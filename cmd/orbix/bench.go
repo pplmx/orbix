@@ -24,6 +24,8 @@ func cmdBench(args []string) error {
 	maxTokens := fs.Int("max-tokens", 32, "tokens to generate per request")
 	concurrency := fs.Int("concurrency", 1, "requests in flight at once")
 	workers := fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
+	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
+	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
 	requests := fs.Int("requests", 0, "total requests; 0 means one per concurrency slot")
 	prompt := fs.String("prompt", "Once upon a time", "prompt for each request")
 	if err := fs.Parse(args); err != nil {
@@ -45,6 +47,9 @@ func cmdBench(args []string) error {
 	if *workers < 0 {
 		return fmt.Errorf("bench: --workers must not be negative")
 	}
+	if *blocks < 0 || *blockSize < 0 {
+		return fmt.Errorf("bench: --blocks and --block-size must not be negative")
+	}
 	total := *requests
 	if total <= 0 {
 		total = *concurrency
@@ -58,7 +63,12 @@ func cmdBench(args []string) error {
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(*model, engine.Options{MaxActive: *concurrency, Workers: *workers})
+	eng, err := engine.New(*model, engine.Options{
+		MaxActive: *concurrency,
+		Workers:   *workers,
+		BlockSize: *blockSize,
+		Blocks:    *blocks,
+	})
 	if err != nil {
 		return err
 	}
@@ -73,8 +83,17 @@ func cmdBench(args []string) error {
 	fmt.Printf("model:       %s\n", cfg)
 	fmt.Printf("params:      %d\n", eng.Model().W.Params())
 	fmt.Printf("prompt:      %d tokens\n", len(promptTokens))
-	fmt.Printf("generating:  %d tokens x %d requests, concurrency %d, workers %d\n\n",
+	fmt.Printf("generating:  %d tokens x %d requests, concurrency %d, workers %d\n",
 		*maxTokens, total, *concurrency, eng.Model().Runner().Workers())
+	if pool := eng.Pool(); pool != nil {
+		fmt.Printf("kv cache:    paged, %d blocks x %d positions = %.2f MiB shared\n",
+			pool.Blocks(), pool.BlockSize(), float64(pool.Bytes())/(1<<20))
+	} else {
+		perSeq := int64(cfg.ContextLen) * int64(cfg.KVHeads) * int64(cfg.HeadDim) * 2 * 4 * int64(cfg.Layers)
+		fmt.Printf("kv cache:    contiguous, %.2f MiB reserved per request\n",
+			float64(perSeq)/(1<<20))
+	}
+	fmt.Println()
 
 	start := time.Now()
 	var generated int

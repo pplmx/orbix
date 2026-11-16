@@ -403,3 +403,142 @@ func TestMaxActiveZeroDefaultsToEight(t *testing.T) {
 		t.Errorf("default MaxActive = %d, want 8", got)
 	}
 }
+
+// TestPagedEngineMatchesContiguous is the property that matters for switching a
+// deployment to paged caches: the tokens must not change. It runs the same
+// requests through both layouts and requires identical output.
+func TestPagedEngineMatchesContiguous(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	gf, _ := gguf.Open(path)
+	tok, _ := tokenize.New(gf)
+	prompts := []string{"Once upon a time", "The little girl was"}
+	const maxTokens = 6
+
+	run := func(opts Options) [][]int32 {
+		e, err := New(path, opts)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		chans := make([]<-chan Event, len(prompts))
+		for i, p := range prompts {
+			ch, err := e.Submit(Request{Prompt: tok.Encode(p, true), MaxTokens: maxTokens})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			chans[i] = ch
+		}
+		for e.Pump() > 0 {
+		}
+		out := make([][]int32, len(prompts))
+		for i, ch := range chans {
+			out[i], _ = collect(t, ch)
+		}
+		return out
+	}
+
+	want := run(Options{})
+	// A pool with room to spare, and a block size that does not divide the prompt
+	// lengths, so the last block of every sequence is partly filled.
+	got := run(Options{BlockSize: 5, Blocks: 256})
+
+	for i := range want {
+		if len(got[i]) != len(want[i]) {
+			t.Fatalf("sequence %d: paged produced %d tokens, contiguous %d", i, len(got[i]), len(want[i]))
+		}
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("sequence %d token %d: paged %d, contiguous %d", i, j, got[i][j], want[i][j])
+			}
+		}
+	}
+}
+
+// TestPagedEngineReservesLessMemory is the reason paging exists. A queued request
+// must not reserve a whole context: the pool is a fixed budget, and the sequences
+// draw from it as they generate.
+func TestPagedEngineReservesLessMemory(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	gf, _ := gguf.Open(path)
+	tok, _ := tokenize.New(gf)
+
+	// A pool sized for about one context. It has to cover the sequences that are
+	// *active* (the engine advances at most MaxActive per round), not every queued
+	// one: that is the whole point of sharing a budget rather than reserving per
+	// request.
+	probe, err := New(path, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mcfg := probe.Model().Config()
+	const blockSize = 16
+	const maxActive = 4
+	// 12 positions per sequence (a 4-token prompt plus 3 generated, rounded up)
+	// across maxActive sequences, with slack for the block the next token needs.
+	// A block id covers every layer at once, so the pool counts position slots.
+	perSeq := (len(tok.Encode("Once upon a time", true)) + 3 + blockSize - 1) / blockSize
+	blocks := maxActive * (perSeq + 1)
+	e, err := New(path, Options{BlockSize: blockSize, Blocks: blocks, MaxActive: maxActive})
+	if err != nil {
+		t.Fatalf("New with pool: %v", err)
+	}
+	if e.Pool() == nil {
+		t.Fatal("Pool() is nil for a paged engine")
+	}
+	poolBytes := e.Pool().Bytes()
+
+	prompt := tok.Encode("Once upon a time", true)
+	const queued = 32
+	chans := make([]<-chan Event, queued)
+	for i := range chans {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		chans[i] = ch
+	}
+	// Every request is admitted and runs to completion out of one context-sized
+	// pool, which is impossible with whole-context reservations: 32 sequences
+	// would need 32 contexts.
+	for e.Pump() > 0 {
+	}
+	for i, ch := range chans {
+		out, reason := collect(t, ch)
+		if len(out) != 3 {
+			t.Errorf("sequence %d produced %d tokens, want 3", i, len(out))
+		}
+		if reason != "length" {
+			t.Errorf("sequence %d finish reason = %q, want length", i, reason)
+		}
+	}
+
+	// The pool is the whole cache budget, so its size is the number the contiguous
+	// layout would have paid per sequence.
+	perSequence := int64(mcfg.ContextLen) * int64(mcfg.KVHeads) * int64(mcfg.HeadDim) * 2 * 4 * int64(mcfg.Layers)
+	if poolBytes > perSequence {
+		t.Errorf("pool is %d bytes, larger than one whole-context cache (%d)", poolBytes, perSequence)
+	}
+	t.Logf("pool %.2f MiB served %d sequences that would each have reserved %.2f MiB",
+		float64(poolBytes)/(1<<20), queued, float64(perSequence)/(1<<20))
+}
+
+// TestBlockPoolDefaultIsClamped checks the engine keeps working when a caller asks
+// for paging but leaves the block size at its zero value.
+func TestBlockPoolDefaultIsClamped(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	e, err := New(path, Options{Blocks: 8})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := e.Pool().BlockSize(); got <= 0 {
+		t.Errorf("BlockSize = %d, want a positive default", got)
+	}
+}

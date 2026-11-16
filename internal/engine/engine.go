@@ -38,7 +38,7 @@ type Request struct {
 type sequence struct {
 	id      int
 	req     Request
-	cache   *llama.KVCache
+	cache   llama.Cache
 	pos     int     // positions written; also the prompt index while prefilling
 	out     []int32 // generated tokens
 	events  chan Event
@@ -64,6 +64,11 @@ type Engine struct {
 	model     *llama.Model
 	maxActive int
 
+	// pool, when set, is the shared block store paged caches draw from. It is nil
+	// for the contiguous layout, which gives every sequence a whole-context arena
+	// up front.
+	pool *llama.BlockPool
+
 	mu     sync.Mutex
 	active map[int]*sequence
 	nextID int
@@ -78,6 +83,19 @@ type Options struct {
 	// parallelism in play and defaulting it to the CPU count is what makes a
 	// single stream fast.
 	Workers int
+	// BlockSize and Blocks switch the engine to a paged KV cache drawn from one
+	// shared pool of Blocks blocks of BlockSize positions. Blocks == 0 keeps the
+	// contiguous layout, where every sequence reserves the whole context as soon
+	// as it is submitted.
+	//
+	// The trade is explicit. Contiguous is simpler and makes a sequence's memory
+	// independent of its neighbours, but it charges a request for the context it
+	// might use rather than the positions it does use: at a 4096-token window a
+	// queued 4-token request still reserves 4096 positions. Paging sizes the
+	// cache to the position count instead, at the cost of indirection in
+	// attention.
+	BlockSize int
+	Blocks    int
 }
 
 // New loads a model and returns an engine for it.
@@ -90,12 +108,28 @@ func New(path string, opts Options) (*Engine, error) {
 	if maxActive <= 0 {
 		maxActive = 8
 	}
-	return &Engine{
+	e := &Engine{
 		model:     m,
 		maxActive: maxActive,
 		active:    make(map[int]*sequence),
-	}, nil
+	}
+	if opts.Blocks > 0 {
+		pool, err := llama.NewBlockPool(m.Config(), llama.BlockPoolOptions{
+			BlockSize: opts.BlockSize,
+			Blocks:    opts.Blocks,
+		})
+		if err != nil {
+			return nil, err
+		}
+		e.pool = pool
+	}
+	return e, nil
 }
+
+// Pool returns the shared block pool, or nil when the engine uses the contiguous
+// layout. It exists so a caller can report the memory budget and how much of it a
+// workload is using.
+func (e *Engine) Pool() *llama.BlockPool { return e.pool }
 
 // Model exposes the loaded model, for configuration and statistics.
 func (e *Engine) Model() *llama.Model { return e.model }
@@ -116,9 +150,18 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 		return nil, fmt.Errorf("engine: negative max tokens")
 	}
 
-	cache, err := llama.NewKVCache(cfg, cfg.ContextLen)
-	if err != nil {
-		return nil, err
+	// Paged sequences take blocks as they generate; contiguous ones reserve the
+	// whole context now. Both are created here so a request's admission cost is
+	// the same call either way.
+	var cache llama.Cache
+	if e.pool != nil {
+		cache = e.pool.New()
+	} else {
+		arena, err := llama.NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			return nil, err
+		}
+		cache = arena
 	}
 
 	e.mu.Lock()
@@ -264,7 +307,7 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 
 // decode advances every pending sequence by one token in a single batched pass.
 func (e *Engine) decode(batch []pending) {
-	caches := make([]*llama.KVCache, len(batch))
+	caches := make([]llama.Cache, len(batch))
 	tokens := make([]int32, len(batch))
 	for i, p := range batch {
 		caches[i] = p.s.cache
@@ -294,10 +337,23 @@ func (e *Engine) decode(batch []pending) {
 }
 
 // finish closes a sequence's channel and drops it from the active set.
+//
+// A paged sequence returns its blocks here. Released blocks go back to the pool
+// the moment the sequence stops advancing, not when the caller drains its channel,
+// because holding them would let a finished request starve one that is waiting.
 func (e *Engine) finish(s *sequence, last Event) {
 	e.mu.Lock()
 	delete(e.active, s.id)
 	e.mu.Unlock()
+
+	if err := s.cache.Reset(); err != nil {
+		// A cache that cannot release its blocks is a pool bug, not a request
+		// failure: report it rather than leaving the memory unrecoverable.
+		if last.Err == nil {
+			last.Err = err
+			last.FinishReason = "error"
+		}
+	}
 	if last.Err != nil || last.Done {
 		s.events <- last
 	}

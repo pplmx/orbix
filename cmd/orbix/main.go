@@ -30,6 +30,8 @@ func run(args []string) error {
 		return cmdRun(args[1:])
 	case "bench":
 		return cmdBench(args[1:])
+	case "chat":
+		return cmdChat(args[1:])
 	case "serve":
 		return cmdServe(args[1:])
 	case "model":
@@ -52,6 +54,7 @@ Usage:
 
 Commands:
   run <prompt>           Generate text from a prompt
+  chat                   Interactive REPL with conversation history
   serve                  Serve an OpenAI-compatible HTTP API
   bench                  Measure generation throughput
   model inspect <path>   Print GGUF metadata, tensor types, quantization

@@ -33,6 +33,9 @@ var codecs = map[gguf.QuantType]codec{
 	gguf.F16:  {1, 2, decodeF16},
 	gguf.BF16: {1, 2, decodeBF16},
 	gguf.Q4_0: {32, 18, decodeQ4_0},
+	gguf.Q4_1: {32, 20, decodeQ4_1},
+	gguf.Q5_0: {32, 22, decodeQ5_0},
+	gguf.Q5_1: {32, 24, decodeQ5_1},
 	gguf.Q8_0: {32, 34, decodeQ8_0},
 }
 
@@ -131,6 +134,102 @@ func decodeQ8_0(dst []float32, src []byte) {
 		y := dst[b*q8_0BlockSize : (b+1)*q8_0BlockSize]
 		for j := range q8_0BlockSize {
 			y[j] = float32(int8(blk[2+j])) * d
+		}
+	}
+}
+
+// q4_1BlockSize is the number of weights in one Q4_1 block.
+const q4_1BlockSize = 32
+
+// decodeQ4_1 expands a Q4_1 tensor.
+//
+// Q4_1 is Q4_0 with an affine mapping instead of a symmetric one: the block stores
+// a minimum as well as a scale, and decodes x = code*scale + min. That is what lets
+// it represent a weight distribution that is not centred on zero, which is why it
+// costs two extra bytes per block (20 against 18) and is preferred for tensors with a
+// large mean.
+//
+// Layout: F16 scale, F16 min, then 16 bytes of packed nibbles. The nibble
+// interleaving matches Q4_0 -- byte j's low nibble is weight j, its high nibble is
+// weight j+16 -- and the codes are unsigned (0..15) because the offset moved into
+// min.
+func decodeQ4_1(dst []float32, src []byte) {
+	const blockBytes = 20
+	for b := range len(dst) / q4_1BlockSize {
+		blk := src[b*blockBytes:]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
+		m := f16.ToFloat32(binary.LittleEndian.Uint16(blk[2:]))
+		y := dst[b*q4_1BlockSize : (b+1)*q4_1BlockSize]
+		for j := range q4_1BlockSize / 2 {
+			qs := blk[4+j]
+			y[j] = float32(qs&0x0f)*d + m
+			y[j+q4_1BlockSize/2] = float32(qs>>4)*d + m
+		}
+	}
+}
+
+// q5_0BlockSize is the number of weights in one Q5_0 block.
+const q5_0BlockSize = 32
+
+// decodeQ5_0 expands a Q5_0 tensor.
+//
+// Q5_0 is symmetric like Q4_0 but stores five bits per weight: a block has an F16
+// scale, 4 bytes of high bits, then 16 bytes of low nibbles. The high bits are one
+// bit per weight, packed in order: the first 8 weights' high bits are in byte 0 from
+// the least significant bit up, and weight i reads bit i%8 of byte i/8.
+//
+// The code is (high bit << 4 | nibble) - 16, giving -16..15 before scaling. Reading
+// the high bits as a mask over the wrong nibble order produces a tensor that is
+// subtly wrong everywhere rather than obviously broken, so this follows ggml's
+// dequantize_row_q5_0 exactly.
+func decodeQ5_0(dst []float32, src []byte) {
+	const blockBytes = 22
+	for b := range len(dst) / q5_0BlockSize {
+		blk := src[b*blockBytes:]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
+		// qh holds four bytes of high bits, little-endian, one bit per weight.
+		qh := binary.LittleEndian.Uint32(blk[2:])
+		y := dst[b*q5_0BlockSize : (b+1)*q5_0BlockSize]
+		for j := range q5_0BlockSize / 2 {
+			// Weight j: low nibble of byte j, high bit j.
+			lo := int(blk[6+j] & 0x0f)
+			hi := int(qh>>j) & 1
+			y[j] = float32((lo|hi<<4)-16) * d
+
+			// Weight j+16: high nibble of byte j, high bit j+16.
+			lo = int(blk[6+j] >> 4)
+			hi = int(qh>>(j+16)) & 1
+			y[j+q5_0BlockSize/2] = float32((lo|hi<<4)-16) * d
+		}
+	}
+}
+
+// q5_1BlockSize is the number of weights in one Q5_1 block.
+const q5_1BlockSize = 32
+
+// decodeQ5_1 expands a Q5_1 tensor.
+//
+// Q5_1 combines both ideas: five bits per weight like Q5_0, and an affine mapping
+// like Q4_1. Layout is F16 scale, F16 min, 4 bytes of high bits, then 16 bytes of low
+// nibbles -- Q5_0's packing with Q4_1's two extra bytes in front.
+//
+// Codes are 0..31, and x = code*scale + min.
+func decodeQ5_1(dst []float32, src []byte) {
+	const blockBytes = 24
+	for b := range len(dst) / q5_1BlockSize {
+		blk := src[b*blockBytes:]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
+		m := f16.ToFloat32(binary.LittleEndian.Uint16(blk[2:]))
+		qh := binary.LittleEndian.Uint32(blk[4:])
+		y := dst[b*q5_1BlockSize : (b+1)*q5_1BlockSize]
+		for j := range q5_1BlockSize / 2 {
+			lo := int(blk[8+j] & 0x0f)
+			hi := int(qh>>j) & 1
+			y[j] = float32(lo|hi<<4)*d + m
+
+			lo = int(blk[8+j] >> 4)
+			hi = int(qh>>(j+16)) & 1
+			y[j+q5_1BlockSize/2] = float32(lo|hi<<4)*d + m
 		}
 	}
 }

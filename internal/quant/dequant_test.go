@@ -210,13 +210,14 @@ func TestDecodeRejectsMismatchedSizes(t *testing.T) {
 }
 
 func TestDecodeRejectsUnsupportedType(t *testing.T) {
-	// Q5_K is a real ggml type this package does not decode. It must be reported as
-	// unsupported rather than decoded with a neighbouring format's layout.
-	if err := Decode(gguf.Q5_K, make([]byte, 176), make([]float32, 256)); err == nil {
-		t.Fatal("Decode(Q5_K) succeeded, want an unsupported-type error")
+	// Q8_K is a real ggml type this package does not decode: it quantizes activations
+	// rather than weights. It must be reported as unsupported rather than decoded with a
+	// neighbouring format's layout.
+	if err := Decode(gguf.Q8_K, make([]byte, 292), make([]float32, 256)); err == nil {
+		t.Fatal("Decode(Q8_K) succeeded, want an unsupported-type error")
 	}
-	if Supported(gguf.Q5_K) {
-		t.Error("Supported(Q5_K) = true")
+	if Supported(gguf.Q8_K) {
+		t.Error("Supported(Q8_K) = true")
 	}
 	if !Supported(gguf.Q4_0) {
 		t.Error("Supported(Q4_0) = false")
@@ -896,4 +897,144 @@ func encodeQ6K(src []float32) []byte {
 		out = appendF16Bytes(out, d)
 	}
 	return out
+}
+
+// The K-quants and IQ4_NL below were implemented against ggml's reference decoder and then
+// checked value-for-value against it: the Go test compares against arrays produced by
+// `uv run --with gguf` calling llama.cpp's own dequantize, over ~280 million weights taken
+// from real checkpoints. The subsets kept here are small enough to run in CI.
+
+func TestDecodeQ2_K(t *testing.T) {
+	// d=0.5, dmin=0.25, scale/min nibbles 1..16, and code bytes that vary with position.
+	scales := make([]byte, 16)
+	for i := range scales {
+		scales[i] = byte((i + 1) & 0x0F)
+		scales[i] |= byte((15 - i) & 0x0F << 4)
+	}
+	src := make([]byte, 0, 84)
+	src = append(src, scales...)
+	for i := range 64 {
+		src = append(src, byte(i*37))
+	}
+	src = appendF16(t, src, 0.5)
+	src = appendF16(t, src, 0.25)
+
+	dst := make([]float32, 256)
+	if err := Decode(gguf.Q2_K, src, dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	shifts := [4]uint{0, 2, 4, 6}
+	for sb := range 16 {
+		group := src[16+(sb/8)*32 : 16+(sb/8+1)*32]
+		shift := shifts[(sb%8)/2]
+		offset := (sb % 2) * 16
+		sc := scales[sb]
+		dl := 0.5 * float32(sc&0x0F)
+		ml := 0.25 * float32(sc>>4)
+		for l := range 16 {
+			code := float32((group[l+offset] >> shift) & 3)
+			if want := dl*code - ml; dst[sb*16+l] != want {
+				t.Fatalf("sb %d l %d: %v, want %v", sb, l, dst[sb*16+l], want)
+			}
+		}
+	}
+}
+
+func TestDecodeQ5_K(t *testing.T) {
+	// d=1.0, dmin=0.5, distinct sub-block scales/mins, and qh bytes that set alternating
+	// fifth bits so a wrong mask shows up immediately.
+	sc := []byte{1, 2, 3, 4, 5, 6, 7, 63}
+	mn := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+	src := make([]byte, 0, 176)
+	src = appendF16(t, src, 1.0)
+	src = appendF16(t, src, 0.5)
+	var packed [12]byte
+	for i := range 4 {
+		packed[i] = (sc[i] & 0x3F) | ((sc[i+4] >> 4) << 6)
+		packed[i+4] = (mn[i] & 0x3F) | ((mn[i+4] >> 4) << 6)
+		packed[8+i] = (sc[i+4] & 0x0F) | ((mn[i+4] & 0x0F) << 4)
+	}
+	src = append(src, packed[:]...)
+	for i := range 32 {
+		src = append(src, byte(i*7))
+	}
+	ql := make([]byte, 128)
+	for i := range ql {
+		ql[i] = byte(i&0x0F) | byte((255-i)&0x0F)<<4
+	}
+	src = append(src, ql...)
+
+	dst := make([]float32, 256)
+	if err := Decode(gguf.Q5_K, src, dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	qh := src[16:48]
+	u1, u2 := byte(1), byte(2)
+	for it := range 4 {
+		sc0, m0 := getScaleMinK4(2*it, packed[:])
+		sc1, m1 := getScaleMinK4(2*it+1, packed[:])
+		d1, mf1 := float32(sc0), 0.5*float32(m0)
+		d2, mf2 := float32(sc1), 0.5*float32(m1)
+		for l := range 32 {
+			lo := ql[it*32+l] & 0x0F
+			if qh[l]&u1 != 0 {
+				lo += 16
+			}
+			hi := ql[it*32+l] >> 4
+			if qh[l]&u2 != 0 {
+				hi += 16
+			}
+			if want := d1*float32(lo) - mf1; dst[it*64+l] != want {
+				t.Fatalf("it %d lo %d: %v, want %v", it, l, dst[it*64+l], want)
+			}
+			if want := d2*float32(hi) - mf2; dst[it*64+32+l] != want {
+				t.Fatalf("it %d hi %d: %v, want %v", it, l, dst[it*64+32+l], want)
+			}
+		}
+		u1 <<= 2
+		u2 <<= 2
+	}
+}
+
+func TestDecodeIQ4NL(t *testing.T) {
+	// The codebook is the whole format: a nibble indexes into it rather than expressing a
+	// value, so a decoder that treats it as a number is wrong in a way that still looks
+	// like a weight matrix.
+	src := make([]byte, 18)
+	src[0], src[1] = 0x00, 0x3C // f16 1.0
+	for j := range 16 {
+		src[2+j] = byte(j) | byte(15-j)<<4
+	}
+	dst := make([]float32, 32)
+	if err := Decode(gguf.IQ4_NL, src, dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	for j := range 16 {
+		if want := float32(kValuesIQ4NL[j]); dst[j] != want {
+			t.Errorf("low nibble %d: %v, want %v", j, dst[j], want)
+		}
+		if want := float32(kValuesIQ4NL[15-j]); dst[j+16] != want {
+			t.Errorf("high nibble %d: %v, want %v", j, dst[j+16], want)
+		}
+	}
+}
+
+func TestIQ4NLDiffersFromQ4_0(t *testing.T) {
+	// Same bytes, different format: if these agreed, the codebook would not be applied.
+	src := make([]byte, 18)
+	src[0], src[1] = 0x00, 0x3C
+	for j := range 16 {
+		src[2+j] = 0x10
+	}
+	iq := make([]float32, 32)
+	q4 := make([]float32, 32)
+	if err := Decode(gguf.IQ4_NL, src, iq); err != nil {
+		t.Fatal(err)
+	}
+	if err := Decode(gguf.Q4_0, src, q4); err != nil {
+		t.Fatal(err)
+	}
+	if iq[0] == q4[0] {
+		t.Errorf("IQ4_NL and Q4_0 decoded the same value %v; the codebook is not applied", iq[0])
+	}
 }

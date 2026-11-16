@@ -29,16 +29,20 @@ type codec struct {
 // it to gguf's size table. The two must agree, which TestCodecsMatchGGUF
 // enforces by comparing against the declared block size.
 var codecs = map[gguf.QuantType]codec{
-	gguf.F32:  {1, 4, decodeF32},
-	gguf.F16:  {1, 2, decodeF16},
-	gguf.BF16: {1, 2, decodeBF16},
-	gguf.Q4_0: {32, 18, decodeQ4_0},
-	gguf.Q4_1: {32, 20, decodeQ4_1},
-	gguf.Q5_0: {32, 22, decodeQ5_0},
-	gguf.Q5_1: {32, 24, decodeQ5_1},
-	gguf.Q8_0: {32, 34, decodeQ8_0},
+	gguf.F32:    {1, 4, decodeF32},
+	gguf.F16:    {1, 2, decodeF16},
+	gguf.BF16:   {1, 2, decodeBF16},
+	gguf.Q4_0:   {32, 18, decodeQ4_0},
+	gguf.Q4_1:   {32, 20, decodeQ4_1},
+	gguf.Q5_0:   {32, 22, decodeQ5_0},
+	gguf.Q5_1:   {32, 24, decodeQ5_1},
+	gguf.Q8_0:   {32, 34, decodeQ8_0},
+	gguf.IQ4_NL: {32, 18, decodeIQ4NL},
 	// K-quants: 256-weight super-blocks with per-sub-block scales.
+	gguf.Q2_K: {256, 84, decodeQ2_K},
+	gguf.Q3_K: {256, 110, decodeQ3_K},
 	gguf.Q4_K: {256, 144, decodeQ4_K},
+	gguf.Q5_K: {256, 176, decodeQ5_K},
 	gguf.Q6_K: {256, 210, decodeQ6_K},
 }
 
@@ -261,6 +265,72 @@ func getScaleMinK4(j int, q []byte) (scale, minv uint8) {
 		(q[j+4] >> 4) | ((q[j] >> 6) << 4)
 }
 
+// decodeQ3_K expands a Q3_K tensor.
+//
+// The implementation mirrors ggml's own numpy reference decode expression by expression,
+// because Q3_K's two index mappings are not derivable from a loop order: both are defined
+// by how 2-D grids flatten back to 16 sub-blocks.
+//
+// Block layout (110 bytes): 32 mask bytes, 64 code bytes, 12 packed scale bytes, F16 d.
+//
+// Scales: the first eight bytes are split into low and high nibbles as a (2, 8) grid, so
+// scales 0-7 take bytes 0-7's low nibbles in order and scales 8-15 their high nibbles. The
+// last four bytes form a (4, 4) grid -- byte 8+i shifted by 0/2/4/6 -- whose flattening
+// puts scale 4*i+j's high two bits in bit pair j of byte 8+i.
+//
+// Codes: the 64 code bytes form a (2 groups, 4 shifts, 32 bytes) grid and the 32 mask bytes
+// a (1, 8 masks, 32 bytes) grid. Both flatten to (16 sub-blocks, 16 values), so sub-block
+// sb takes its codes from group sb/8 shifted by shifts[(sb%8)/2] and its mask from bit sb/2,
+// at byte offset (sb%2)*16.
+//
+// x = d * (scale - 32) * (ql - 4*(1 - qh))
+func decodeQ3_K(dst []float32, src []byte) {
+	const blockBytes = 110
+	shifts := [4]uint{0, 2, 4, 6}
+	for b := range len(dst) / qkK {
+		blk := src[b*blockBytes:]
+		hm := blk[0:32]
+		qs := blk[32:96]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[108:]))
+		y := dst[b*qkK : (b+1)*qkK]
+
+		var scales [16]int8
+		unpackQ3KScales(blk[96:108], &scales)
+
+		for sb := range 16 {
+			group := qs[(sb/8)*32 : (sb/8+1)*32]
+			shift := shifts[(sb%8)/2]
+			offset := (sb % 2) * 16
+			maskBit := uint(sb / 2)
+			dl := d * float32(scales[sb]-32)
+			base := sb * 16
+			for l := range 16 {
+				idx := l + offset
+				ql := int8((group[idx] >> shift) & 3)
+				qh := int8((hm[idx] >> maskBit) & 1)
+				y[base+l] = dl * float32(ql-4*(1-qh))
+			}
+		}
+	}
+}
+
+// unpackQ3KScales expands Q3_K's 12 packed bytes into 16 six-bit scales.
+//
+// Low nibbles: bytes 0-7 give scales 0-7 (low nibble) and scales 8-15 (high nibble).
+// High bits: byte 8+i gives scale 4*i+j's high two bits in bits 2j..2j+1.
+func unpackQ3KScales(packed []byte, out *[16]int8) {
+	for i := range 8 {
+		out[i] = int8(packed[i] & 0x0F)
+		out[i+8] = int8(packed[i] >> 4)
+	}
+	// The high two bits come from bytes 8-11 as a (shift, byte) grid: index f of the
+	// flattened 16 takes shift f/4 and byte f%4, so scale f's high bits are bit pair
+	// f/4 of byte 8 + f%4.
+	for f := range 16 {
+		out[f] |= int8(((packed[8+f%4] >> (2 * (f / 4))) & 0x03) << 4)
+	}
+}
+
 // decodeQ4_K expands a Q4_K tensor.
 //
 // Block layout (144 bytes): F16 super-scale d, F16 super-min dmin, 12 packed scale/min
@@ -341,6 +411,123 @@ func decodeQ6_K(dst []float32, src []byte) {
 				y[yOff+l+64] = d * float32(int8(scales[scOff+is+4])) * float32(q3)
 				y[yOff+l+96] = d * float32(int8(scales[scOff+is+6])) * float32(q4)
 			}
+		}
+	}
+}
+
+// iq4nlBlockSize is the number of weights in one IQ4_NL block.
+const iq4nlBlockSize = 32
+
+// kValuesIQ4NL is IQ4_NL's non-linear 4-bit codebook.
+//
+// A nibble is an index into this table rather than an integer offset, which is what
+// separates IQ4_NL from Q4_0: the spacing is denser near zero, matching a weight
+// distribution with many small values. Treating the nibble as a number produces output of
+// the right shape and entirely the wrong values.
+var kValuesIQ4NL = [16]int8{
+	-127, -104, -83, -65, -49, -35, -22, -10,
+	1, 13, 25, 38, 53, 69, 89, 113,
+}
+
+// decodeIQ4NL expands an IQ4_NL tensor.
+//
+// Block layout (18 bytes): an F16 scale, then 16 packed nibble bytes in Q4_0's split-half
+// order -- byte j holds weight j in its low nibble and weight j+16 in its high nibble.
+//
+//	x = d * kValuesIQ4NL[nibble]
+func decodeIQ4NL(dst []float32, src []byte) {
+	const blockBytes = 18
+	for b := range len(dst) / iq4nlBlockSize {
+		blk := src[b*blockBytes:]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
+		y := dst[b*iq4nlBlockSize : (b+1)*iq4nlBlockSize]
+		for j := range iq4nlBlockSize / 2 {
+			qs := blk[2+j]
+			y[j] = d * float32(kValuesIQ4NL[qs&0x0F])
+			y[j+iq4nlBlockSize/2] = d * float32(kValuesIQ4NL[qs>>4])
+		}
+	}
+}
+
+// decodeQ2_K expands a Q2_K tensor.
+//
+// Block layout (84 bytes): 16 scale/min bytes, 64 code bytes, then F16 d and F16 dmin.
+// The 256 weights are 16 sub-blocks of 16, each with a 4-bit scale in its byte's low
+// nibble and a 4-bit minimum in the high nibble:
+//
+//	x = d * (sc & 0xF) * code - dmin * (sc >> 4)
+//
+// The code grid is the same shape Q3_K uses for its codes: two groups of 32 bytes, each
+// shifted by 0, 2, 4, and 6, flattening to 16 sub-blocks -- so sub-block sb reads group
+// sb/8 at shift (sb%8)/2 and byte offset (sb%2)*16.
+func decodeQ2_K(dst []float32, src []byte) {
+	const blockBytes = 84
+	shifts := [4]uint{0, 2, 4, 6}
+	for b := range len(dst) / qkK {
+		blk := src[b*blockBytes:]
+		scales := blk[0:16]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[80:]))
+		dmin := f16.ToFloat32(binary.LittleEndian.Uint16(blk[82:]))
+		y := dst[b*qkK : (b+1)*qkK]
+
+		for sb := range 16 {
+			group := blk[16+(sb/8)*32 : 16+(sb/8+1)*32]
+			shift := shifts[(sb%8)/2]
+			offset := (sb % 2) * 16
+			sc := scales[sb]
+			dl := d * float32(sc&0x0F)
+			ml := dmin * float32(sc>>4)
+			base := sb * 16
+			for l := range 16 {
+				code := int8((group[l+offset] >> shift) & 3)
+				y[base+l] = dl*float32(code) - ml
+			}
+		}
+	}
+}
+
+// decodeQ5_K expands a Q5_K tensor.
+//
+// Block layout (176 bytes): F16 d, F16 dmin, 12 packed scale/min bytes in Q4_K's format
+// read by the same getScaleMinK4, 32 high-bit bytes, then 128 code bytes.
+//
+//	x = d * scale[j] * (code + 16*highbit) - dmin * min[j]
+//
+// The high-bit mask steps two bits per 64-weight iteration: u1 for the low nibbles and u2
+// for the high, both shifted left by two each time.
+func decodeQ5_K(dst []float32, src []byte) {
+	const blockBytes = 176
+	for b := range len(dst) / qkK {
+		blk := src[b*blockBytes:]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
+		dmin := f16.ToFloat32(binary.LittleEndian.Uint16(blk[2:]))
+		scales := blk[4:16]
+		qh := blk[16:48]
+		ql := blk[48:176]
+		y := dst[b*qkK : (b+1)*qkK]
+
+		u1, u2 := byte(1), byte(2)
+		for it := range 4 {
+			sc0, m0 := getScaleMinK4(2*it, scales)
+			sc1, m1 := getScaleMinK4(2*it+1, scales)
+			d1, m1f := d*float32(sc0), dmin*float32(m0)
+			d2, m2f := d*float32(sc1), dmin*float32(m1)
+			qOff := it * 32
+			yOff := it * 64
+			for l := range 32 {
+				lo := ql[qOff+l] & 0x0F
+				if qh[l]&u1 != 0 {
+					lo += 16
+				}
+				hi := ql[qOff+l] >> 4
+				if qh[l]&u2 != 0 {
+					hi += 16
+				}
+				y[yOff+l] = d1*float32(lo) - m1f
+				y[yOff+l+32] = d2*float32(hi) - m2f
+			}
+			u1 <<= 2
+			u2 <<= 2
 		}
 	}
 }

@@ -128,6 +128,11 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 	if err := m.run.MatVec(m.q, layer.wq, m.xn, cfg.Heads*cfg.HeadDim, cfg.Hidden); err != nil {
 		return err
 	}
+	// The query bias applies even though the key and value are already stored: the
+	// projection produced q, and the bias is part of what q is.
+	if err := kernel.AddBias(m.q, layer.qBias, 1, cfg.Heads*cfg.HeadDim); err != nil {
+		return err
+	}
 	// Only the query is needed: the key and value at this position are stored.
 	for h := range cfg.Heads {
 		if err := m.rope.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
@@ -155,4 +160,24 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 		return err
 	}
 	return kernel.AddInPlace(m.x, m.attnOut)
+}
+
+// addBias applies the attention projections' biases after the three projections.
+//
+// It is one call rather than three because the three vectors always travel
+// together: a model has all of them or none, which the config records, and keeping
+// the nil check in one place is what keeps the three forward paths from each growing
+// their own copy of it.
+func (m *Model) addBias(layer *layer, rows int) error {
+	cfg := m.W.Config
+	if layer.qBias == nil && layer.kBias == nil && layer.vBias == nil {
+		return nil
+	}
+	if err := kernel.AddBias(m.q, layer.qBias, rows, cfg.Heads*cfg.HeadDim); err != nil {
+		return err
+	}
+	if err := kernel.AddBias(m.k, layer.kBias, rows, cfg.kvDim()); err != nil {
+		return err
+	}
+	return kernel.AddBias(m.v, layer.vBias, rows, cfg.kvDim())
 }

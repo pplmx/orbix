@@ -15,6 +15,11 @@ import (
 // as log-probabilities diverging from llama.cpp by several nats while the text
 // still read as English.
 type rope struct {
+	// layout is how dimensions pair up. Llama pairs adjacent dimensions; Qwen
+	// pairs i with i+dims/2. The two agree on the first pair and diverge after it,
+	// which is why a wrong layout still produces fluent text.
+	layout RopeLayout
+
 	// dims is the number of head dimensions the rotation covers. Dimensions
 	// past it are copied through untouched, which is what ggml's trailing
 	// "fill the remain channels" loop does.
@@ -49,6 +54,7 @@ func newRope(cfg Config, nCtx int) (*rope, error) {
 	thetaScale := math.Pow(float64(cfg.RopeBase), -2.0/float64(cfg.RopeDim))
 
 	r := &rope{
+		layout:  cfg.RopeLayout,
 		dims:    cfg.RopeDim,
 		headDim: cfg.HeadDim,
 		cos:     make([][]float32, nCtx),
@@ -78,8 +84,8 @@ func newRope(cfg Config, nCtx int) (*rope, error) {
 
 // apply rotates one vector of headDim values at the given position, in place.
 //
-// x is a single head: dims [0, n_dims) are rotated as adjacent pairs (2i, 2i+1),
-// and dims [n_dims, headDim) are left alone.
+// x is a single head: dims [0, n_dims) are rotated according to the model's
+// layout, and dims [n_dims, headDim) are left alone.
 func (r *rope) apply(x []float32, pos int) error {
 	if len(x) < r.headDim {
 		return fmt.Errorf("llama: rope needs %d values, got %d", r.headDim, len(x))
@@ -89,8 +95,16 @@ func (r *rope) apply(x []float32, pos int) error {
 	}
 	cos := r.cos[pos]
 	sin := r.sin[pos]
-	for k := range r.dims / 2 {
+	half := r.dims / 2
+	for k := range half {
+		// The two layouts pair different dimensions, and both indices move: Normal
+		// rotates the adjacent pair (2k, 2k+1), while NEOX rotates k with half+k, so
+		// its first index is k and not 2k. The frequency is the k-th one either way,
+		// which is what keeps this a single table and a single loop.
 		i0, i1 := 2*k, 2*k+1
+		if r.layout == RopeNeox {
+			i0, i1 = k, half+k
+		}
 		x0 := x[i0]
 		x1 := x[i1]
 		x[i0] = x0*cos[k] - x1*sin[k]

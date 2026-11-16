@@ -18,6 +18,15 @@ type layer struct {
 	wv       []float32 // [hidden, kvHeads*headDim]
 	wo       []float32 // [heads*headDim, hidden]
 
+	// qBias, kBias, and vBias are added to the projections before attention. They
+	// are nil for architectures that do not use them (Llama) and present for those
+	// that do (Qwen2). Keeping them separate from the weights rather than folding
+	// them into the matrices is what makes a nil check the only branch the forward
+	// pass needs.
+	qBias []float32 // [heads*headDim]
+	kBias []float32 // [kvHeads*headDim]
+	vBias []float32 // [kvHeads*headDim]
+
 	ffnNorm []float32 // [hidden]
 	wGate   []float32 // [hidden, ffn]
 	wUp     []float32 // [hidden, ffn]
@@ -75,6 +84,9 @@ func LoadWeights(path string) (*Weights, error) {
 			p+"attn_v.weight", p+"attn_output.weight", p+"ffn_norm.weight",
 			p+"ffn_gate.weight", p+"ffn_up.weight", p+"ffn_down.weight",
 		)
+		if cfg.AttnBias {
+			names = append(names, p+"attn_q.bias", p+"attn_k.bias", p+"attn_v.bias")
+		}
 	}
 
 	// Decoding is bandwidth bound and the tensors are independent, so fan it
@@ -104,6 +116,9 @@ func LoadWeights(path string) (*Weights, error) {
 			wGate:    tensors[p+"ffn_gate.weight"],
 			wUp:      tensors[p+"ffn_up.weight"],
 			wDown:    tensors[p+"ffn_down.weight"],
+			qBias:    tensors[p+"attn_q.bias"],
+			kBias:    tensors[p+"attn_k.bias"],
+			vBias:    tensors[p+"attn_v.bias"],
 		}
 	}
 	return w, nil
@@ -114,6 +129,7 @@ func (w *Weights) Params() int64 {
 	n := int64(len(w.TokenEmbedding)) + int64(len(w.OutputNorm)) + int64(len(w.Output))
 	for _, l := range w.Layers {
 		n += int64(len(l.attnNorm) + len(l.wq) + len(l.wk) + len(l.wv) + len(l.wo))
+		n += int64(len(l.qBias) + len(l.kBias) + len(l.vBias))
 		n += int64(len(l.ffnNorm) + len(l.wGate) + len(l.wUp) + len(l.wDown))
 	}
 	return n

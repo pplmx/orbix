@@ -15,7 +15,8 @@ import (
 // computes n results per pass over it. That is the difference between sharing
 // time and sharing work.
 type batch struct {
-	n int // positions in flight
+	n   int // positions in flight
+	cfg Config
 
 	x       []float32 // [n, hidden] residual stream
 	xn      []float32 // [n, hidden] normalized input to a sublayer
@@ -36,6 +37,7 @@ func newBatch(cfg Config, n int) *batch {
 	kvdim := cfg.kvDim()
 	return &batch{
 		n:       n,
+		cfg:     cfg,
 		x:       make([]float32, n*cfg.Hidden),
 		xn:      make([]float32, n*cfg.Hidden),
 		q:       make([]float32, n*qdim),
@@ -217,6 +219,21 @@ func (m *Model) Prefill(cache Cache, tokens []int32, startPos int) ([]float32, e
 	return b.logits, nil
 }
 
+// addBiasBatch applies the attention projections' biases to every row of a batch.
+func addBiasBatch(b *batch, layer *layer, n int) error {
+	if layer.qBias == nil && layer.kBias == nil && layer.vBias == nil {
+		return nil
+	}
+	cfg := b.cfg
+	if err := kernel.AddBias(b.q, layer.qBias, n, cfg.Heads*cfg.HeadDim); err != nil {
+		return err
+	}
+	if err := kernel.AddBias(b.k, layer.kBias, n, cfg.kvDim()); err != nil {
+		return err
+	}
+	return kernel.AddBias(b.v, layer.vBias, n, cfg.kvDim())
+}
+
 // normRows normalizes every row of the residual stream into b.xn.
 //
 // The rows are independent, so this is a plain loop over the per-row kernel
@@ -266,6 +283,9 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 		return err
 	}
 	if err := m.run.MatMulTransposed(b.v, b.xn, layer.wv, n, kvdim, cfg.Hidden); err != nil {
+		return err
+	}
+	if err := addBiasBatch(b, layer, n); err != nil {
 		return err
 	}
 
@@ -452,7 +472,8 @@ func (m *Model) DecodeStep(caches []Cache, tokens []int32) ([]float32, error) {
 // prefill keeps a score vector sized to the context and projects only its last
 // row, while a decode projects every row and touches each sequence's own cache.
 type decodeBatch struct {
-	n int // sequences in flight
+	n   int // sequences in flight
+	cfg Config
 
 	x       []float32   // [n, hidden] residual stream
 	xn      []float32   // [n, hidden] normalized input to a sublayer
@@ -477,6 +498,7 @@ func newDecodeBatch(cfg Config, n int) *decodeBatch {
 	kvdim := cfg.kvDim()
 	b := &decodeBatch{
 		n:       n,
+		cfg:     cfg,
 		x:       make([]float32, n*cfg.Hidden),
 		xn:      make([]float32, n*cfg.Hidden),
 		q:       make([]float32, n*qdim),
@@ -531,6 +553,9 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 	if err := m.run.MatMulTransposed(b.v, b.xn, layer.wv, n, kvdim, cfg.Hidden); err != nil {
 		return err
 	}
+	if err := addBiasDecode(b, layer, n); err != nil {
+		return err
+	}
 
 	// Each sequence rotates at its own position and appends at its own cache end.
 	scale := attentionScale(cfg)
@@ -576,6 +601,22 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 		return err
 	}
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
+}
+
+// addBiasDecode applies the attention projections' biases to every row of a decode
+// batch.
+func addBiasDecode(b *decodeBatch, layer *layer, n int) error {
+	if layer.qBias == nil && layer.kBias == nil && layer.vBias == nil {
+		return nil
+	}
+	cfg := b.cfg
+	if err := kernel.AddBias(b.q, layer.qBias, n, cfg.Heads*cfg.HeadDim); err != nil {
+		return err
+	}
+	if err := kernel.AddBias(b.k, layer.kBias, n, cfg.kvDim()); err != nil {
+		return err
+	}
+	return kernel.AddBias(b.v, layer.vBias, n, cfg.kvDim())
 }
 
 // feedForward runs one block's feed-forward network for every row.

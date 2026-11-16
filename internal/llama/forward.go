@@ -199,6 +199,9 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 	if err := m.run.MatVec(m.v, layer.wv, m.xn, cfg.kvDim(), cfg.Hidden); err != nil {
 		return err
 	}
+	if err := m.addBias(layer, 1); err != nil {
+		return err
+	}
 
 	// Rotate each head's query and the corresponding key at this position.
 	for h := range cfg.Heads {

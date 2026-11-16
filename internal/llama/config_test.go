@@ -220,10 +220,12 @@ func TestLoadConfigRejects(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "wrong architecture",
+			name: "unsupported architecture",
 			mutate: func(c *tinyConfig) []kv {
 				kvs := c.kvs()
-				kvs[0] = kv{"general.architecture", strVal("qwen2")}
+				// qwen2 is supported now; the test needs an architecture this
+				// package genuinely does not implement.
+				kvs[0] = kv{"general.architecture", strVal("gemma")}
 				return kvs
 			},
 			want: "unsupported architecture",

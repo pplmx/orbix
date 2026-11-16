@@ -2,6 +2,8 @@ package llama
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/pplmx/orbix/internal/gguf"
 )
@@ -14,6 +16,16 @@ import (
 type Config struct {
 	// Arch is general.architecture, the key prefix for everything else.
 	Arch string
+
+	// RopeLayout is how the rotary embedding pairs dimensions. Llama rotates
+	// adjacent pairs (2i, 2i+1); Qwen2 rotates i with i+n_dims/2, which ggml calls
+	// NEOX. Getting this wrong leaves a model fluent but measurably off, so it is
+	// a field with a name rather than a branch hidden in the rotation.
+	RopeLayout RopeLayout
+
+	// AttnBias reports whether the attention projections have bias vectors. Qwen2
+	// has q, k, and v biases; Llama has none.
+	AttnBias bool
 
 	// Name is general.name, for display.
 	Name string
@@ -70,6 +82,48 @@ type Config struct {
 	BOSID int
 }
 
+// RopeLayout is a rotary embedding dimension pairing.
+type RopeLayout int
+
+const (
+	// RopeNormal pairs dimension i with i+1, as Llama does.
+	RopeNormal RopeLayout = iota
+	// RopeNeox pairs dimension i with i+dims/2, as Qwen-family models do.
+	RopeNeox
+)
+
+// String names the layout, for the model summary.
+func (l RopeLayout) String() string {
+	if l == RopeNeox {
+		return "neox"
+	}
+	return "normal"
+}
+
+// archSpec is what each supported architecture changes about the forward pass.
+//
+// Only the differences are listed. Everything not mentioned here -- the pre-norm
+// block structure, RMSNorm, the gated FFN, grouped-query attention -- is shared, and
+// that sharing is the point of treating these as one implementation with a spec
+// rather than two copies.
+type archSpec struct {
+	// rope is the dimension pairing the model was trained with.
+	rope RopeLayout
+	// attnBias reports whether the attention projections carry bias vectors.
+	attnBias bool
+}
+
+// archSpecs lists the architectures this package implements.
+//
+// A model whose architecture is not here is refused at load time. That is
+// deliberate: loading a Qwen2 checkpoint with Llama's rotation produces fluent
+// English with the wrong numbers, which is far harder to notice than an error
+// naming the architecture.
+var archSpecs = map[string]archSpec{
+	"llama": {rope: RopeNormal, attnBias: false},
+	"qwen2": {rope: RopeNeox, attnBias: true},
+}
+
 // LoadConfig reads the architecture parameters and validates them.
 //
 // Validation is strict on purpose: a shape mismatch caught here produces a clear
@@ -80,8 +134,9 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if arch != "llama" {
-		return Config{}, fmt.Errorf("llama: unsupported architecture %q", arch)
+	spec, ok := archSpecs[arch]
+	if !ok {
+		return Config{}, fmt.Errorf("llama: unsupported architecture %q (supported: %s)", arch, supportedArchs())
 	}
 
 	get := func(name string) (int, error) {
@@ -95,7 +150,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		return v, nil
 	}
 
-	cfg := Config{Arch: arch}
+	cfg := Config{Arch: arch, RopeLayout: spec.rope, AttnBias: spec.attnBias}
 	if name, ok := f.Get[string]("general.name"); ok {
 		cfg.Name = name
 	}
@@ -233,6 +288,13 @@ func (c Config) validate(f *gguf.File) error {
 			want{p + "ffn_up.weight", []uint64{uint64(c.Hidden), uint64(c.FFN)}},
 			want{p + "ffn_down.weight", []uint64{uint64(c.FFN), uint64(c.Hidden)}},
 		)
+		if c.AttnBias {
+			wants = append(wants,
+				want{p + "attn_q.bias", []uint64{uint64(c.Heads * c.HeadDim)}},
+				want{p + "attn_k.bias", []uint64{uint64(c.KVHeads * c.HeadDim)}},
+				want{p + "attn_v.bias", []uint64{uint64(c.KVHeads * c.HeadDim)}},
+			)
+		}
 	}
 	for _, w := range wants {
 		ti, ok := f.Tensor(w.name)
@@ -261,9 +323,23 @@ func (c Config) String() string {
 	if c.TiedEmbeddings {
 		tie = "tied embeddings"
 	}
+	bias := ""
+	if c.AttnBias {
+		bias = ", attention bias"
+	}
 	return fmt.Sprintf(
-		"%s: %d layers, %d hidden, %d heads (%d kv), head dim %d, ffn %d, ctx %d, vocab %d, rope dim %d base %g, eps %g, %s",
+		"%s: %d layers, %d hidden, %d heads (%d kv), head dim %d, ffn %d, ctx %d, vocab %d, rope dim %d base %g %s, eps %g, %s%s",
 		c.Arch, c.Layers, c.Hidden, c.Heads, c.KVHeads, c.HeadDim, c.FFN,
-		c.ContextLen, c.VocabSize, c.RopeDim, c.RopeBase, c.RMSNormEps, tie,
+		c.ContextLen, c.VocabSize, c.RopeDim, c.RopeBase, c.RopeLayout, c.RMSNormEps, tie, bias,
 	)
+}
+
+// supportedArchs lists the architectures in sorted order, for an error message.
+func supportedArchs() string {
+	names := make([]string, 0, len(archSpecs))
+	for name := range archSpecs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return strings.Join(names, ", ")
 }

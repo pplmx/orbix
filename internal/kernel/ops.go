@@ -108,6 +108,36 @@ func matVecRows(dst, a, v []float32, n, k, lo, hi int) error {
 	return nil
 }
 
+// AddBias adds a bias vector to every row of dst, in place.
+//
+// A projection with a bias is dst = a @ bᵀ + bias, and adding it as a separate pass
+// keeps the matmul kernel free of a branch every model would pay for even when it
+// has no bias. rows may be 1 (decode) or the batch size (prefill).
+//
+// An empty bias is a no-op, so a caller with a model that has no bias does not need
+// to check before calling.
+func AddBias(dst, bias []float32, rows, width int) error {
+	if rows < 0 || width < 0 {
+		return fmt.Errorf("kernel: negative shape in AddBias(%d, %d)", rows, width)
+	}
+	if len(bias) == 0 {
+		return nil
+	}
+	if len(bias) < width {
+		return fmt.Errorf("kernel: bias has %d values, need %d", len(bias), width)
+	}
+	if len(dst) < rows*width {
+		return fmt.Errorf("kernel: dst has %d values, need %d", len(dst), rows*width)
+	}
+	for r := range rows {
+		row := dst[r*width : (r+1)*width]
+		for i := range width {
+			row[i] += bias[i]
+		}
+	}
+	return nil
+}
+
 // RMSNorm normalizes src in place into dst using the root-mean-square norm.
 //
 // dst and src may alias. Each element is divided by the RMS of the row and

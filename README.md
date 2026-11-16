@@ -67,14 +67,14 @@ The constraints follow from the goal:
 The repository is at the start of the roadmap. What exists, and what has been
 verified:
 
-| Layer          | Package             | State                                                                                                                                                |
-| -------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GGUF container | `internal/gguf`     | Parses header, metadata, tensor directory, and streams tensor data. Every field and byte offset cross-checked against an independent parser.         |
-| Half precision | `internal/f16`      | binary16 to/from float32 with correct subnormals, infinities, NaNs, and round-to-nearest-even. All 65,536 bit patterns verified against a reference. |
-| Dequantization | `internal/quant`    | F32, F16, BF16, Q4_0, Q8_0. Decoded values for every tensor in a real model compared bit for bit with a reference.                                   |
-| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers.                                                                   |
-| Tokenizer      | `internal/tokenize` | SentencePiece segmentation matching llama.cpp's implementation token for token.                                                                      |
-| Transformer    | —                   | Not yet implemented.                                                                                                                                 |
+| Layer          | Package             | State                                                                                                                                                                 |
+| -------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GGUF container | `internal/gguf`     | Parses header, metadata, tensor directory, and streams tensor data. Every field and byte offset cross-checked against an independent parser.                          |
+| Half precision | `internal/f16`      | binary16 to/from float32 with correct subnormals, infinities, NaNs, and round-to-nearest-even. All 65,536 bit patterns verified against a reference.                  |
+| Dequantization | `internal/quant`    | F32, F16, BF16, Q4_0, Q8_0. Decoded values for every tensor in a real model compared bit for bit with a reference.                                                    |
+| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers.                                                                                    |
+| Tokenizer      | `internal/tokenize` | SentencePiece segmentation matching llama.cpp's implementation token for token.                                                                                       |
+| Transformer    | `internal/llama`    | Llama forward pass with NEOX RoPE, grouped-query attention, and a contiguous KV cache. Greedy and temperature sampling. Generates coherent text on a real checkpoint. |
 
 ## What You Can Learn From This Codebase
 
@@ -174,9 +174,9 @@ func RMSNorm(dst, src, weight []float32, eps float32)
 
 ## Quick Start
 
-The snippets below show the intended interface. Only `orbix model inspect` runs
-today; the serving and embedding examples are the target API, kept here so the
-shape of the engine is visible while the lower layers are built.
+`orbix run` and `orbix model inspect` work today. The serving and embedding
+snippets are the target API, kept here so the shape of the engine stays visible
+while the upper layers are built.
 
 ### Serve a GGUF model
 
@@ -259,13 +259,16 @@ the [Roadmap](#roadmap) and will not appear until they work.
 | Command                      | Description                                     | Status   |
 | ---------------------------- | ----------------------------------------------- | -------- |
 | `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization | v0.1     |
+| `orbix run "<prompt>"`       | One-shot inference                              | v0.1     |
 | `orbix version`              | Print version and build info                    | v0.1     |
-| `orbix run "<prompt>"`       | One-shot inference                              | planned  |
 | `orbix chat`                 | Interactive REPL with history                   | planned  |
 | `orbix serve`                | Start the OpenAI-compatible inference server    | planned  |
 | `orbix bench`                | Run a built-in throughput/latency benchmark     | planned  |
 
 ```bash
+orbix run --model ./model.gguf "Once upon a time"
+orbix run --model ./model.gguf --stats --max-tokens 64 "Explain KV caching."
+
 orbix model inspect ./model.gguf
 orbix model inspect --json ./model.gguf   # machine-readable
 ```
@@ -309,7 +312,7 @@ The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it t
 
 The roadmap is a learning path as much as a feature list. Each version adds one conceptual layer.
 
-- [ ] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, `orbix model inspect` — *partial: GGUF, quantization decode, kernels, tokenizer, and `model inspect` are implemented; transformer inference and `orbix run` are not*
+- [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
 - [ ] `v0.2` — **Scheduling and cache**: scheduler with continuous batching, paged `KVCacheManager`, Q4_0/Q4_1, Qwen2
 - [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral
 - [ ] `v0.4` — **Performance paths**: K-quants, prefix-aware radix cache, `amd64` AVX2 and `arm64` NEON assembly

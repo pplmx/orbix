@@ -32,6 +32,7 @@ internal/f16/       binary16 与 float32 互转（量化 scale 的基础）
 internal/quant/     反量化：F32/F16/BF16/Q4_0/Q8_0 + 张量加载器
 internal/kernel/    参考算子：matmul / RMSNorm / softmax / SiLU
 internal/tokenize/  SentencePiece 分词，对齐 llama.cpp 的 SPM 实现
+internal/llama/     Llama 架构：超参数校验、RoPE、KV cache、前向推理、采样
 internal/<层>/      后续层按 README 的阅读顺序添加
 ```
 

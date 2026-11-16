@@ -293,3 +293,48 @@ func TestEngineMatchesGenerate(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkersOptionReachesTheModel checks the plumbing: the engine's Workers
+// option must configure the model's kernels, or a caller tuning concurrency
+// would silently get the default instead.
+func TestWorkersOptionReachesTheModel(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	e, err := New(path, Options{Workers: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A serial engine and a parallel one must still generate the same tokens;
+	// the option changes the schedule, not the numbers.
+	gf, _ := gguf.Open(path)
+	tok, _ := tokenize.New(gf)
+	prompt := tok.Encode("Once upon a time", true)
+
+	run := func(e *Engine) []int32 {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 5})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		for e.Pump() > 0 {
+		}
+		out, _ := collect(t, ch)
+		return out
+	}
+	serial := run(e)
+
+	pe, err := New(path, Options{Workers: 8})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	parallel := run(pe)
+	if len(serial) != len(parallel) {
+		t.Fatalf("serial produced %d tokens, parallel %d", len(serial), len(parallel))
+	}
+	for i := range serial {
+		if serial[i] != parallel[i] {
+			t.Errorf("token %d: serial %d, parallel %d", i, serial[i], parallel[i])
+		}
+	}
+}

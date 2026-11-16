@@ -79,11 +79,16 @@ type Engine struct {
 type Options struct {
 	// MaxActive caps how many sequences are advanced per round. Zero means 8.
 	MaxActive int
+	// Workers is the model's kernel fan-out; zero means one per available CPU.
+	// The engine drives one forward pass at a time, so this is the only
+	// parallelism in play and defaulting it to the CPU count is what makes a
+	// single stream fast.
+	Workers int
 }
 
 // New loads a model and returns an engine for it.
 func New(path string, opts Options) (*Engine, error) {
-	m, err := llama.New(path)
+	m, err := llama.NewWithOptions(path, llama.Options{Workers: opts.Workers})
 	if err != nil {
 		return nil, err
 	}

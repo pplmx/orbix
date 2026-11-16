@@ -18,3 +18,6 @@ coverage.*
 
 # rumdl's markdown lint cache
 .rumdl_cache/
+
+# Test binaries produced by `go test -c` and profiling runs.
+*.test

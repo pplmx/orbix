@@ -23,6 +23,7 @@ func cmdBench(args []string) error {
 	model := fs.String("model", "", "path to a GGUF model file (required)")
 	maxTokens := fs.Int("max-tokens", 32, "tokens to generate per request")
 	concurrency := fs.Int("concurrency", 1, "requests in flight at once")
+	workers := fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
 	requests := fs.Int("requests", 0, "total requests; 0 means one per concurrency slot")
 	prompt := fs.String("prompt", "Once upon a time", "prompt for each request")
 	if err := fs.Parse(args); err != nil {
@@ -41,6 +42,9 @@ func cmdBench(args []string) error {
 	if *maxTokens < 1 {
 		return fmt.Errorf("bench: --max-tokens must be at least 1")
 	}
+	if *workers < 0 {
+		return fmt.Errorf("bench: --workers must not be negative")
+	}
 	total := *requests
 	if total <= 0 {
 		total = *concurrency
@@ -54,7 +58,7 @@ func cmdBench(args []string) error {
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(*model, engine.Options{MaxActive: *concurrency})
+	eng, err := engine.New(*model, engine.Options{MaxActive: *concurrency, Workers: *workers})
 	if err != nil {
 		return err
 	}
@@ -69,8 +73,8 @@ func cmdBench(args []string) error {
 	fmt.Printf("model:       %s\n", cfg)
 	fmt.Printf("params:      %d\n", eng.Model().W.Params())
 	fmt.Printf("prompt:      %d tokens\n", len(promptTokens))
-	fmt.Printf("generating:  %d tokens x %d requests, concurrency %d\n\n",
-		*maxTokens, total, *concurrency)
+	fmt.Printf("generating:  %d tokens x %d requests, concurrency %d, workers %d\n\n",
+		*maxTokens, total, *concurrency, eng.Model().Runner().Workers())
 
 	start := time.Now()
 	var generated int

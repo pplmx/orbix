@@ -361,3 +361,92 @@ func BenchmarkDecode(b *testing.B) {
 		}
 	}
 }
+
+// TestParallelMatchesSerialWeights is the end-to-end form of the Runner
+// contract: a model built with several workers must produce exactly the logits a
+// serial one does. The kernel tests pin the individual products; this pins the
+// forward pass, where a buffer shared between two projections would show up as a
+// wrong value only under concurrency.
+func TestParallelMatchesSerialWeights(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file")
+	}
+	serial, err := NewWithOptions(path, Options{Workers: 1})
+	if err != nil {
+		t.Fatalf("NewWithOptions(serial): %v", err)
+	}
+	parallel, err := NewWithOptions(path, Options{Workers: 8})
+	if err != nil {
+		t.Fatalf("NewWithOptions(parallel): %v", err)
+	}
+
+	c := serial.Config()
+	prompt := []int32{1, 9038, 2501, 263, 931}
+
+	seqCache, err := NewKVCache(c, c.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pos, tok := range prompt {
+		if _, err := serial.Forward(seqCache, int(tok), pos); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := append([]float32(nil), serial.Logits()...)
+
+	batchCache, err := NewKVCache(c, c.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parallel.Prefill(batchCache, prompt, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("logit[%d] = %v with 8 workers, %v serial", i, got[i], want[i])
+		}
+	}
+
+	// Decode a few tokens on both and compare each step, so the single-token
+	// path is covered too and not just the batched one.
+	pos := len(prompt)
+	for range 3 {
+		tok := Greedy{}.Next(want)
+		wantNext, err := serial.Forward(seqCache, int(tok), pos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append([]float32(nil), wantNext...)
+
+		tok2 := Greedy{}.Next(got)
+		if tok2 != tok {
+			t.Fatalf("token at %d: parallel model chose %d, serial chose %d", pos, tok2, tok)
+		}
+		gotNext, err := parallel.Forward(batchCache, int(tok), pos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range want {
+			if gotNext[i] != want[i] {
+				t.Fatalf("decode logit[%d] = %v with 8 workers, %v serial", i, gotNext[i], want[i])
+			}
+		}
+		got = append([]float32(nil), gotNext...)
+		pos++
+	}
+}
+
+func TestNewWithOptionsZeroWorkersUsesGOMAXPROCS(t *testing.T) {
+	loadReal(t) // skips without a model
+	m2, err := NewWithOptions(os.Getenv("MODEL"), Options{})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
+	}
+	// Both defaults must agree, which means the CLI path and an explicit zero
+	// are the same configuration.
+	if got, want := m2.run.Workers(), workers(0); got != want {
+		t.Errorf("default workers = %d, want %d", got, want)
+	}
+}

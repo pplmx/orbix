@@ -3,6 +3,7 @@ package llama
 import (
 	"fmt"
 	"math"
+	"runtime"
 
 	"github.com/pplmx/orbix/internal/kernel"
 )
@@ -16,6 +17,13 @@ import (
 type Model struct {
 	W    *Weights
 	rope *rope
+
+	// run splits the row-partitioned kernels across goroutines. Decoding a
+	// token is a chain of matrix-vector products that are bounded by memory
+	// bandwidth, not arithmetic, so the rows parallelize well. The split is
+	// over independent rows, which keeps every result bit-identical to the
+	// serial kernel.
+	run *kernel.Runner
 
 	// Scratch buffers, sized once. Reusing them across tokens is what keeps
 	// per-token allocation at zero after the first call.
@@ -37,8 +45,23 @@ type Model struct {
 	buf *batch
 }
 
+// Options controls how a Model runs. The zero value is the default: one worker
+// per available CPU, which is what a standalone CLI wants.
+type Options struct {
+	// Workers is the number of goroutines the row-partitioned kernels may use.
+	// 0 means runtime.GOMAXPROCS(0) and 1 means serial. A scheduler that already
+	// has its own parallelism sets this lower, so the two do not oversubscribe
+	// the machine fighting each other.
+	Workers int
+}
+
 // New loads a model from a GGUF file and prepares its scratch buffers.
 func New(path string) (*Model, error) {
+	return NewWithOptions(path, Options{})
+}
+
+// NewWithOptions is New with explicit run options.
+func NewWithOptions(path string, opts Options) (*Model, error) {
 	w, err := LoadWeights(path)
 	if err != nil {
 		return nil, err
@@ -51,6 +74,7 @@ func New(path string) (*Model, error) {
 	return &Model{
 		W:       w,
 		rope:    r,
+		run:     kernel.NewRunner(workers(opts.Workers)),
 		x:       make([]float32, cfg.Hidden),
 		xn:      make([]float32, cfg.Hidden),
 		q:       make([]float32, cfg.Heads*cfg.HeadDim),
@@ -65,8 +89,20 @@ func New(path string) (*Model, error) {
 	}, nil
 }
 
+// workers resolves the configured fan-out, defaulting to every available CPU.
+func workers(n int) int {
+	if n <= 0 {
+		return runtime.GOMAXPROCS(0)
+	}
+	return n
+}
+
 // Config returns the model's hyperparameters.
 func (m *Model) Config() Config { return m.W.Config }
+
+// Runner returns the kernel scheduler this model uses, for reporting the
+// fan-out a run actually got.
+func (m *Model) Runner() *kernel.Runner { return m.run }
 
 // Logits returns the logits from the most recent successful Forward call.
 //
@@ -150,13 +186,13 @@ func (m *Model) attention(cache *KVCache, l int, pos int) error {
 	}
 	// Three projections of the same normalized input. wq is [hidden, qDim] and
 	// MatVec produces one output per row, which is exactly the layout.
-	if err := kernel.MatVec(m.q, layer.wq, m.xn, cfg.Heads*cfg.HeadDim, cfg.Hidden); err != nil {
+	if err := m.run.MatVec(m.q, layer.wq, m.xn, cfg.Heads*cfg.HeadDim, cfg.Hidden); err != nil {
 		return err
 	}
-	if err := kernel.MatVec(m.k, layer.wk, m.xn, cfg.kvDim(), cfg.Hidden); err != nil {
+	if err := m.run.MatVec(m.k, layer.wk, m.xn, cfg.kvDim(), cfg.Hidden); err != nil {
 		return err
 	}
-	if err := kernel.MatVec(m.v, layer.wv, m.xn, cfg.kvDim(), cfg.Hidden); err != nil {
+	if err := m.run.MatVec(m.v, layer.wv, m.xn, cfg.kvDim(), cfg.Hidden); err != nil {
 		return err
 	}
 
@@ -216,7 +252,7 @@ func (m *Model) attention(cache *KVCache, l int, pos int) error {
 		}
 	}
 
-	if err := kernel.MatVec(m.attnOut, layer.wo, m.attn, cfg.Hidden, cfg.Heads*cfg.HeadDim); err != nil {
+	if err := m.run.MatVec(m.attnOut, layer.wo, m.attn, cfg.Hidden, cfg.Heads*cfg.HeadDim); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(m.x, m.attnOut)
@@ -231,10 +267,10 @@ func (m *Model) feedForward(l int) error {
 		return err
 	}
 	// Llama's FFN is gated: up(x) * silu(gate(x)), then down().
-	if err := kernel.MatVec(m.gate, layer.wGate, m.xn, cfg.FFN, cfg.Hidden); err != nil {
+	if err := m.run.MatVec(m.gate, layer.wGate, m.xn, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
-	if err := kernel.MatVec(m.up, layer.wUp, m.xn, cfg.FFN, cfg.Hidden); err != nil {
+	if err := m.run.MatVec(m.up, layer.wUp, m.xn, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
 	kernel.SiLU(m.gate)
@@ -242,7 +278,7 @@ func (m *Model) feedForward(l int) error {
 		return err
 	}
 	// wDown is [ffn, hidden], so the output width is hidden.
-	if err := kernel.MatVec(m.attnOut, layer.wDown, m.up, cfg.Hidden, cfg.FFN); err != nil {
+	if err := m.run.MatVec(m.attnOut, layer.wDown, m.up, cfg.Hidden, cfg.FFN); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(m.x, m.attnOut)
@@ -260,5 +296,5 @@ func (m *Model) finish() error {
 	if w == nil {
 		w = m.W.TokenEmbedding
 	}
-	return kernel.MatVec(m.logits, w, m.xn, cfg.VocabSize, cfg.Hidden)
+	return m.run.MatVec(m.logits, w, m.xn, cfg.VocabSize, cfg.Hidden)
 }

@@ -72,7 +72,7 @@ verified:
 | GGUF container | `internal/gguf`     | Parses header, metadata, tensor directory, and streams tensor data. Every field and byte offset cross-checked against an independent parser.                                                                                                                                                                                                                                                                                                 |
 | Half precision | `internal/f16`      | binary16 to/from float32 with correct subnormals, infinities, NaNs, and round-to-nearest-even. All 65,536 bit patterns verified against a reference.                                                                                                                                                                                                                                                                                         |
 | Dequantization | `internal/quant`    | F32, F16, BF16, Q4_0, Q8_0. Decoded values for every tensor in a real model compared bit for bit with a reference.                                                                                                                                                                                                                                                                                                                           |
-| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers.                                                                                                                                                                                                                                                                                                                                                           |
+| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers. A `Runner` splits the row-partitioned products across goroutines with a measured size threshold; every row is still computed by one goroutine in serial order, so results are bit-identical to the serial kernel.                                                                                                                                         |
 | Tokenizer      | `internal/tokenize` | SentencePiece segmentation matching llama.cpp's implementation token for token.                                                                                                                                                                                                                                                                                                                                                              |
 | Engine         | `internal/engine`   | Interleaves several sequences over one model, one token per sequence per round. Each sequence keeps its own logits copy, and each prompt is prefilled in one batched pass. Decode is still one token at a time, so concurrency lowers per-stream latency cost without yet raising total throughput.                                                                                                                                          |
 | Transformer    | `internal/llama`    | Llama forward pass with adjacent-pair RoPE, grouped-query attention, and a contiguous KV cache. Batched prefill (`Prefill`) runs a prompt as one matrix-matrix sequence and returns the last position's logits; its output is bit-identical to the per-token path. Greedy and temperature sampling. Greedy decoding on a real checkpoint reproduces llama.cpp's text exactly, and per-token log-probabilities agree to within about 0.1 nat. |
@@ -171,6 +171,11 @@ package kernel
 func MatMulQ4_0(dst, a []float32, b []byte, m, n, k int)
 func Attention(q, k, v []float32, mask []float32, scale float32)
 func RMSNorm(dst, src, weight []float32, eps float32)
+
+// Runner evaluates the row-partitioned kernels across a bounded worker set.
+func NewRunner(workers int) *Runner
+func (r *Runner) MatVec(dst, a, v []float32, n, k int) error
+func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error
 ```
 
 ## Quick Start
@@ -305,9 +310,10 @@ GGUF parsing and tokenization are implemented in pure Go from the start; the qua
 Orbix is a learning project, and it is honest about where it stands:
 
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
-- **Reference kernels are not optimized.** They are written to be readable. Assembly fast paths on `amd64` (AVX2) and `arm64` (NEON) are planned behind the same interfaces, after the reference implementations are correct.
-- **Scheduling still matters.** Continuous batching and prefix-aware KV caching mean Orbix can sustain more concurrent requests than a naive one-request-at-a-time loop, even with slower per-token kernels.
-- **Benchmarks are self-run.** `orbix bench` is part of the CLI so you can measure on your own hardware, with your own model.
+- **Reference kernels are not optimized per instruction.** They are written to be readable, with no SIMD and no assembly. What they do use is more than one core: the row-partitioned products run on a bounded worker set, which took decoding on stories15M from 65 to 235 tokens per second on a 128-core EPYC. Assembly fast paths on `amd64` (AVX2) and `arm64` (NEON) are planned behind the same interfaces, after the reference implementations are correct.
+- **Parallelism is over rows, never over a reduction.** Every output row is computed by one goroutine in the same order the serial kernel uses, so float32 addition is never reassociated and the parallel result is bit-identical. That is a deliberate constraint: a split reduction would be faster on paper and would silently change every number the project compares against llama.cpp.
+- **Scheduling decides what concurrency buys.** Each sequence's prompt is prefilled in one batched pass, but decode still advances one token per sequence per round on one shared model. Concurrency therefore splits one stream's speed into several fair streams; a real throughput win needs batched decode, which is the next layer.
+- **Benchmarks are self-run.** `orbix bench` is part of the CLI so you can measure on your own hardware, with your own model. It reports the worker count it actually used.
 
 The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it take to make LLM inference work in pure Go, and what do I learn by building it?"
 

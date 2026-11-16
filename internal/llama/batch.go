@@ -156,13 +156,13 @@ func (m *Model) attentionBatch(b *batch, cache *KVCache, l, startPos int) error 
 	if err := m.normRows(b, layer.attnNorm); err != nil {
 		return err
 	}
-	if err := kernel.MatMulTransposed(b.q, b.xn, layer.wq, n, qdim, cfg.Hidden); err != nil {
+	if err := m.run.MatMulTransposed(b.q, b.xn, layer.wq, n, qdim, cfg.Hidden); err != nil {
 		return err
 	}
-	if err := kernel.MatMulTransposed(b.k, b.xn, layer.wk, n, kvdim, cfg.Hidden); err != nil {
+	if err := m.run.MatMulTransposed(b.k, b.xn, layer.wk, n, kvdim, cfg.Hidden); err != nil {
 		return err
 	}
-	if err := kernel.MatMulTransposed(b.v, b.xn, layer.wv, n, kvdim, cfg.Hidden); err != nil {
+	if err := m.run.MatMulTransposed(b.v, b.xn, layer.wv, n, kvdim, cfg.Hidden); err != nil {
 		return err
 	}
 
@@ -231,7 +231,7 @@ func (m *Model) attentionBatch(b *batch, cache *KVCache, l, startPos int) error 
 		}
 	}
 
-	if err := kernel.MatMulTransposed(b.attnOut, b.attn, layer.wo, n, cfg.Hidden, qdim); err != nil {
+	if err := m.run.MatMulTransposed(b.attnOut, b.attn, layer.wo, n, cfg.Hidden, qdim); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
@@ -245,17 +245,17 @@ func (m *Model) feedForwardBatch(b *batch, cfg Config, l int) error {
 	if err := m.normRows(b, layer.ffnNorm); err != nil {
 		return err
 	}
-	if err := kernel.MatMulTransposed(b.gate, b.xn, layer.wGate, n, cfg.FFN, cfg.Hidden); err != nil {
+	if err := m.run.MatMulTransposed(b.gate, b.xn, layer.wGate, n, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
-	if err := kernel.MatMulTransposed(b.up, b.xn, layer.wUp, n, cfg.FFN, cfg.Hidden); err != nil {
+	if err := m.run.MatMulTransposed(b.up, b.xn, layer.wUp, n, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
 	kernel.SiLU(b.gate[:n*cfg.FFN])
 	if err := kernel.MulInPlace(b.up[:n*cfg.FFN], b.gate[:n*cfg.FFN]); err != nil {
 		return err
 	}
-	if err := kernel.MatMulTransposed(b.attnOut, b.up, layer.wDown, n, cfg.Hidden, cfg.FFN); err != nil {
+	if err := m.run.MatMulTransposed(b.attnOut, b.up, layer.wDown, n, cfg.Hidden, cfg.FFN); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
@@ -279,5 +279,5 @@ func (m *Model) finishBatch(b *batch) error {
 	if w == nil {
 		w = m.W.TokenEmbedding
 	}
-	return kernel.MatVec(b.logits, w, xn, cfg.VocabSize, cfg.Hidden)
+	return m.run.MatVec(b.logits, w, xn, cfg.VocabSize, cfg.Hidden)
 }

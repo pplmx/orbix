@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -58,20 +59,22 @@ func TestReadHeaderAndDirectory(t *testing.T) {
 	if f.Version != Version {
 		t.Errorf("Version = %d, want %d", f.Version, Version)
 	}
-	if len(f.Metadata) != 12 {
-		t.Errorf("metadata entries = %d, want 12", len(f.Metadata))
+	if got := f.MetadataCount(); got != 12 {
+		t.Errorf("metadata entries = %d, want 12", got)
 	}
-	if len(f.Tensors) != 2 {
-		t.Fatalf("tensors = %d, want 2", len(f.Tensors))
+	if got := f.TensorCount(); got != 2 {
+		t.Fatalf("tensors = %d, want 2", got)
 	}
-	if got := f.Tensors[0].Name; got != "token_embd.weight" {
-		t.Errorf("tensor[0].Name = %q", got)
+	// The streaming accessor must yield the directory in file order.
+	var names []string
+	for ti := range f.Tensors() {
+		names = append(names, ti.Name)
 	}
-	if got, want := f.Tensors[0].N(), int64(8); got != want {
+	if want := []string{"token_embd.weight", "blk.0.attn_q.weight"}; !slices.Equal(names, want) {
+		t.Errorf("Tensors() names = %v, want %v", names, want)
+	}
+	if got, want := f.TensorInfos[0].N(), int64(8); got != want {
 		t.Errorf("tensor[0].N() = %d, want %d", got, want)
-	}
-	if got, want := f.Tensors[1].Name, "blk.0.attn_q.weight"; got != want {
-		t.Errorf("tensor[1].Name = %q, want %q", got, want)
 	}
 	if f.Alignment != 32 {
 		t.Errorf("Alignment = %d, want 32", f.Alignment)
@@ -332,8 +335,8 @@ func TestKeysSorted(t *testing.T) {
 		t.Fatalf("Read: %v", err)
 	}
 	keys := f.Keys()
-	if len(keys) != len(f.Metadata) {
-		t.Fatalf("Keys() = %d entries, want %d", len(keys), len(f.Metadata))
+	if len(keys) != f.MetadataCount() {
+		t.Fatalf("Keys() = %d entries, want %d", len(keys), f.MetadataCount())
 	}
 	for i := 1; i < len(keys); i++ {
 		if keys[i-1] >= keys[i] {
@@ -347,6 +350,163 @@ func TestBaseName(t *testing.T) {
 		"/models/qwen2.5-7b-q4_0.gguf": "qwen2.5-7b-q4_0",
 		"model.gguf":                   "model",
 		"/a/b/c":                       "c",
+	}
+	for in, want := range tests {
+		if got := BaseName(in); got != want {
+			t.Errorf("BaseName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestGetGenericConversions(t *testing.T) {
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	// The same key read through the generic accessor and its typed wrappers
+	// must agree; the wrappers are thin aliases and drifting apart would mean
+	// one of the two conversions is wrong.
+	if got, ok := f.Get[uint32]("llama.block_count"); !ok || got != 1 {
+		t.Errorf("Get[uint32](block_count) = %d, %v", got, ok)
+	}
+	if got, ok := f.Get[int64]("llama.block_count"); !ok || got != 1 {
+		t.Errorf("Get[int64](block_count) = %d, %v", got, ok)
+	}
+	if got, ok := f.Get[float32]("llama.block_count"); !ok || got != 1 {
+		t.Errorf("Get[float32](block_count) = %v, %v", got, ok)
+	}
+	// float32 stored as 1e-5 must survive as float32 and as float64.
+	if got, ok := f.Get[float32]("llama.attention.layer_norm_rms_epsilon"); !ok || got != 1e-5 {
+		t.Errorf("Get[float32](eps) = %v, %v", got, ok)
+	}
+	if got, ok := f.Get[float64]("llama.attention.layer_norm_rms_epsilon"); !ok || math.Abs(got-1e-5) > 1e-9 {
+		t.Errorf("Get[float64](eps) = %v, %v", got, ok)
+	}
+	if got, ok := f.Get[string]("general.architecture"); !ok || got != "llama" {
+		t.Errorf("Get[string](architecture) = %q, %v", got, ok)
+	}
+	if got, ok := f.Get[bool]("orbix.test.flag"); !ok || !got {
+		t.Errorf("Get[bool](flag) = %v, %v", got, ok)
+	}
+}
+
+func TestGetRejectsWrongKind(t *testing.T) {
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	// Asking for a string at a numeric key, or a number at a string key, must
+	// report absence rather than a zero value that looks like real data.
+	if _, ok := f.Get[string]("llama.block_count"); ok {
+		t.Error("Get[string] at a uint32 key reported ok")
+	}
+	if _, ok := f.Get[uint32]("general.architecture"); ok {
+		t.Error("Get[uint32] at a string key reported ok")
+	}
+	if _, ok := f.Get[bool]("llama.block_count"); ok {
+		t.Error("Get[bool] at a numeric key reported ok")
+	}
+	if _, ok := f.Get[uint32]("llama.missing"); ok {
+		t.Error("Get at a missing key reported ok")
+	}
+}
+
+func TestGetRejectsNarrowingOverflow(t *testing.T) {
+	// orbix.test.big is 1<<40, which does not fit in uint32 or int32. The
+	// conversion must report absence instead of wrapping to a plausible small
+	// number that would silently change inference.
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if _, ok := f.Get[uint32]("orbix.test.big"); ok {
+		t.Error("Get[uint32] of 1<<40 reported ok")
+	}
+	if _, ok := f.Get[int32]("orbix.test.big"); ok {
+		t.Error("Get[int32] of 1<<40 reported ok")
+	}
+	if got, ok := f.Get[uint64]("orbix.test.big"); !ok || got != 1<<40 {
+		t.Errorf("Get[uint64](big) = %d, %v", got, ok)
+	}
+}
+
+func TestGetArray(t *testing.T) {
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	tokens, ok := f.GetArray[string]("tokenizer.ggml.tokens")
+	if !ok || !slices.Equal(tokens, []string{"<unk>", "a", "b", "<s>"}) {
+		t.Errorf("GetArray[string](tokens) = %v, %v", tokens, ok)
+	}
+	types, ok := f.GetArray[int32]("tokenizer.ggml.token_type")
+	if !ok || !slices.Equal(types, []int32{2, 1, 1, 3}) {
+		t.Errorf("GetArray[int32](token_type) = %v, %v", types, ok)
+	}
+	// A scalar key is not an array.
+	if _, ok := f.GetArray[string]("general.architecture"); ok {
+		t.Error("GetArray at a scalar key reported ok")
+	}
+}
+
+func TestGetArrayEmptyIsSuccess(t *testing.T) {
+	// An empty array must be distinguishable from a failure: both would return
+	// a nil slice to a careless implementation.
+	data := buildFile([]kv{{"orbix.test.empty", Value{Type: TypeArray, ElemType: TypeString}}}, nil, 32, nil)
+	f, err := Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	got, ok := f.GetArray[string]("orbix.test.empty")
+	if !ok {
+		t.Fatal("GetArray on an empty array reported failure")
+	}
+	if len(got) != 0 {
+		t.Errorf("GetArray = %v, want empty", got)
+	}
+	if _, ok := f.GetArray[string]("orbix.test.absent"); ok {
+		t.Error("GetArray at a missing key reported ok")
+	}
+}
+
+func TestAllIteratesSorted(t *testing.T) {
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	var keys []string
+	for k := range f.All() {
+		keys = append(keys, k)
+	}
+	if !slices.IsSorted(keys) {
+		t.Errorf("All() yielded unsorted keys: %v", keys)
+	}
+	if len(keys) != f.MetadataCount() {
+		t.Errorf("All() yielded %d keys, want %d", len(keys), f.MetadataCount())
+	}
+	// Early termination must stop the iteration.
+	count := 0
+	for range f.All() {
+		count++
+		break
+	}
+	if count != 1 {
+		t.Errorf("early break yielded %d entries, want 1", count)
+	}
+}
+
+func TestBaseNameEdgeCases(t *testing.T) {
+	tests := map[string]string{
+		"/models/qwen2.5-7b-q4_0.gguf": "qwen2.5-7b-q4_0",
+		"model.gguf":                   "model",
+		"noext":                        "noext",
+		"/a/b/c":                       "c",
+		// A dotfile has no extension, so it must not collapse to an empty
+		// name.
+		".gguf": ".gguf",
+		// Only the final extension is stripped; the version stays.
+		"model.v2.gguf": "model.v2",
 	}
 	for in, want := range tests {
 		if got := BaseName(in); got != want {

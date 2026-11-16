@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -53,8 +53,8 @@ func writeHuman(w io.Writer, f *gguf.File, path string) error {
 	}
 	fmt.Fprintf(tw, "GGUF version\t%d\n", f.Version)
 	fmt.Fprintf(tw, "Alignment\t%d bytes\n", f.Alignment)
-	fmt.Fprintf(tw, "Metadata entries\t%d\n", len(f.Metadata))
-	fmt.Fprintf(tw, "Tensors\t%d\n", len(f.Tensors))
+	fmt.Fprintf(tw, "Metadata entries\t%d\n", f.MetadataCount())
+	fmt.Fprintf(tw, "Tensors\t%d\n", f.TensorCount())
 	fmt.Fprintf(tw, "Tensor data offset\t%d\n", f.TensorDataLoc)
 
 	if archErr == nil {
@@ -114,7 +114,7 @@ func printQuantization(tw *tabwriter.Writer, ew *errWriter, f *gguf.File) error 
 	}
 	stats := map[gguf.QuantType]*stat{}
 	var order []gguf.QuantType
-	for _, ti := range f.Tensors {
+	for ti := range f.Tensors() {
 		s, ok := stats[ti.Type]
 		if !ok {
 			s = &stat{}
@@ -133,7 +133,9 @@ func printQuantization(tw *tabwriter.Writer, ew *errWriter, f *gguf.File) error 
 	}
 	// Sort by name so the table is stable across runs; map iteration order
 	// would otherwise reshuffle rows.
-	sort.Slice(order, func(i, j int) bool { return order[i].String() < order[j].String() })
+	slices.SortFunc(order, func(a, b gguf.QuantType) int {
+		return strings.Compare(a.String(), b.String())
+	})
 
 	fmt.Fprintln(tw)
 	fmt.Fprintln(tw, "Quantization")
@@ -152,13 +154,13 @@ func printQuantization(tw *tabwriter.Writer, ew *errWriter, f *gguf.File) error 
 
 // printTensors lists each tensor with its shape, type, and encoded size.
 func printTensors(tw *tabwriter.Writer, ew *errWriter, f *gguf.File) error {
-	if len(f.Tensors) == 0 {
+	if f.TensorCount() == 0 {
 		return nil
 	}
 	fmt.Fprintln(tw)
-	fmt.Fprintf(tw, "Tensors (%d)\n", len(f.Tensors))
+	fmt.Fprintf(tw, "Tensors (%d)\n", f.TensorCount())
 	fmt.Fprintln(tw, "  Name\tType\tShape\tSize")
-	for _, ti := range f.Tensors {
+	for ti := range f.Tensors() {
 		shape := formatShape(ti.Dims)
 		size := "?"
 		if n, ok := ti.Bytes(); ok {
@@ -190,12 +192,12 @@ func writeJSON(w io.Writer, f *gguf.File) error {
 		Alignment:     f.Alignment,
 		TensorDataLoc: f.TensorDataLoc,
 		Metadata:      map[string]string{},
-		Tensors:       make([]tensor, 0, len(f.Tensors)),
+		Tensors:       make([]tensor, 0, f.TensorCount()),
 	}
 	for k, v := range f.Metadata {
 		out.Metadata[k] = v.String()
 	}
-	for _, ti := range f.Tensors {
+	for ti := range f.Tensors() {
 		t := tensor{Name: ti.Name, Dims: ti.Dims, Type: ti.Type.String(), Offset: ti.Offset}
 		if n, ok := ti.Bytes(); ok {
 			t.Bytes = &n

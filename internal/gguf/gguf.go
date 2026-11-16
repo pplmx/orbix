@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 // File is a parsed GGUF file.
@@ -25,9 +28,9 @@ type File struct {
 	// specification name ("general.architecture", "llama.block_count", ...).
 	Metadata map[string]Value
 
-	// Tensors lists tensor information in file order. TensorDataLoc is the
+	// TensorInfos lists tensor information in file order. TensorDataLoc is the
 	// offset of the tensor data section, not of an individual tensor.
-	Tensors []TensorInfo
+	TensorInfos []TensorInfo
 
 	// TensorDataLoc is the absolute offset in the file where tensor data
 	// begins. Individual tensors are addressed relative to it.
@@ -135,16 +138,16 @@ func Read(r io.Reader) (*File, error) {
 		file.Metadata[key] = val
 	}
 
-	file.Tensors = make([]TensorInfo, 0, count)
+	file.TensorInfos = make([]TensorInfo, 0, count)
 	for i := uint64(0); i < count; i++ {
 		ti, err := readTensorInfo(rr)
 		if err != nil {
 			return nil, fmt.Errorf("gguf: read tensor info %d: %w", i, err)
 		}
-		file.Tensors = append(file.Tensors, ti)
+		file.TensorInfos = append(file.TensorInfos, ti)
 	}
 
-	file.Alignment = file.uintOr("general.alignment", 32)
+	file.Alignment = int64(file.floatOr("general.alignment", 32))
 	if file.Alignment <= 0 {
 		return nil, fmt.Errorf("gguf: invalid general.alignment %d", file.Alignment)
 	}
@@ -268,7 +271,7 @@ func (t *tensorReader) Close() error               { return t.c.Close() }
 
 // Tensor returns the tensor info for name.
 func (f *File) Tensor(name string) (TensorInfo, bool) {
-	for _, t := range f.Tensors {
+	for _, t := range f.TensorInfos {
 		if t.Name == name {
 			return t, true
 		}
@@ -346,14 +349,43 @@ func FormatFloat(t ValueType, f float64) string {
 	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
+// MetadataCount returns the number of metadata entries.
+func (f *File) MetadataCount() int { return len(f.Metadata) }
+
 // Keys returns every metadata key in sorted order.
+//
+// Sorting is part of the contract: callers print these keys, and map iteration
+// order would reorder the output between runs.
 func (f *File) Keys() []string {
-	keys := make([]string, 0, len(f.Metadata))
-	for k := range f.Metadata {
-		keys = append(keys, k)
+	return slices.Sorted(maps.Keys(f.Metadata))
+}
+
+// All iterates every metadata entry in sorted key order.
+//
+// This is the streaming counterpart to Keys: a dump can format each value as it
+// arrives instead of materialising a slice of keys first.
+func (f *File) All() iter.Seq2[string, Value] {
+	return func(yield func(string, Value) bool) {
+		for _, k := range f.Keys() {
+			if !yield(k, f.Metadata[k]) {
+				return
+			}
+		}
 	}
-	sort.Strings(keys)
-	return keys
+}
+
+// TensorCount returns the number of tensors in the directory.
+//
+// It exists because len() does not apply to the streaming accessor, and the
+// count appears in every summary the CLI prints.
+func (f *File) TensorCount() int { return len(f.TensorInfos) }
+
+// Tensors iterates the tensor directory in file order.
+//
+// The directory is exposed both as a slice (TensorInfos) and as a stream: a
+// dump or a loader walks it, and either form reads naturally at the call site.
+func (f *File) Tensors() iter.Seq[TensorInfo] {
+	return slices.Values(f.TensorInfos)
 }
 
 // Lookup returns the metadata value for key.
@@ -362,135 +394,89 @@ func (f *File) Lookup(key string) (Value, bool) {
 	return v, ok
 }
 
-// uintOr returns the integer metadata value for key, or def when the key is
-// missing or not an integer type.
-func (f *File) uintOr(key string, def int64) int64 {
+// Get returns the metadata value at key converted to T.
+//
+// One generic method replaces the per-type accessors (Uint32, Uint64, Float64,
+// String, ...): the target type selects the conversion, and a value that cannot
+// be represented as T is reported as absent rather than zero. Generic methods
+// are a Go 1.27 feature, which is why this package requires that language
+// version.
+//
+// Supported T: string, bool, and the integer and float types. Conversions
+// between numeric metadata and Go numbers are allowed in both directions, which
+// matches how GGUF writers store hyperparameters inconsistently -- the same key
+// may be uint32 in one checkpoint and float32 in another. Narrowing to T is
+// checked, so a uint64 that does not fit in a uint32 reports false instead of
+// wrapping.
+func (f *File) Get[T Scalar](key string) (T, bool) {
+	var zero T
 	v, ok := f.Metadata[key]
 	if !ok {
-		return def
+		return zero, false
 	}
-	switch v.Type {
-	case TypeUint8, TypeUint16, TypeUint32, TypeUint64:
-		return int64(v.Uint)
-	case TypeInt8, TypeInt16, TypeInt32, TypeInt64:
-		return v.Int
-	default:
-		return def
+	return scalarAs[T](v)
+}
+
+// GetArray returns the array stored at key converted elementwise to T.
+//
+// Element types are not silently mixed: asking for []float32 at a key holding
+// an int32 array reports false, because a malformed score table should be
+// reported rather than widened into something that looks plausible.
+func (f *File) GetArray[T Scalar](key string) ([]T, bool) {
+	v, ok := f.Metadata[key]
+	if !ok || v.Type != TypeArray {
+		return nil, false
 	}
+	out := make([]T, 0, len(v.Array))
+	for _, e := range v.Array {
+		converted, ok := scalarAs[T](e)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, converted)
+	}
+	if len(out) == 0 {
+		// A zero-length result is indistinguishable from the failure value, so
+		// report success explicitly through a non-nil empty slice.
+		out = []T{}
+	}
+	return out, true
+}
+
+// floatOr returns the floating-point metadata value for key, or def when the
+// key is missing or not numeric.
+//
+// It exists for the alignment lookup, which happens before the accessors above
+// are usable because it needs a value from the file being parsed.
+func (f *File) floatOr(key string, def float64) float64 {
+	if v, ok := f.Get[float64](key); ok {
+		return v
+	}
+	return def
 }
 
 // Uint32 returns the unsigned integer metadata value for key.
-func (f *File) Uint32(key string) (uint32, bool) {
-	v, ok := f.Metadata[key]
-	if !ok {
-		return 0, false
-	}
-	switch v.Type {
-	case TypeUint8, TypeUint16, TypeUint32, TypeUint64:
-		if v.Uint > 0xFFFFFFFF {
-			return 0, false
-		}
-		return uint32(v.Uint), true
-	case TypeInt8, TypeInt16, TypeInt32, TypeInt64:
-		if v.Int < 0 || v.Int > 0xFFFFFFFF {
-			return 0, false
-		}
-		return uint32(v.Int), true
-	default:
-		return 0, false
-	}
-}
+func (f *File) Uint32(key string) (uint32, bool) { return f.Get[uint32](key) }
 
 // Uint64 returns the unsigned integer metadata value for key.
-func (f *File) Uint64(key string) (uint64, bool) {
-	v, ok := f.Metadata[key]
-	if !ok {
-		return 0, false
-	}
-	switch v.Type {
-	case TypeUint8, TypeUint16, TypeUint32, TypeUint64:
-		return v.Uint, true
-	case TypeInt8, TypeInt16, TypeInt32, TypeInt64:
-		if v.Int < 0 {
-			return 0, false
-		}
-		return uint64(v.Int), true
-	default:
-		return 0, false
-	}
-}
+func (f *File) Uint64(key string) (uint64, bool) { return f.Get[uint64](key) }
 
 // Float64 returns the floating-point metadata value for key. Integer values
-// are converted, which is what GGUF writers do for hyperparameters such as
-// rope frequencies that are sometimes stored as integers.
-func (f *File) Float64(key string) (float64, bool) {
-	v, ok := f.Metadata[key]
-	if !ok {
-		return 0, false
-	}
-	switch v.Type {
-	case TypeFloat32, TypeFloat64:
-		return v.Float, true
-	case TypeUint8, TypeUint16, TypeUint32, TypeUint64:
-		return float64(v.Uint), true
-	case TypeInt8, TypeInt16, TypeInt32, TypeInt64:
-		return float64(v.Int), true
-	default:
-		return 0, false
-	}
-}
+// are converted, which is what GGUF writers do for hyperparameters such as rope
+// frequencies that are sometimes stored as integers.
+func (f *File) Float64(key string) (float64, bool) { return f.Get[float64](key) }
 
 // String returns the string metadata value for key.
-func (f *File) String(key string) (string, bool) {
-	v, ok := f.Metadata[key]
-	if !ok || v.Type != TypeString {
-		return "", false
-	}
-	return v.Str, true
-}
+func (f *File) String(key string) (string, bool) { return f.Get[string](key) }
 
 // Strings returns the array of strings stored at key.
-func (f *File) Strings(key string) ([]string, bool) {
-	v, ok := f.Metadata[key]
-	if !ok || v.Type != TypeArray || v.ElemType != TypeString {
-		return nil, false
-	}
-	out := make([]string, len(v.Array))
-	for i, e := range v.Array {
-		out[i] = e.Str
-	}
-	return out, true
-}
+func (f *File) Strings(key string) ([]string, bool) { return f.GetArray[string](key) }
 
 // Float32s returns the array of float32 values stored at key.
-//
-// Integer arrays are not converted: a float32 array is a distinct type in the
-// file, and silently widening an int32 vocabulary score would hide a malformed
-// model instead of reporting it.
-func (f *File) Float32s(key string) ([]float32, bool) {
-	v, ok := f.Metadata[key]
-	if !ok || v.Type != TypeArray || v.ElemType != TypeFloat32 {
-		return nil, false
-	}
-	out := make([]float32, len(v.Array))
-	for i, e := range v.Array {
-		out[i] = float32(e.Float)
-	}
-	return out, true
-}
+func (f *File) Float32s(key string) ([]float32, bool) { return f.GetArray[float32](key) }
 
 // Int32s returns the array of int32 values stored at key.
-func (f *File) Int32s(key string) ([]int32, bool) {
-	v, ok := f.Metadata[key]
-	if !ok || v.Type != TypeArray || v.ElemType != TypeInt32 {
-		return nil, false
-	}
-	out := make([]int32, len(v.Array))
-	for i, e := range v.Array {
-		out[i] = int32(e.Int)
-	}
-	return out, true
-}
+func (f *File) Int32s(key string) ([]int32, bool) { return f.GetArray[int32](key) }
 
 // ErrNoTensor is returned when a required tensor is missing from a file.
 var ErrNoTensor = errors.New("gguf: tensor not found")
@@ -508,6 +494,13 @@ func (f *File) Arch() (string, error) {
 // BaseName returns the model name without directory or extension. It is the
 // fallback display name when general.name is absent.
 func BaseName(path string) string {
-	b := filepath.Base(path)
-	return b[:len(b)-len(filepath.Ext(b))]
+	base := filepath.Base(path)
+	// strings.CutLast drops the final dot and everything after it, which is
+	// the extension. A name with no dot is returned unchanged, and a dotfile
+	// such as ".gguf" keeps its name rather than becoming empty.
+	name, _, found := strings.CutLast(base, ".")
+	if !found || name == "" {
+		return base
+	}
+	return name
 }

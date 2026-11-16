@@ -500,55 +500,78 @@ func TestStopFieldAcceptsBothSpellings(t *testing.T) {
 	}
 }
 
-// TestPolicyAffectsShortRequestLatency measures what an admission policy is for, through
-// the layer a user actually talks to: a short request submitted while a long one holds
-// the model.
+// TestPolicyAffectsShortRequestLatency checks that an admission policy reaches the HTTP
+// layer, by measuring whether a short request queued behind a long one gets served before
+// the long one finishes.
 //
-// The numbers are timing, so the assertions are deliberately loose -- the point is the
-// order of magnitude, not a millisecond count. A tight bound would fail on a loaded
-// machine while telling nobody anything.
+// The assertion is on ordering rather than on elapsed time. A time ratio compared two
+// quantities that both move with machine load, so it failed whenever something else was
+// running -- the policy rows of `orbix bench --suite` measure the same property more
+// precisely, and this test exists to prove the wiring, not the magnitude.
 func TestPolicyAffectsShortRequestLatency(t *testing.T) {
 	path := os.Getenv("MODEL")
 	if path == "" {
 		t.Skip("set MODEL to a GGUF file")
 	}
-	measure := func(t *testing.T, policy engine.Priority) time.Duration {
+
+	type outcome struct {
+		// shortBeforeLong reports whether the short request's response arrived before the
+		// long request's did.
+		shortBeforeLong bool
+	}
+	measure := func(t *testing.T, policy engine.Priority) outcome {
 		t.Helper()
 		srv := serverWithPolicy(t, path, policy)
-		var wg sync.WaitGroup
 
+		var mu sync.Mutex
+		var longDone time.Time
+		var longFinished bool
+
+		var wg sync.WaitGroup
 		wg.Go(func() {
 			resp := post(t, srv.Handler(), "/v1/completions",
 				`{"prompt": "Once upon a time", "max_tokens": 40}`)
 			decodeBody[completionResponse](t, resp)
+			mu.Lock()
+			longDone = time.Now()
+			longFinished = true
+			mu.Unlock()
 		})
 		// Wait until the long request is actually in the engine, so the short one is
 		// queued behind it rather than racing it.
 		waitFor(t, 5*time.Second, func() bool { return srv.eng.Active() > 0 },
 			"the long request never started")
 
-		var wait time.Duration
+		var shortDone time.Time
 		wg.Go(func() {
-			start := time.Now()
 			resp := post(t, srv.Handler(), "/v1/completions",
 				`{"prompt": "Hi", "max_tokens": 2}`)
 			decodeBody[completionResponse](t, resp)
-			wait = time.Since(start)
+			mu.Lock()
+			shortDone = time.Now()
+			mu.Unlock()
 		})
 		wg.Wait()
-		return wait
+
+		mu.Lock()
+		defer mu.Unlock()
+		if !longFinished {
+			t.Fatal("the long request never reported completion")
+		}
+		return outcome{shortBeforeLong: shortDone.Before(longDone)}
 	}
 
-	fifo := measure(t, engine.PriorityFIFO)
-	t.Logf("fifo:     short request took %v", fifo.Round(time.Millisecond))
+	// FIFO serves the long request first, so the short one must finish last.
+	if got := measure(t, engine.PriorityFIFO); got.shortBeforeLong {
+		t.Errorf("under FIFO the short request finished before the long one; " +
+			"submission order was not honoured")
+	}
+	// Both other policies let the short request through while the long one is still
+	// generating its 40 tokens.
 	for _, policy := range []engine.Priority{engine.PriorityShortest, engine.PriorityFair} {
-		got := measure(t, policy)
-		t.Logf("%-9s short request took %v", policy, got.Round(time.Millisecond))
-		// Fair and shortest both let the short request in within a round or two, so a
-		// third of the FIFO wait is a generous ceiling that still fails if the policy
-		// stops applying.
-		if fifo > 0 && got > fifo/3 {
-			t.Errorf("%v: short request waited %v, want less than a third of fifo's %v", policy, got, fifo)
+		if got := measure(t, policy); !got.shortBeforeLong {
+			t.Errorf("under %v the short request finished after the long one; "+
+				"the policy did not reach the HTTP layer", policy)
 		}
 	}
 }

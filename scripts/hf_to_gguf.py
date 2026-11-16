@@ -122,12 +122,23 @@ def kv_i32s(k, vals):
     return out
 
 # Qwen2 special tokens.
+#
+# eos is <|im_end|>, not <|endoftext|>: an instruction-tuned Qwen2 ends a turn with
+# im_end and only uses endoftext as a document separator. Writing the wrong one does
+# not fail to load -- generation simply runs past the end of the answer until it hits
+# the token budget, so the defect shows up as verbose output rather than an error.
 im_start = next(i for i,t in enumerate(vocab) if t == "<|im_start|>")
 im_end   = next(i for i,t in enumerate(vocab) if t == "<|im_end|>")
-eos      = next(i for i,t in enumerate(vocab) if t == "<|endoftext|>")
+eos      = im_end
+# Every added special token is a control token, not just the three the model needs to
+# generate. GGUF distinguishes them because a control token never appears in decoded
+# text: marking only the ones this converter happens to know treats the rest as ordinary
+# words, so a checkpoint that emits <|endoftext|> renders it as literal angle brackets
+# and keeps generating instead of stopping.
 types = [1]*len(vocab)   # normal
-for i in (im_start, im_end, eos):
-    types[i] = 3          # control
+for i, piece in enumerate(vocab):
+    if piece.startswith("<|") and piece.endswith("|>"):
+        types[i] = 3      # control
 
 _meta_list = ([
     kv_str("general.architecture", "qwen2"),

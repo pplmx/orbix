@@ -224,3 +224,129 @@ func surfaces(vocab []string, ids []int32) []string {
 	}
 	return out
 }
+
+// A chat template is markup, not prose. These tests pin the difference: Encode treats
+// every byte as text, while EncodeWithSpecials recognises the vocabulary's control
+// pieces. Collapsing the two would either make a user's literal "<|im_start|>" a
+// control token, or make a template's marker six ordinary pieces -- and the second
+// failure is silent, because the model answers the mangled prompt as though it were
+// prose and never emits its end-of-turn token.
+
+// specialVocab has a control marker and pieces that can spell it as text, which is what
+// makes the two encodings distinguishable.
+var specialVocab = []string{
+	"<|endoftext|>", // 0, control
+	"<|im_start|>",  // 1, control
+	"<|im_end|>",    // 2, control
+	"Ġ",             // 3
+	"<",             // 4
+	"|",             // 5
+	"i",             // 6
+	"m",             // 7
+	"_",             // 8
+	"s",             // 9
+	"t",             // 10
+	"a",             // 11
+	"r",             // 12
+	"e",             // 13
+	"n",             // 14
+	"d",             // 15
+	">",             // 16
+	"hi",            // 17
+}
+
+func specialTokenizer(t *testing.T) *Tokenizer {
+	t.Helper()
+	types := normalTypes(len(specialVocab))
+	types[0], types[1], types[2] = int32(Control), int32(Control), int32(Control)
+	f := buildTokenizerGGUF(t, "gpt2", specialVocab, types)
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return tok
+}
+
+func TestEncodeWithSpecialsMatchesMarkerWhole(t *testing.T) {
+	tok := specialTokenizer(t)
+	got := tok.EncodeWithSpecials("<|im_start|>hi", false)
+	want := []int32{1, 17}
+	if len(got) != len(want) {
+		t.Fatalf("EncodeWithSpecials = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("EncodeWithSpecials = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestEncodeTreatsMarkersAsText(t *testing.T) {
+	// The plain encoder must not produce control tokens: a user who types the marker
+	// means the characters, and a template that wants the token uses the other call.
+	tok := specialTokenizer(t)
+	got := tok.Encode("<|im_start|>", false)
+	for _, id := range got {
+		if id == 1 || id == 2 || id == 0 {
+			t.Fatalf("Encode produced control token %d for literal text: %v", id, got)
+		}
+	}
+	if len(got) < 2 {
+		t.Errorf("Encode = %v, want the marker spelled out as several pieces", got)
+	}
+	if round := tok.Decode(got); round != "<|im_start|>" {
+		t.Errorf("round trip = %q, want the literal marker", round)
+	}
+}
+
+func TestEncodeWithSpecialsPrefersLongest(t *testing.T) {
+	// "<|im_start|>" and "<|im_end|>" share a prefix, so a scan that tried the
+	// shortest marker first would match "im" inside the longer one.
+	tok := specialTokenizer(t)
+	for marker, want := range map[string]int32{
+		"<|im_start|>":  1,
+		"<|im_end|>":    2,
+		"<|endoftext|>": 0,
+	} {
+		got := tok.EncodeWithSpecials(marker, false)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("%q encoded to %v, want [%d]", marker, got, want)
+		}
+	}
+}
+
+func TestEncodeWithSpecialsEncodesSurroundingText(t *testing.T) {
+	tok := specialTokenizer(t)
+	// Text on both sides of a marker must still be encoded, and the marker must not
+	// disturb the pieces around it.
+	got := tok.EncodeWithSpecials("hi<|im_end|>hi", false)
+	want := []int32{17, 2, 17}
+	if len(got) != len(want) {
+		t.Fatalf("EncodeWithSpecials = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("EncodeWithSpecials = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestEncodeWithSpecialsWithoutSpecials(t *testing.T) {
+	// A vocabulary with no control pieces must encode exactly as Encode does, so a
+	// model without markers behaves as before.
+	f := buildTokenizerGGUF(t, "gpt2", gpt2Vocab, normalTypes(len(gpt2Vocab)))
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	plain := tok.Encode("the cat", false)
+	withSpecials := tok.EncodeWithSpecials("the cat", false)
+	if len(plain) != len(withSpecials) {
+		t.Fatalf("plain %v, withSpecials %v", plain, withSpecials)
+	}
+	for i := range plain {
+		if plain[i] != withSpecials[i] {
+			t.Fatalf("plain %v, withSpecials %v", plain, withSpecials)
+		}
+	}
+}

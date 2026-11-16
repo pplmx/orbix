@@ -215,7 +215,9 @@ type chatTurn struct {
 func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, system string, history []chatTurn, user string, opts chatOptions) (string, error) {
 	prompt := renderChatPrompt(system, history, user)
 	cfg := eng.Model().Config()
-	ids := tok.Encode(prompt, cfg.BOSID >= 0)
+	// The chat transcript is markup, not prose: its markers are control tokens the
+	// model was trained to see, so they have to be matched whole.
+	ids := tok.EncodeWithSpecials(prompt, cfg.BOSID >= 0)
 	if len(ids) == 0 {
 		return "", fmt.Errorf("prompt encoded to no tokens")
 	}

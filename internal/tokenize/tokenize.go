@@ -2,6 +2,7 @@ package tokenize
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -99,6 +100,16 @@ type Tokenizer struct {
 	// this explicitly with tokenizer.ggml.add_space_prefix.
 	addSpacePrefix bool
 
+	// specials lists the control and user-defined pieces, longest first, so
+	// encoding can take whole markers instead of spelling them out.
+	//
+	// A chat template is not text: "<|im_start|>" is one token the model was
+	// trained to see, and encoding it as the six ordinary pieces it happens to be
+	// spelled from gives the model a prompt it has never seen -- it then answers
+	// as though the marker were prose, re-stating the system prompt and never
+	// emitting its end-of-turn token. Matching longest first matters because
+	// markers share prefixes.
+
 	// byteLevel reports that the vocabulary is GPT-2 byte-level BPE rather than
 	// SentencePiece, which changes how a space is represented before merging.
 	//
@@ -109,6 +120,23 @@ type Tokenizer struct {
 	// the encoder produces valid ids for every word and silently drops every
 	// space, which is the bug this field exists to prevent.
 	byteLevel bool
+
+	// specials lists the control and user-defined pieces, longest first, so
+	// encoding can take whole markers instead of spelling them out.
+	//
+	// A chat template is not text: "<|im_start|>" is one token the model was
+	// trained to see, and encoding it as the six ordinary pieces it happens to be
+	// spelled from gives the model a prompt it has never seen -- it then answers
+	// as though the marker were prose, re-stating the system prompt and never
+	// emitting its end-of-turn token. Matching longest first matters because
+	// markers share prefixes.
+	specials []specialToken
+}
+
+// specialToken is one piece that must be matched as a unit.
+type specialToken struct {
+	text string
+	id   int32
 }
 
 // New builds a Tokenizer from a parsed GGUF file.
@@ -167,6 +195,20 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.byteID[b] = int32(i)
 		}
 	}
+
+	// Index the control and user-defined pieces so encoding can match them whole.
+	// User-defined is included because that is what a chat template's markers are in
+	// most checkpoints; control covers the ones a model marks as its own.
+	for i, tok := range tokens {
+		if t.types[i] == Control || t.types[i] == UserDefined {
+			t.specials = append(t.specials, specialToken{text: tok, id: int32(i)})
+		}
+	}
+	// Longest first: "<|im_start|>" and "<|im_end|>" share a prefix, so a shortest-first
+	// scan would match the shorter marker inside the longer one.
+	slices.SortStableFunc(t.specials, func(a, b specialToken) int {
+		return len(b.text) - len(a.text)
+	})
 
 	if id, ok := f.Uint32("tokenizer.ggml.unknown_token_id"); ok {
 		t.unknownID = int32(id)
@@ -331,6 +373,63 @@ func (t *Tokenizer) Encode(text string, addSpecial bool) []int32 {
 	}
 	out = append(out, t.encodeText(text)...)
 	return out
+}
+
+// EncodeWithSpecials encodes text, recognising the vocabulary's control and
+// user-defined pieces wherever they appear.
+//
+// This is the entry point for a rendered chat template. Encode treats text as text, so
+// a marker like "<|im_start|>" becomes the characters it is spelled from -- correct for
+// a user who typed those characters, wrong for a template that means the token. The two
+// cannot be one function: only the caller knows whether a marker is markup or prose.
+func (t *Tokenizer) EncodeWithSpecials(text string, addSpecial bool) []int32 {
+	var out []int32
+	if addSpecial && t.bosID >= 0 {
+		out = append(out, t.bosID)
+	}
+	if len(t.specials) == 0 {
+		return append(out, t.encodeText(text)...)
+	}
+
+	// Split the text at each special piece and encode the gaps as ordinary text, so a
+	// marker in the middle of a string does not disturb the pieces around it. The
+	// segment boundaries are what keeps SentencePiece's leading-space rule intact: an
+	// empty gap between two adjacent markers produces no tokens at all.
+	start := 0
+	for i := 0; i < len(text); {
+		if sp, ok := t.matchSpecial(text[i:]); ok {
+			if start < i {
+				out = append(out, t.encodeText(text[start:i])...)
+			}
+			out = append(out, sp.id)
+			i += len(sp.text)
+			start = i
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(text[i:])
+		if size <= 0 {
+			size = 1
+		}
+		i += size
+	}
+	if start < len(text) {
+		out = append(out, t.encodeText(text[start:])...)
+	}
+	return out
+}
+
+// matchSpecial returns the special piece text starts with, if any.
+//
+// The scan is linear because the list is short (a handful of markers per vocabulary)
+// and text is searched once per encoded string; an index over first bytes would save
+// little and hide the prefix rule.
+func (t *Tokenizer) matchSpecial(text string) (specialToken, bool) {
+	for _, sp := range t.specials {
+		if sp.text != "" && strings.HasPrefix(text, sp.text) {
+			return sp, true
+		}
+	}
+	return specialToken{}, false
 }
 
 // encodeText is the SentencePiece segmentation of one string.

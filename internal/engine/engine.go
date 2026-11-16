@@ -55,6 +55,23 @@ type sequence struct {
 	// otherwise read whichever sequence ran most recently, which produced
 	// fluent-looking garbage when two requests shared the engine.
 	logits []float32
+
+	// lastServed is the round in which this sequence last advanced, or -1 before its
+	// first turn. PriorityFair uses it to give the long-waiting sequence a slot.
+	lastServed int
+}
+
+// remaining is how many tokens the sequence still has to emit.
+//
+// It counts the budget left rather than the model's work: a sequence that has emitted
+// most of its tokens is close to finishing, which is the property PriorityShortest
+// sorts on.
+func (s *sequence) remaining() int {
+	left := s.req.MaxTokens - len(s.out)
+	if left < 0 {
+		return 0
+	}
+	return left
 }
 
 // Engine generates for several sequences at once.
@@ -69,6 +86,12 @@ type sequence struct {
 type Engine struct {
 	model     *llama.Model
 	maxActive int
+	policy    Priority
+
+	// round counts Pump calls. It exists so PriorityFair can record when a sequence
+	// last ran without a wall clock: a round number is deterministic, and a test that
+	// asserted on wall-clock times would be flaky on a loaded machine.
+	round int
 
 	// pool, when set, is the shared block store paged caches draw from. It is nil
 	// for the contiguous layout, which gives every sequence a whole-context arena
@@ -102,6 +125,9 @@ type Options struct {
 	// attention.
 	BlockSize int
 	Blocks    int
+	// Policy decides which requests advance when more are ready than MaxActive
+	// allows. Zero is PriorityFIFO, which is submission order.
+	Policy Priority
 	// PrefixCache turns on prefix reuse for a paged cache. Requests whose prompts
 	// start with the same whole blocks of tokens attach the already-computed keys
 	// and values instead of prefilling them again, which is what makes a shared
@@ -126,6 +152,7 @@ func New(path string, opts Options) (*Engine, error) {
 	e := &Engine{
 		model:     m,
 		maxActive: maxActive,
+		policy:    opts.Policy,
 		active:    make(map[int]*sequence),
 	}
 	if opts.Blocks > 0 {
@@ -186,13 +213,14 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	id := e.nextID
 	e.nextID++
 	s := &sequence{
-		id:      id,
-		req:     req,
-		cache:   cache,
-		pos:     0,
-		events:  make(chan Event, 64),
-		sampler: req.Sampler,
-		logits:  make([]float32, cfg.VocabSize),
+		id:         id,
+		req:        req,
+		cache:      cache,
+		pos:        0,
+		events:     make(chan Event, 64),
+		sampler:    req.Sampler,
+		logits:     make([]float32, cfg.VocabSize),
+		lastServed: -1,
 	}
 	if s.sampler == nil {
 		s.sampler = llama.Greedy{}
@@ -233,8 +261,18 @@ func (e *Engine) Pump() int {
 	// Deterministic order keeps runs reproducible, which matters when comparing
 	// against a reference implementation.
 	sortByID(seqs)
-	if len(seqs) > e.maxActive {
-		seqs = seqs[:e.maxActive]
+	// The round number is taken under the lock and stamped on the admitted sequences
+	// here, before any of them runs: PolicyFair compares it later, and reading it
+	// without the lock would race with Round().
+	e.mu.Lock()
+	e.round++
+	round := e.round
+	e.mu.Unlock()
+	// Admit a round's worth. When everything fits, no policy applies and ready is
+	// returned unchanged; when it does not, the policy decides who waits.
+	seqs = admit(seqs, e.maxActive, e.policy)
+	for _, s := range seqs {
+		s.lastServed = round
 	}
 
 	eos := int32(-1)
@@ -409,6 +447,19 @@ func (e *Engine) Active() int {
 
 // MaxActive returns the configured concurrency cap.
 func (e *Engine) MaxActive() int { return e.maxActive }
+
+// Policy returns the admission policy.
+func (e *Engine) Policy() Priority { return e.policy }
+
+// Round returns how many Pump calls have run.
+//
+// It is a scheduling clock rather than a metric: a test that measured request latency
+// in wall-clock time would be flaky on a loaded machine, while a round count is exact.
+func (e *Engine) Round() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.round
+}
 
 func contains(ids []int32, v int32) bool {
 	for _, x := range ids {

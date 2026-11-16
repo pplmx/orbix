@@ -2,6 +2,7 @@ package llama
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/pplmx/orbix/internal/kernel"
 )
@@ -27,8 +28,16 @@ type batch struct {
 	attnOut []float32 // [n, hidden] after wo, also reused for the down projection
 	gate    []float32 // [n, ffn]
 	up      []float32 // [n, ffn]
-	scores  []float32 // [ctx] one head's scores
-	logits  []float32 // [vocab] the last position only
+
+	// MoE scratch. A batch routes each row independently, so an expert's operand is a
+	// gathered subset of rows: expertProj holds that subset's up-projection and
+	// expertFFN its hidden-width output before it is scattered back. Both are sized for
+	// the whole batch because the worst case is every row choosing the same expert.
+	expertProj []float32 // [n, ffn]
+	expertFFN  []float32 // [n, hidden]
+
+	scores []float32 // [ctx] one head's scores
+	logits []float32 // [vocab] the last position only
 }
 
 // newBatch allocates scratch for up to n positions.
@@ -36,19 +45,21 @@ func newBatch(cfg Config, n int) *batch {
 	qdim := cfg.Heads * cfg.HeadDim
 	kvdim := cfg.kvDim()
 	return &batch{
-		n:       n,
-		cfg:     cfg,
-		x:       make([]float32, n*cfg.Hidden),
-		xn:      make([]float32, n*cfg.Hidden),
-		q:       make([]float32, n*qdim),
-		k:       make([]float32, n*kvdim),
-		v:       make([]float32, n*kvdim),
-		attn:    make([]float32, n*qdim),
-		attnOut: make([]float32, n*cfg.Hidden),
-		gate:    make([]float32, n*cfg.FFN),
-		up:      make([]float32, n*cfg.FFN),
-		scores:  make([]float32, cfg.ContextLen),
-		logits:  make([]float32, cfg.VocabSize),
+		n:          n,
+		cfg:        cfg,
+		x:          make([]float32, n*cfg.Hidden),
+		xn:         make([]float32, n*cfg.Hidden),
+		q:          make([]float32, n*qdim),
+		k:          make([]float32, n*kvdim),
+		v:          make([]float32, n*kvdim),
+		attn:       make([]float32, n*qdim),
+		attnOut:    make([]float32, n*cfg.Hidden),
+		gate:       make([]float32, n*cfg.FFN),
+		up:         make([]float32, n*cfg.FFN),
+		expertProj: make([]float32, n*cfg.FFN),
+		expertFFN:  make([]float32, n*cfg.Hidden),
+		scores:     make([]float32, cfg.ContextLen),
+		logits:     make([]float32, cfg.VocabSize),
 	}
 }
 
@@ -357,6 +368,9 @@ func (m *Model) feedForwardBatch(b *batch, cfg Config, l int) error {
 	if err := m.normRows(b, layer.ffnNorm); err != nil {
 		return err
 	}
+	if cfg.Experts > 0 {
+		return m.feedForwardMoERows(moeRowsFromBatch(b, cfg), layer, cfg)
+	}
 	if err := m.run.MatMulTransposed(b.gate, b.xn, layer.wGate, n, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
@@ -480,17 +494,20 @@ type decodeBatch struct {
 	n   int // sequences in flight
 	cfg Config
 
-	x       []float32   // [n, hidden] residual stream
-	xn      []float32   // [n, hidden] normalized input to a sublayer
-	q       []float32   // [n, heads*headDim]
-	k       []float32   // [n, kvHeads*headDim]
-	v       []float32   // [n, kvHeads*headDim]
-	attn    []float32   // [n, heads*headDim] attention output before wo
-	attnOut []float32   // [n, hidden] after wo, also reused for the down projection
-	gate    []float32   // [n, ffn]
-	up      []float32   // [n, ffn]
-	scores  [][]float32 // per sequence, one head's logits over its own context
-	logits  []float32   // [n, vocab] one row per sequence
+	x       []float32 // [n, hidden] residual stream
+	xn      []float32 // [n, hidden] normalized input to a sublayer
+	q       []float32 // [n, heads*headDim]
+	k       []float32 // [n, kvHeads*headDim]
+	v       []float32 // [n, kvHeads*headDim]
+	attn    []float32 // [n, heads*headDim] attention output before wo
+	attnOut []float32 // [n, hidden] after wo, also reused for the down projection
+	gate    []float32 // [n, ffn]
+	up      []float32 // [n, ffn]
+
+	expertProj []float32   // [n, ffn] MoE scratch, see batch
+	expertFFN  []float32   // [n, hidden]
+	scores     [][]float32 // per sequence, one head's logits over its own context
+	logits     []float32   // [n, vocab] one row per sequence
 }
 
 // newDecodeBatch allocates scratch for n sequences.
@@ -502,19 +519,21 @@ func newDecodeBatch(cfg Config, n int) *decodeBatch {
 	qdim := cfg.Heads * cfg.HeadDim
 	kvdim := cfg.kvDim()
 	b := &decodeBatch{
-		n:       n,
-		cfg:     cfg,
-		x:       make([]float32, n*cfg.Hidden),
-		xn:      make([]float32, n*cfg.Hidden),
-		q:       make([]float32, n*qdim),
-		k:       make([]float32, n*kvdim),
-		v:       make([]float32, n*kvdim),
-		attn:    make([]float32, n*qdim),
-		attnOut: make([]float32, n*cfg.Hidden),
-		gate:    make([]float32, n*cfg.FFN),
-		up:      make([]float32, n*cfg.FFN),
-		scores:  make([][]float32, n),
-		logits:  make([]float32, n*cfg.VocabSize),
+		n:          n,
+		cfg:        cfg,
+		x:          make([]float32, n*cfg.Hidden),
+		xn:         make([]float32, n*cfg.Hidden),
+		q:          make([]float32, n*qdim),
+		k:          make([]float32, n*kvdim),
+		v:          make([]float32, n*kvdim),
+		attn:       make([]float32, n*qdim),
+		attnOut:    make([]float32, n*cfg.Hidden),
+		gate:       make([]float32, n*cfg.FFN),
+		up:         make([]float32, n*cfg.FFN),
+		expertProj: make([]float32, n*cfg.FFN),
+		expertFFN:  make([]float32, n*cfg.Hidden),
+		scores:     make([][]float32, n),
+		logits:     make([]float32, n*cfg.VocabSize),
 	}
 	for i := range b.scores {
 		b.scores[i] = make([]float32, cfg.ContextLen)
@@ -642,6 +661,9 @@ func (b *decodeBatch) feedForward(m *Model, l int) error {
 			return err
 		}
 	}
+	if cfg.Experts > 0 {
+		return m.feedForwardMoERows(moeRowsFromDecode(b, cfg), layer, cfg)
+	}
 	if err := m.run.MatMulTransposed(b.gate, b.xn, layer.wGate, n, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
@@ -674,4 +696,149 @@ func (b *decodeBatch) finish(m *Model) error {
 		w = m.W.TokenEmbedding
 	}
 	return m.run.MatMulTransposed(b.logits, b.xn, w, n, cfg.VocabSize, cfg.Hidden)
+}
+
+// feedForwardMoERows runs a mixture-of-experts block for every row.
+//
+// Routing is per token, so the rows split into groups by chosen expert. The natural
+// implementation runs each row through its experts one at a time, which for a prefill
+// means n times the matmul launches. Grouping by expert instead lets one matmul cover
+// every row that chose that expert, with one launch per distinct expert rather than per
+// row -- the same arithmetic, far fewer calls.
+//
+// A token whose weight is zero contributes nothing, so a row joins an expert's group
+// only when its weight is non-zero. That also keeps the accumulation order independent
+// of how many rows happened to round to zero.
+func (m *Model) feedForwardMoERows(r moeRows, layer *layer, cfg Config) error {
+	n, hidden, ffn := r.n, r.hidden, r.ffn
+
+	// Route every row first, so the grouping below is a pure rearrangement. The router
+	// is one row per expert, so scoring is cheap next to the experts it selects.
+	var assigned []expertAssignment
+	for row := range n {
+		in := r.xn[row*hidden : (row+1)*hidden]
+		if err := m.run.MatVec(m.routerLogits, layer.router, in, cfg.Experts, hidden); err != nil {
+			return err
+		}
+		selected, weights := selectExperts(m.routerLogits, cfg.ExpertUsed)
+		for i, e := range selected {
+			if weights[i] == 0 {
+				continue
+			}
+			assigned = append(assigned, expertAssignment{expert: e, row: row, weight: weights[i]})
+		}
+	}
+
+	// Accumulate into a separate buffer: a row appears in several experts' outputs, and
+	// adding straight into the residual stream would let a later expert see an earlier
+	// one's contribution.
+	clear(r.scatter[:n*hidden])
+
+	// One pass per distinct expert, ascending, so the accumulation order -- and the
+	// float rounding it implies -- does not depend on map iteration.
+	for _, e := range distinctExperts(assigned) {
+		var rows []int
+		var weights []float32
+		for _, a := range assigned {
+			if a.expert == e {
+				rows = append(rows, a.row)
+				weights = append(weights, a.weight)
+			}
+		}
+		if len(rows) == 0 {
+			continue
+		}
+
+		// Gather the selected rows so one matmul can serve them; a scatter would need
+		// the matmul to accept an index list.
+		for i, row := range rows {
+			copy(r.up[i*hidden:(i+1)*hidden], r.xn[row*hidden:(row+1)*hidden])
+		}
+
+		if err := m.run.MatMulTransposed(r.gate, r.up, layer.expertGate[e], len(rows), ffn, hidden); err != nil {
+			return err
+		}
+		if err := m.run.MatMulTransposed(r.proj, r.up, layer.expertUp[e], len(rows), ffn, hidden); err != nil {
+			return err
+		}
+		kernel.SiLU(r.gate[:len(rows)*ffn])
+		if err := kernel.MulInPlace(r.proj[:len(rows)*ffn], r.gate[:len(rows)*ffn]); err != nil {
+			return err
+		}
+		if err := m.run.MatMulTransposed(r.out, r.proj, layer.expertDown[e], len(rows), hidden, ffn); err != nil {
+			return err
+		}
+
+		// Scatter the expert's output back to its source rows, scaled by the routing
+		// weight.
+		for i, row := range rows {
+			src := r.out[i*hidden : (i+1)*hidden]
+			dst := r.scatter[row*hidden : (row+1)*hidden]
+			for j := range dst {
+				dst[j] += weights[i] * src[j]
+			}
+		}
+	}
+	return kernel.AddInPlace(r.x[:n*hidden], r.scatter[:n*hidden])
+}
+
+// moeRows is the per-row state a mixture-of-experts block needs, which both batch
+// layouts provide. Writing the MoE path once against this view is what keeps the
+// prefill and decode paths from drifting apart: the arithmetic is identical and only the
+// buffers differ.
+type moeRows struct {
+	n      int
+	hidden int
+	ffn    int
+
+	x       []float32 // [n, hidden] residual stream
+	xn      []float32 // [n, hidden] normalized input
+	gate    []float32 // [n, ffn] scratch
+	up      []float32 // [n, ffn] gathered rows, then up-projection
+	proj    []float32 // [n, ffn] expert up-projection
+	out     []float32 // [n, hidden] expert output, then the accumulated sum
+	scatter []float32 // [n, hidden] the residual addition target
+}
+
+// moeRowsFromBatch adapts a prefill batch.
+func moeRowsFromBatch(b *batch, cfg Config) moeRows {
+	return moeRows{
+		n: b.n, hidden: cfg.Hidden, ffn: cfg.FFN,
+		x: b.x, xn: b.xn, gate: b.gate, up: b.up,
+		proj: b.expertProj, out: b.expertFFN,
+		scatter: b.attnOut,
+	}
+}
+
+// moeRowsFromDecode adapts a decode batch.
+func moeRowsFromDecode(b *decodeBatch, cfg Config) moeRows {
+	return moeRows{
+		n: b.n, hidden: cfg.Hidden, ffn: cfg.FFN,
+		x: b.x, xn: b.xn, gate: b.gate, up: b.up,
+		proj: b.expertProj, out: b.expertFFN,
+		scatter: b.attnOut,
+	}
+}
+
+// expertAssignment is one row's use of one expert.
+type expertAssignment struct {
+	expert int
+	row    int
+	weight float32
+}
+
+// distinctExperts returns the expert ids referenced by the assignments, ascending and
+// without duplicates.
+func distinctExperts(assigned []expertAssignment) []int {
+	seen := make(map[int]bool, len(assigned))
+	out := make([]int, 0, len(assigned))
+	for _, a := range assigned {
+		if seen[a.expert] {
+			continue
+		}
+		seen[a.expert] = true
+		out = append(out, a.expert)
+	}
+	slices.Sort(out)
+	return out
 }

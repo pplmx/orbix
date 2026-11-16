@@ -48,8 +48,24 @@ type Config struct {
 	// HeadDim is HeadCount-derived: Hidden/Heads.
 	HeadDim int
 
-	// FFN is llama.feed_forward_length.
+	// FFN is llama.feed_forward_length, the width of one expert's hidden layer.
 	FFN int
+
+	// Experts is llama.expert_count, or 0 for a dense feed-forward network.
+	//
+	// A mixture-of-experts layer replaces the single gated FFN with Experts copies of
+	// it plus a small router, and runs only ExpertUsed of them per token. The compute
+	// is therefore proportional to ExpertUsed rather than Experts, which is the whole
+	// point: Mixtral 8x7B runs two experts per token and costs like a 13B model while
+	// carrying 47B of weights.
+	//
+	// Zero is the dense default and is not a special case in the forward pass: a dense
+	// layer is the same code with one expert and no router, which is why this package
+	// keeps one path rather than two.
+	Experts int
+
+	// ExpertUsed is llama.expert_used_count, how many experts a token routes to.
+	ExpertUsed int
 
 	// ContextLen is llama.context_length, the trained window this package
 	// allocates a KV cache for.
@@ -230,6 +246,16 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		return Config{}, fmt.Errorf("llama: unsupported rope scaling type %q", t)
 	}
 
+	// A file states its expert counts under the architecture namespace. The
+	// tensors decide whether they are used, because some converters emit the counts
+	// for a model that then stores a dense FFN; validate enforces that the two agree.
+	if v, ok := f.Get[int](arch + ".expert_count"); ok && v > 0 {
+		cfg.Experts = v
+	}
+	if v, ok := f.Get[int](arch + ".expert_used_count"); ok && v > 0 {
+		cfg.ExpertUsed = v
+	}
+
 	// The sliding window is per-architecture, and a missing key means unbounded: a
 	// Mistral fine-tune that trained with full attention sets it to 0 or omits it.
 	if v, ok := f.Get[int](arch + ".attention.sliding_window"); ok && v > 0 {
@@ -301,10 +327,25 @@ func (c Config) validate(f *gguf.File) error {
 			want{p + "attn_v.weight", []uint64{uint64(c.Hidden), uint64(c.KVHeads * c.HeadDim)}},
 			want{p + "attn_output.weight", []uint64{uint64(c.Heads * c.HeadDim), uint64(c.Hidden)}},
 			want{p + "ffn_norm.weight", []uint64{uint64(c.Hidden)}},
-			want{p + "ffn_gate.weight", []uint64{uint64(c.Hidden), uint64(c.FFN)}},
-			want{p + "ffn_up.weight", []uint64{uint64(c.Hidden), uint64(c.FFN)}},
-			want{p + "ffn_down.weight", []uint64{uint64(c.FFN), uint64(c.Hidden)}},
 		)
+		if c.Experts > 0 {
+			// The expert tensors stack one matrix per expert in the outermost
+			// dimension, which is why their shapes carry the expert count as a third
+			// dimension rather than the hidden width first.
+			e := uint64(c.Experts)
+			wants = append(wants,
+				want{p + "ffn_gate_inp.weight", []uint64{uint64(c.Hidden), e}},
+				want{p + "ffn_gate_exps.weight", []uint64{uint64(c.Hidden), uint64(c.FFN), e}},
+				want{p + "ffn_up_exps.weight", []uint64{uint64(c.Hidden), uint64(c.FFN), e}},
+				want{p + "ffn_down_exps.weight", []uint64{uint64(c.FFN), uint64(c.Hidden), e}},
+			)
+		} else {
+			wants = append(wants,
+				want{p + "ffn_gate.weight", []uint64{uint64(c.Hidden), uint64(c.FFN)}},
+				want{p + "ffn_up.weight", []uint64{uint64(c.Hidden), uint64(c.FFN)}},
+				want{p + "ffn_down.weight", []uint64{uint64(c.FFN), uint64(c.Hidden)}},
+			)
+		}
 		if c.AttnBias {
 			wants = append(wants,
 				want{p + "attn_q.bias", []uint64{uint64(c.Heads * c.HeadDim)}},

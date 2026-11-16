@@ -2,6 +2,7 @@ package llama
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 
 	"github.com/pplmx/orbix/internal/kernel"
@@ -35,8 +36,14 @@ type Model struct {
 	attnOut []float32 // [hidden] after wo
 	gate    []float32 // [ffn]
 	up      []float32 // [ffn]
-	scores  []float32 // [ctx] attention scores for one head
-	logits  []float32 // [vocab]
+
+	// MoE scratch. routerLogits holds one score per expert before selection, and
+	// expertOut accumulates the weighted sum of the chosen experts' outputs; both are
+	// sized from the config and nil for a dense model.
+	routerLogits []float32 // [experts]
+	expertOut    []float32 // [hidden]
+	scores       []float32 // [ctx] attention scores for one head
+	logits       []float32 // [vocab]
 
 	// buf holds the multi-row scratch used by Prefill. It is allocated on first
 	// use and grows to the largest batch seen, so a single-token run never pays
@@ -88,8 +95,12 @@ func NewWithOptions(path string, opts Options) (*Model, error) {
 		attnOut: make([]float32, cfg.Hidden),
 		gate:    make([]float32, cfg.FFN),
 		up:      make([]float32, cfg.FFN),
-		scores:  make([]float32, cfg.ContextLen),
-		logits:  make([]float32, cfg.VocabSize),
+		// Only a MoE model needs these, and their size comes from the config rather
+		// than from a guess: a model with no experts gets nil and never allocates.
+		routerLogits: make([]float32, max(cfg.Experts, 0)),
+		expertOut:    make([]float32, cfg.Hidden),
+		scores:       make([]float32, cfg.ContextLen),
+		logits:       make([]float32, cfg.VocabSize),
 	}, nil
 }
 
@@ -254,6 +265,9 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 // feedForward runs one block's gated feed-forward network.
 func (m *Model) feedForward(l int) error {
 	cfg := m.W.Config
+	if cfg.Experts > 0 {
+		return m.feedForwardMoE(l)
+	}
 	layer := &m.W.Layers[l]
 
 	if err := kernel.RMSNorm(m.xn, m.x, layer.ffnNorm, cfg.RMSNormEps); err != nil {
@@ -291,3 +305,115 @@ func (m *Model) finish() error {
 	}
 	return m.run.MatVec(m.logits, w, m.xn, cfg.VocabSize, cfg.Hidden)
 }
+
+// feedForwardMoE runs one mixture-of-experts block.
+//
+// The block is a dense gated FFN per expert plus a router that decides which experts a
+// token uses:
+//
+//	logits = router @ xn                    [experts]
+//	top    = the ExpertUsed highest logits
+//	weight = softmax over exactly those top logits
+//	out    = sum over top of weight * expert(xn)
+//
+// Renormalising over the selected experts is what makes the weights sum to one:
+// a softmax over every expert and then renormalising the kept ones gives the same
+// result, because the discarded terms cancel, and computing it the direct way avoids
+// exponentiating experts whose values are thrown away.
+//
+// Routing is per token and per layer, so there is no stable expert choice for a
+// prompt: which experts run depends on the hidden state at that position.
+func (m *Model) feedForwardMoE(l int) error {
+	cfg := m.W.Config
+	layer := &m.W.Layers[l]
+
+	if err := kernel.RMSNorm(m.xn, m.x, layer.ffnNorm, cfg.RMSNormEps); err != nil {
+		return err
+	}
+
+	// Score every expert. The router is small -- one row per expert -- so this is
+	// cheap next to the experts it selects between.
+	if err := m.run.MatVec(m.routerLogits, layer.router, m.xn, cfg.Experts, cfg.Hidden); err != nil {
+		return err
+	}
+	selected, weights := selectExperts(m.routerLogits, cfg.ExpertUsed)
+
+	// Accumulate the chosen experts' outputs. clear rather than overwrite, because
+	// each expert adds in.
+	clear(m.expertOut)
+	for i, e := range selected {
+		if err := m.run.MatVec(m.gate, layer.expertGate[e], m.xn, cfg.FFN, cfg.Hidden); err != nil {
+			return err
+		}
+		if err := m.run.MatVec(m.up, layer.expertUp[e], m.xn, cfg.FFN, cfg.Hidden); err != nil {
+			return err
+		}
+		kernel.SiLU(m.gate)
+		if err := kernel.MulInPlace(m.up, m.gate); err != nil {
+			return err
+		}
+		// Reuse attnOut as this expert's hidden-width output, then scale it by the
+		// routing weight and add it to the running sum.
+		if err := m.run.MatVec(m.attnOut, layer.expertDown[e], m.up, cfg.Hidden, cfg.FFN); err != nil {
+			return err
+		}
+		for j := range m.attnOut {
+			m.expertOut[j] += weights[i] * m.attnOut[j]
+		}
+	}
+	return kernel.AddInPlace(m.x, m.expertOut)
+}
+
+// selectExperts picks the top-k logits and turns them into softmax weights.
+//
+// The returned experts are in descending score order, which makes the choice
+// deterministic: two experts that tie are separated by their id, so a model with equal
+// router scores for two experts always runs the lower one first instead of picking
+// whichever the scan happened to visit.
+func selectExperts(logits []float32, k int) (selected []int, weights []float32) {
+	if k <= 0 || len(logits) == 0 {
+		return nil, nil
+	}
+	if k > len(logits) {
+		k = len(logits)
+	}
+	selected = make([]int, 0, k)
+	chosen := make([]bool, len(logits))
+	for range k {
+		best := -1
+		for i, v := range logits {
+			if chosen[i] {
+				continue
+			}
+			// Strict greater-than keeps the earlier (lower-id) expert on a tie.
+			if best < 0 || v > logits[best] {
+				best = i
+			}
+		}
+		chosen[best] = true
+		selected = append(selected, best)
+	}
+
+	// Softmax over the selected logits only, subtracting the maximum first so a large
+	// logit does not overflow the exponential.
+	weights = make([]float32, len(selected))
+	peak := logits[selected[0]]
+	for _, e := range selected {
+		peak = max(peak, logits[e])
+	}
+	var sum float32
+	for i, e := range selected {
+		w := exp32(logits[e] - peak)
+		weights[i] = w
+		sum += w
+	}
+	if sum > 0 {
+		for i := range weights {
+			weights[i] /= sum
+		}
+	}
+	return selected, weights
+}
+
+// exp32 is float32 exp.
+func exp32(x float32) float32 { return float32(math.Exp(float64(x))) }

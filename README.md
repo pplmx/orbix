@@ -130,6 +130,13 @@ exist:
   is a real difference -- but it would not change what the cache is for, so it is not
   claimed here.
 - **Scheduler** owns admission, batching, and the prefill/decode lifecycle.
+- **Mixture of experts** is a property of the feed-forward layer, not a separate
+  architecture: a model with `expert_count` set replaces its single gated FFN with one
+  per expert plus a small router, and runs `expert_used_count` of them per token. The
+  routing is top-k over the router logits with a softmax over the selected experts only,
+  which renormalising a full softmax would give the same answer for. Both the prefill and
+  the decode path group rows by chosen expert so one matmul serves every row that picked
+  the same one.
 - **Compute kernels** are where the pure-Go work happens, with reference
   implementations first and assembly fast paths later.
 
@@ -382,7 +389,7 @@ Orbix targets the GGUF ecosystem. Initial support:
 | **Llama / Llama 2 / 3** | `llama`              | v0.1         |
 | **Qwen 2 / 2.5**        | `qwen2`              | v0.2         |
 | **Mistral**             | `mistral`            | v0.3         |
-| **Mixtral**             | `mixtral`            | planned v0.4 |
+| **Mixtral**             | `llama` with experts | v0.3         |
 | **Gemma**               | `gemma`              | planned v0.4 |
 
 | Quantization                   | Status |
@@ -427,7 +434,7 @@ The roadmap is a learning path as much as a feature list. Each version adds one 
 
 - [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
 - [x] `v0.2` — **Scheduling and cache**: continuous batching, a paged KV cache, Q4_0/Q4_1, Qwen2 — batched prefill and decode with an admission policy, a reference-counted paged cache with prefix reuse, every 32-weight ggml block format, Llama and Qwen2
-- [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — *partial: SSE streaming, client-disconnect cancellation, a per-request `priority` field, an admission policy, Q5_0/Q5_1 decode, the `mistral` architecture with its sliding window, and chat templates rendered from `tokenizer.chat_template` when they fall inside the supported Jinja subset. Mixtral's mixture of experts is not done*
+- [x] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — SSE streaming, client-disconnect cancellation, a per-request `priority` field, an admission policy, every 32-weight and K-quant block format, the `mistral` architecture with its sliding window, chat templates rendered from `tokenizer.chat_template`, and mixture-of-experts layers
 - [ ] `v0.4` — **Performance paths**: K-quants, prefix-aware radix cache, `amd64` AVX2 and `arm64` NEON assembly — *partial: every K-quant and IQ4_NL decode, and the paged cache with a prefix index covers the reuse case; a radix-based prefix tree and assembly are not done*
 - [ ] `v0.5` — **Measurement and observability**: `orbix bench` suite, remote HTTP backend, Prometheus and OpenTelemetry — *partial: `orbix bench --suite` prints every scenario as one table, and `/metrics` exports counters and gauges in Prometheus text format; a remote HTTP backend and OpenTelemetry traces are not done*
 - [ ] `v1.0` — **Stable API**: cross-platform CI matrix, published benchmarks, documented reading path

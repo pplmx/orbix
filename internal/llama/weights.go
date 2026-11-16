@@ -31,6 +31,22 @@ type layer struct {
 	wGate   []float32 // [hidden, ffn]
 	wUp     []float32 // [hidden, ffn]
 	wDown   []float32 // [ffn, hidden]
+
+	// MoE fields. Those experts are nil for a dense layer, which is what the forward
+	// pass branches on: the presence of a router is the difference between running one
+	// FFN and selecting several.
+	//
+	// The expert tensors are stored per expert rather than as one block, so the forward
+	// pass hands matmul a contiguous matrix instead of a slice with an expert stride to
+	// explain. Splitting them costs one pass over the weights at load and saves an
+	// offset calculation in the inner loop of every token.
+	router []float32 // [hidden, experts]
+
+	// expertGate, expertUp, and expertDown are indexed by expert id. Each entry is one
+	// expert's slice of the corresponding stacked tensor.
+	expertGate [][]float32 // [hidden, ffn] each
+	expertUp   [][]float32 // [hidden, ffn] each
+	expertDown [][]float32 // [ffn, hidden] each
 }
 
 // Weights is a fully loaded Llama model.
@@ -82,8 +98,17 @@ func LoadWeights(path string) (*Weights, error) {
 		names = append(names,
 			p+"attn_norm.weight", p+"attn_q.weight", p+"attn_k.weight",
 			p+"attn_v.weight", p+"attn_output.weight", p+"ffn_norm.weight",
-			p+"ffn_gate.weight", p+"ffn_up.weight", p+"ffn_down.weight",
 		)
+		if cfg.Experts > 0 {
+			names = append(names,
+				p+"ffn_gate_inp.weight", p+"ffn_gate_exps.weight",
+				p+"ffn_up_exps.weight", p+"ffn_down_exps.weight",
+			)
+		} else {
+			names = append(names,
+				p+"ffn_gate.weight", p+"ffn_up.weight", p+"ffn_down.weight",
+			)
+		}
 		if cfg.AttnBias {
 			names = append(names, p+"attn_q.bias", p+"attn_k.bias", p+"attn_v.bias")
 		}
@@ -113,15 +138,45 @@ func LoadWeights(path string) (*Weights, error) {
 			wv:       tensors[p+"attn_v.weight"],
 			wo:       tensors[p+"attn_output.weight"],
 			ffnNorm:  tensors[p+"ffn_norm.weight"],
-			wGate:    tensors[p+"ffn_gate.weight"],
-			wUp:      tensors[p+"ffn_up.weight"],
-			wDown:    tensors[p+"ffn_down.weight"],
 			qBias:    tensors[p+"attn_q.bias"],
 			kBias:    tensors[p+"attn_k.bias"],
 			vBias:    tensors[p+"attn_v.bias"],
 		}
+		if cfg.Experts > 0 {
+			w.Layers[i].router = tensors[p+"ffn_gate_inp.weight"]
+			w.Layers[i].expertGate = splitExperts(tensors[p+"ffn_gate_exps.weight"], cfg.Experts)
+			w.Layers[i].expertUp = splitExperts(tensors[p+"ffn_up_exps.weight"], cfg.Experts)
+			w.Layers[i].expertDown = splitExperts(tensors[p+"ffn_down_exps.weight"], cfg.Experts)
+		} else {
+			w.Layers[i].wGate = tensors[p+"ffn_gate.weight"]
+			w.Layers[i].wUp = tensors[p+"ffn_up.weight"]
+			w.Layers[i].wDown = tensors[p+"ffn_down.weight"]
+		}
 	}
 	return w, nil
+}
+
+// splitExperts cuts a stacked expert tensor into one contiguous slice per expert.
+//
+// GGUF lists dimensions fastest-first and stores the outermost one as a contiguous
+// run, so a [in, out, experts] tensor is experts blocks of in*out floats. Splitting
+// costs one pass at load time and leaves the forward pass with plain matrices: the
+// alternative is an expert stride threaded through every matmul call.
+func splitExperts(stacked []float32, experts int) [][]float32 {
+	if experts <= 0 || len(stacked) == 0 {
+		return nil
+	}
+	per := len(stacked) / experts
+	if per*experts != len(stacked) {
+		// A stacked tensor whose element count is not divisible by the expert count
+		// means the metadata and the weights disagree; validate catches this at load.
+		return nil
+	}
+	out := make([][]float32, experts)
+	for e := range experts {
+		out[e] = stacked[e*per : (e+1)*per]
+	}
+	return out
 }
 
 // Params returns the number of weights the model holds.

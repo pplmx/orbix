@@ -94,6 +94,9 @@ func f32Val(v float32) gguf.Value { return gguf.Value{Type: gguf.TypeFloat32, Fl
 type tinyConfig struct {
 	hidden, layers, heads, kvHeads, ffn, ctx, vocab int
 	tied                                            bool
+	// experts and usedAbove are non-zero for a mixture-of-experts fixture.
+	experts int
+	used    int
 }
 
 func (c tinyConfig) headDim() int { return c.hidden / c.heads }
@@ -110,6 +113,12 @@ func (c tinyConfig) kvs() []kv {
 		{"llama.context_length", u32Val(uint32(c.ctx))},
 		{"llama.rope.dimension_count", u32Val(uint32(c.headDim()))},
 		{"llama.attention.layer_norm_rms_epsilon", f32Val(1e-5)},
+	}
+	if c.experts > 0 {
+		out = append(out,
+			kv{"llama.expert_count", u32Val(uint32(c.experts))},
+			kv{"llama.expert_used_count", u32Val(uint32(c.used))},
+		)
 	}
 	return out
 }
@@ -132,6 +141,18 @@ func (c tinyConfig) tensors() []gguf.TensorInfo {
 			gguf.TensorInfo{Name: p + "attn_v.weight", Dims: []uint64{h, uint64(c.kvHeads * c.headDim())}, Type: gguf.F32},
 			gguf.TensorInfo{Name: p + "attn_output.weight", Dims: []uint64{h, h}, Type: gguf.F32},
 			gguf.TensorInfo{Name: p + "ffn_norm.weight", Dims: []uint64{h}, Type: gguf.F32},
+		)
+		if c.experts > 0 {
+			e := uint64(c.experts)
+			out = append(out,
+				gguf.TensorInfo{Name: p + "ffn_gate_inp.weight", Dims: []uint64{h, e}, Type: gguf.F32},
+				gguf.TensorInfo{Name: p + "ffn_gate_exps.weight", Dims: []uint64{h, uint64(c.ffn), e}, Type: gguf.F32},
+				gguf.TensorInfo{Name: p + "ffn_up_exps.weight", Dims: []uint64{h, uint64(c.ffn), e}, Type: gguf.F32},
+				gguf.TensorInfo{Name: p + "ffn_down_exps.weight", Dims: []uint64{uint64(c.ffn), h, e}, Type: gguf.F32},
+			)
+			continue
+		}
+		out = append(out,
 			gguf.TensorInfo{Name: p + "ffn_gate.weight", Dims: []uint64{h, uint64(c.ffn)}, Type: gguf.F32},
 			gguf.TensorInfo{Name: p + "ffn_up.weight", Dims: []uint64{h, uint64(c.ffn)}, Type: gguf.F32},
 			gguf.TensorInfo{Name: p + "ffn_down.weight", Dims: []uint64{uint64(c.ffn), h}, Type: gguf.F32},

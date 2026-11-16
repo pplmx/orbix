@@ -50,6 +50,110 @@ func newBatch(cfg Config, n int) *batch {
 	}
 }
 
+// PrefillWithPrefix runs Prefill, but first attaches whatever part of the prompt a
+// shared prefix index already holds.
+//
+// This is the prefill path a server wants. A conversation's system prompt and its
+// earlier turns are re-sent on every turn, and for a given model those positions'
+// keys and values depend only on the token prefix: two requests with the same first
+// n tokens have identical KV state for those n positions. When the cache is paged
+// and the pool has a prefix index, the matching blocks can simply be attached, which
+// skips both the projections and the attention for that whole prefix.
+//
+// Only whole blocks are reused, and only from position zero, so the shared part is a
+// prefix by construction rather than a match found in the middle. That keeps the
+// invariant attention depends on: a block is appended to by exactly one sequence.
+//
+// A cache that is not paged, or a pool without an index, takes the plain path, so a
+// caller does not have to know which configuration it has.
+func (m *Model) PrefillWithPrefix(cache Cache, tokens []int32, startPos int) ([]float32, error) {
+	if startPos != 0 {
+		return nil, fmt.Errorf("llama: PrefillWithPrefix needs to start at position 0, got %d", startPos)
+	}
+	paged, ok := cache.(*PagedKVCache)
+	if !ok {
+		return m.Prefill(cache, tokens, startPos)
+	}
+	idx := paged.pool.index
+	if idx == nil {
+		return m.Prefill(cache, tokens, startPos)
+	}
+
+	n, blocks := idx.Match(tokens)
+	if n > 0 {
+		if err := paged.adopt(blocks); err != nil {
+			return nil, err
+		}
+		paged.reused = n
+	}
+	// Prefill the rest, continuing from the adopted length. The adopted blocks are
+	// shared until the first append reaches them, which is why only whole blocks are
+	// reused: the block being appended to is never one somebody else holds.
+	if n == len(tokens) {
+		// The whole prompt is cached; no forward pass is needed, but the caller still
+		// needs the next-token logits. Run the last position through the model with
+		// its prefix already in place.
+		return m.logitsForCached(paged, tokens, n)
+	}
+	out, err := m.Prefill(paged, tokens[n:], n)
+	if err != nil {
+		return nil, err
+	}
+	// Publish the blocks this pass completed, so the next request with this prefix
+	// can reuse them.
+	if err := m.rememberPrefix(paged, tokens, n); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// rememberPrefix publishes the blocks a prefill just completed.
+func (m *Model) rememberPrefix(cache *PagedKVCache, tokens []int32, from int) error {
+	if cache.pool.index == nil {
+		return nil
+	}
+	for pos := from; pos < len(tokens); pos++ {
+		if err := cache.rememberFullBlock(tokens, pos); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// logitsForCached returns the logits of the last prompt position when the whole
+// prompt was already cached.
+//
+// The cache holds every position including the last one, so nothing has to be
+// appended: the model only needs that position's attention (as a query over the
+// cache it is already part of) and its projections. Running Forward here would
+// recompute and re-append the position, which would either double-count it or write
+// into a block that other sequences share.
+//
+// This is the case a long shared system prompt hits on every turn, so it is the one
+// worth getting right rather than a corner case.
+func (m *Model) logitsForCached(cache *PagedKVCache, tokens []int32, n int) ([]float32, error) {
+	if n <= 0 || n > len(tokens) {
+		return nil, fmt.Errorf("llama: cached prefix of %d positions for %d tokens", n, len(tokens))
+	}
+	cfg := m.W.Config
+	pos := n - 1
+	if err := m.embed(int(tokens[pos])); err != nil {
+		return nil, err
+	}
+	for l := range cfg.Layers {
+		if err := m.attentionCached(cache, l, pos); err != nil {
+			return nil, err
+		}
+		if err := m.feedForward(l); err != nil {
+			return nil, err
+		}
+	}
+	if err := m.finish(); err != nil {
+		return nil, err
+	}
+	return m.logits, nil
+}
+
 // Prefill appends tokens to cache starting at startPos in one batched pass and
 // returns the logits of the last position.
 //

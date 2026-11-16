@@ -111,3 +111,48 @@ func spanRows(spans []span) int {
 func attentionScale(cfg Config) float32 {
 	return float32(1 / math.Sqrt(float64(cfg.HeadDim)))
 }
+
+// attentionCached runs one block's self-attention for a position whose keys and
+// values are already in the cache.
+//
+// It differs from attention in one way: the position is not appended. The cache
+// already holds it -- that is what "cached" means here -- and the block may be shared
+// with other sequences, so writing to it would corrupt them.
+func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
+	cfg := m.W.Config
+	layer := &m.W.Layers[l]
+
+	if err := kernel.RMSNorm(m.xn, m.x, layer.attnNorm, cfg.RMSNormEps); err != nil {
+		return err
+	}
+	if err := m.run.MatVec(m.q, layer.wq, m.xn, cfg.Heads*cfg.HeadDim, cfg.Hidden); err != nil {
+		return err
+	}
+	// Only the query is needed: the key and value at this position are stored.
+	for h := range cfg.Heads {
+		if err := m.rope.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+			return err
+		}
+	}
+
+	scale := attentionScale(cfg)
+	group := cfg.Heads / cfg.KVHeads
+	n := pos + 1
+	for h := range cfg.Heads {
+		kv := h / group
+		keys, values, err := cache.spans(l, kv, n)
+		if err != nil {
+			return err
+		}
+		qh := m.q[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
+		out := m.attn[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
+		if err := attend(qh, keys, values, n, m.scores, out, scale); err != nil {
+			return err
+		}
+	}
+
+	if err := m.run.MatVec(m.attnOut, layer.wo, m.attn, cfg.Hidden, cfg.Heads*cfg.HeadDim); err != nil {
+		return err
+	}
+	return kernel.AddInPlace(m.x, m.attnOut)
+}

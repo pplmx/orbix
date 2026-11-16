@@ -30,6 +30,13 @@ import "fmt"
 // an error rather than a silent truncation: admitting a request that cannot be
 // finished is a scheduling decision, and the scheduler is the layer that can make
 // it.
+//
+// Blocks are reference counted, because a block may legitimately be shared: for a
+// given model, a run of positions' keys and values depend only on the token prefix
+// that produced them, so two requests with the same prompt start hold the same
+// state, not merely similar state. PrefixIndex exploits that (see prefix.go); the
+// reference count is what keeps a shared block alive until its last holder is done,
+// and what makes releasing it a decrement rather than a free.
 type PagedKVCache struct {
 	cfg   Config
 	pool  *BlockPool
@@ -37,6 +44,10 @@ type PagedKVCache struct {
 
 	blocks []int32 // block ids holding this sequence's positions
 	len    int     // positions written
+
+	// reused is how many leading positions came from the prefix index instead of a
+	// forward pass. It is reported so a caller can see what reuse bought.
+	reused int
 }
 
 // BlockPool owns the key and value storage that paged caches draw from.
@@ -53,6 +64,17 @@ type BlockPool struct {
 	// recently released block is reused first, which keeps the working set
 	// small when sequences finish in bursts.
 	free []int32
+
+	// refs is how many holders each block has. A block may be held by several
+	// sequences at once, because a shared prompt prefix is genuinely the same
+	// keys and values for every request that starts with it. The block returns
+	// to the free list when the last holder releases it.
+	refs []int32
+
+	// index, when set, remembers which token prefix each complete block holds, so
+	// a later request with the same prefix can attach the block instead of
+	// recomputing it. It holds a reference on every block it remembers.
+	index *PrefixIndex
 
 	// k and v are [layer][block * blockSize * kvDim]. Blocks are addressed as
 	// blockID * blockSize + offset within the block, so a block is contiguous
@@ -98,6 +120,7 @@ func NewBlockPool(cfg Config, opts BlockPoolOptions) (*BlockPool, error) {
 		block: block,
 		total: opts.Blocks,
 		free:  make([]int32, opts.Blocks),
+		refs:  make([]int32, opts.Blocks),
 		k:     make([][]float32, cfg.Layers),
 		v:     make([][]float32, cfg.Layers),
 	}
@@ -136,23 +159,57 @@ func (p *BlockPool) Bytes() int64 {
 	return n
 }
 
-// acquire takes a block off the free list.
+// acquire takes a block off the free list with a single reference.
+//
+// When the free list is empty it first gives up remembered prefixes: a cached
+// prefix is speculative (some future request might reuse it) while an allocation
+// request is not, so the speculative claim loses. Only when nothing is left to
+// give up does exhaustion surface as an error.
 func (p *BlockPool) acquire() (int32, error) {
-	if len(p.free) == 0 {
-		return 0, fmt.Errorf("llama: block pool exhausted (%d blocks of %d positions)", p.total, p.block)
+	for len(p.free) == 0 {
+		if p.index == nil || !p.index.evictOne() {
+			return 0, fmt.Errorf("llama: block pool exhausted (%d blocks of %d positions)", p.total, p.block)
+		}
 	}
 	id := p.free[len(p.free)-1]
 	p.free = p.free[:len(p.free)-1]
+	p.refs[id] = 1
 	return id, nil
 }
 
-// release returns a block to the free list.
+// retain adds a holder to a block.
+func (p *BlockPool) retain(id int32) error {
+	if id < 0 || int(id) >= p.total {
+		return fmt.Errorf("llama: block %d outside the pool (%d)", id, p.total)
+	}
+	if p.refs[id] == 0 {
+		return fmt.Errorf("llama: retain of unreferenced block %d", id)
+	}
+	p.refs[id]++
+	return nil
+}
+
+// release drops one holder, returning the block to the free list when none is left.
 func (p *BlockPool) release(id int32) error {
 	if id < 0 || int(id) >= p.total {
 		return fmt.Errorf("llama: block %d outside the pool (%d)", id, p.total)
 	}
-	p.free = append(p.free, id)
+	if p.refs[id] == 0 {
+		return fmt.Errorf("llama: release of unreferenced block %d", id)
+	}
+	p.refs[id]--
+	if p.refs[id] == 0 {
+		p.free = append(p.free, id)
+	}
 	return nil
+}
+
+// RefCount returns how many holders a block has, for tests and diagnostics.
+func (p *BlockPool) RefCount(id int32) int {
+	if id < 0 || int(id) >= p.total {
+		return 0
+	}
+	return int(p.refs[id])
 }
 
 // rows returns the k and v storage for one block in one layer, viewed as
@@ -184,6 +241,10 @@ func (c *PagedKVCache) Len() int { return c.len }
 // capacity the cache would have to guess at.
 func (c *PagedKVCache) Cap() int { return c.cfg.ContextLen }
 
+// ReusedPositions returns how many leading positions this cache got from a shared
+// prefix rather than from a forward pass.
+func (c *PagedKVCache) ReusedPositions() int { return c.reused }
+
 // BlocksHeld returns the number of blocks this sequence currently holds.
 func (c *PagedKVCache) BlocksHeld() int { return len(c.blocks) }
 
@@ -202,7 +263,65 @@ func (c *PagedKVCache) Reset() error {
 	clear(c.blocks)
 	c.blocks = c.blocks[:0]
 	c.len = 0
+	c.reused = 0
 	return nil
+}
+
+// adopt attaches already-filled blocks to this cache, as a prefix hit does.
+//
+// The blocks must hold exactly the first positions of this sequence's prompt, in
+// order. adopt retains each one, so the pool keeps them alive even if the request
+// that produced them finishes first.
+//
+// Only whole blocks are adopted, and this cache must be empty; both follow from
+// what a shared block is: a run of positions whose keys and values no holder may
+// modify. A cache that adopted part of a block would append into it and corrupt the
+// other holders.
+func (c *PagedKVCache) adopt(blocks []int32) error {
+	if len(c.blocks) != 0 || c.len != 0 {
+		return fmt.Errorf("llama: adopt into a cache that already holds %d positions", c.len)
+	}
+	for _, id := range blocks {
+		if err := c.pool.retain(id); err != nil {
+			// Undo the retains done so far: a partial adopt would leave the cache
+			// holding blocks with no positions recorded.
+			for _, done := range c.blocks {
+				_ = c.pool.release(done)
+			}
+			return err
+		}
+		c.blocks = append(c.blocks, id)
+	}
+	c.len = len(blocks) * c.block
+	return nil
+}
+
+// rememberFullBlock publishes the block covering position pos to the prefix index,
+// once that block is complete.
+//
+// A block is published when its last position is written, which is the moment its
+// keys and values stop changing. Publishing earlier would hand out a block that its
+// owner is still appending to.
+func (c *PagedKVCache) rememberFullBlock(tokens []int32, pos int) error {
+	pool := c.pool
+	if pool.index == nil {
+		return nil
+	}
+	if (pos+1)%c.block != 0 {
+		return nil
+	}
+	idx := (pos + 1) / c.block
+	if idx > len(c.blocks) {
+		return fmt.Errorf("llama: block %d for position %d is not allocated", idx-1, pos)
+	}
+	start := (idx - 1) * c.block
+	if start+c.block > len(tokens) {
+		return fmt.Errorf("llama: block %d needs tokens up to %d, have %d", idx-1, start+c.block, len(tokens))
+	}
+	// Remember takes the index's own reference. This cache already holds its
+	// reference from the allocation, so the block now has two holders and stays
+	// alive after the sequence finishes -- which is the whole point.
+	return pool.index.Remember(tokens[start:start+c.block], c.blocks[idx-1])
 }
 
 // ensureBlocks makes sure the sequence holds a block covering pos.

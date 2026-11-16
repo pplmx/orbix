@@ -32,6 +32,12 @@ const (
 // " hello" is one token while "hello" may be several.
 const spacePrefix = "\u2581"
 
+// bpeSpace is how a byte-level BPE vocabulary escapes a space: the byte 0x20 is
+// rendered as the character at code point 256+offset, which for space is U+0120 'Ġ'.
+// It is spelled here rather than looked up in bpeBytes because encoding needs the
+// rune, and the table maps runes to bytes.
+const bpeSpace = "\u0120"
+
 // bpeBytes is GPT-2's byte-to-character table, the inverse of the escaping its
 // byte-level BPE applies before training: byte b is rendered as the character with
 // code points[b] so that a vocabulary can be valid UTF-8 text. Every byte outside
@@ -92,6 +98,17 @@ type Tokenizer struct {
 	// are trained on text that starts with a space, and some GGUF files state
 	// this explicitly with tokenizer.ggml.add_space_prefix.
 	addSpacePrefix bool
+
+	// byteLevel reports that the vocabulary is GPT-2 byte-level BPE rather than
+	// SentencePiece, which changes how a space is represented before merging.
+	//
+	// SentencePiece folds a space into a U+2581 marker on the following piece, so
+	// " a" is one symbol. Byte-level BPE escapes the space as the character 'Ġ'
+	// and keeps it as its own symbol, so " a" is two symbols that the merge can
+	// join into a "Ġa" piece or leave apart. Using the wrong one does not fail:
+	// the encoder produces valid ids for every word and silently drops every
+	// space, which is the bug this field exists to prevent.
+	byteLevel bool
 }
 
 // New builds a Tokenizer from a parsed GGUF file.
@@ -160,12 +177,27 @@ func New(f *gguf.File) (*Tokenizer, error) {
 	if id, ok := f.Uint32("tokenizer.ggml.eos_token_id"); ok {
 		t.eosID = int32(id)
 	}
+	// The vocab family decides both the space marker and whether a leading space is
+	// added at all, so it is read before either is decided.
+	if model, ok := f.Get[string]("tokenizer.ggml.model"); ok {
+		switch model {
+		case "gpt2":
+			t.byteLevel = true
+		case "llama":
+			// SentencePiece; the default below applies.
+		default:
+			return nil, fmt.Errorf("tokenize: unsupported tokenizer.ggml.model %q (want llama or gpt2)", model)
+		}
+	}
+
 	if v, ok := f.Lookup("tokenizer.ggml.add_space_prefix"); ok && v.Type == gguf.TypeBool {
 		t.addSpacePrefix = v.Bool
 	} else {
 		// SentencePiece always prepends a space during training, and a model
-		// that omits the key is following that convention.
-		t.addSpacePrefix = true
+		// that omits the key is following that convention. A byte-level BPE
+		// vocabulary does not: text arrives exactly as written, and the space is
+		// part of the text rather than a training-time convention.
+		t.addSpacePrefix = !t.byteLevel
 	}
 
 	return t, nil
@@ -315,10 +347,16 @@ func (t *Tokenizer) encodeText(text string) []int32 {
 	if t.addSpacePrefix {
 		text = " " + text
 	}
-	// Fold spaces into the U+2581 marker. Every space becomes a marker, not
-	// just leading ones: SentencePiece treats the marker as part of the token
-	// that follows it.
-	text = strings.ReplaceAll(text, " ", spacePrefix)
+	// Represent each space the way the vocabulary does before merging. The two
+	// families differ in when the space becomes part of a piece: SentencePiece
+	// folds it into the marker on the following character, so " a" is one symbol,
+	// while byte-level BPE escapes it as its own symbol and lets the merge decide
+	// whether "Ġa" exists as a piece.
+	if t.byteLevel {
+		text = strings.ReplaceAll(text, " ", bpeSpace)
+	} else {
+		text = strings.ReplaceAll(text, " ", spacePrefix)
+	}
 
 	symbols := make([]symbol, 0, len(text))
 	for off := 0; off < len(text); {

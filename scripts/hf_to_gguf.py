@@ -141,6 +141,10 @@ _meta_list = ([
     kv_f32("qwen2.attention.layer_norm_rms_epsilon", CFG["rms_norm_eps"]),
     kv_u32("qwen2.rope.dimension_count", CFG["hidden_size"]//CFG["num_attention_heads"]),
     kv_f32("qwen2.rope.freq_base", CFG["rope_theta"]),
+    # The vocab family, which decides how a space is represented before merging.
+    # Omitting it makes a reader fall back to SentencePiece's convention and silently
+    # drop every space in the prompt, so this key is not optional.
+    kv_str("tokenizer.ggml.model", "gpt2"),
     kv_strs("tokenizer.ggml.tokens", vocab),
     kv_i32s("tokenizer.ggml.token_type", types),
     kv_u32("tokenizer.ggml.bos_token_id", CFG["bos_token_id"]),

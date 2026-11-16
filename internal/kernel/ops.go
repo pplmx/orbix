@@ -52,13 +52,17 @@ func MatMul(dst, a, b []float32, m, n, k int) error {
 // form directly avoids materializing a k x n copy, which for a 7B model's
 // FFN would be most of the layer's memory.
 func MatMulTransposed(dst, a, b []float32, m, n, k int) error {
-	if len(b) < n*k {
-		return fmt.Errorf("kernel: b has %d values, need %d", len(b), n*k)
-	}
-	if err := checkMatMul(dst, a, nil, m, n, k); err != nil {
+	if err := checkMatMulTransposed(dst, a, b, m, n, k); err != nil {
 		return err
 	}
-	for i := range m {
+	return matMulTransposedRows(dst, a, b, m, n, k, 0, m)
+}
+
+// matMulTransposedRows computes rows [lo,hi) of MatMulTransposed. Every output
+// element depends only on its own row of a, so a caller may split the row range
+// without changing any value.
+func matMulTransposedRows(dst, a, b []float32, m, n, k, lo, hi int) error {
+	for i := lo; i < hi; i++ {
 		aRow := a[i*k : (i+1)*k]
 		dstRow := dst[i*n : (i+1)*n]
 		for j := range n {
@@ -79,17 +83,21 @@ func MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 // against every projection in the model, once per token. It is a separate
 // function rather than a 1-row MatMul because it is the hot path and because
 // its shape (no m dimension) is easier to reason about.
+//
+// This is the serial reference. Runner.MatVec computes the same values across
+// several goroutines and is bit-identical, because the rows are independent.
 func MatVec(dst, a, v []float32, n, k int) error {
-	if len(v) < k {
-		return fmt.Errorf("kernel: v has %d values, need %d", len(v), k)
+	if err := checkMatVec(dst, a, v, n, k); err != nil {
+		return err
 	}
-	if len(a) < n*k {
-		return fmt.Errorf("kernel: a has %d values, need %d", len(a), n*k)
-	}
-	if len(dst) < n {
-		return fmt.Errorf("kernel: dst has %d values, need %d", len(dst), n)
-	}
-	for j := range n {
+	return matVecRows(dst, a, v, n, k, 0, n)
+}
+
+// matVecRows computes rows [lo,hi) of MatVec. Each row is a complete dot
+// product in serial order, so a caller may split the row range across
+// goroutines without changing any value.
+func matVecRows(dst, a, v []float32, n, k, lo, hi int) error {
+	for j := lo; j < hi; j++ {
 		row := a[j*k : (j+1)*k]
 		var sum float32
 		for p := range k {

@@ -161,13 +161,19 @@ func (s *Server) Stats() (requests, tokens int64) {
 // logit_bias and response_format that a local engine has no use for, and refusing
 // them would make the server unusable from an SDK that always sends them.
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	MaxTokens   int           `json:"max_tokens"`
-	Temperature *float64      `json:"temperature"`
-	TopK        int           `json:"top_k"`
-	Stream      bool          `json:"stream"`
-	Stop        stopField     `json:"stop"`
+	Model     string        `json:"model"`
+	Messages  []chatMessage `json:"messages"`
+	MaxTokens int           `json:"max_tokens"`
+
+	// Priority ranks this request against others waiting for a slot; higher advances
+	// first, and an omitted value means "with the rest". It is Orbix's own extension:
+	// OpenAI's API has no equivalent, so a client that never sends it is unaffected.
+	Priority int `json:"priority"`
+
+	Temperature *float64  `json:"temperature"`
+	TopK        int       `json:"top_k"`
+	Stream      bool      `json:"stream"`
+	Stop        stopField `json:"stop"`
 }
 
 type chatMessage struct {
@@ -176,9 +182,13 @@ type chatMessage struct {
 }
 
 type completionRequest struct {
-	Model       string    `json:"model"`
-	Prompt      string    `json:"prompt"`
-	MaxTokens   int       `json:"max_tokens"`
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	MaxTokens int    `json:"max_tokens"`
+
+	// Priority ranks this request against others waiting for a slot; see chatRequest.
+	Priority int `json:"priority"`
+
 	Temperature *float64  `json:"temperature"`
 	TopK        int       `json:"top_k"`
 	Stream      bool      `json:"stream"`
@@ -239,6 +249,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.generate(w, r, generateParams{
 		prompt:      prompt,
 		maxTokens:   req.MaxTokens,
+		priority:    req.Priority,
 		temperature: req.Temperature,
 		topK:        req.TopK,
 		stream:      req.Stream,
@@ -260,6 +271,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	s.generate(w, r, generateParams{
 		prompt:      req.Prompt,
 		maxTokens:   req.MaxTokens,
+		priority:    req.Priority,
 		temperature: req.Temperature,
 		topK:        req.TopK,
 		stream:      req.Stream,
@@ -284,6 +296,7 @@ func (s *Server) renderChat(msgs []chatMessage) string {
 type generateParams struct {
 	prompt      string
 	maxTokens   int
+	priority    int
 	temperature *float64
 	topK        int
 	stream      bool
@@ -326,6 +339,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	ch, err := s.eng.Submit(engine.Request{
 		Prompt:    promptTokens,
 		MaxTokens: maxTokens,
+		Priority:  p.priority,
 		Stop:      stopIDs,
 		Sampler:   sampler,
 		Cancel:    r.Context().Done(),

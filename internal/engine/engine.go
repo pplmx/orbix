@@ -38,6 +38,16 @@ type Request struct {
 	// away does not keep the model busy: without it, a disconnected stream would
 	// generate its whole token budget into a channel nobody reads.
 	Cancel <-chan struct{}
+
+	// Priority ranks this request against others waiting for a slot: a higher value
+	// advances first. Zero is the default and means "with the rest".
+	//
+	// This is the caller's ranking, which the engine cannot infer. The admission
+	// policy decides how to order requests of *equal* priority; it cannot know that
+	// one of them is an interactive request a person is watching and another is a
+	// batch job that will not be read for an hour. Negative values are lower than
+	// default, which is what a background prefill wants.
+	Priority int
 }
 
 // sequence is the scheduler's per-request state.

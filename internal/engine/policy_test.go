@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -270,6 +271,192 @@ func TestPolicyDoesNotChangeOutput(t *testing.T) {
 					t.Errorf("%v: request %d token %d = %d, fifo = %d", policy, i, j, got[i][j], fifo[i][j])
 				}
 			}
+		}
+	}
+}
+
+// Per-request priority is the caller's ranking; the policy orders requests the caller
+// ranked equally. These tests keep the two apart deliberately, because a scheduler that
+// blurs them serves a high-priority request late without any signal that it did.
+
+// fakeSeqPrio is fakeSeq with an explicit Request.Priority.
+func fakeSeqPrio(id, maxTokens, priority int) *sequence {
+	s := fakeSeq(id, maxTokens, 0, -1)
+	s.req.Priority = priority
+	return s
+}
+
+func TestAdmitPriorityOutranksFIFO(t *testing.T) {
+	// Submitted last, ranked highest: it must go first despite the submission order.
+	seqs := []*sequence{
+		fakeSeqPrio(0, 5, 0),
+		fakeSeqPrio(1, 5, 0),
+		fakeSeqPrio(2, 5, 10),
+	}
+	got := admit(seqs, 1, PriorityFIFO)
+	if want := []int{2}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Errorf("admitted %v, want %v", ids(got), want)
+	}
+}
+
+func TestAdmitNegativePriorityGoesLast(t *testing.T) {
+	// A background job marked below default must yield to everything else.
+	seqs := []*sequence{
+		fakeSeqPrio(0, 5, -5),
+		fakeSeqPrio(1, 5, 0),
+	}
+	got := admit(seqs, 1, PriorityFIFO)
+	if want := []int{1}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Errorf("admitted %v, want %v (the negative-priority request should yield)", ids(got), want)
+	}
+}
+
+func TestAdmitPriorityThenPolicyWithinTier(t *testing.T) {
+	// Two tiers, and the policy must apply inside each. Under shortest, the 2-token
+	// request wins its tier even though it was submitted last.
+	seqs := []*sequence{
+		fakeSeqPrio(0, 100, 0),
+		fakeSeqPrio(1, 2, 0),
+		fakeSeqPrio(2, 100, 5),
+		fakeSeqPrio(3, 3, 5),
+	}
+	got := admit(seqs, 2, PriorityShortest)
+	if want := []int{3, 2}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Errorf("admitted %v, want %v (high tier first, shortest within it)", ids(got), want)
+	}
+}
+
+func TestAdmitPriorityIsStableUnderFair(t *testing.T) {
+	// Fair orders by last-served, but priority still dominates: a high-priority request
+	// that just ran must beat a low-priority one that has waited.
+	high := fakeSeqPrio(0, 5, 10)
+	high.lastServed = 100
+	low := fakeSeqPrio(1, 5, 0)
+	low.lastServed = -1
+	got := admit([]*sequence{low, high}, 1, PriorityFair)
+	if want := []int{0}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Errorf("admitted %v, want %v (priority outranks wait time)", ids(got), want)
+	}
+}
+
+func TestAdmitPriorityDoesNotReorderWhenAllFit(t *testing.T) {
+	// When the round has room for everything, no policy or priority applies: the input
+	// order is preserved so the common case stays allocation-free.
+	seqs := []*sequence{fakeSeqPrio(0, 5, -1), fakeSeqPrio(1, 5, 99)}
+	got := admit(seqs, 5, PriorityFIFO)
+	if want := []int{0, 1}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Errorf("admitted %v, want %v (unchanged input order)", ids(got), want)
+	}
+}
+
+func TestAdmitPriorityTiesFallBackToID(t *testing.T) {
+	// Same priority, same score, different ids: the lower id must win, or selection
+	// would depend on map iteration order.
+	seqs := []*sequence{fakeSeqPrio(7, 5, 3), fakeSeqPrio(2, 5, 3)}
+	got := admit(seqs, 1, PriorityFIFO)
+	if want := []int{2}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Errorf("admitted %v, want %v", ids(got), want)
+	}
+}
+
+// TestPriorityReachesTheEngine is the end-to-end counterpart to the unit tests: it
+// checks that Request.Priority travels from Submit to admit, through the real engine.
+// A unit test on admit alone would keep passing if the field were never copied.
+func TestPriorityReachesTheEngine(t *testing.T) {
+	// The last request submitted is the one ranked highest, so a run that ignores
+	// priority cannot produce the expected order by accident.
+	const tokens = 4
+	firstRound := func(t *testing.T, priorities []int) map[int]int {
+		t.Helper()
+		e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2, Policy: PriorityFIFO})
+		prompt := tok.Encode("Once upon a time", true)
+
+		chans := make([]<-chan Event, len(priorities))
+		for i, prio := range priorities {
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: tokens, Priority: prio})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			chans[i] = ch
+		}
+
+		first := make(map[int]int, len(priorities))
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for i, ch := range chans {
+			wg.Go(func() {
+				for ev := range ch {
+					if ev.HasToken {
+						mu.Lock()
+						if _, seen := first[i]; !seen {
+							first[i] = e.Round()
+						}
+						mu.Unlock()
+					}
+				}
+			})
+		}
+		for e.Pump() > 0 {
+		}
+		wg.Wait()
+		return first
+	}
+
+	t.Run("highest priority starts first", func(t *testing.T) {
+		got := firstRound(t, []int{0, 0, 10})
+		t.Logf("first-token rounds: %v", got)
+		if got[2] > got[0] || got[2] > got[1] {
+			t.Errorf("the priority-10 request first ran on round %d, others on %v; "+
+				"priority was not applied", got[2], got)
+		}
+	})
+	t.Run("negative priority yields", func(t *testing.T) {
+		got := firstRound(t, []int{-5, 0, 0})
+		t.Logf("first-token rounds: %v", got)
+		if got[0] < got[1] || got[0] < got[2] {
+			t.Errorf("the priority -5 request first ran on round %d, others on %v; "+
+				"a below-default request should yield", got[0], got)
+		}
+	})
+}
+
+// TestPriorityDoesNotChangeOutput is the same safety property the policies have: ranking
+// a request differently changes when it runs, never what it produces.
+func TestPriorityDoesNotChangeOutput(t *testing.T) {
+	run := func(priorities []int) [][]int32 {
+		e, tok := loadEngine(t, Options{MaxActive: 2, Workers: 2, Policy: PriorityShortest})
+		prompt := tok.Encode("Once upon a time", true)
+		chans := make([]<-chan Event, len(priorities))
+		for i, prio := range priorities {
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 6, Priority: prio})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			chans[i] = ch
+		}
+		out := make([][]int32, len(priorities))
+		var wg sync.WaitGroup
+		for i, ch := range chans {
+			wg.Go(func() {
+				for ev := range ch {
+					if ev.HasToken {
+						out[i] = append(out[i], ev.Token)
+					}
+				}
+			})
+		}
+		for e.Pump() > 0 {
+		}
+		wg.Wait()
+		return out
+	}
+
+	plain := run([]int{0, 0, 0, 0})
+	ranked := run([]int{5, -5, 0, 100})
+	for i := range plain {
+		if fmt.Sprint(plain[i]) != fmt.Sprint(ranked[i]) {
+			t.Errorf("request %d: priority changed the output\n plain  %v\n ranked %v",
+				i, plain[i], ranked[i])
 		}
 	}
 }

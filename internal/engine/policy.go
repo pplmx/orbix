@@ -78,6 +78,11 @@ func ParsePriority(s string) (Priority, error) {
 // reproducible: a tie under any policy falls back to submission order, so two runs of the
 // same workload select the same sequences.
 //
+// Per-request priority outranks the policy: a higher Request.Priority advances first, and
+// the policy only orders requests of equal priority. The two answer different questions --
+// priority is the caller's ranking, which the engine cannot infer, while the policy is a
+// heuristic over work remaining or wait time, which the caller cannot see.
+//
 // The result is a subset of ready and never longer than limit.
 func admit(ready []*sequence, limit int, policy Priority) []*sequence {
 	if limit <= 0 || len(ready) == 0 {
@@ -101,10 +106,18 @@ func admit(ready []*sequence, limit int, policy Priority) []*sequence {
 
 // compareForPolicy returns a negative number when a should advance before b.
 //
-// Every policy breaks ties by id, so selection is deterministic. Without that, two
-// requests with the same score would be ordered by insertion into a map, and the
-// engine's output would depend on Go's map iteration order.
+// The outermost key is the caller's priority, so the policy only ever reorders requests
+// the caller ranked equally. Every policy breaks its own ties by id, so selection is
+// deterministic: without that, two requests with the same score would be ordered by
+// insertion into a map, and the engine's output would depend on Go's map iteration order.
 func compareForPolicy(a, b *sequence, policy Priority) int {
+	// Higher priority first, so a larger value sorts earlier.
+	if ap, bp := a.req.Priority, b.req.Priority; ap != bp {
+		if ap > bp {
+			return -1
+		}
+		return 1
+	}
 	switch policy {
 	case PriorityShortest:
 		// Remaining work is measured from the sequence's own budget: a sequence that

@@ -579,3 +579,83 @@ func serverWithPolicy(t *testing.T, path string, policy engine.Priority) *Server
 	go srv.Run(ctx)
 	return srv
 }
+
+// TestPriorityFieldReachesTheEngine checks the HTTP surface: `priority` is Orbix's own
+// extension to the OpenAI schema, so nothing else would catch it being dropped between the
+// JSON body and engine.Request.
+//
+// The observation is indirect by necessity -- the response carries no scheduling
+// information -- so the test compares completion order between a low-priority request
+// holding the only slot and a high-priority one queued behind it.
+func TestPriorityFieldReachesTheEngine(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file")
+	}
+	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
+
+	var mu sync.Mutex
+	finished := map[string]time.Time{}
+	record := func(name string, at time.Time) {
+		mu.Lock()
+		finished[name] = at
+		mu.Unlock()
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "Once upon a time", "max_tokens": 40, "priority": -10}`)
+		decodeBody[completionResponse](t, resp)
+		record("low", time.Now())
+	})
+	waitFor(t, 5*time.Second, func() bool { return srv.eng.Active() > 0 },
+		"the long request never started")
+
+	// Submitted second, ranked far higher: it must finish first even though the low
+	// priority request is holding the only slot and still has 40 tokens to go.
+	wg.Go(func() {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "Hi", "max_tokens": 2, "priority": 100}`)
+		decodeBody[completionResponse](t, resp)
+		record("high", time.Now())
+	})
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	high, low, ok := finished["high"], finished["low"], len(finished) == 2
+	if !ok {
+		t.Fatalf("both requests must finish; got %v", finished)
+	}
+	t.Logf("high finished %v before low", low.Sub(high).Round(time.Millisecond))
+	if !high.Before(low) {
+		t.Error("the priority-100 request finished after the priority -10 one; " +
+			"the priority field did not reach the engine")
+	}
+}
+
+// TestPriorityIsOptional pins the compatibility property: a client that never heard of
+// `priority` must keep working, and an explicit 0 must mean the same as omitting it.
+func TestPriorityIsOptional(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file")
+	}
+	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
+	for _, body := range []string{
+		`{"prompt": "Hi", "max_tokens": 2}`,
+		`{"prompt": "Hi", "max_tokens": 2, "priority": 0}`,
+		`{"prompt": "Hi", "max_tokens": 2, "priority": -3}`,
+		`{"prompt": "Hi", "max_tokens": 2, "priority": 7}`,
+	} {
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", body, resp.StatusCode)
+		}
+		got := decodeBody[completionResponse](t, resp)
+		if len(got.Choices) != 1 {
+			t.Fatalf("%s: %d choices", body, len(got.Choices))
+		}
+	}
+}

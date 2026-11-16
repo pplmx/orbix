@@ -67,16 +67,16 @@ The constraints follow from the goal:
 The repository is at the start of the roadmap. What exists, and what has been
 verified:
 
-| Layer          | Package             | State                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| -------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GGUF container | `internal/gguf`     | Parses header, metadata, tensor directory, and streams tensor data. Every field and byte offset cross-checked against an independent parser.                                                                                                                                                                                                                                                                                                                                                                               |
-| Half precision | `internal/f16`      | binary16 to/from float32 with correct subnormals, infinities, NaNs, and round-to-nearest-even. All 65,536 bit patterns verified against a reference.                                                                                                                                                                                                                                                                                                                                                                       |
-| Dequantization | `internal/quant`    | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0. Each block layout is pinned twice: exact-value tests on constructed blocks, and a round-trip error bound against the format's step size.                                                                                                                                                                                                                                                                                                                                     |
-| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers. A `Runner` splits the row-partitioned products across goroutines with a measured size threshold; every row is still computed by one goroutine in serial order, so results are bit-identical to the serial kernel.                                                                                                                                                                                                                       |
-| Tokenizer      | `internal/tokenize` | SentencePiece segmentation matching llama.cpp's implementation token for token.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Engine         | `internal/engine`   | Batches a scheduling round: every pending prompt prefills in one pass, then every active sequence decodes together in one pass, so concurrency raises total throughput. Each sequence keeps its own logits copy and its own KV cache. `MaxActive` bounds how many sequences advance per round. The KV cache is either a contiguous arena per sequence or paged blocks from one shared pool, with optional prefix reuse across requests. `RenderChatPrompt` is the one chat template both the REPL and the HTTP server use. |
-| Transformer    | `internal/llama`    | Llama and Qwen2 forward passes: adjacent-pair (Llama) and NEOX (Qwen2) RoPE, optional attention bias, grouped-query attention, and two KV cache layouts -- a contiguous arena per sequence and a reference-counted paged cache over a shared block pool. `PrefillWithPrefix` reuses blocks whose token prefix has been seen before. `Prefill` and `DecodeStep` are bit-identical to the per-token path on either layout. Greedy decoding on a real checkpoint reproduces llama.cpp's text exactly.                         |
-| Server         | `internal/server`   | `orbix serve`: OpenAI-compatible `/v1/chat/completions` and `/v1/completions` with SSE streaming, `/v1/models`, and `/healthz`. Streaming text is decoded incrementally so multi-byte characters split across tokens still render; concatenated stream deltas equal the non-streaming body exactly. A disconnected client cancels its sequence through the engine.                                                                                                                                                         |
+| Layer          | Package             | State                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GGUF container | `internal/gguf`     | Parses header, metadata, tensor directory, and streams tensor data. Every field and byte offset cross-checked against an independent parser.                                                                                                                                                                                                                                                                                                                                                                                 |
+| Half precision | `internal/f16`      | binary16 to/from float32 with correct subnormals, infinities, NaNs, and round-to-nearest-even. All 65,536 bit patterns verified against a reference.                                                                                                                                                                                                                                                                                                                                                                         |
+| Dequantization | `internal/quant`    | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0. Each block layout is pinned twice: exact-value tests on constructed blocks, and a round-trip error bound against the format's step size.                                                                                                                                                                                                                                                                                                                                       |
+| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers. A `Runner` splits the row-partitioned products across goroutines with a measured size threshold; every row is still computed by one goroutine in serial order, so results are bit-identical to the serial kernel.                                                                                                                                                                                                                         |
+| Tokenizer      | `internal/tokenize` | SentencePiece segmentation matching llama.cpp's implementation token for token.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Engine         | `internal/engine`   | Batches a scheduling round: every pending prompt prefills in one pass, then every active sequence decodes together in one pass, so concurrency raises total throughput. `MaxActive` bounds a round and an admission policy (`fifo`, `shortest`, `fair`) picks which sequences fill it. Each sequence keeps its own logits copy and KV cache; the cache is a contiguous arena or paged blocks from a shared pool, with optional prefix reuse. `RenderChatPrompt` is the one chat template the REPL and the HTTP server share. |
+| Transformer    | `internal/llama`    | Llama and Qwen2 forward passes: adjacent-pair (Llama) and NEOX (Qwen2) RoPE, optional attention bias, grouped-query attention, and two KV cache layouts -- a contiguous arena per sequence and a reference-counted paged cache over a shared block pool. `PrefillWithPrefix` reuses blocks whose token prefix has been seen before. `Prefill` and `DecodeStep` are bit-identical to the per-token path on either layout. Greedy decoding on a real checkpoint reproduces llama.cpp's text exactly.                           |
+| Server         | `internal/server`   | `orbix serve`: OpenAI-compatible `/v1/chat/completions` and `/v1/completions` with SSE streaming, `/v1/models`, and `/healthz`. Streaming text is decoded incrementally so multi-byte characters split across tokens still render; concatenated stream deltas equal the non-streaming body exactly. A disconnected client cancels its sequence through the engine.                                                                                                                                                           |
 
 ## What You Can Learn From This Codebase
 
@@ -86,7 +86,7 @@ Each layer maps to a concept in LLM inference. The code is organized to make tha
 | ------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | **GGUF loader**     | Model formats, quantization types, tokenizers | How a model file is structured, how tensors are laid out, how tokens become IDs          |
 | **Compute kernels** | Matmul, attention, normalization, activations | What a transformer forward pass actually computes, and why quantization changes the math |
-| **KVCacheManager**  | KV cache, paged allocation, prefix reuse      | Why inference is memory-bound, how attention state is stored and reused                  |
+| **KV cache**        | KV cache, paged allocation, prefix reuse      | Why inference is memory-bound, how attention state is stored and reused                  |
 | **Scheduler**       | Continuous batching, prefill/decode, priority | Why serving is a scheduling problem, not just a compute problem                          |
 | **Server**          | OpenAI-compatible API, SSE, request lifecycle | How a serving layer maps HTTP requests onto an inference engine                          |
 
@@ -119,7 +119,7 @@ If you are learning LLM inference, the intended reading order is top to bottom: 
 ```
 
 - **Scheduler** owns admission, batching, and the prefill/decode lifecycle.
-- **KVCacheManager** abstracts block allocation and prefix reuse. The default implementation uses paged blocks.
+- **KV cache** is `llama.BlockPool` + `llama.PagedKVCache` + `llama.PrefixIndex`: a shared pool of reference-counted blocks, and an index that hands back the blocks a repeated prompt prefix already produced.
 - **Backend** is the compute boundary. The default `native` backend runs kernels in-process.
 - **Compute kernels** are where the pure-Go work happens, with reference implementations first and assembly fast paths later.
 
@@ -141,28 +141,25 @@ type Scheduler interface {
 	Stats() SchedulerStats
 }
 
-// KVCacheManager abstracts cache lifecycle and prefix reuse.
-type KVCacheManager interface {
-	Allocate(seqLen int) (BlockHandle, error)
-	Release(handle BlockHandle)
-	MatchPrefix(tokens []int) (cachedLen int, handle BlockHandle)
-}
-
-// Backend is the compute boundary.
-type Backend interface {
-	Name() string
-	Capabilities() Capabilities
-	Execute(ctx context.Context, batch Batch) (<-chan Event, error)
-}
-
 // Event is the streaming unit.
 type Event struct {
-	Type  EventType
-	Token string
-	Meta  map[string]any
-	Err   error
+	Token        int32
+	HasToken     bool
+	Done         bool
+	Err          error
+	FinishReason string
 }
 ```
+
+Progress against those interfaces, stated plainly so the block above reads as a target
+rather than as a description:
+
+| Interface        | State                                                                                                                 |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `Engine`         | Exists as `engine.Engine`, but takes a model path rather than a `LoadOptions` struct                                  |
+| `Scheduler`      | Exists as `Engine.Submit` + `Engine.Pump`; there is no `Stats()` yet, and a round is driven by the caller, not a loop |
+| `KVCacheManager` | Not a separate interface: `llama.BlockPool` owns allocation and `llama.PrefixIndex` owns prefix matching              |
+| `Backend`        | Not implemented. There is one compute path (the in-process kernels); a remote backend would be the place to add it    |
 
 The compute kernels are internal but exposed for testing and benchmarking:
 
@@ -351,8 +348,8 @@ The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it t
 The roadmap is a learning path as much as a feature list. Each version adds one conceptual layer.
 
 - [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
-- [ ] `v0.2` — **Scheduling and cache**: scheduler with continuous batching, paged `KVCacheManager`, Q4_0/Q4_1, Qwen2 — *partial: continuous batching, a reference-counted paged KV cache, prefix reuse, and Qwen2 inference all work; Q4_1 and admission policy are not done*
-- [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — *partial: `orbix serve` implements chat and text completions with SSE streaming and client-disconnect cancellation, and Q5_0/Q5_1 decode; a model's own Jinja template, priority queues, and Mistral are not done*
+- [x] `v0.2` — **Scheduling and cache**: continuous batching, a paged KV cache, Q4_0/Q4_1, Qwen2 — batched prefill and decode with an admission policy, a reference-counted paged cache with prefix reuse, every 32-weight ggml block format, Llama and Qwen2
+- [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — *partial: `orbix serve` implements chat and text completions with SSE streaming and client-disconnect cancellation, an admission policy stands in for priority queues, and Q5_0/Q5_1 decode; a model's own Jinja template, per-request priorities, and Mistral are not done*
 - [ ] `v0.4` — **Performance paths**: K-quants, prefix-aware radix cache, `amd64` AVX2 and `arm64` NEON assembly
 - [ ] `v0.5` — **Measurement and observability**: `orbix bench` suite, remote HTTP backend, Prometheus and OpenTelemetry
 - [ ] `v1.0` — **Stable API**: cross-platform CI matrix, published benchmarks, documented reading path
@@ -369,25 +366,25 @@ The roadmap is a learning path as much as a feature list. Each version adds one 
 
 ## Configuration
 
-Orbix reads `orbix.yaml` from the working directory or `~/.orbix/`. Environment variables use the `ORBIX_` prefix.
-
-```yaml
-model: ./models/qwen2.5-7b-q4_0.gguf
-scheduler:
-  max_batch_size: 32
-  policy: priority
-kv_cache:
-  manager: paged
-  block_size: 16
-  max_blocks: 2048
-server:
-  addr: ":8080"
-```
+Every setting is a flag today; there is no config file. `ORBIX_MODEL` is the one
+environment variable, so a shell can point every command at the same checkpoint.
 
 ```bash
 export ORBIX_MODEL=./models/llama-3-8b-q4_0.gguf
-export ORBIX_SERVER_ADDR=:8080
+orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --prefix-cache
 ```
+
+| Flag                       | What it controls                                                   |
+| -------------------------- | ------------------------------------------------------------------ |
+| `--model`                  | Checkpoint path; falls back to `ORBIX_MODEL`                       |
+| `--max-active`             | Sequences advanced per round, and therefore the batch size         |
+| `--policy`                 | Which sequences fill a round: `fifo`, `shortest`, or `fair`        |
+| `--workers`                | Kernel goroutines; 0 means one per CPU                             |
+| `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context |
+| `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix            |
+
+A config file is on the roadmap, not in the code: the interface block at the top of
+this file describes the target, and this table describes what exists.
 
 ## Development
 

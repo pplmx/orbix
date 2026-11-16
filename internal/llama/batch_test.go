@@ -450,3 +450,266 @@ func TestNewWithOptionsZeroWorkersUsesGOMAXPROCS(t *testing.T) {
 		t.Errorf("default workers = %d, want %d", got, want)
 	}
 }
+
+// TestDecodeStepMatchesForward is the contract for DecodeStep: advancing several
+// sequences together must produce exactly the logits each would get alone. The
+// sequences deliberately have different cache lengths, because a batched decode
+// that used one shared position would look correct only while every sequence
+// happened to be at the same place.
+func TestDecodeStepMatchesForward(t *testing.T) {
+	m := loadReal(t)
+	cfg := m.Config()
+
+	// Three sequences with different histories, so their cache lengths differ.
+	histories := [][]int32{
+		{1, 9038},
+		{1, 9038, 2501, 263},
+		{1, 29871},
+	}
+	tokens := []int32{931, 3000, 13}
+
+	// Reference: one Forward per sequence.
+	want := make([][]float32, len(histories))
+	seqCaches := make([]*KVCache, len(histories))
+	for i, hist := range histories {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seqCaches[i] = cache
+		if _, err := m.Prefill(cache, hist, 0); err != nil {
+			t.Fatalf("Prefill(%d): %v", i, err)
+		}
+		last, err := m.Forward(cache, int(tokens[i]), cache.Len())
+		if err != nil {
+			t.Fatalf("Forward(%d): %v", i, err)
+		}
+		want[i] = append([]float32(nil), last...)
+	}
+
+	// Batched: one DecodeStep for all three.
+	batchCaches := make([]*KVCache, len(histories))
+	for i, hist := range histories {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batchCaches[i] = cache
+		if _, err := m.Prefill(cache, hist, 0); err != nil {
+			t.Fatalf("Prefill(%d): %v", i, err)
+		}
+	}
+	got, err := m.DecodeStep(batchCaches, tokens)
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+	if len(got) != len(histories)*cfg.VocabSize {
+		t.Fatalf("DecodeStep returned %d values, want %d", len(got), len(histories)*cfg.VocabSize)
+	}
+	for i := range histories {
+		row := got[i*cfg.VocabSize : (i+1)*cfg.VocabSize]
+		for j := range want[i] {
+			if row[j] != want[i][j] {
+				t.Fatalf("sequence %d logit[%d] = %v, want %v", i, j, row[j], want[i][j])
+			}
+		}
+		if got, want := batchCaches[i].Len(), seqCaches[i].Len(); got != want {
+			t.Errorf("sequence %d cache len = %d, want %d", i, got, want)
+		}
+	}
+}
+
+// TestDecodeStepContinuesLikeForward runs several greedy steps through both paths
+// and requires the generated tokens to stay identical, so the caches written by a
+// batched decode keep matching what a sequential one would hold.
+func TestDecodeStepContinuesLikeForward(t *testing.T) {
+	m := loadReal(t)
+	cfg := m.Config()
+	prompts := [][]int32{
+		{1, 9038, 2501},
+		{1, 31373, 612},
+		{1, 29871, 13, 29906},
+	}
+	const steps = 5
+
+	// Sequential reference.
+	seqCaches := make([]*KVCache, len(prompts))
+	seqTokens := make([][]int32, len(prompts))
+	for i, p := range prompts {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seqCaches[i] = cache
+		logits, err := m.Prefill(cache, p, 0)
+		if err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		logits = append([]float32(nil), logits...)
+		for range steps {
+			tok := Greedy{}.Next(logits)
+			seqTokens[i] = append(seqTokens[i], tok)
+			next, err := m.Forward(cache, int(tok), cache.Len())
+			if err != nil {
+				t.Fatalf("Forward: %v", err)
+			}
+			logits = append([]float32(nil), next...)
+		}
+	}
+
+	// Batched.
+	batchCaches := make([]*KVCache, len(prompts))
+	pending := make([]float32, len(prompts)*cfg.VocabSize)
+	batchTokens := make([][]int32, len(prompts))
+	for i, p := range prompts {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batchCaches[i] = cache
+		logits, err := m.Prefill(cache, p, 0)
+		if err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		copy(pending[i*cfg.VocabSize:], logits)
+	}
+	next := make([]int32, len(prompts))
+	for range steps {
+		for i := range prompts {
+			next[i] = Greedy{}.Next(pending[i*cfg.VocabSize : (i+1)*cfg.VocabSize])
+			batchTokens[i] = append(batchTokens[i], next[i])
+		}
+		out, err := m.DecodeStep(batchCaches, next)
+		if err != nil {
+			t.Fatalf("DecodeStep: %v", err)
+		}
+		copy(pending, out)
+	}
+
+	for i := range prompts {
+		for j := range seqTokens[i] {
+			if batchTokens[i][j] != seqTokens[i][j] {
+				t.Fatalf("sequence %d token %d: batched %d, sequential %d (%v vs %v)",
+					i, j, batchTokens[i][j], seqTokens[i][j], batchTokens[i], seqTokens[i])
+			}
+		}
+	}
+}
+
+func TestDecodeStepRejectsBadInput(t *testing.T) {
+	m := loadReal(t)
+	cfg := m.Config()
+
+	if _, err := m.DecodeStep(nil, nil); err == nil {
+		t.Error("DecodeStep accepted an empty batch")
+	}
+	cache, _ := NewKVCache(cfg, cfg.ContextLen)
+	if _, err := m.DecodeStep([]*KVCache{cache}, nil); err == nil {
+		t.Error("DecodeStep accepted mismatched token and cache counts")
+	}
+	if _, err := m.DecodeStep([]*KVCache{cache}, []int32{int32(cfg.VocabSize)}); err == nil {
+		t.Error("DecodeStep accepted a token past the vocabulary")
+	}
+	if _, err := m.DecodeStep([]*KVCache{nil}, []int32{1}); err == nil {
+		t.Error("DecodeStep accepted a nil cache")
+	}
+	// A full cache cannot take another position.
+	full, _ := NewKVCache(cfg, 2)
+	if _, err := m.Prefill(full, []int32{1, 2}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.DecodeStep([]*KVCache{full}, []int32{3}); err == nil {
+		t.Error("DecodeStep accepted a full cache")
+	}
+}
+
+// TestDecodeStepGrowsScratch checks that a later, larger batch works: the scratch
+// grows on demand rather than staying pinned to the first batch's size.
+func TestDecodeStepGrowsScratch(t *testing.T) {
+	m := loadReal(t)
+	cfg := m.Config()
+
+	one, _ := NewKVCache(cfg, cfg.ContextLen)
+	if _, err := m.Prefill(one, []int32{1, 9038}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.DecodeStep([]*KVCache{one}, []int32{2501}); err != nil {
+		t.Fatalf("DecodeStep(1): %v", err)
+	}
+
+	n := min(6, cfg.ContextLen-2)
+	caches := make([]*KVCache, n)
+	tokens := make([]int32, n)
+	for i := range caches {
+		caches[i], _ = NewKVCache(cfg, cfg.ContextLen)
+		if _, err := m.Prefill(caches[i], []int32{1, 9038}, 0); err != nil {
+			t.Fatal(err)
+		}
+		tokens[i] = int32(2501 + i)
+	}
+	out, err := m.DecodeStep(caches, tokens)
+	if err != nil {
+		t.Fatalf("DecodeStep(%d): %v", n, err)
+	}
+	if len(out) != n*cfg.VocabSize {
+		t.Errorf("returned %d values, want %d", len(out), n*cfg.VocabSize)
+	}
+	for i, v := range out {
+		if v != v {
+			t.Fatalf("logit[%d] is NaN", i)
+		}
+	}
+}
+
+// TestDecodeStepTinyModel covers the batched path on the synthetic model, so a
+// regression is caught without a checkpoint configured.
+func TestDecodeStepTinyModel(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	prompts := [][]int32{{0, 1}, {0, 1, 2}}
+	tokens := []int32{3, 4}
+
+	want := make([][]float32, len(prompts))
+	seqCaches := make([]*KVCache, len(prompts))
+	for i, p := range prompts {
+		cache, err := NewKVCache(cfg, c.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seqCaches[i] = cache
+		if _, err := m.Prefill(cache, p, 0); err != nil {
+			t.Fatal(err)
+		}
+		last, err := m.Forward(cache, int(tokens[i]), cache.Len())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[i] = append([]float32(nil), last...)
+	}
+
+	batchCaches := make([]*KVCache, len(prompts))
+	for i, p := range prompts {
+		cache, _ := NewKVCache(cfg, c.ctx)
+		batchCaches[i] = cache
+		if _, err := m.Prefill(cache, p, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := m.DecodeStep(batchCaches, tokens)
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+	for i := range want {
+		row := got[i*cfg.VocabSize : (i+1)*cfg.VocabSize]
+		for j := range want[i] {
+			if row[j] != want[i][j] {
+				t.Errorf("sequence %d logit[%d] = %v, want %v", i, j, row[j], want[i][j])
+			}
+		}
+	}
+}

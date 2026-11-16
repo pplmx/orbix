@@ -43,6 +43,11 @@ type Model struct {
 	// use and grows to the largest batch seen, so a single-token run never pays
 	// for it.
 	buf *batch
+
+	// dbuf holds the scratch DecodeStep uses to advance several sequences in one
+	// pass. It is allocated on first batched decode and grows to the largest
+	// batch seen, so a single-sequence run never pays for it.
+	dbuf *decodeBatch
 }
 
 // Options controls how a Model runs. The zero value is the default: one worker

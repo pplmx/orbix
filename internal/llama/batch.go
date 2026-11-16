@@ -281,3 +281,274 @@ func (m *Model) finishBatch(b *batch) error {
 	}
 	return m.run.MatVec(b.logits, w, xn, cfg.VocabSize, cfg.Hidden)
 }
+
+// DecodeStep advances several sequences by one token each in a single pass.
+//
+// This is the batched form of Forward. Each request decodes one token at its own
+// position, and the tokens, positions, and caches differ per sequence, but the
+// projections are the same weights against one row per sequence. Running them as
+// one matrix-matrix product reads each weight once for the whole batch instead of
+// once per sequence, which is what turns concurrency into throughput rather than
+// only into fairness.
+//
+// Only attention is per sequence: its causal mask, its cache, and its position
+// are per request, and its cost is small next to the projections.
+//
+// The result is one logits row per request, in request order, and is
+// bit-identical to calling Forward once per request: every row is computed by the
+// same arithmetic in the same order. The returned slice is owned by the model and
+// is overwritten by the next pass; callers must copy what they keep.
+//
+// A returned error leaves the caches in an unspecified but individually
+// consistent state: a batch either advances every cache or reports an error, and
+// the caller must not keep decoding after one.
+func (m *Model) DecodeStep(caches []*KVCache, tokens []int32) ([]float32, error) {
+	cfg := m.W.Config
+	n := len(tokens)
+	if n == 0 {
+		return nil, fmt.Errorf("llama: empty decode batch")
+	}
+	if len(caches) != n {
+		return nil, fmt.Errorf("llama: %d tokens but %d caches", n, len(caches))
+	}
+	for i, tok := range tokens {
+		if tok < 0 || int(tok) >= cfg.VocabSize {
+			return nil, fmt.Errorf("llama: token %d at index %d outside the vocabulary (%d)", tok, i, cfg.VocabSize)
+		}
+		c := caches[i]
+		if c == nil {
+			return nil, fmt.Errorf("llama: cache %d is nil", i)
+		}
+		// A decode step appends exactly one position at the cache's current end.
+		if c.Len() >= c.Cap() {
+			return nil, fmt.Errorf("llama: cache %d is full at %d positions", i, c.Len())
+		}
+		if c.Len() >= len(m.rope.cos) {
+			return nil, fmt.Errorf("llama: cache %d at %d is past the rope table (%d)", i, c.Len(), len(m.rope.cos))
+		}
+	}
+
+	if m.dbuf == nil || m.dbuf.n < n {
+		m.dbuf = newDecodeBatch(cfg, n)
+	}
+	b := m.dbuf
+	b.n = n
+
+	for i, tok := range tokens {
+		if err := b.embed(m, i, int(tok)); err != nil {
+			return nil, err
+		}
+	}
+	for l := range cfg.Layers {
+		if err := b.attention(m, caches, l); err != nil {
+			return nil, err
+		}
+		if err := b.feedForward(m, l); err != nil {
+			return nil, err
+		}
+	}
+	// Advance every cache only after the whole pass succeeded, matching Forward's
+	// contract: a failure leaves each cache consistent with a shorter sequence.
+	for _, c := range caches {
+		c.len++
+	}
+
+	if err := b.finish(m); err != nil {
+		return nil, err
+	}
+	return b.logits, nil
+}
+
+// decodeBatch holds the per-batch scratch for DecodeStep.
+//
+// It is separate from batch because prefill and decode need different shapes: a
+// prefill keeps a score vector sized to the context and projects only its last
+// row, while a decode projects every row and touches each sequence's own cache.
+type decodeBatch struct {
+	n int // sequences in flight
+
+	x       []float32   // [n, hidden] residual stream
+	xn      []float32   // [n, hidden] normalized input to a sublayer
+	q       []float32   // [n, heads*headDim]
+	k       []float32   // [n, kvHeads*headDim]
+	v       []float32   // [n, kvHeads*headDim]
+	attn    []float32   // [n, heads*headDim] attention output before wo
+	attnOut []float32   // [n, hidden] after wo, also reused for the down projection
+	gate    []float32   // [n, ffn]
+	up      []float32   // [n, ffn]
+	scores  [][]float32 // per sequence, one head's logits over its own context
+	logits  []float32   // [n, vocab] one row per sequence
+}
+
+// newDecodeBatch allocates scratch for n sequences.
+//
+// The score vectors are allocated per sequence because each attends over its own
+// cache, and those lengths differ. They are sized to the context once and reused,
+// which keeps a steady-state decode free of allocation.
+func newDecodeBatch(cfg Config, n int) *decodeBatch {
+	qdim := cfg.Heads * cfg.HeadDim
+	kvdim := cfg.kvDim()
+	b := &decodeBatch{
+		n:       n,
+		x:       make([]float32, n*cfg.Hidden),
+		xn:      make([]float32, n*cfg.Hidden),
+		q:       make([]float32, n*qdim),
+		k:       make([]float32, n*kvdim),
+		v:       make([]float32, n*kvdim),
+		attn:    make([]float32, n*qdim),
+		attnOut: make([]float32, n*cfg.Hidden),
+		gate:    make([]float32, n*cfg.FFN),
+		up:      make([]float32, n*cfg.FFN),
+		scores:  make([][]float32, n),
+		logits:  make([]float32, n*cfg.VocabSize),
+	}
+	for i := range b.scores {
+		b.scores[i] = make([]float32, cfg.ContextLen)
+	}
+	return b
+}
+
+// embed copies one sequence's token embedding into its row.
+func (b *decodeBatch) embed(m *Model, row, token int) error {
+	cfg := m.W.Config
+	off := token * cfg.Hidden
+	if off+cfg.Hidden > len(m.W.TokenEmbedding) {
+		return fmt.Errorf("llama: token %d embedding outside %d values", token, len(m.W.TokenEmbedding))
+	}
+	copy(b.x[row*cfg.Hidden:(row+1)*cfg.Hidden], m.W.TokenEmbedding[off:off+cfg.Hidden])
+	return nil
+}
+
+// attention runs one block's attention for every sequence in the batch.
+func (b *decodeBatch) attention(m *Model, caches []*KVCache, l int) error {
+	cfg := m.W.Config
+	layer := &m.W.Layers[l]
+	n := b.n
+	qdim := cfg.Heads * cfg.HeadDim
+	kvdim := cfg.kvDim()
+
+	for r := range n {
+		row := b.x[r*cfg.Hidden : (r+1)*cfg.Hidden]
+		out := b.xn[r*cfg.Hidden : (r+1)*cfg.Hidden]
+		if err := kernel.RMSNorm(out, row, layer.attnNorm, cfg.RMSNormEps); err != nil {
+			return err
+		}
+	}
+	// The projections are the batched part: [n, hidden] x [hidden, out].
+	if err := m.run.MatMulTransposed(b.q, b.xn, layer.wq, n, qdim, cfg.Hidden); err != nil {
+		return err
+	}
+	if err := m.run.MatMulTransposed(b.k, b.xn, layer.wk, n, kvdim, cfg.Hidden); err != nil {
+		return err
+	}
+	if err := m.run.MatMulTransposed(b.v, b.xn, layer.wv, n, kvdim, cfg.Hidden); err != nil {
+		return err
+	}
+
+	// Each sequence rotates at its own position and appends at its own cache end.
+	scale := float32(1 / math.Sqrt(float64(cfg.HeadDim)))
+	group := cfg.Heads / cfg.KVHeads
+
+	for r := range n {
+		cache := caches[r]
+		pos := cache.Len()
+		qRow := b.q[r*qdim : (r+1)*qdim]
+		kRow := b.k[r*kvdim : (r+1)*kvdim]
+		vRow := b.v[r*kvdim : (r+1)*kvdim]
+
+		for h := range cfg.Heads {
+			if err := m.rope.apply(qRow[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+				return err
+			}
+		}
+		for h := range cfg.KVHeads {
+			if err := m.rope.apply(kRow[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+				return err
+			}
+		}
+
+		allK, allV, err := cache.appendKV(l, kRow, vRow, pos)
+		if err != nil {
+			return err
+		}
+		scores := b.scores[r][:pos+1]
+		for h := range cfg.Heads {
+			kv := h / group
+			qh := qRow[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
+
+			for t := range scores {
+				off := t*kvdim + kv*cfg.HeadDim
+				kh := allK[off : off+cfg.HeadDim]
+				var dot float32
+				for j := range qh {
+					dot += qh[j] * kh[j]
+				}
+				scores[t] = dot * scale
+			}
+			kernel.Softmax(scores)
+
+			out := b.attn[r*qdim+h*cfg.HeadDim : r*qdim+(h+1)*cfg.HeadDim]
+			clear(out)
+			for t := range scores {
+				w := scores[t]
+				off := t*kvdim + kv*cfg.HeadDim
+				vh := allV[off : off+cfg.HeadDim]
+				for j := range out {
+					out[j] += w * vh[j]
+				}
+			}
+		}
+	}
+
+	if err := m.run.MatMulTransposed(b.attnOut, b.attn, layer.wo, n, cfg.Hidden, qdim); err != nil {
+		return err
+	}
+	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
+}
+
+// feedForward runs one block's feed-forward network for every row.
+func (b *decodeBatch) feedForward(m *Model, l int) error {
+	cfg := m.W.Config
+	layer := &m.W.Layers[l]
+	n := b.n
+
+	for r := range n {
+		row := b.x[r*cfg.Hidden : (r+1)*cfg.Hidden]
+		out := b.xn[r*cfg.Hidden : (r+1)*cfg.Hidden]
+		if err := kernel.RMSNorm(out, row, layer.ffnNorm, cfg.RMSNormEps); err != nil {
+			return err
+		}
+	}
+	if err := m.run.MatMulTransposed(b.gate, b.xn, layer.wGate, n, cfg.FFN, cfg.Hidden); err != nil {
+		return err
+	}
+	if err := m.run.MatMulTransposed(b.up, b.xn, layer.wUp, n, cfg.FFN, cfg.Hidden); err != nil {
+		return err
+	}
+	kernel.SiLU(b.gate[:n*cfg.FFN])
+	if err := kernel.MulInPlace(b.up[:n*cfg.FFN], b.gate[:n*cfg.FFN]); err != nil {
+		return err
+	}
+	if err := m.run.MatMulTransposed(b.attnOut, b.up, layer.wDown, n, cfg.Hidden, cfg.FFN); err != nil {
+		return err
+	}
+	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
+}
+
+// finish normalizes every row and projects the batch onto the vocabulary.
+func (b *decodeBatch) finish(m *Model) error {
+	cfg := m.W.Config
+	n := b.n
+	for r := range n {
+		row := b.x[r*cfg.Hidden : (r+1)*cfg.Hidden]
+		out := b.xn[r*cfg.Hidden : (r+1)*cfg.Hidden]
+		if err := kernel.RMSNorm(out, row, m.W.OutputNorm, cfg.RMSNormEps); err != nil {
+			return err
+		}
+	}
+	w := m.W.Output
+	if w == nil {
+		w = m.W.TokenEmbedding
+	}
+	return m.run.MatMulTransposed(b.logits, b.xn, w, n, cfg.VocabSize, cfg.Hidden)
+}

@@ -17,6 +17,11 @@ import (
 // The number that matters for a serving engine is tokens per second under
 // concurrency, not single-stream latency. Reporting both is what shows whether
 // interleaving requests buys anything on a given machine.
+//
+// With --suite, it runs a fixed set of scenarios instead and prints them as one
+// table. A single number answers one question about one machine; the suite is what
+// shows which of the engine's mechanisms actually pay for themselves, and it is the
+// baseline any later optimisation has to beat.
 func cmdBench(args []string) error {
 	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -30,6 +35,7 @@ func cmdBench(args []string) error {
 	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --concurrency: fifo, shortest, or fair")
 	requests := fs.Int("requests", 0, "total requests; 0 means one per concurrency slot")
 	prompt := fs.String("prompt", "Once upon a time", "prompt for each request")
+	suite := fs.Bool("suite", false, "run the fixed scenario suite instead of one measurement")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -55,6 +61,25 @@ func cmdBench(args []string) error {
 	total := *requests
 	if total <= 0 {
 		total = *concurrency
+	}
+
+	// The suite builds its own engines per scenario and encodes its own prompt, so it
+	// branches before the single-measurement path constructs one it would not use.
+	if *suite {
+		tok, cfg, err := benchLoad(*model)
+		if err != nil {
+			return err
+		}
+		promptIDs := tok.Encode(*prompt, cfg.BOSID >= 0)
+		if len(promptIDs) >= cfg.ContextLen {
+			return fmt.Errorf("bench: prompt is %d tokens, context is %d", len(promptIDs), cfg.ContextLen)
+		}
+		return runSuite(suiteOptions{
+			model:   *model,
+			prompt:  promptIDs,
+			maxTok:  *maxTokens,
+			workers: *workers,
+		})
 	}
 
 	gf, err := gguf.Open(*model)

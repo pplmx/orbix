@@ -56,7 +56,7 @@ Commands:
   run <prompt>           Generate text from a prompt
   chat                   Interactive REPL with conversation history
   serve                  Serve an OpenAI-compatible HTTP API
-  bench                  Measure generation throughput
+  bench                  Measure generation throughput; --suite runs every scenario
   model inspect <path>   Print GGUF metadata, tensor types, quantization
   version                Print version and build info
   help                   Print this message

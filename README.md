@@ -290,6 +290,7 @@ orbix run --model ./model.gguf --stats --max-tokens 64 "Explain KV caching."
 orbix chat --model ./model.gguf
 
 orbix bench --model ./model.gguf --concurrency 4 --max-tokens 32
+orbix bench --model ./model.gguf --suite     # every scenario in one table
 
 orbix model inspect ./model.gguf
 orbix model inspect --json ./model.gguf   # machine-readable
@@ -297,6 +298,37 @@ orbix model inspect --json ./model.gguf   # machine-readable
 
 `orbix model inspect` is also a learning tool: it prints the GGUF layout in a
 readable form, which is useful when studying how a model file is structured.
+
+`orbix bench --suite` runs a fixed set of scenarios and prints them as one table. A
+single throughput number answers one question about one machine; the suite is what shows
+which mechanisms pay for themselves. It pairs each mechanism with a control row -- paged
+against contiguous caches, prefix reuse against none, shortest against FIFO -- so a
+difference is attributable to that mechanism rather than to the scenario changing.
+
+Measured on stories15M q4_0 with a 41-token prompt, 8 workers:
+
+```text
+SCENARIO         TOKENS  ELAPSED  TOK/S  FIRST  NOTE
+single stream    8       77ms     104.3  40ms   baseline: one request, contiguous cache
+batch x4         32      261ms    122.8  159ms  batched decode, contiguous caches
+batch x16        128     993ms    128.9  644ms  where batched decode stops scaling
+paged x16        128     983ms    130.2  643ms  same batch, block cache instead of whole-context reservations
+prefix no reuse  32      261ms    122.8  159ms  four requests sharing one prompt, reuse off
+prefix reuse x4  32      192ms    166.3  95ms   the same four, reuse on
+policy shortest  63      396ms    159.0  41ms   MaxActive 1, a short request queued behind a long one
+policy fifo      63      395ms    159.5  381ms  the same queue without reordering
+```
+
+Two of those rows need a sentence of explanation, because their numbers look flat for a
+reason:
+
+- **Paged vs contiguous** is a memory trade, not a throughput one. The paged cache serves
+  the same batch at the same speed while letting 16 sequences share one pool instead of
+  each reserving a whole context. The suite prints the pool shape so the trade is visible
+  rather than implied.
+- **The policy rows have the same total time on purpose.** A policy reorders a fixed
+  amount of work; it cannot reduce it. What it changes is the short request's first-token
+  latency, 381 ms under FIFO against 41 ms under shortest, and that is the `FIRST` column.
 
 ## Supported Models and Quantization
 

@@ -1,0 +1,354 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"text/tabwriter"
+	"time"
+
+	"github.com/pplmx/orbix/internal/engine"
+	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/tokenize"
+)
+
+// suiteOptions is what every scenario in the suite needs to build a model.
+//
+// Each scenario constructs its own engine: the mechanisms being measured are configured
+// per engine (cache shape, admission policy, worker count), so sharing one would mean
+// measuring the previous scenario's leftovers.
+type suiteOptions struct {
+	model   string
+	prompt  []int32
+	maxTok  int
+	workers int
+}
+
+// scenario is one measured configuration.
+type scenario struct {
+	name string
+	// note explains what the row is for, since a table of numbers without a question
+	// attached does not tell a reader whether a difference is expected or a regression.
+	note string
+	run  func(o suiteOptions) (result, error)
+}
+
+// result is one row's measurements. Fields that do not apply stay zero and are left
+// blank in the table rather than printed as 0, which would read as "measured as zero".
+type result struct {
+	tokens int
+	// elapsed is wall time to finish every request in the scenario.
+	elapsed time.Duration
+	// firstToken is how long until *any* request produced a token. For a scenario with
+	// nothing to reorder it is just the prefill time; for the policy rows it is the
+	// number the policies exist to change, since they reorder a fixed amount of work
+	// rather than reduce it.
+	firstToken time.Duration
+	extra      string
+}
+
+// tokPerSec is the throughput this row demonstrated.
+func (r result) tokPerSec() float64 {
+	if r.elapsed <= 0 {
+		return 0
+	}
+	return float64(r.tokens) / r.elapsed.Seconds()
+}
+
+// scenarioList is the suite, in the order it runs.
+//
+// The order matters only for reading: each scenario is independent, and the sequence is
+// arranged so the table answers its questions top to bottom -- how fast is one stream,
+// what does batching buy, what does each cache shape cost, and does reuse help.
+func scenarioList() []scenario {
+	return []scenario{
+		{
+			name: "single stream",
+			note: "baseline: one request, contiguous cache",
+			run: func(o suiteOptions) (result, error) {
+				return runRequests(o, 1, 1, engine.Options{MaxActive: 1, Workers: o.workers})
+			},
+		},
+		{
+			name: "batch x4",
+			note: "batched decode, contiguous caches",
+			run: func(o suiteOptions) (result, error) {
+				return runRequests(o, 4, 4, engine.Options{MaxActive: 4, Workers: o.workers})
+			},
+		},
+		{
+			name: "batch x16",
+			note: "where batched decode stops scaling",
+			run: func(o suiteOptions) (result, error) {
+				return runRequests(o, 16, 16, engine.Options{MaxActive: 16, Workers: o.workers})
+			},
+		},
+		{
+			name: "paged x16",
+			note: "same batch, block cache instead of whole-context reservations",
+			run: func(o suiteOptions) (result, error) {
+				return runRequests(o, 16, 16, engine.Options{
+					MaxActive: 16, Workers: o.workers,
+					BlockSize: 16, Blocks: 4096,
+				})
+			},
+		},
+		{
+			name: "prefix no reuse",
+			note: "four requests sharing one prompt, reuse off",
+			run: func(o suiteOptions) (result, error) {
+				return runRequests(o, 4, 4, engine.Options{
+					MaxActive: 4, Workers: o.workers,
+					BlockSize: 16, Blocks: 4096,
+				})
+			},
+		},
+		{
+			name: "prefix reuse x4",
+			note: "the same four, reuse on -- the pair is the comparison",
+			run: func(o suiteOptions) (result, error) {
+				return runRequests(o, 4, 4, engine.Options{
+					MaxActive: 4, Workers: o.workers,
+					BlockSize: 16, Blocks: 4096, PrefixCache: true,
+				})
+			},
+		},
+		{
+			name: "policy shortest",
+			note: "MaxActive 1, a short request queued behind a long one",
+			run: func(o suiteOptions) (result, error) {
+				return runPolicy(o, engine.PriorityShortest)
+			},
+		},
+		{
+			name: "policy fifo",
+			note: "the same queue without reordering, for comparison",
+			run: func(o suiteOptions) (result, error) {
+				return runPolicy(o, engine.PriorityFIFO)
+			},
+		},
+	}
+}
+
+// runSuite runs every scenario and prints one table.
+func runSuite(o suiteOptions) error {
+	fmt.Printf("model:       %s\n", o.model)
+	fmt.Printf("prompt:      %d tokens\n", len(o.prompt))
+	fmt.Printf("generating:  %d tokens per request\n\n", o.maxTok)
+
+	type row struct {
+		scenario scenario
+		res      result
+		err      error
+	}
+	rows := make([]row, 0, len(scenarioList()))
+	for _, sc := range scenarioList() {
+		res, err := sc.run(o)
+		rows = append(rows, row{scenario: sc, res: res, err: err})
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	var werr error
+	writef := func(format string, args ...any) {
+		if werr != nil {
+			return
+		}
+		if _, err := fmt.Fprintf(tw, format, args...); err != nil {
+			werr = err
+		}
+	}
+	writef("SCENARIO\tTOKENS\tELAPSED\tTOK/S\tFIRST\tNOTE\n")
+	for _, r := range rows {
+		if r.err != nil {
+			writef("%s\t-\t-\t-\t-\tfailed: %v\n", r.scenario.name, r.err)
+			continue
+		}
+		note := r.scenario.note
+		if r.res.extra != "" {
+			note += "; " + r.res.extra
+		}
+		first := "-"
+		if r.res.firstToken > 0 {
+			first = r.res.firstToken.Round(time.Millisecond).String()
+		}
+		writef("%s\t%d\t%s\t%.1f\t%s\t%s\n",
+			r.scenario.name, r.res.tokens, r.res.elapsed.Round(time.Millisecond),
+			r.res.tokPerSec(), first, note)
+	}
+	if werr == nil {
+		werr = tw.Flush()
+	}
+	if werr != nil {
+		return fmt.Errorf("bench: write table: %w", werr)
+	}
+
+	// A scenario failing should not hide the ones that ran, but it must not read as
+	// success either.
+	var failed []string
+	for _, r := range rows {
+		if r.err != nil {
+			failed = append(failed, r.scenario.name)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("bench: %d scenario(s) failed: %v", len(failed), failed)
+	}
+	return nil
+}
+
+// newSuiteEngine builds an engine with the suite's shared settings plus opts.
+func newSuiteEngine(o suiteOptions, opts engine.Options) (*engine.Engine, error) {
+	opts.Workers = o.workers
+	return engine.New(o.model, opts)
+}
+
+// runRequests submits n requests at once and measures the wall time to finish them all.
+//
+// Requests are submitted together and pumped together, so the elapsed time reflects
+// whatever batching the engine actually achieves rather than the caller's pacing.
+func runRequests(o suiteOptions, n, concurrency int, opts engine.Options) (result, error) {
+	opts.MaxActive = min(opts.MaxActive, concurrency)
+	eng, err := newSuiteEngine(o, opts)
+	if err != nil {
+		return result{}, err
+	}
+	prompt := o.prompt
+
+	chans := make([]<-chan engine.Event, n)
+	start := time.Now()
+	for i := range chans {
+		ch, err := eng.Submit(engine.Request{
+			Prompt:    prompt,
+			MaxTokens: o.maxTok,
+			Sampler:   llama.Greedy{},
+		})
+		if err != nil {
+			return result{}, fmt.Errorf("submit: %w", err)
+		}
+		chans[i] = ch
+	}
+	var tokens int
+	var firstToken time.Duration
+	drain := func(ch <-chan engine.Event) error {
+		for ev := range ch {
+			if ev.Err != nil {
+				return ev.Err
+			}
+			if ev.HasToken {
+				if firstToken == 0 {
+					firstToken = time.Since(start)
+				}
+				tokens++
+			}
+		}
+		return nil
+	}
+	// Drain concurrently with pumping: the buffers are bounded, so a scenario with a
+	// large token budget would block Pump waiting for a reader.
+	errs := make(chan error, len(chans))
+	for _, ch := range chans {
+		go func(ch <-chan engine.Event) { errs <- drain(ch) }(ch)
+	}
+	for eng.Pump() > 0 {
+	}
+	for range chans {
+		if err := <-errs; err != nil {
+			return result{}, err
+		}
+	}
+	r := result{tokens: tokens, elapsed: time.Since(start), firstToken: firstToken}
+	// Report what the cache actually was, since that is the variable the row exists to
+	// isolate and a misconfigured flag would otherwise look like a throughput change.
+	if pool := eng.Pool(); pool != nil {
+		r.extra = fmt.Sprintf("paged %dx%d", pool.Blocks(), pool.BlockSize())
+	}
+	return r, nil
+}
+
+// runPolicy measures how soon a short request is served behind a long one, which is the
+// property the admission policies exist to change.
+func runPolicy(o suiteOptions, policy engine.Priority) (result, error) {
+	eng, err := newSuiteEngine(o, engine.Options{MaxActive: 1, Policy: policy})
+	if err != nil {
+		return result{}, err
+	}
+	long := o.maxTok
+	if long < 60 {
+		long = 60
+	}
+	start := time.Now()
+	longCh, err := eng.Submit(engine.Request{Prompt: o.prompt, MaxTokens: long, Sampler: llama.Greedy{}})
+	if err != nil {
+		return result{}, err
+	}
+	shortCh, err := eng.Submit(engine.Request{Prompt: o.prompt, MaxTokens: 3, Sampler: llama.Greedy{}})
+	if err != nil {
+		return result{}, err
+	}
+
+	// Pump until both requests finish, draining their channels between rounds. Draining
+	// is not optional: the event buffers are bounded, and a 60-token sequence fills its
+	// buffer long before it is done, which would block Pump forever.
+	var tokens int
+	type shortStats struct {
+		round    int
+		latency  time.Duration
+		firstTok bool
+	}
+	shortFirst := make(chan shortStats, 1)
+	go func() {
+		var st shortStats
+		for ev := range shortCh {
+			if ev.HasToken {
+				if !st.firstTok {
+					st.firstTok = true
+					st.round = eng.Round()
+					st.latency = time.Since(start)
+				}
+				tokens++
+			}
+		}
+		shortFirst <- st
+	}()
+	longDone := make(chan struct{})
+	go func() {
+		defer close(longDone)
+		for ev := range longCh {
+			if ev.HasToken {
+				tokens++
+			}
+		}
+	}()
+
+	for eng.Pump() > 0 {
+	}
+	<-longDone
+	st := <-shortFirst
+	return result{
+		tokens:  tokens,
+		elapsed: time.Since(start),
+		// The short request's own latency is the property under test. Total elapsed
+		// time is dominated by the long request, which every policy must also serve, so
+		// it says nothing about the policy.
+		firstToken: st.latency,
+		extra:      fmt.Sprintf("short request's first token on round %d", st.round),
+	}, nil
+}
+
+// benchLoad opens a model just far enough to read its tokenizer and config, which is
+// what the suite needs before it can encode a prompt or size a cache.
+func benchLoad(path string) (*tokenize.Tokenizer, llama.Config, error) {
+	gf, err := gguf.Open(path)
+	if err != nil {
+		return nil, llama.Config{}, err
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		return nil, llama.Config{}, err
+	}
+	cfg, err := llama.LoadConfig(gf)
+	if err != nil {
+		return nil, llama.Config{}, err
+	}
+	return tok, cfg, nil
+}

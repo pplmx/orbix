@@ -37,6 +37,9 @@ var codecs = map[gguf.QuantType]codec{
 	gguf.Q5_0: {32, 22, decodeQ5_0},
 	gguf.Q5_1: {32, 24, decodeQ5_1},
 	gguf.Q8_0: {32, 34, decodeQ8_0},
+	// K-quants: 256-weight super-blocks with per-sub-block scales.
+	gguf.Q4_K: {256, 144, decodeQ4_K},
+	gguf.Q6_K: {256, 210, decodeQ6_K},
 }
 
 // Decode dequantizes len(dst) weights of type t from src into dst.
@@ -230,6 +233,114 @@ func decodeQ5_1(dst []float32, src []byte) {
 			lo = int(blk[8+j] >> 4)
 			hi = int(qh>>(j+16)) & 1
 			y[j+q5_1BlockSize/2] = float32(lo|hi<<4)*d + m
+		}
+	}
+}
+
+// K-quant super-block size: every K-quant covers 256 weights, with sub-blocks of 32
+// sharing a scale.
+const qkK = 256
+
+// getScaleMinK4 unpacks sub-block j's scale and minimum from a Q4_K/Q5_K block's
+// 12-byte packed header.
+//
+// The packing is dense: eight 6-bit scales and eight 6-bit mins in 12 bytes. Bytes 0-3
+// hold scales 0-3 and bytes 4-7 hold mins 0-3, each using six bits and leaving two bits
+// at the top; bytes 8-11 hold the low four bits of scales 4-7 in their low nibble and of
+// mins 4-7 in their high nibble. The high bits of the first eight bytes complete them.
+//
+// Reading this wrong is not a visible failure -- the result is a matrix of plausible
+// magnitudes with the wrong sub-block scales, which produces fluent text at the wrong
+// probabilities. The four branches below are the whole function, so they are spelled out
+// rather than folded into an index expression.
+func getScaleMinK4(j int, q []byte) (scale, minv uint8) {
+	if j < 4 {
+		return q[j] & 63, q[j+4] & 63
+	}
+	return (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4),
+		(q[j+4] >> 4) | ((q[j] >> 6) << 4)
+}
+
+// decodeQ4_K expands a Q4_K tensor.
+//
+// Block layout (144 bytes): F16 super-scale d, F16 super-min dmin, 12 packed scale/min
+// bytes, then 128 bytes of 4-bit codes. The 256 weights are eight sub-blocks of 32, each
+// with its own 6-bit scale and min:
+//
+//	x = d * scale[j] * code - dmin * min[j]
+//
+// The codes run over four iterations of 64 weights: each iteration's first 32 come from
+// the low nibbles of its 32 bytes, the next 32 from the high nibbles of the same bytes.
+// That means the nibble halves are not interleaved per byte as in Q4_0 -- they are
+// separated by 32 positions -- which is the detail most likely to be gotten wrong.
+func decodeQ4_K(dst []float32, src []byte) {
+	const blockBytes = 144
+	for b := range len(dst) / qkK {
+		blk := src[b*blockBytes:]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
+		dmin := f16.ToFloat32(binary.LittleEndian.Uint16(blk[2:]))
+		scales := blk[4:16]
+		qs := blk[16:144]
+		y := dst[b*qkK : (b+1)*qkK]
+
+		for it := range 4 {
+			sc0, m0 := getScaleMinK4(2*it, scales)
+			sc1, m1 := getScaleMinK4(2*it+1, scales)
+			d1, m1f := d*float32(sc0), dmin*float32(m0)
+			d2, m2f := d*float32(sc1), dmin*float32(m1)
+
+			qOff := it * 32
+			yOff := it * 64
+			for l := range 32 {
+				q := qs[qOff+l]
+				y[yOff+l] = d1*float32(q&0x0F) - m1f
+				y[yOff+32+l] = d2*float32(q>>4) - m2f
+			}
+		}
+	}
+}
+
+// decodeQ6_K expands a Q6_K tensor.
+//
+// Block layout (210 bytes): 128 bytes of low nibbles, 64 bytes of high 2-bit codes, 16
+// signed 8-bit sub-block scales, then the F16 super-scale -- note that d comes *last*,
+// unlike every other format here, which is the detail that makes this decoder different
+// from the rest rather than a variation on Q4_K.
+//
+//	x = d * scales[is] * (code - 32)
+//
+// The 256 weights are processed as two halves of 128. Within a half, each of 32 byte
+// positions yields four weights: low nibble of ql[l] and ql[l+32], then their high
+// nibbles, with the high two bits taken from successive bit pairs of qh[l].
+func decodeQ6_K(dst []float32, src []byte) {
+	const blockBytes = 210
+	for b := range len(dst) / qkK {
+		blk := src[b*blockBytes:]
+		ql := blk[0:128]
+		qh := blk[128:192]
+		scales := blk[192:208]
+		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[208:]))
+		y := dst[b*qkK : (b+1)*qkK]
+
+		// Two halves of 128 weights, each using 64 bytes of ql, 32 of qh, 8 scales.
+		for half := range 2 {
+			yOff := half * 128
+			qlOff := half * 64
+			qhOff := half * 32
+			scOff := half * 8
+			for l := range 32 {
+				is := l / 16
+				h := qh[qhOff+l]
+				q1 := int8((ql[qlOff+l]&0x0F)|((h&0x03)<<4)) - 32
+				q2 := int8((ql[qlOff+l+32]&0x0F)|(((h>>2)&0x03)<<4)) - 32
+				q3 := int8((ql[qlOff+l]>>4)|(((h>>4)&0x03)<<4)) - 32
+				q4 := int8((ql[qlOff+l+32]>>4)|(((h>>6)&0x03)<<4)) - 32
+
+				y[yOff+l] = d * float32(int8(scales[scOff+is])) * float32(q1)
+				y[yOff+l+32] = d * float32(int8(scales[scOff+is+2])) * float32(q2)
+				y[yOff+l+64] = d * float32(int8(scales[scOff+is+4])) * float32(q3)
+				y[yOff+l+96] = d * float32(int8(scales[scOff+is+6])) * float32(q4)
+			}
 		}
 	}
 }

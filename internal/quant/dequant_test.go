@@ -210,13 +210,13 @@ func TestDecodeRejectsMismatchedSizes(t *testing.T) {
 }
 
 func TestDecodeRejectsUnsupportedType(t *testing.T) {
-	// Q4_K is a real ggml type that this package does not decode yet. It must
-	// be reported as unsupported rather than decoded with the wrong layout.
-	if err := Decode(gguf.Q4_K, make([]byte, 144), make([]float32, 256)); err == nil {
-		t.Fatal("Decode(Q4_K) succeeded, want an unsupported-type error")
+	// Q5_K is a real ggml type this package does not decode. It must be reported as
+	// unsupported rather than decoded with a neighbouring format's layout.
+	if err := Decode(gguf.Q5_K, make([]byte, 176), make([]float32, 256)); err == nil {
+		t.Fatal("Decode(Q5_K) succeeded, want an unsupported-type error")
 	}
-	if Supported(gguf.Q4_K) {
-		t.Error("Supported(Q4_K) = true")
+	if Supported(gguf.Q5_K) {
+		t.Error("Supported(Q5_K) = true")
 	}
 	if !Supported(gguf.Q4_0) {
 		t.Error("Supported(Q4_0) = false")
@@ -584,4 +584,316 @@ func appendF16Bytes(dst []byte, v float32) []byte {
 	var tmp [2]byte
 	binary.LittleEndian.PutUint16(tmp[:], f16.FromFloat32(v))
 	return append(dst, tmp[:]...)
+}
+
+// K-quants use 256-weight super-blocks with per-sub-block scales, which makes them the
+// first formats here whose layout cannot be checked by eye. Two tests below: exact
+// values on constructed blocks, and a round trip whose error is bounded by the format's
+// step size.
+
+func TestDecodeQ4_K(t *testing.T) {
+	// d=1.0, dmin=0.5, sub-block scales 1..8, mins 8..1, and codes that make a
+	// permutation visible: low nibble i+1, high nibble 255-i.
+	sc := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	mn := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+	src := buildKBlock(t, 1.0, 0.5, sc, mn, q4KCodes())
+	dst := make([]float32, 256)
+	if err := Decode(gguf.Q4_K, src, dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	for it := range 4 {
+		lo := float32(sc[2*it])
+		hi := float32(sc[2*it+1])
+		mlo := 0.5 * float32(mn[2*it])
+		mhi := 0.5 * float32(mn[2*it+1])
+		for l := range 32 {
+			q := q4KCodes()[it*32+l]
+			if want := lo*float32(q&0x0F) - mlo; dst[it*64+l] != want {
+				t.Fatalf("sub-block %d low[%d] = %v, want %v", it, l, dst[it*64+l], want)
+			}
+			if want := hi*float32(q>>4) - mhi; dst[it*64+32+l] != want {
+				t.Fatalf("sub-block %d high[%d] = %v, want %v", it, l, dst[it*64+32+l], want)
+			}
+		}
+	}
+}
+
+// q4KCodes is the 128-byte code section the Q4_K layout test uses.
+func q4KCodes() []byte {
+	out := make([]byte, 128)
+	for i := range out {
+		out[i] = byte((i+1)&0x0F) | byte((255-i)&0x0F)<<4
+	}
+	return out
+}
+
+// buildKBlock assembles a Q4_K block: F16 d, F16 dmin, packed scales, 128 code bytes.
+func buildKBlock(t *testing.T, d, dmin float32, sc, mn, qs []byte) []byte {
+	t.Helper()
+	out := make([]byte, 0, 144)
+	out = appendF16(t, out, d)
+	out = appendF16(t, out, dmin)
+	var packed [12]byte
+	for i := range 4 {
+		packed[i] = (sc[i] & 0x3F) | ((sc[i+4] >> 4) << 6)
+		packed[i+4] = (mn[i] & 0x3F) | ((mn[i+4] >> 4) << 6)
+		packed[8+i] = (sc[i+4] & 0x0F) | ((mn[i+4] & 0x0F) << 4)
+	}
+	out = append(out, packed[:]...)
+	return append(out, qs...)
+}
+
+func TestGetScaleMinK4(t *testing.T) {
+	// The packing is dense enough to deserve its own test: eight 6-bit scales and eight
+	// 6-bit mins in 12 bytes, with the last four of each split across two bytes.
+	sc := []byte{1, 2, 3, 4, 5, 6, 7, 63}
+	mn := []byte{8, 9, 10, 11, 12, 13, 14, 62}
+	var q [12]byte
+	for i := range 4 {
+		q[i] = (sc[i] & 0x3F) | ((sc[i+4] >> 4) << 6)
+		q[i+4] = (mn[i] & 0x3F) | ((mn[i+4] >> 4) << 6)
+		q[8+i] = (sc[i+4] & 0x0F) | ((mn[i+4] & 0x0F) << 4)
+	}
+	for j := range 8 {
+		gotSC, gotM := getScaleMinK4(j, q[:])
+		if gotSC != sc[j] || gotM != mn[j] {
+			t.Errorf("j=%d: scale/min = %d/%d, want %d/%d", j, gotSC, gotM, sc[j], mn[j])
+		}
+	}
+}
+
+func TestDecodeQ6_K(t *testing.T) {
+	// d=0.25, signed scales -8..7, and distinguishable quants. Q6_K stores d last.
+	src := buildQ6KBlock(t, 0.25, q6KCodes())
+	dst := make([]float32, 256)
+	if err := Decode(gguf.Q6_K, src, dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ql, qh, scales := q6KParts(q6KCodes())
+	for half := range 2 {
+		for l := range 32 {
+			is := l / 16
+			h := qh[half*32+l]
+			wants := [4]float32{
+				0.25 * float32(int8(scales[half*8+is])) * float32(int8(ql[half*64+l]&0x0F|((h&3)<<4))-32),
+				0.25 * float32(int8(scales[half*8+is+2])) * float32(int8(ql[half*64+l+32]&0x0F|(((h>>2)&3)<<4))-32),
+				0.25 * float32(int8(scales[half*8+is+4])) * float32(int8(ql[half*64+l]>>4|(((h>>4)&3)<<4))-32),
+				0.25 * float32(int8(scales[half*8+is+6])) * float32(int8(ql[half*64+l+32]>>4|(((h>>6)&3)<<4))-32),
+			}
+			for k, want := range wants {
+				idx := half*128 + l + k*32
+				if dst[idx] != want {
+					t.Fatalf("half %d l %d q%d: [%d] = %v, want %v", half, l, k+1, idx, dst[idx], want)
+				}
+			}
+		}
+	}
+}
+
+// q6KCodes is the 192-byte ql+qh section the Q6_K layout test uses.
+func q6KCodes() []byte {
+	out := make([]byte, 192)
+	for i := range 128 {
+		out[i] = byte(i&0x0F) | byte((i*3)&0x0F)<<4
+	}
+	for i := range 64 {
+		out[128+i] = byte(i&3) | byte((i+1)&3)<<2 | byte((i+2)&3)<<4 | byte((i+3)&3)<<6
+	}
+	return out
+}
+
+// q6KParts splits the test block's code section into its three regions.
+func q6KParts(codes []byte) (ql, qh, scales []byte) {
+	ql = codes[0:128]
+	qh = codes[128:192]
+	scales = make([]byte, 16)
+	for i := range scales {
+		scales[i] = byte((i % 16) - 8)
+	}
+	return ql, qh, scales
+}
+
+// buildQ6KBlock assembles a Q6_K block: 128 ql, 64 qh, 16 signed scales, F16 d.
+func buildQ6KBlock(t *testing.T, d float32, codes []byte) []byte {
+	t.Helper()
+	out := append([]byte(nil), codes...)
+	_, _, scales := q6KParts(codes)
+	out = append(out, scales...)
+	return appendF16(t, out, d)
+}
+
+// TestKQuantRoundTrip bounds each K-quant decoder's error by the format's step size.
+//
+// A wrong sub-block scale or a nibble-order mistake still decodes to plausible
+// magnitudes, so the exact tests above are what catch a permutation; this one catches a
+// decoder that is self-consistent but disagrees with the encoder about magnitudes.
+func TestKQuantRoundTrip(t *testing.T) {
+	r := rand.New(rand.NewSource(17))
+	const blocks = 64
+	src := make([]float32, blocks*256)
+	for i := range src {
+		src[i] = float32(r.NormFloat64() * 0.06)
+	}
+
+	tests := []struct {
+		name     string
+		typ      gguf.QuantType
+		encode   func([]float32) []byte
+		maxError float64
+	}{
+		{"Q4_K", gguf.Q4_K, encodeQ4K, 0.05},
+		{"Q6_K", gguf.Q6_K, encodeQ6K, 0.01},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enc := tc.encode(src)
+			got := make([]float32, len(src))
+			if err := Decode(tc.typ, enc, got); err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			var maxErr, sum float64
+			for i := range src {
+				e := math.Abs(float64(got[i] - src[i]))
+				maxErr = math.Max(maxErr, e)
+				sum += e
+			}
+			mean := sum / float64(len(src))
+			t.Logf("%s: max error %.5f, mean %.6f", tc.name, maxErr, mean)
+			if maxErr > tc.maxError {
+				t.Errorf("max error %.5f exceeds the bound %.3f", maxErr, tc.maxError)
+			}
+			if mean == 0 {
+				t.Error("decoded values are identical to the source")
+			}
+		})
+	}
+}
+
+// encodeQ4K quantizes with Q4_K's layout: eight sub-blocks of 32, each with its own
+// 6-bit scale and min.
+//
+// d and dmin are the super-block references the 6-bit fields are measured against. The
+// encoder picks them from the largest sub-block range, which is how a real encoder does
+// it: the fields can only express a ratio to d, so d has to be large enough that the
+// biggest sub-block still fits in six bits.
+func encodeQ4K(src []float32) []byte {
+	out := make([]byte, 0, len(src)/256*144)
+	for b := 0; b < len(src); b += 256 {
+		blk := src[b : b+256]
+
+		// First pass: each sub-block's range, and the largest of them, which sets d.
+		type subRange struct{ lo, hi float32 }
+		var ranges [8]subRange
+		maxStep := float32(0)
+		for sb := range 8 {
+			sub := blk[sb*32 : (sb+1)*32]
+			lo, hi := sub[0], sub[0]
+			for _, v := range sub {
+				lo = min(lo, v)
+				hi = max(hi, v)
+			}
+			ranges[sb] = subRange{lo: lo, hi: hi}
+			maxStep = max(maxStep, (hi-lo)/15)
+		}
+		if maxStep == 0 {
+			maxStep = 1
+		}
+		d := maxStep / 63 // so the largest sub-block's scale fits in six bits
+		if d == 0 {
+			d = 1
+		}
+		maxMin := float32(0)
+		for _, r := range ranges {
+			maxMin = max(maxMin, -r.lo)
+		}
+		dmin := maxMin / 63
+		if dmin == 0 {
+			dmin = d
+		}
+
+		var sc, mn [8]byte
+		var codes [128]byte
+		for sb := range 8 {
+			r := ranges[sb]
+			step := (r.hi - r.lo) / 15
+			if step == 0 {
+				step = 1
+			}
+			sc[sb] = byte(min(max(int(math.Round(float64(step/d))), 1), 63))
+			mn[sb] = byte(min(max(int(math.Round(float64(-r.lo/dmin))), 0), 63))
+			for i, v := range blk[sb*32 : (sb+1)*32] {
+				putQ4KCode(codes[:], sb, i, byte(min(max(int(math.Round(float64((v-r.lo)/step))), 0), 15)))
+			}
+		}
+		out = appendF16Bytes(out, d)
+		out = appendF16Bytes(out, dmin)
+		var packed [12]byte
+		for i := range 4 {
+			packed[i] = (sc[i] & 0x3F) | ((sc[i+4] >> 4) << 6)
+			packed[i+4] = (mn[i] & 0x3F) | ((mn[i+4] >> 4) << 6)
+			packed[8+i] = (sc[i+4] & 0x0F) | ((mn[i+4] & 0x0F) << 4)
+		}
+		out = append(out, packed[:]...)
+		out = append(out, codes[:]...)
+	}
+	return out
+}
+
+// putQ4KCode writes sub-block sb's element i into the Q4_K code layout.
+//
+// Sub-blocks are packed in pairs: byte (sb/2)*32 + i carries sub-block sb's element i in
+// its low nibble and sub-block sb+1's in its high nibble. Writing a code to the wrong
+// nibble leaves the neighbouring sub-block's values intact but every other sub-block
+// decoding to its partner's data, which is why this is a helper rather than an index.
+func putQ4KCode(codes []byte, sb, i int, code byte) {
+	idx := (sb/2)*32 + i
+	if sb%2 == 0 {
+		codes[idx] = codes[idx]&0xF0 | code&0x0F
+		return
+	}
+	codes[idx] = codes[idx]&0x0F | (code&0x0F)<<4
+}
+
+// encodeQ6K quantizes with Q6_K's layout: 16 groups of 16, each with an int8 scale.
+func encodeQ6K(src []float32) []byte {
+	out := make([]byte, 0, len(src)/256*210)
+	for b := 0; b < len(src); b += 256 {
+		blk := src[b : b+256]
+		// One scale per 16 weights, chosen so the block's largest magnitude fits in
+		// the 6-bit range (-32..31).
+		peak := float32(0)
+		for _, v := range blk {
+			peak = max(peak, float32(math.Abs(float64(v))))
+		}
+		d := peak / 31
+		if d == 0 {
+			d = 1
+		}
+		var q [256]int
+		for i, v := range blk {
+			q[i] = min(max(int(math.Round(float64(v/d))), -32), 31)
+		}
+		ql := make([]byte, 128)
+		qh := make([]byte, 64)
+		scales := make([]byte, 16)
+		for i := range scales {
+			scales[i] = 1
+		}
+		for half := range 2 {
+			for l := range 32 {
+				q1 := q[half*128+l] + 32
+				q2 := q[half*128+l+32] + 32
+				q3 := q[half*128+l+64] + 32
+				q4 := q[half*128+l+96] + 32
+				ql[half*64+l] = byte(q1&0x0F) | byte(q3&0x0F)<<4
+				ql[half*64+l+32] = byte(q2&0x0F) | byte(q4&0x0F)<<4
+				qh[half*32+l] = byte((q1>>4)&3) | byte((q2>>4)&3)<<2 | byte((q3>>4)&3)<<4 | byte((q4>>4)&3)<<6
+			}
+		}
+		out = append(out, ql...)
+		out = append(out, qh...)
+		out = append(out, scales...)
+		out = appendF16Bytes(out, d)
+	}
+	return out
 }

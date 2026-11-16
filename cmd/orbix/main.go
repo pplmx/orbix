@@ -26,6 +26,8 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "run":
+		return cmdRun(args[1:])
 	case "model":
 		return cmdModel(args[1:])
 	case "version":
@@ -45,6 +47,7 @@ Usage:
   orbix <command> [arguments]
 
 Commands:
+  run <prompt>           Generate text from a prompt
   model inspect <path>   Print GGUF metadata, tensor types, quantization
   version                Print version and build info
   help                   Print this message

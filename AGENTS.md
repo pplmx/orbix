@@ -33,7 +33,8 @@ internal/quant/     反量化：F32/F16/BF16/Q4_0/Q8_0 + 张量加载器
 internal/kernel/    参考算子：matmul / RMSNorm / softmax / SiLU
 internal/tokenize/  SentencePiece 分词，对齐 llama.cpp 的 SPM 实现
 internal/llama/     Llama 架构：超参数校验、RoPE、KV cache、前向推理、采样
-internal/engine/    调度：多序列交错推进、每序列独立 logits
+internal/engine/    调度：批量 prefill、批量 decode、每序列独立 logits 与 KV cache
+internal/server/    HTTP：OpenAI 兼容 API、SSE 流式、断连取消
 internal/<层>/      后续层按 README 的阅读顺序添加
 ```
 

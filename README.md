@@ -76,6 +76,7 @@ verified:
 | Tokenizer      | `internal/tokenize` | SentencePiece segmentation matching llama.cpp's implementation token for token.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Engine         | `internal/engine`   | Batches a scheduling round: every pending prompt prefills in one pass, then every active sequence decodes together in one pass, so concurrency raises total throughput. Each sequence keeps its own logits copy and its own KV cache. `MaxActive` bounds how many sequences advance per round. The KV cache is either a contiguous arena per sequence or paged blocks from one shared pool.                                                                                                                                                                                             |
 | Transformer    | `internal/llama`    | Llama forward pass with adjacent-pair RoPE, grouped-query attention, and two KV cache layouts: a contiguous arena per sequence and a paged cache over a shared block pool. `Prefill` runs a prompt as one matrix-matrix sequence and returns the last position's logits; `DecodeStep` advances several sequences one token each in one pass. Both are bit-identical to the per-token path and produce identical logits on either cache layout. Greedy decoding on a real checkpoint reproduces llama.cpp's text exactly, and per-token log-probabilities agree to within about 0.1 nat. |
+| Server         | `internal/server`   | `orbix serve`: OpenAI-compatible `/v1/chat/completions` and `/v1/completions` with SSE streaming, `/v1/models`, and `/healthz`. Streaming text is decoded incrementally so multi-byte characters split across tokens still render; concatenated stream deltas equal the non-streaming body exactly. A disconnected client cancels its sequence through the engine.                                                                                                                                                                                                                      |
 
 ## What You Can Learn From This Codebase
 
@@ -180,9 +181,9 @@ func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error
 
 ## Quick Start
 
-`orbix run` and `orbix model inspect` work today. The serving and embedding
-snippets are the target API, kept here so the shape of the engine stays visible
-while the upper layers are built.
+`orbix run`, `orbix model inspect`, `orbix bench`, and `orbix serve` work today.
+The embedding snippet below is the target API, kept here so the shape of the
+engine stays visible while that layer is built.
 
 ### Serve a GGUF model
 
@@ -193,6 +194,19 @@ orbix serve \
   --model ./models/qwen2.5-7b-instruct-q4_0.gguf \
   --addr :8080
 ```
+
+The server implements `/v1/chat/completions`, `/v1/completions` (both streaming
+and not), `/v1/models`, and `/healthz`. Two things about the chat endpoint are
+worth knowing before pointing a client at it:
+
+- **The chat template is neutral.** GGUF stores a model's real template as
+  Jinja2, and this project takes no Jinja dependency. The server renders
+  `Role: content` lines and leaves the assistant turn open. If your model needs
+  its own header or marker tokens, render the prompt yourself and send it to
+  `/v1/completions`, which passes text through verbatim.
+- **`stop` matches on token ids.** A stop string is encoded and its first token
+  is used, which covers `"\n"` and marker strings. A stop that spans several
+  tokens is not matched.
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -268,7 +282,7 @@ the [Roadmap](#roadmap) and will not appear until they work.
 | `orbix run "<prompt>"`       | One-shot inference                              | v0.1     |
 | `orbix version`              | Print version and build info                    | v0.1     |
 | `orbix chat`                 | Interactive REPL with history                   | planned  |
-| `orbix serve`                | Start the OpenAI-compatible inference server    | planned  |
+| `orbix serve`                | Start the OpenAI-compatible inference server    | v0.3     |
 | `orbix bench`                | Run a built-in throughput/latency benchmark     | v0.2     |
 
 ```bash
@@ -323,7 +337,7 @@ The roadmap is a learning path as much as a feature list. Each version adds one 
 
 - [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
 - [ ] `v0.2` — **Scheduling and cache**: scheduler with continuous batching, paged `KVCacheManager`, Q4_0/Q4_1, Qwen2 — *partial: continuous batching works (batched prefill and batched decode, `MaxActive` caps a round), a paged KV cache over a shared block pool works, and `orbix bench` reports throughput; prefix reuse, admission policy, and Qwen2 are not done*
-- [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral
+- [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — *partial: `orbix serve` implements chat and text completions with SSE streaming and client-disconnect cancellation, and renders a neutral chat template; a model's own Jinja template, priority queues, and the extra quant types are not done*
 - [ ] `v0.4` — **Performance paths**: K-quants, prefix-aware radix cache, `amd64` AVX2 and `arm64` NEON assembly
 - [ ] `v0.5` — **Measurement and observability**: `orbix bench` suite, remote HTTP backend, Prometheus and OpenTelemetry
 - [ ] `v1.0` — **Stable API**: cross-platform CI matrix, published benchmarks, documented reading path

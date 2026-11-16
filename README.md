@@ -319,6 +319,17 @@ Orbix targets the GGUF ecosystem. Initial support:
 
 GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally.
 
+Both supported architectures are checked against real checkpoints, not only against
+synthetic fixtures. `scripts/hf_to_gguf.py` converts a Qwen2.5 safetensors checkpoint
+to GGUF for that purpose; it is deliberately independent of the Go code, because a
+converter that shared the loader's assumptions could not catch a wrong one. With
+`QWEN2_MODEL` set it runs those tests:
+
+```bash
+uv run --with numpy python3 scripts/hf_to_gguf.py ./Qwen2.5-0.5B-Instruct /tmp/qwen2-f32.gguf
+QWEN2_MODEL=/tmp/qwen2-f32.gguf go test ./internal/llama/ -run Qwen2
+```
+
 ## Performance Expectations
 
 Orbix is a learning project, and it is honest about where it stands:

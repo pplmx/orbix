@@ -102,26 +102,35 @@ If you are learning LLM inference, the intended reading order is top to bottom: 
                                  │
 ┌────────────────────────────────▼────────────────────────────────┐
 │                            Scheduler                            │
-│             continuous batching · priority · queues             │
-└──────────────┬──────────────────────────────────┬───────────────┘
-               │                                  │
-┌─────────────────────────────┐   ┌───────────────────────────────┐
-│       KVCacheManager        │   │            Backend            │
-│        paged blocks         │   │      native Go (default)      │
-│        radix prefix         │   │          remote HTTP          │
-└─────────────────────────────┘   └───────────────┬───────────────┘
-                                                  │
-                                  ┌───────────────▼───────────────┐
-                                  │        Compute kernels        │
-                                  │       quantized matmul        │
-                                  │       attention · norms       │
-                                  └───────────────────────────────┘
+│                continuous batching · admission policy           │
+└──────────────┬───────────────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────┐   ┌───────────────────────────┐
+│           KV cache              │   │     Compute kernels       │
+│   BlockPool: refcounted blocks  │   │     quantized matmul      │
+│   PagedKVCache: per-sequence    │   │     attention · norms     │
+│   PrefixIndex: hashed prefixes  │   │     silu · softmax        │
+└─────────────────────────────────┘   └───────────────────────────┘
 ```
 
+Solid boxes above are what the code does today. Two components that a project like
+this usually has are deliberately *not* drawn, because drawing them would imply they
+exist:
+
+- There is no `Backend` abstraction. One compute path exists -- the in-process
+  kernels -- and introducing an interface with a single implementation would be
+  ceremony rather than a seam. A remote backend is the change that would earn it.
+- There is no `KVCacheManager` interface, and no radix tree. The paged cache and its
+  hashed prefix index cover the same job: a shared pool of reference-counted blocks,
+  and an index that hands back the blocks a repeated prompt prefix already produced.
+  The index matches whole blocks by hash and compares the tokens, so a collision
+  costs a rejected hit rather than a wrong result. A radix tree would let a prefix be
+  matched at sub-block granularity and would make evicting a subtree natural, which
+  is a real difference -- but it would not change what the cache is for, so it is not
+  claimed here.
 - **Scheduler** owns admission, batching, and the prefill/decode lifecycle.
-- **KV cache** is `llama.BlockPool` + `llama.PagedKVCache` + `llama.PrefixIndex`: a shared pool of reference-counted blocks, and an index that hands back the blocks a repeated prompt prefix already produced.
-- **Backend** is the compute boundary. The default `native` backend runs kernels in-process.
-- **Compute kernels** are where the pure-Go work happens, with reference implementations first and assembly fast paths later.
+- **Compute kernels** are where the pure-Go work happens, with reference
+  implementations first and assembly fast paths later.
 
 Dependencies point downward only. Kernels never import the scheduler; the scheduler never imports the server.
 

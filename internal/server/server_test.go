@@ -499,3 +499,83 @@ func TestStopFieldAcceptsBothSpellings(t *testing.T) {
 		}
 	}
 }
+
+// TestPolicyAffectsShortRequestLatency measures what an admission policy is for, through
+// the layer a user actually talks to: a short request submitted while a long one holds
+// the model.
+//
+// The numbers are timing, so the assertions are deliberately loose -- the point is the
+// order of magnitude, not a millisecond count. A tight bound would fail on a loaded
+// machine while telling nobody anything.
+func TestPolicyAffectsShortRequestLatency(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file")
+	}
+	measure := func(t *testing.T, policy engine.Priority) time.Duration {
+		t.Helper()
+		srv := serverWithPolicy(t, path, policy)
+		var wg sync.WaitGroup
+
+		wg.Go(func() {
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Once upon a time", "max_tokens": 40}`)
+			decodeBody[completionResponse](t, resp)
+		})
+		// Wait until the long request is actually in the engine, so the short one is
+		// queued behind it rather than racing it.
+		waitFor(t, 5*time.Second, func() bool { return srv.eng.Active() > 0 },
+			"the long request never started")
+
+		var wait time.Duration
+		wg.Go(func() {
+			start := time.Now()
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Hi", "max_tokens": 2}`)
+			decodeBody[completionResponse](t, resp)
+			wait = time.Since(start)
+		})
+		wg.Wait()
+		return wait
+	}
+
+	fifo := measure(t, engine.PriorityFIFO)
+	t.Logf("fifo:     short request took %v", fifo.Round(time.Millisecond))
+	for _, policy := range []engine.Priority{engine.PriorityShortest, engine.PriorityFair} {
+		got := measure(t, policy)
+		t.Logf("%-9s short request took %v", policy, got.Round(time.Millisecond))
+		// Fair and shortest both let the short request in within a round or two, so a
+		// third of the FIFO wait is a generous ceiling that still fails if the policy
+		// stops applying.
+		if fifo > 0 && got > fifo/3 {
+			t.Errorf("%v: short request waited %v, want less than a third of fifo's %v", policy, got, fifo)
+		}
+	}
+}
+
+// serverWithPolicy builds a server whose engine runs exactly one request at a time under
+// the given policy, so the test can observe queueing rather than batching.
+func serverWithPolicy(t *testing.T, path string, policy engine.Priority) *Server {
+	t.Helper()
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{MaxActive: 1, Policy: policy})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Run(ctx)
+	return srv
+}

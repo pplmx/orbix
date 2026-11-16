@@ -27,6 +27,7 @@ func cmdBench(args []string) error {
 	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
 	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix")
+	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --concurrency: fifo, shortest, or fair")
 	requests := fs.Int("requests", 0, "total requests; 0 means one per concurrency slot")
 	prompt := fs.String("prompt", "Once upon a time", "prompt for each request")
 	if err := fs.Parse(args); err != nil {
@@ -64,8 +65,13 @@ func cmdBench(args []string) error {
 	if err != nil {
 		return err
 	}
+	schedPolicy, err := engine.ParsePriority(*policy)
+	if err != nil {
+		return err
+	}
 	eng, err := engine.New(*model, engine.Options{
 		MaxActive:   *concurrency,
+		Policy:      schedPolicy,
 		Workers:     *workers,
 		BlockSize:   *blockSize,
 		Blocks:      *blocks,
@@ -85,8 +91,8 @@ func cmdBench(args []string) error {
 	fmt.Printf("model:       %s\n", cfg)
 	fmt.Printf("params:      %d\n", eng.Model().W.Params())
 	fmt.Printf("prompt:      %d tokens\n", len(promptTokens))
-	fmt.Printf("generating:  %d tokens x %d requests, concurrency %d, workers %d\n",
-		*maxTokens, total, *concurrency, eng.Model().Runner().Workers())
+	fmt.Printf("generating:  %d tokens x %d requests, concurrency %d, %s policy, workers %d\n",
+		*maxTokens, total, *concurrency, schedPolicy, eng.Model().Runner().Workers())
 	if pool := eng.Pool(); pool != nil {
 		fmt.Printf("kv cache:    paged, %d blocks x %d positions = %.2f MiB shared\n",
 			pool.Blocks(), pool.BlockSize(), float64(pool.Bytes())/(1<<20))

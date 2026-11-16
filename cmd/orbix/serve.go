@@ -30,6 +30,7 @@ func cmdServe(args []string) error {
 	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
 	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
+	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --max-active: fifo, shortest, or fair")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -52,8 +53,13 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	schedPolicy, err := engine.ParsePriority(*policy)
+	if err != nil {
+		return err
+	}
 	eng, err := engine.New(*model, engine.Options{
 		MaxActive:   *maxActive,
+		Policy:      schedPolicy,
 		Workers:     *workers,
 		BlockSize:   *blockSize,
 		Blocks:      *blocks,
@@ -92,6 +98,7 @@ func cmdServe(args []string) error {
 	go srv.Run(ctx)
 
 	fmt.Printf("orbix serving %s on %s\n", cfg, url)
+	fmt.Printf("scheduling: %d active, %s policy\n", *maxActive, schedPolicy)
 	fmt.Printf("POST %s/v1/chat/completions\n", url)
 	if pool := eng.Pool(); pool != nil {
 		fmt.Printf("kv cache: paged, %d blocks x %d positions = %.2f MiB shared\n",

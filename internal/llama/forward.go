@@ -63,6 +63,13 @@ func New(path string) (*Model, error) {
 // Config returns the model's hyperparameters.
 func (m *Model) Config() Config { return m.W.Config }
 
+// Logits returns the logits from the most recent successful Forward call.
+//
+// The slice is owned by the model and is overwritten by the next forward pass,
+// so a caller that needs values past that point must copy. It returns nil before
+// the first forward pass.
+func (m *Model) Logits() []float32 { return m.logits }
+
 // Forward runs one token through the model at the given position and returns
 // the logits over the vocabulary.
 //

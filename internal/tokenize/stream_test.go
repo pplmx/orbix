@@ -117,3 +117,53 @@ func TestStreamDecoderSingleToken(t *testing.T) {
 		t.Errorf("streamed %q, Decode gives %q", got, want)
 	}
 }
+
+// TestDecodeUndoesBPEByteEscaping covers GPT-2 byte-level BPE pieces, which the
+// Qwen family uses instead of SentencePiece. A decoder that only knows the
+// SentencePiece marker renders "Ġthe" as "the" with no space and "Ċ" as a literal
+// two-character string, which reads as a sampling quirk rather than as a bug.
+func TestDecodeUndoesBPEByteEscaping(t *testing.T) {
+	// The escaping is a property of the vocabulary, not of a checkpoint, so a
+	// synthetic tokenizer is enough and this test needs no model file.
+	tok := &Tokenizer{
+		tokens: []string{"ĠOnce", "Ġupon", "Ġa", "Ċ", "Ġtime", "ĉtab", "hello"},
+		types:  []TokenType{Normal, Normal, Normal, Normal, Normal, Normal, Normal},
+		index:  map[string]int32{},
+	}
+	got := tok.Decode([]int32{0, 1, 2, 4})
+	if want := "Once upon a time"; got != want {
+		t.Errorf("Decode = %q, want %q", got, want)
+	}
+	// "Ġupon" carries its own space, so the newline is followed by one space.
+	if got := tok.Decode([]int32{0, 3, 1}); got != "Once\n upon" {
+		t.Errorf("Decode with a newline token = %q, want %q", got, "Once\n upon")
+	}
+	if got := tok.Decode([]int32{5}); got != "\ttab" {
+		t.Errorf("Decode with a tab token = %q, want %q", got, "\ttab")
+	}
+	// A plain ASCII piece passes through unchanged.
+	if got := tok.Decode([]int32{6}); got != "hello" {
+		t.Errorf("Decode = %q, want hello", got)
+	}
+}
+
+// TestStreamDecoderMatchesBPEVocabulary checks the incremental path handles the
+// same vocabulary, since streaming is where a wrong escape becomes a visible
+// artifact in the middle of a response.
+func TestStreamDecoderMatchesBPEVocabulary(t *testing.T) {
+	tok := &Tokenizer{
+		tokens: []string{"ĠOnce", "Ġupon", "Ġa", "Ċ", "Ġtime"},
+		types:  []TokenType{Normal, Normal, Normal, Normal, Normal},
+		index:  map[string]int32{},
+	}
+	ids := []int32{0, 1, 2, 4, 3}
+	want := tok.Decode(ids)
+	dec := tok.Seq()
+	var got strings.Builder
+	for _, id := range ids {
+		got.WriteString(dec.Token(id))
+	}
+	if got.String() != want {
+		t.Errorf("streamed %q, Decode gives %q", got.String(), want)
+	}
+}

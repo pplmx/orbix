@@ -32,6 +32,42 @@ const (
 // " hello" is one token while "hello" may be several.
 const spacePrefix = "\u2581"
 
+// bpeBytes is GPT-2's byte-to-character table, the inverse of the escaping its
+// byte-level BPE applies before training: byte b is rendered as the character with
+// code points[b] so that a vocabulary can be valid UTF-8 text. Every byte outside
+// the printable ASCII range, plus space, is mapped.
+//
+// Qwen-family models use this vocabulary instead of SentencePiece's, and the table
+// is what makes them decode: space becomes U+0120 ("Ġ") and newline U+010A ("Ċ").
+// A decoder that only knows the SentencePiece marker leaves every word after the
+// first joined to the previous one and renders newlines as literal "Ċ", which is
+// legible enough to be mistaken for a sampling problem rather than a bug.
+//
+// Decoding has to undo it. Without this the newline token renders as "Ċ" and the
+// tab token as "ĉ", which is what a Qwen checkpoint produces out of the box: the
+// text is legible enough to be mistaken for a sampling problem.
+var bpeBytes = func() map[rune]byte {
+	// The reversible table GPT-2 uses: printable ASCII (except space) maps to
+	// itself, and everything else is assigned the next unused code point from 256.
+	var keep [256]bool
+	for b := '!'; b <= '~'; b++ {
+		keep[b] = true
+	}
+	table := make(map[rune]byte, 256)
+	next := 0
+	for b := range 256 {
+		var r rune
+		if keep[b] {
+			r = rune(b)
+		} else {
+			r = rune(256 + next)
+			next++
+		}
+		table[r] = byte(b)
+	}
+	return table
+}()
+
 // unknownSurface is how SentencePiece renders an unknown token on decode.
 const unknownSurface = " \u2047 "
 
@@ -433,7 +469,7 @@ func (t *Tokenizer) Decode(ids []int32) string {
 			b.WriteString(unknownSurface)
 			continue
 		}
-		b.WriteString(strings.ReplaceAll(t.tokens[id], spacePrefix, " "))
+		b.WriteString(bpeUnescape(t.tokens[id]))
 	}
 	flushBytes()
 
@@ -534,7 +570,7 @@ func (d *StreamDecoder) Token(id int32) string {
 	if d.tok.types[id] == Unknown {
 		b.WriteString(unknownSurface)
 	} else {
-		b.WriteString(strings.ReplaceAll(d.tok.tokens[id], spacePrefix, " "))
+		b.WriteString(bpeUnescape(d.tok.tokens[id]))
 	}
 	out := b.String()
 	if !d.started && strings.HasPrefix(out, " ") {
@@ -574,4 +610,34 @@ func (d *StreamDecoder) drainPending(force bool) string {
 	out := strings.ToValidUTF8(string(d.pending), "\uFFFD")
 	d.pending = d.pending[:0]
 	return out
+}
+
+// bpeUnescape renders one vocabulary piece as text, undoing both space markers and
+// GPT-2's byte escaping.
+//
+// A SentencePiece piece carries U+2581 for a space and is otherwise plain text; a
+// GPT-2 byte-level piece carries one escaped character per byte. Both are handled
+// here so the two vocabulary families decode through the same call site, which is
+// what keeps the incremental decoder from needing to know which one it has.
+func bpeUnescape(piece string) string {
+	if !strings.ContainsFunc(piece, func(r rune) bool {
+		_, ok := bpeBytes[r]
+		return ok && r > 0x7e
+	}) {
+		// Fast path: no escaped bytes, so only the SentencePiece marker can appear.
+		return strings.ReplaceAll(piece, spacePrefix, " ")
+	}
+	var b strings.Builder
+	for _, r := range piece {
+		if r == ' ' || r == 0x2581 {
+			b.WriteByte(' ')
+			continue
+		}
+		if c, ok := bpeBytes[r]; ok {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

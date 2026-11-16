@@ -28,6 +28,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "run":
 		return cmdRun(args[1:])
+	case "bench":
+		return cmdBench(args[1:])
 	case "model":
 		return cmdModel(args[1:])
 	case "version":
@@ -48,6 +50,7 @@ Usage:
 
 Commands:
   run <prompt>           Generate text from a prompt
+  bench                  Measure generation throughput
   model inspect <path>   Print GGUF metadata, tensor types, quantization
   version                Print version and build info
   help                   Print this message

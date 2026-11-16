@@ -74,6 +74,7 @@ verified:
 | Dequantization | `internal/quant`    | F32, F16, BF16, Q4_0, Q8_0. Decoded values for every tensor in a real model compared bit for bit with a reference.                                                                                                                                                        |
 | Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers.                                                                                                                                                                                        |
 | Tokenizer      | `internal/tokenize` | SentencePiece segmentation matching llama.cpp's implementation token for token.                                                                                                                                                                                           |
+| Engine         | `internal/engine`   | Interleaves several sequences over one model, one token per sequence per round. Each sequence keeps its own logits copy. Concurrency does not yet raise total throughput: the forward pass is not batched, so the engine shares time rather than work.                    |
 | Transformer    | `internal/llama`    | Llama forward pass with adjacent-pair RoPE, grouped-query attention, and a contiguous KV cache. Greedy and temperature sampling. Greedy decoding on a real checkpoint reproduces llama.cpp's text exactly, and per-token log-probabilities agree to within about 0.1 nat. |
 
 ## What You Can Learn From This Codebase
@@ -263,11 +264,13 @@ the [Roadmap](#roadmap) and will not appear until they work.
 | `orbix version`              | Print version and build info                    | v0.1     |
 | `orbix chat`                 | Interactive REPL with history                   | planned  |
 | `orbix serve`                | Start the OpenAI-compatible inference server    | planned  |
-| `orbix bench`                | Run a built-in throughput/latency benchmark     | planned  |
+| `orbix bench`                | Run a built-in throughput/latency benchmark     | v0.2     |
 
 ```bash
 orbix run --model ./model.gguf "Once upon a time"
 orbix run --model ./model.gguf --stats --max-tokens 64 "Explain KV caching."
+
+orbix bench --model ./model.gguf --concurrency 4 --max-tokens 32
 
 orbix model inspect ./model.gguf
 orbix model inspect --json ./model.gguf   # machine-readable
@@ -313,7 +316,7 @@ The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it t
 The roadmap is a learning path as much as a feature list. Each version adds one conceptual layer.
 
 - [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
-- [ ] `v0.2` — **Scheduling and cache**: scheduler with continuous batching, paged `KVCacheManager`, Q4_0/Q4_1, Qwen2
+- [ ] `v0.2` — **Scheduling and cache**: scheduler with continuous batching, paged `KVCacheManager`, Q4_0/Q4_1, Qwen2 — *partial: the engine interleaves sequences and `orbix bench` reports throughput; batching inside the forward pass, paging, and Qwen2 are not done*
 - [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral
 - [ ] `v0.4` — **Performance paths**: K-quants, prefix-aware radix cache, `amd64` AVX2 and `arm64` NEON assembly
 - [ ] `v0.5` — **Measurement and observability**: `orbix bench` suite, remote HTTP backend, Prometheus and OpenTelemetry

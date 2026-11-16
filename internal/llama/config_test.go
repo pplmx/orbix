@@ -670,3 +670,74 @@ func TestGenerateStopsAtContextLimit(t *testing.T) {
 		t.Errorf("Generate produced %d tokens with a 4-position cache", len(out))
 	}
 }
+
+func TestLoadConfigMistral(t *testing.T) {
+	// Mistral is Llama's architecture with a sliding window and a different
+	// tokenizer: same rotation, no attention biases. Registering it with Qwen2's
+	// rotation would produce fluent text with the wrong numbers.
+	c := defaultTiny()
+	kvs := c.kvs()
+	for i := range kvs {
+		if kvs[i].key == "general.architecture" {
+			kvs[i].val = strVal("mistral")
+			continue
+		}
+		if after, ok := strings.CutPrefix(kvs[i].key, "llama."); ok {
+			kvs[i].key = "mistral." + after
+		}
+	}
+	kvs = append(kvs, kv{"mistral.attention.sliding_window", u32Val(4)})
+
+	f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Arch != "mistral" {
+		t.Errorf("Arch = %q, want mistral", cfg.Arch)
+	}
+	if cfg.RopeLayout != RopeNormal {
+		t.Errorf("RopeLayout = %v, want RopeNormal", cfg.RopeLayout)
+	}
+	if cfg.AttnBias {
+		t.Error("AttnBias = true; Mistral has no attention biases")
+	}
+	if cfg.WindowLen != 4 {
+		t.Errorf("WindowLen = %d, want 4", cfg.WindowLen)
+	}
+}
+
+func TestLoadConfigWindowLenDefaultsToUnbounded(t *testing.T) {
+	// A model that omits sliding_window attends over its whole context. Reading the
+	// absence as zero and then trimming to zero positions would leave attention with
+	// nothing to look at.
+	f := parseTiny(t, defaultTiny())
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.WindowLen != 0 {
+		t.Errorf("WindowLen = %d, want 0 (unbounded)", cfg.WindowLen)
+	}
+}
+
+func TestLoadConfigWindowLenIgnoresNonPositive(t *testing.T) {
+	// Published Mistral fine-tunes exist with sliding_window set to 0 to mean "no
+	// window", which is the same thing as omitting it.
+	c := defaultTiny()
+	kvs := append(c.kvs(), kv{"llama.attention.sliding_window", u32Val(0)})
+	f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.WindowLen != 0 {
+		t.Errorf("WindowLen = %d, want 0", cfg.WindowLen)
+	}
+}

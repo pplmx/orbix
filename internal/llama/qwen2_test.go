@@ -261,8 +261,10 @@ func TestQwen2PrefillMatchesForward(t *testing.T) {
 // should be a visible change, and removing one should fail a test rather than a
 // user's model load.
 func TestQwen2ArchitectureRegistry(t *testing.T) {
-	if got := supportedArchs(); !strings.Contains(got, "llama") || !strings.Contains(got, "qwen2") {
-		t.Errorf("supported architectures = %q, want llama and qwen2", got)
+	for _, want := range []string{"llama", "mistral", "qwen2"} {
+		if got := supportedArchs(); !strings.Contains(got, want) {
+			t.Errorf("supported architectures = %q, want %s", got, want)
+		}
 	}
 	spec, ok := archSpecs["qwen2"]
 	if !ok {
@@ -277,5 +279,14 @@ func TestQwen2ArchitectureRegistry(t *testing.T) {
 	}
 	if spec.rope != RopeNormal || spec.attnBias {
 		t.Errorf("llama spec = %+v, want the normal rotation without bias", spec)
+	}
+	// Mistral shares Llama's rotation and bias layout; what differs is the sliding
+	// window, which comes from the config key rather than the table.
+	spec, ok = archSpecs["mistral"]
+	if !ok {
+		t.Fatal("mistral is not registered")
+	}
+	if spec.rope != RopeNormal || spec.attnBias {
+		t.Errorf("mistral spec = %+v, want the normal rotation without bias", spec)
 	}
 }

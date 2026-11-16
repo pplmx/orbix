@@ -66,6 +66,16 @@ type Config struct {
 	// to extend the usable context; the default is 1.
 	RopeScale float32
 
+	// WindowLen is how many recent positions attention may read, or 0 for no limit.
+	//
+	// Mistral trained with a 4096-position sliding window: each token attends to the
+	// previous 4096 and no further. Applying full attention instead does not fail --
+	// it produces fluent text with subtly wrong probabilities, because the model never
+	// learned to weigh distant tokens. Treating the window as a cache bound is also
+	// wrong: the cache still has to hold the context the caller asked for, since the
+	// positions come back into range for later tokens.
+	WindowLen int
+
 	// RMSNormEps is the epsilon in the RMS normalization.
 	RMSNormEps float32
 
@@ -120,8 +130,9 @@ type archSpec struct {
 // English with the wrong numbers, which is far harder to notice than an error
 // naming the architecture.
 var archSpecs = map[string]archSpec{
-	"llama": {rope: RopeNormal, attnBias: false},
-	"qwen2": {rope: RopeNeox, attnBias: true},
+	"llama":   {rope: RopeNormal, attnBias: false},
+	"mistral": {rope: RopeNormal, attnBias: false},
+	"qwen2":   {rope: RopeNeox, attnBias: true},
 }
 
 // LoadConfig reads the architecture parameters and validates them.
@@ -217,6 +228,12 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// YaRN-trained model produces plausible but wrong text instead of an error.
 	if t, ok := f.Get[string](arch + ".rope.scaling.type"); ok && t != "" && t != "linear" && t != "none" {
 		return Config{}, fmt.Errorf("llama: unsupported rope scaling type %q", t)
+	}
+
+	// The sliding window is per-architecture, and a missing key means unbounded: a
+	// Mistral fine-tune that trained with full attention sets it to 0 or omits it.
+	if v, ok := f.Get[int](arch + ".attention.sliding_window"); ok && v > 0 {
+		cfg.WindowLen = v
 	}
 
 	cfg.RMSNormEps = 1e-5

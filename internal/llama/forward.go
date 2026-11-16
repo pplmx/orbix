@@ -231,9 +231,16 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 		if err != nil {
 			return err
 		}
+		// A sliding-window model reads only the recent positions, which bounds
+		// attention rather than storage: the cache still holds the whole context.
+		if cfg.WindowLen > 0 {
+			keys = trimSpans(keys, cfg.WindowLen)
+			values = trimSpans(values, cfg.WindowLen)
+		}
+		nWin := spanRows(keys)
 		qh := m.q[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 		out := m.attn[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
-		if err := attend(qh, keys, values, n, m.scores, out, scale); err != nil {
+		if err := attend(qh, keys, values, nWin, m.scores, out, scale); err != nil {
 			return err
 		}
 	}

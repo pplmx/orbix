@@ -329,10 +329,15 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 			if err != nil {
 				return err
 			}
+			if cfg.WindowLen > 0 {
+				keys = trimSpans(keys, cfg.WindowLen)
+				values = trimSpans(values, cfg.WindowLen)
+			}
+			nWin := spanRows(keys)
 			qOff := i*qdim + h*cfg.HeadDim
 			qh := b.q[qOff : qOff+cfg.HeadDim]
 			out := b.attn[i*qdim+h*cfg.HeadDim : i*qdim+(h+1)*cfg.HeadDim]
-			if err := attend(qh, keys, values, m2, b.scores, out, scale); err != nil {
+			if err := attend(qh, keys, values, nWin, b.scores, out, scale); err != nil {
 				return err
 			}
 		}
@@ -589,9 +594,14 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 			if err != nil {
 				return err
 			}
+			if cfg.WindowLen > 0 {
+				keys = trimSpans(keys, cfg.WindowLen)
+				values = trimSpans(values, cfg.WindowLen)
+			}
+			nWin := spanRows(keys)
 			qh := qRow[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 			out := b.attn[r*qdim+h*cfg.HeadDim : r*qdim+(h+1)*cfg.HeadDim]
-			if err := attend(qh, keys, values, m2, b.scores[r], out, scale); err != nil {
+			if err := attend(qh, keys, values, nWin, b.scores[r], out, scale); err != nil {
 				return err
 			}
 		}

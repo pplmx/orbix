@@ -149,9 +149,16 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 		if err != nil {
 			return err
 		}
+		// A sliding-window model reads only the recent positions, which is a bound on
+		// attention rather than on storage.
+		if cfg.WindowLen > 0 {
+			keys = trimSpans(keys, cfg.WindowLen)
+			values = trimSpans(values, cfg.WindowLen)
+		}
+		nWin := spanRows(keys)
 		qh := m.q[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 		out := m.attn[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
-		if err := attend(qh, keys, values, n, m.scores, out, scale); err != nil {
+		if err := attend(qh, keys, values, nWin, m.scores, out, scale); err != nil {
 			return err
 		}
 	}
@@ -180,4 +187,39 @@ func (m *Model) addBias(layer *layer, rows int) error {
 		return err
 	}
 	return kernel.AddBias(m.v, layer.vBias, rows, cfg.kvDim())
+}
+
+// trimSpans drops all but the last keep rows from a span list.
+//
+// A sliding-window model attends over only the most recent WindowLen positions, but the
+// cache still holds them all: the window bounds attention, not storage. Trimming here
+// instead of in the caches keeps the policy in one place -- a contiguous cache and a
+// paged one both lose rows the same way, and neither needs to know a window exists.
+//
+// The returned spans alias the originals. A partially-trimmed span keeps its row stride
+// and starts at the first surviving row, so one span may be split at a block boundary
+// without copying anything.
+func trimSpans(spans []span, keep int) []span {
+	total := spanRows(spans)
+	if keep >= total {
+		return spans
+	}
+	if keep <= 0 {
+		return nil
+	}
+	drop := total - keep
+	out := make([]span, 0, len(spans))
+	for _, s := range spans {
+		if drop >= s.rows {
+			drop -= s.rows
+			continue
+		}
+		if drop > 0 {
+			s.data = s.data[drop*s.stride:]
+			s.rows -= drop
+			drop = 0
+		}
+		out = append(out, s)
+	}
+	return out
 }

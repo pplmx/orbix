@@ -306,7 +306,8 @@ Orbix targets the GGUF ecosystem. Initial support:
 | ----------------------- | -------------------- | ------------ |
 | **Llama / Llama 2 / 3** | `llama`              | v0.1         |
 | **Qwen 2 / 2.5**        | `qwen2`              | v0.2         |
-| **Mistral / Mixtral**   | `mistral`, `mixtral` | planned v0.3 |
+| **Mistral**             | `mistral`            | v0.3         |
+| **Mixtral**             | `mixtral`            | planned v0.4 |
 | **Gemma**               | `gemma`              | planned v0.4 |
 
 | Quantization                   | Status |
@@ -351,7 +352,7 @@ The roadmap is a learning path as much as a feature list. Each version adds one 
 
 - [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
 - [x] `v0.2` — **Scheduling and cache**: continuous batching, a paged KV cache, Q4_0/Q4_1, Qwen2 — batched prefill and decode with an admission policy, a reference-counted paged cache with prefix reuse, every 32-weight ggml block format, Llama and Qwen2
-- [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — *partial: `orbix serve` implements chat and text completions with SSE streaming and client-disconnect cancellation, an admission policy stands in for priority queues, and Q5_0/Q5_1 decode; a model's own Jinja template, per-request priorities, and Mistral are not done*
+- [ ] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — *partial: `orbix serve` implements chat and text completions with SSE streaming and client-disconnect cancellation; an admission policy stands in for priority queues; Q5_0/Q5_1 decode and the `mistral` architecture with its sliding window work. A model's own Jinja template, per-request priorities, and Mixtral's mixture of experts are not done*
 - [ ] `v0.4` — **Performance paths**: K-quants, prefix-aware radix cache, `amd64` AVX2 and `arm64` NEON assembly — *partial: every K-quant and IQ4_NL decode, and the paged cache with a prefix index covers the reuse case; a radix-based prefix tree and assembly are not done*
 - [ ] `v0.5` — **Measurement and observability**: `orbix bench` suite, remote HTTP backend, Prometheus and OpenTelemetry
 - [ ] `v1.0` — **Stable API**: cross-platform CI matrix, published benchmarks, documented reading path

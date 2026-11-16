@@ -3,6 +3,7 @@ package kernel
 import (
 	"fmt"
 	"math"
+	"slices"
 )
 
 // MatMul computes dst = a @ b for row-major matrices.
@@ -22,20 +23,20 @@ func MatMul(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMul(dst, a, b, m, n, k); err != nil {
 		return err
 	}
-	for i := 0; i < m; i++ {
+	for i := range m {
 		dstRow := dst[i*n : (i+1)*n]
 		// Zero the row first: MatMul assigns, it does not accumulate.
 		for j := range dstRow {
 			dstRow[j] = 0
 		}
 		aRow := a[i*k : (i+1)*k]
-		for p := 0; p < k; p++ {
+		for p := range k {
 			av := aRow[p]
 			if av == 0 {
 				continue
 			}
 			bRow := b[p*n : (p+1)*n]
-			for j := 0; j < n; j++ {
+			for j := range n {
 				dstRow[j] += av * bRow[j]
 			}
 		}
@@ -57,13 +58,13 @@ func MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMul(dst, a, nil, m, n, k); err != nil {
 		return err
 	}
-	for i := 0; i < m; i++ {
+	for i := range m {
 		aRow := a[i*k : (i+1)*k]
 		dstRow := dst[i*n : (i+1)*n]
-		for j := 0; j < n; j++ {
+		for j := range n {
 			bRow := b[j*k : (j+1)*k]
 			var sum float32
-			for p := 0; p < k; p++ {
+			for p := range k {
 				sum += aRow[p] * bRow[p]
 			}
 			dstRow[j] = sum
@@ -88,10 +89,10 @@ func MatVec(dst, a, v []float32, n, k int) error {
 	if len(dst) < n {
 		return fmt.Errorf("kernel: dst has %d values, need %d", len(dst), n)
 	}
-	for j := 0; j < n; j++ {
+	for j := range n {
 		row := a[j*k : (j+1)*k]
 		var sum float32
-		for p := 0; p < k; p++ {
+		for p := range k {
 			sum += row[p] * v[p]
 		}
 		dst[j] = sum
@@ -126,7 +127,7 @@ func RMSNorm(dst, src, weight []float32, eps float32) error {
 	// loses enough precision to change the normalized values.
 	scale := float32(1 / math.Sqrt(mean+float64(eps)))
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		dst[i] = src[i] * scale * weight[i]
 	}
 	return nil
@@ -141,12 +142,9 @@ func Softmax(scores []float32) {
 	if len(scores) == 0 {
 		return
 	}
-	max := scores[0]
-	for _, v := range scores[1:] {
-		if v > max {
-			max = v
-		}
-	}
+	// The max of the whole slice; slices.Max handles the comparison and reads
+	// as the intent rather than as a loop that happens to compute it.
+	max := slices.Max(scores)
 
 	var sum float64
 	for i, v := range scores {

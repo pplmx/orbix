@@ -381,7 +381,7 @@ func (t *Tokenizer) resegment(span string, rev map[string][2]string, out []int32
 // encodeBytes appends the byte-token sequence for a piece the vocabulary
 // cannot represent directly.
 func (t *Tokenizer) encodeBytes(piece string, out []int32) []int32 {
-	for i := 0; i < len(piece); i++ {
+	for i := range len(piece) {
 		if id := t.byteID[piece[i]]; id >= 0 {
 			out = append(out, id)
 		} else if t.unknownID >= 0 {

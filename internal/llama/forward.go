@@ -30,6 +30,11 @@ type Model struct {
 	up      []float32 // [ffn]
 	scores  []float32 // [ctx] attention scores for one head
 	logits  []float32 // [vocab]
+
+	// buf holds the multi-row scratch used by Prefill. It is allocated on first
+	// use and grows to the largest batch seen, so a single-token run never pays
+	// for it.
+	buf *batch
 }
 
 // New loads a model from a GGUF file and prepares its scratch buffers.

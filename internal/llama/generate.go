@@ -146,17 +146,14 @@ func (m *Model) Generate(cache *KVCache, prompt []int32, sampler Sampler, opts G
 	out := make([]int32, 0, len(prompt)+opts.MaxTokens)
 	out = append(out, prompt...)
 
-	var logits []float32
-	for pos, tok := range prompt {
-		next, err := m.Forward(cache, int(tok), pos)
-		if err != nil {
-			return nil, fmt.Errorf("llama: prefill token %d at %d: %w", tok, pos, err)
-		}
-		// Only the last prompt token's logits are used to start generating.
-		if pos == len(prompt)-1 {
-			logits = append([]float32(nil), next...)
-		}
+	// The prompt is prefilled in one batched pass. Nothing consumes the
+	// intermediate rows: only the last position's logits start generation, and
+	// the KV cache is what the decode loop needs from the rest.
+	prefilled, err := m.Prefill(cache, prompt, 0)
+	if err != nil {
+		return nil, fmt.Errorf("llama: prefill %d prompt tokens: %w", len(prompt), err)
 	}
+	logits := append([]float32(nil), prefilled...)
 
 	pos := len(prompt)
 	for range opts.MaxTokens {

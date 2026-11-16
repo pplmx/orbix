@@ -26,9 +26,13 @@ make bench   # 基准测试
 ## 目录
 
 ```text
-cmd/orbix/         CLI 入口：参数解析、输出渲染
-internal/gguf/     GGUF 容器解析：头部、元数据、张量目录、张量数据
-internal/<层>/     后续层按 README 的阅读顺序添加
+cmd/orbix/          CLI 入口：参数解析、输出渲染
+internal/gguf/      GGUF 容器解析：头部、元数据、张量目录、张量数据
+internal/f16/       binary16 与 float32 互转（量化 scale 的基础）
+internal/quant/     反量化：F32/F16/BF16/Q4_0/Q8_0 + 张量加载器
+internal/kernel/    参考算子：matmul / RMSNorm / softmax / SiLU
+internal/tokenize/  SentencePiece 分词，对齐 llama.cpp 的 SPM 实现
+internal/<层>/      后续层按 README 的阅读顺序添加
 ```
 
 ## 分层与阅读顺序
@@ -36,6 +40,19 @@ internal/<层>/     后续层按 README 的阅读顺序添加
 README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必须写 `doc.go`，讲清"这一层在推理里负责什么"，而不是复述代码。
 
 顺序：GGUF → kernels → KV cache → scheduler → server。新代码顺着这个顺序加，上层可以依赖下层。
+
+## Go 版本与现代化写法
+
+`go.mod` 声明 `go 1.27.0`，工具链低于 1.27 无法构建。用不上旧写法的地方就用新特性：
+
+- **泛型方法**（Go 1.27 新增）：替代 `(T, bool)` 一族的访问器。见 `gguf.File.Get[T]` / `GetArray[T]`，由目标类型选择转换，越界或类型不符返回 `false`。
+- **`iter.Seq` / `iter.Seq2`**：遍历用迭代器。`File.All()` 按 key 排序产出 `(string, Value)`，`File.Tensors()` 按文件顺序产出 `TensorInfo`；需要 `len` 时用 `TensorCount()` / `MetadataCount()`，不要为了 `len` 退回返回切片。
+- **`slices` / `maps`**：排序、查找、转换用泛型版本。`slices.Sorted(maps.Keys(m))` 替掉"收集 key + sort.Strings"，`slices.SortFunc` 替掉 `sort.Slice`。
+- **`strings.CutLast`**（Go 1.27 新增）：切最后一个分隔符用 `CutLast`，不要手算索引。
+- **`sync.WaitGroup.Go`**（Go 1.25）：并发任务用 `wg.Go(fn)`，不需要 `wg.Add(1)` + `defer wg.Done()`。并发必须有界，用带缓冲 channel 当信号量，不做无界 fan-out。
+- 能用的还有 `min` / `max` 内建、`for range N`、泛型容器。
+
+新增普通访问器时先想想能否用 `Get[T]`；只有需要"缺失时返回默认值"这类语义时才另写方法，并在注释里说明原因。
 
 ## 代码风格
 

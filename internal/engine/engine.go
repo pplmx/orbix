@@ -55,17 +55,11 @@ type sequence struct {
 //
 // Concurrency here is cooperative, not parallel: llama.Model keeps scratch
 // buffers per instance, so a single loaded model runs one forward pass at a
-// time. What the engine buys is interleaving -- each active sequence advances by
-// one token per round, so a short request finishes without waiting for a long
-// one. That is what continuous batching means at this stage, and it is the
-// property a scheduler is built to preserve when the forward pass later grows
-// real batching.
-//
-// The one place the engine does batch work today is prefill: a sequence's whole
-// prompt goes through llama.Prefill in a single pass, so prompt processing is
-// shared rather than interleaved. Decode stays one token per sequence per round,
-// which is why concurrency still trades per-stream speed for fairness instead of
-// raising total throughput.
+// time. What the engine buys is batching -- a round prefills every pending
+// prompt and then decodes every active sequence in one pass -- so concurrency
+// raises total throughput rather than only dividing one stream's speed. Each
+// sequence still advances by one token per round, which is what keeps a short
+// request from waiting behind a long one.
 type Engine struct {
 	model     *llama.Model
 	maxActive int
@@ -148,14 +142,25 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	return s.events, nil
 }
 
-// Pump advances every active sequence by one token.
+// Pump advances the active sequences by one round.
 //
 // It returns the number of sequences still running after the round. A caller
-// loops until Pump reports zero; each call is one scheduling round, which is
-// what makes the interleaving observable to tests.
+// loops until Pump reports zero; each call is one scheduling round, which is what
+// makes the interleaving observable to tests.
 //
-// Panics inside the model propagate: a corrupt forward pass should not be
-// turned into a per-request error that hides a bug in the engine.
+// A round has two phases. Sequences still holding prompt tokens prefill, one
+// batched pass each. Sequences that already hold their prompt sample their next
+// token and then decode together in a single batched pass, so the projections run
+// once for the whole round instead of once per sequence. A sequence prefills in
+// one round and decodes from the next, which keeps every round a single step per
+// sequence and leaves the interleaving property intact.
+//
+// At most MaxActive sequences advance per round; the rest wait in submission
+// order. That bound is what keeps a burst of requests from allocating a batch
+// whose scratch dwarfs the model.
+//
+// Panics inside the model propagate: a corrupt forward pass should not be turned
+// into a per-request error that hides a bug in the engine.
 func (e *Engine) Pump() int {
 	e.mu.Lock()
 	seqs := make([]*sequence, 0, len(e.active))
@@ -167,14 +172,37 @@ func (e *Engine) Pump() int {
 	// Deterministic order keeps runs reproducible, which matters when comparing
 	// against a reference implementation.
 	sortByID(seqs)
+	if len(seqs) > e.maxActive {
+		seqs = seqs[:e.maxActive]
+	}
 
 	eos := int32(-1)
 	if v := e.model.Config().EOSID; v >= 0 {
 		eos = int32(v)
 	}
 
+	// Phase 1: prefill. Each sequence is independent here, and Prefill batches
+	// internally, so there is nothing to share between sequences.
+	var decoding []*sequence
 	for _, s := range seqs {
-		e.step(s, eos)
+		if s.pos < len(s.req.Prompt) {
+			e.prefill(s)
+			continue
+		}
+		decoding = append(decoding, s)
+	}
+
+	// Phase 2: sample, then decode the survivors together.
+	batch := make([]pending, 0, len(decoding))
+	for _, s := range decoding {
+		tok, ok := e.sample(s, eos)
+		if !ok {
+			continue
+		}
+		batch = append(batch, pending{s: s, tok: tok})
+	}
+	if len(batch) > 0 {
+		e.decode(batch)
 	}
 
 	e.mu.Lock()
@@ -183,61 +211,85 @@ func (e *Engine) Pump() int {
 	return n
 }
 
-// step advances one sequence by a single token.
-//
-// Every decision here is taken from this sequence's own logits copy. The model
-// has one scratch buffer, so its output must be captured immediately after the
-// forward pass returns and before any other sequence runs.
-func (e *Engine) step(s *sequence, eos int32) {
-	cfg := e.model.Config()
+// pending is one sequence's participation in a batched decode.
+type pending struct {
+	s   *sequence
+	tok int32
+}
 
-	// Prefill: the whole prompt in one batched pass. The projections become a
-	// single matrix-matrix product instead of one per token, so prompt
-	// processing is shared work rather than shared time.
-	//
+// prefill processes a sequence's remaining prompt in one batched pass.
+func (e *Engine) prefill(s *sequence) {
 	// pos doubles as the prompt index here because a sequence prefills before it
-	// decodes anything: while pos < len(Prompt) the cache holds exactly the
-	// prompt prefix, which is the invariant Prefill requires.
-	if s.pos < len(s.req.Prompt) {
-		out, err := e.model.Prefill(s.cache, s.req.Prompt[s.pos:], s.pos)
-		if err != nil {
-			e.finish(s, Event{Err: err, FinishReason: "error"})
-			return
-		}
-		// Prefill returns the logits of the last position: decoding continues
-		// from exactly there.
-		copy(s.logits, out)
-		s.pos = len(s.req.Prompt)
+	// decodes anything: while pos < len(Prompt) the cache holds exactly the prompt
+	// prefix, which is the invariant Prefill requires.
+	out, err := e.model.Prefill(s.cache, s.req.Prompt[s.pos:], s.pos)
+	if err != nil {
+		e.finish(s, Event{Err: err, FinishReason: "error"})
 		return
 	}
+	// Prefill returns the logits of the last position: decoding continues from
+	// exactly there.
+	copy(s.logits, out)
+	s.pos = len(s.req.Prompt)
+}
+
+// sample picks a sequence's next token and emits it. It reports false when the
+// sequence finished this round and must not be decoded.
+//
+// Every decision here is taken from this sequence's own logits copy: the model
+// holds one scratch buffer, so a sequence's logits must be captured before the
+// batch runs.
+func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
+	cfg := e.model.Config()
 
 	if len(s.out) >= s.req.MaxTokens {
 		e.finish(s, Event{Done: true, FinishReason: "length"})
-		return
+		return 0, false
 	}
 
 	tok := s.sampler.Next(s.logits)
 	if tok == eos || contains(s.req.Stop, tok) {
 		e.finish(s, Event{Done: true, FinishReason: "stop"})
-		return
+		return 0, false
 	}
 	s.out = append(s.out, tok)
 	s.events <- Event{Token: tok, HasToken: true}
 
 	if s.pos >= cfg.ContextLen {
 		e.finish(s, Event{Done: true, FinishReason: "length"})
-		return
+		return 0, false
 	}
-	out, err := e.model.Forward(s.cache, int(tok), s.pos)
-	if err != nil {
-		e.finish(s, Event{Err: err, FinishReason: "error"})
-		return
-	}
-	copy(s.logits, out)
-	s.pos++
+	return tok, true
+}
 
-	if len(s.out) >= s.req.MaxTokens {
-		e.finish(s, Event{Done: true, FinishReason: "length"})
+// decode advances every pending sequence by one token in a single batched pass.
+func (e *Engine) decode(batch []pending) {
+	caches := make([]*llama.KVCache, len(batch))
+	tokens := make([]int32, len(batch))
+	for i, p := range batch {
+		caches[i] = p.s.cache
+		tokens[i] = p.tok
+	}
+
+	out, err := e.model.DecodeStep(caches, tokens)
+	if err != nil {
+		// The whole round failed. Each sequence's cache may or may not have
+		// advanced, so decoding cannot continue for any of them: finish them all
+		// with the error rather than leaving some in the active set with a cache
+		// that no longer matches its position.
+		for _, p := range batch {
+			e.finish(p.s, Event{Err: err, FinishReason: "error"})
+		}
+		return
+	}
+
+	cfg := e.model.Config()
+	for i, p := range batch {
+		copy(p.s.logits, out[i*cfg.VocabSize:(i+1)*cfg.VocabSize])
+		p.s.pos++
+		if len(p.s.out) >= p.s.req.MaxTokens {
+			e.finish(p.s, Event{Done: true, FinishReason: "length"})
+		}
 	}
 }
 

@@ -338,3 +338,68 @@ func TestWorkersOptionReachesTheModel(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxActiveQueuesExcessRequests checks the cap actually applies. Before the
+// batched decode existed MaxActive was stored but never consulted, so a caller
+// could set it to 2 and still have all eight requests advance in one round.
+func TestMaxActiveQueuesExcessRequests(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	gf, _ := gguf.Open(path)
+	tok, _ := tokenize.New(gf)
+	prompt := tok.Encode("Once upon a time", true)
+
+	e, err := New(path, Options{MaxActive: 2, Workers: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const requests = 5
+	chans := make([]<-chan Event, requests)
+	for i := range chans {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		chans[i] = ch
+	}
+	if got := e.Active(); got != requests {
+		t.Fatalf("Active = %d, want %d", got, requests)
+	}
+
+	// Drain concurrently: five sequences x three tokens exceeds the channel
+	// buffer, so Pump would block if nobody is reading.
+	results := make([][]int32, requests)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i, ch := range chans {
+			for ev := range ch {
+				if ev.Err != nil {
+					t.Errorf("sequence %d: %v", i, ev.Err)
+				}
+				if ev.HasToken {
+					results[i] = append(results[i], ev.Token)
+				}
+			}
+		}
+	}()
+	for e.Pump() > 0 {
+	}
+	<-done
+	for i := range results {
+		if len(results[i]) != 3 {
+			t.Errorf("sequence %d produced %d tokens, want 3", i, len(results[i]))
+		}
+	}
+}
+
+// TestMaxActiveZeroDefaultsToEight pins the default, which is otherwise only
+// visible by reading the constructor.
+func TestMaxActiveZeroDefaultsToEight(t *testing.T) {
+	e, _ := loadModel(t)
+	if got := e.MaxActive(); got != 8 {
+		t.Errorf("default MaxActive = %d, want 8", got)
+	}
+}

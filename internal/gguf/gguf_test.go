@@ -514,3 +514,83 @@ func TestBaseNameEdgeCases(t *testing.T) {
 		}
 	}
 }
+
+func TestGetEveryIntegerWidth(t *testing.T) {
+	// Every integer width in the constraint must convert from every stored
+	// integer type. A generic accessor whose conversions only work for some
+	// widths is worse than no generic accessor: the failure looks like a
+	// missing key rather than a wrong implementation.
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	for _, tc := range []struct {
+		key  string
+		want int64
+	}{
+		{"llama.block_count", 1},           // uint32
+		{"tokenizer.ggml.bos_token_id", 3}, // uint32
+	} {
+		if got, ok := f.Get[int](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[int](%s) = %d, %v, want %d", tc.key, got, ok, tc.want)
+		}
+		if got, ok := f.Get[int8](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[int8](%s) = %d, %v, want %d", tc.key, got, ok, tc.want)
+		}
+		if got, ok := f.Get[int16](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[int16](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[int32](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[int32](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[int64](tc.key); !ok || got != tc.want {
+			t.Errorf("Get[int64](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[uint8](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[uint8](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[uint16](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[uint16](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[uint32](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[uint32](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[uint64](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[uint64](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[uint](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[uint](%s) = %d, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[float32](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[float32](%s) = %v, %v", tc.key, got, ok)
+		}
+		if got, ok := f.Get[float64](tc.key); !ok || int64(got) != tc.want {
+			t.Errorf("Get[float64](%s) = %v, %v", tc.key, got, ok)
+		}
+	}
+}
+
+func TestGetSignedness(t *testing.T) {
+	// A negative int32 must not be readable as any unsigned type; silently
+	// wrapping it would turn -1 into 4294967295.
+	data := buildFile([]kv{{"orbix.test.neg", i32Val(-1)}}, nil, 32, nil)
+	f, err := Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got, ok := f.Get[int32]("orbix.test.neg"); !ok || got != -1 {
+		t.Errorf("Get[int32] = %d, %v, want -1", got, ok)
+	}
+	for _, check := range []struct {
+		name string
+		ok   bool
+	}{
+		{"uint32", func() bool { _, ok := f.Get[uint32]("orbix.test.neg"); return ok }()},
+		{"uint64", func() bool { _, ok := f.Get[uint64]("orbix.test.neg"); return ok }()},
+		{"uint", func() bool { _, ok := f.Get[uint]("orbix.test.neg"); return ok }()},
+	} {
+		if check.ok {
+			t.Errorf("Get[%s] accepted a negative value", check.name)
+		}
+	}
+}

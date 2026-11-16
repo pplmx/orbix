@@ -116,7 +116,9 @@ func intAs[T Scalar](n int64) (T, bool) {
 		if int64(int(n)) != n {
 			return zero, false
 		}
-		return convert[T](n)
+		// The argument must be an int, not the int64 n: convert asserts to T,
+		// and asserting an int64 to int fails even when the value fits.
+		return convert[T](int(n))
 	case uint8:
 		if n < 0 || n > math.MaxUint8 {
 			return zero, false

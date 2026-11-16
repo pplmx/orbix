@@ -307,7 +307,9 @@ func BenchmarkPrefillSequential(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		cache.Reset()
+		if err := cache.Reset(); err != nil {
+			b.Fatal(err)
+		}
 		for pos, tok := range ids {
 			if _, err := m.Forward(cache, int(tok), pos); err != nil {
 				b.Fatal(err)
@@ -326,7 +328,9 @@ func BenchmarkPrefillBatched(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		cache.Reset()
+		if err := cache.Reset(); err != nil {
+			b.Fatal(err)
+		}
 		if _, err := m.Prefill(cache, ids, 0); err != nil {
 			b.Fatal(err)
 		}
@@ -353,7 +357,9 @@ func BenchmarkDecode(b *testing.B) {
 		}
 		pos++
 		if pos >= cache.Cap() {
-			cache.Reset()
+			if err := cache.Reset(); err != nil {
+				b.Fatal(err)
+			}
 			if _, err := m.Prefill(cache, ids, 0); err != nil {
 				b.Fatal(err)
 			}
@@ -488,7 +494,7 @@ func TestDecodeStepMatchesForward(t *testing.T) {
 	}
 
 	// Batched: one DecodeStep for all three.
-	batchCaches := make([]*KVCache, len(histories))
+	batchCaches := make([]Cache, len(histories))
 	for i, hist := range histories {
 		cache, err := NewKVCache(cfg, cfg.ContextLen)
 		if err != nil {
@@ -558,7 +564,7 @@ func TestDecodeStepContinuesLikeForward(t *testing.T) {
 	}
 
 	// Batched.
-	batchCaches := make([]*KVCache, len(prompts))
+	batchCaches := make([]Cache, len(prompts))
 	pending := make([]float32, len(prompts)*cfg.VocabSize)
 	batchTokens := make([][]int32, len(prompts))
 	for i, p := range prompts {
@@ -604,13 +610,13 @@ func TestDecodeStepRejectsBadInput(t *testing.T) {
 		t.Error("DecodeStep accepted an empty batch")
 	}
 	cache, _ := NewKVCache(cfg, cfg.ContextLen)
-	if _, err := m.DecodeStep([]*KVCache{cache}, nil); err == nil {
+	if _, err := m.DecodeStep([]Cache{cache}, nil); err == nil {
 		t.Error("DecodeStep accepted mismatched token and cache counts")
 	}
-	if _, err := m.DecodeStep([]*KVCache{cache}, []int32{int32(cfg.VocabSize)}); err == nil {
+	if _, err := m.DecodeStep([]Cache{cache}, []int32{int32(cfg.VocabSize)}); err == nil {
 		t.Error("DecodeStep accepted a token past the vocabulary")
 	}
-	if _, err := m.DecodeStep([]*KVCache{nil}, []int32{1}); err == nil {
+	if _, err := m.DecodeStep([]Cache{nil}, []int32{1}); err == nil {
 		t.Error("DecodeStep accepted a nil cache")
 	}
 	// A full cache cannot take another position.
@@ -618,7 +624,7 @@ func TestDecodeStepRejectsBadInput(t *testing.T) {
 	if _, err := m.Prefill(full, []int32{1, 2}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.DecodeStep([]*KVCache{full}, []int32{3}); err == nil {
+	if _, err := m.DecodeStep([]Cache{full}, []int32{3}); err == nil {
 		t.Error("DecodeStep accepted a full cache")
 	}
 }
@@ -633,12 +639,12 @@ func TestDecodeStepGrowsScratch(t *testing.T) {
 	if _, err := m.Prefill(one, []int32{1, 9038}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.DecodeStep([]*KVCache{one}, []int32{2501}); err != nil {
+	if _, err := m.DecodeStep([]Cache{one}, []int32{2501}); err != nil {
 		t.Fatalf("DecodeStep(1): %v", err)
 	}
 
 	n := min(6, cfg.ContextLen-2)
-	caches := make([]*KVCache, n)
+	caches := make([]Cache, n)
 	tokens := make([]int32, n)
 	for i := range caches {
 		caches[i], _ = NewKVCache(cfg, cfg.ContextLen)
@@ -692,7 +698,7 @@ func TestDecodeStepTinyModel(t *testing.T) {
 		want[i] = append([]float32(nil), last...)
 	}
 
-	batchCaches := make([]*KVCache, len(prompts))
+	batchCaches := make([]Cache, len(prompts))
 	for i, p := range prompts {
 		cache, _ := NewKVCache(cfg, c.ctx)
 		batchCaches[i] = cache

@@ -128,7 +128,7 @@ type GenerateOptions struct {
 //
 // The loop is the decode path in miniature: prefill every prompt token, then one
 // forward pass per generated token, each attending over everything before it.
-func (m *Model) Generate(cache *KVCache, prompt []int32, sampler Sampler, opts GenerateOptions) ([]int32, error) {
+func (m *Model) Generate(cache Cache, prompt []int32, sampler Sampler, opts GenerateOptions) ([]int32, error) {
 	if len(prompt) == 0 {
 		return nil, fmt.Errorf("llama: empty prompt")
 	}

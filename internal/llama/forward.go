@@ -2,7 +2,6 @@ package llama
 
 import (
 	"fmt"
-	"math"
 	"runtime"
 
 	"github.com/pplmx/orbix/internal/kernel"
@@ -134,7 +133,7 @@ func (m *Model) Logits() []float32 { return m.logits }
 //	    x += attention(rmsnorm(x))
 //	    x += ffn(rmsnorm(x))
 //	logits = output(rmsnorm(x))
-func (m *Model) Forward(cache *KVCache, token int, pos int) ([]float32, error) {
+func (m *Model) Forward(cache Cache, token int, pos int) ([]float32, error) {
 	cfg := m.W.Config
 	if token < 0 || token >= cfg.VocabSize {
 		return nil, fmt.Errorf("llama: token %d outside the vocabulary (%d)", token, cfg.VocabSize)
@@ -162,7 +161,7 @@ func (m *Model) Forward(cache *KVCache, token int, pos int) ([]float32, error) {
 	}
 	// The cache length advances only once the position is fully written, so a
 	// failure part-way through leaves the cache consistently short.
-	cache.len = pos + 1
+	cache.setLen(pos + 1)
 
 	if err := m.finish(); err != nil {
 		return nil, err
@@ -182,7 +181,7 @@ func (m *Model) embed(token int) error {
 }
 
 // attention runs one block's self-attention and adds it to the residual.
-func (m *Model) attention(cache *KVCache, l int, pos int) error {
+func (m *Model) attention(cache Cache, l int, pos int) error {
 	cfg := m.W.Config
 	layer := &m.W.Layers[l]
 
@@ -213,47 +212,26 @@ func (m *Model) attention(cache *KVCache, l int, pos int) error {
 		}
 	}
 
-	allK, allV, err := cache.appendKV(l, m.k, m.v, pos)
-	if err != nil {
+	if _, _, err := cache.appendKV(l, m.k, m.v, pos); err != nil {
 		return err
 	}
 
-	// Scale applied to the query rather than to every score: one multiply per
-	// element instead of one per score.
-	scale := float32(1 / math.Sqrt(float64(cfg.HeadDim)))
+	scale := attentionScale(cfg)
 	group := cfg.Heads / cfg.KVHeads
+	n := pos + 1
 
 	for h := range cfg.Heads {
 		// Grouped-query attention: several query heads share one KV head. The
 		// mapping is contiguous, so head h reads KV head h/group.
 		kv := h / group
-		qh := m.q[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
-
-		// Scores against every stored position, 0..pos inclusive.
-		n := pos + 1
-		scores := m.scores[:n]
-		for t := range n {
-			off := t*cfg.kvDim() + kv*cfg.HeadDim
-			var dot float32
-			kh := allK[off : off+cfg.HeadDim]
-			for i := range qh {
-				dot += qh[i] * kh[i]
-			}
-			scores[t] = dot * scale
+		keys, values, err := cache.spans(l, kv, n)
+		if err != nil {
+			return err
 		}
-		kernel.Softmax(scores)
-
-		// Weighted sum of the values, accumulated directly into this head's
-		// slice of the attention output.
+		qh := m.q[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 		out := m.attn[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
-		clear(out)
-		for t := range n {
-			w := scores[t]
-			off := t*cfg.kvDim() + kv*cfg.HeadDim
-			vh := allV[off : off+cfg.HeadDim]
-			for i := range out {
-				out[i] += w * vh[i]
-			}
+		if err := attend(qh, keys, values, n, m.scores, out, scale); err != nil {
+			return err
 		}
 	}
 

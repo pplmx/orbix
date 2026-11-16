@@ -55,8 +55,14 @@ func (c *KVCache) Len() int { return c.len }
 // Cap returns the number of positions the cache can hold.
 func (c *KVCache) Cap() int { return c.ctx }
 
-// Reset drops every stored position. The memory is kept for reuse.
-func (c *KVCache) Reset() { c.len = 0 }
+// Reset drops every stored position. The arena is kept for reuse, which is why
+// resetting a contiguous cache costs nothing and returns no memory.
+//
+// It returns an error only to satisfy Cache: releasing an arena cannot fail.
+func (c *KVCache) Reset() error {
+	c.len = 0
+	return nil
+}
 
 // Bytes returns the size of the cache in bytes.
 func (c *KVCache) Bytes() int64 {
@@ -66,6 +72,34 @@ func (c *KVCache) Bytes() int64 {
 		n += int64(len(c.v[i])) * 4
 	}
 	return n
+}
+
+// spans returns the key and value rows a query at pos attends over, for layer l
+// and kv head kv.
+//
+// A contiguous cache covers every position in one run, so this is always a single
+// span. It exists so attention can be written once against both cache layouts.
+func (c *KVCache) spans(layer, kv, n int) (keys, values []span, err error) {
+	if layer < 0 || layer >= len(c.k) {
+		return nil, nil, fmt.Errorf("llama: layer %d outside the cache (%d)", layer, len(c.k))
+	}
+	if kv < 0 || kv >= c.cfg.KVHeads {
+		return nil, nil, fmt.Errorf("llama: kv head %d outside the cache (%d)", kv, c.cfg.KVHeads)
+	}
+	dim := c.cfg.kvDim()
+	head := c.cfg.HeadDim
+	off := kv * head
+	// n is checked against the arena, not against len: a forward pass writes its
+	// position and then attends over it before len is advanced, so the row it
+	// just wrote is live even though len has not counted it yet. Callers must not
+	// ask for more than the arena holds.
+	if n < 0 || n > c.ctx {
+		return nil, nil, fmt.Errorf("llama: %d positions requested, cache holds %d", n, c.ctx)
+	}
+	end := off + (n-1)*dim + head
+	keys = []span{{data: c.k[layer][off:end], stride: dim, rows: n, width: head}}
+	values = []span{{data: c.v[layer][off:end], stride: dim, rows: n, width: head}}
+	return keys, values, nil
 }
 
 // appendKV stores one position's key and value for layer, returning the slices

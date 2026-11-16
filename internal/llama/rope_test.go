@@ -213,7 +213,9 @@ func TestKVCacheReset(t *testing.T) {
 	if got := c.Len(); got != 3 {
 		t.Errorf("Len = %d, want 3", got)
 	}
-	c.Reset()
+	if err := c.Reset(); err != nil {
+		t.Fatal(err)
+	}
 	if got := c.Len(); got != 0 {
 		t.Errorf("after Reset Len = %d, want 0", got)
 	}

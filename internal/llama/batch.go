@@ -2,7 +2,6 @@ package llama
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/pplmx/orbix/internal/kernel"
 )
@@ -68,7 +67,7 @@ func newBatch(cfg Config, n int) *batch {
 // A returned error means the cache was not advanced, apart from the positions
 // written by the layer that failed; callers treat a batched pass as
 // all-or-nothing and must not decode after an error.
-func (m *Model) Prefill(cache *KVCache, tokens []int32, startPos int) ([]float32, error) {
+func (m *Model) Prefill(cache Cache, tokens []int32, startPos int) ([]float32, error) {
 	cfg := m.W.Config
 	n := len(tokens)
 	if n == 0 {
@@ -106,7 +105,7 @@ func (m *Model) Prefill(cache *KVCache, tokens []int32, startPos int) ([]float32
 			return nil, err
 		}
 	}
-	cache.len = startPos + n
+	cache.setLen(startPos + n)
 
 	if err := m.finishBatch(b); err != nil {
 		return nil, err
@@ -146,7 +145,7 @@ func (m *Model) embedBatch(b *batch, tokens []int32) error {
 }
 
 // attentionBatch runs one block's attention for every position in the batch.
-func (m *Model) attentionBatch(b *batch, cache *KVCache, l, startPos int) error {
+func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	cfg := m.W.Config
 	layer := &m.W.Layers[l]
 	n := b.n
@@ -186,7 +185,7 @@ func (m *Model) attentionBatch(b *batch, cache *KVCache, l, startPos int) error 
 		}
 	}
 
-	scale := float32(1 / math.Sqrt(float64(cfg.HeadDim)))
+	scale := attentionScale(cfg)
 	group := cfg.Heads / cfg.KVHeads
 
 	// Attention itself stays per position: the causal mask differs for each row,
@@ -196,37 +195,21 @@ func (m *Model) attentionBatch(b *batch, cache *KVCache, l, startPos int) error 
 		// Store this row, then attend over everything up to it.
 		kRow := b.k[i*kvdim : (i+1)*kvdim]
 		vRow := b.v[i*kvdim : (i+1)*kvdim]
-		allK, allV, err := cache.appendKV(l, kRow, vRow, pos)
-		if err != nil {
+		if _, _, err := cache.appendKV(l, kRow, vRow, pos); err != nil {
 			return err
 		}
+		m2 := pos + 1
 		for h := range cfg.Heads {
 			kv := h / group
+			keys, values, err := cache.spans(l, kv, m2)
+			if err != nil {
+				return err
+			}
 			qOff := i*qdim + h*cfg.HeadDim
 			qh := b.q[qOff : qOff+cfg.HeadDim]
-
-			m2 := pos + 1
-			scores := b.scores[:m2]
-			for t := range m2 {
-				off := t*kvdim + kv*cfg.HeadDim
-				kh := allK[off : off+cfg.HeadDim]
-				var dot float32
-				for j := range qh {
-					dot += qh[j] * kh[j]
-				}
-				scores[t] = dot * scale
-			}
-			kernel.Softmax(scores)
-
 			out := b.attn[i*qdim+h*cfg.HeadDim : i*qdim+(h+1)*cfg.HeadDim]
-			clear(out)
-			for t := range m2 {
-				w := scores[t]
-				off := t*kvdim + kv*cfg.HeadDim
-				vh := allV[off : off+cfg.HeadDim]
-				for j := range out {
-					out[j] += w * vh[j]
-				}
+			if err := attend(qh, keys, values, m2, b.scores, out, scale); err != nil {
+				return err
 			}
 		}
 	}
@@ -302,7 +285,7 @@ func (m *Model) finishBatch(b *batch) error {
 // A returned error leaves the caches in an unspecified but individually
 // consistent state: a batch either advances every cache or reports an error, and
 // the caller must not keep decoding after one.
-func (m *Model) DecodeStep(caches []*KVCache, tokens []int32) ([]float32, error) {
+func (m *Model) DecodeStep(caches []Cache, tokens []int32) ([]float32, error) {
 	cfg := m.W.Config
 	n := len(tokens)
 	if n == 0 {
@@ -350,7 +333,7 @@ func (m *Model) DecodeStep(caches []*KVCache, tokens []int32) ([]float32, error)
 	// Advance every cache only after the whole pass succeeded, matching Forward's
 	// contract: a failure leaves each cache consistent with a shorter sequence.
 	for _, c := range caches {
-		c.len++
+		c.setLen(c.Len() + 1)
 	}
 
 	if err := b.finish(m); err != nil {
@@ -420,7 +403,7 @@ func (b *decodeBatch) embed(m *Model, row, token int) error {
 }
 
 // attention runs one block's attention for every sequence in the batch.
-func (b *decodeBatch) attention(m *Model, caches []*KVCache, l int) error {
+func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 	cfg := m.W.Config
 	layer := &m.W.Layers[l]
 	n := b.n
@@ -446,7 +429,7 @@ func (b *decodeBatch) attention(m *Model, caches []*KVCache, l int) error {
 	}
 
 	// Each sequence rotates at its own position and appends at its own cache end.
-	scale := float32(1 / math.Sqrt(float64(cfg.HeadDim)))
+	scale := attentionScale(cfg)
 	group := cfg.Heads / cfg.KVHeads
 
 	for r := range n {
@@ -467,35 +450,20 @@ func (b *decodeBatch) attention(m *Model, caches []*KVCache, l int) error {
 			}
 		}
 
-		allK, allV, err := cache.appendKV(l, kRow, vRow, pos)
-		if err != nil {
+		if _, _, err := cache.appendKV(l, kRow, vRow, pos); err != nil {
 			return err
 		}
-		scores := b.scores[r][:pos+1]
+		m2 := pos + 1
 		for h := range cfg.Heads {
 			kv := h / group
-			qh := qRow[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
-
-			for t := range scores {
-				off := t*kvdim + kv*cfg.HeadDim
-				kh := allK[off : off+cfg.HeadDim]
-				var dot float32
-				for j := range qh {
-					dot += qh[j] * kh[j]
-				}
-				scores[t] = dot * scale
+			keys, values, err := cache.spans(l, kv, m2)
+			if err != nil {
+				return err
 			}
-			kernel.Softmax(scores)
-
+			qh := qRow[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 			out := b.attn[r*qdim+h*cfg.HeadDim : r*qdim+(h+1)*cfg.HeadDim]
-			clear(out)
-			for t := range scores {
-				w := scores[t]
-				off := t*kvdim + kv*cfg.HeadDim
-				vh := allV[off : off+cfg.HeadDim]
-				for j := range out {
-					out[j] += w * vh[j]
-				}
+			if err := attend(qh, keys, values, m2, b.scores[r], out, scale); err != nil {
+				return err
 			}
 		}
 	}

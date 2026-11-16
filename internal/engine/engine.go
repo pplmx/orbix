@@ -39,8 +39,7 @@ type sequence struct {
 	id      int
 	req     Request
 	cache   *llama.KVCache
-	next    int     // index into req.Prompt while prefilling, then advanced
-	pos     int     // number of positions written
+	pos     int     // positions written; also the prompt index while prefilling
 	out     []int32 // generated tokens
 	events  chan Event
 	sampler llama.Sampler
@@ -61,6 +60,12 @@ type sequence struct {
 // one. That is what continuous batching means at this stage, and it is the
 // property a scheduler is built to preserve when the forward pass later grows
 // real batching.
+//
+// The one place the engine does batch work today is prefill: a sequence's whole
+// prompt goes through llama.Prefill in a single pass, so prompt processing is
+// shared rather than interleaved. Decode stays one token per sequence per round,
+// which is why concurrency still trades per-stream speed for fairness instead of
+// raising total throughput.
 type Engine struct {
 	model     *llama.Model
 	maxActive int
@@ -181,18 +186,23 @@ func (e *Engine) Pump() int {
 func (e *Engine) step(s *sequence, eos int32) {
 	cfg := e.model.Config()
 
-	// Prefill: consume the prompt one token at a time, keeping the logits from
-	// the last prompt token so decoding can start without re-running it.
-	if s.next < len(s.req.Prompt) {
-		tok := int(s.req.Prompt[s.next])
-		out, err := e.model.Forward(s.cache, tok, s.pos)
+	// Prefill: the whole prompt in one batched pass. The projections become a
+	// single matrix-matrix product instead of one per token, so prompt
+	// processing is shared work rather than shared time.
+	//
+	// pos doubles as the prompt index here because a sequence prefills before it
+	// decodes anything: while pos < len(Prompt) the cache holds exactly the
+	// prompt prefix, which is the invariant Prefill requires.
+	if s.pos < len(s.req.Prompt) {
+		out, err := e.model.Prefill(s.cache, s.req.Prompt[s.pos:], s.pos)
 		if err != nil {
 			e.finish(s, Event{Err: err, FinishReason: "error"})
 			return
 		}
+		// Prefill returns the logits of the last position: decoding continues
+		// from exactly there.
 		copy(s.logits, out)
-		s.next++
-		s.pos++
+		s.pos = len(s.req.Prompt)
 		return
 	}
 

@@ -247,3 +247,49 @@ func TestGreedySamplerDefault(t *testing.T) {
 		}
 	}
 }
+
+// TestEngineMatchesGenerate compares the engine's output with the single-stream
+// llama.Generate path over a prompt long enough to exercise batched prefill.
+// They share the model but not the loop, so agreement means the engine's
+// batched prefill and per-round decode reproduce the straightforward path.
+func TestEngineMatchesGenerate(t *testing.T) {
+	e, tok := loadModel(t)
+	cfg := e.Model().Config()
+	prompt := tok.Encode("Once upon a time there was a little girl named Lily who lived near the river.", cfg.BOSID >= 0)
+	if len(prompt) < 8 {
+		t.Skipf("prompt tokenized to only %d tokens", len(prompt))
+	}
+	const maxTokens = 8
+
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: maxTokens})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	got, _ := collect(t, ch)
+
+	m, err := llama.New(os.Getenv("MODEL"))
+	if err != nil {
+		t.Fatalf("llama.New: %v", err)
+	}
+	cache, err := llama.NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	out, err := m.Generate(cache, prompt, llama.Greedy{}, llama.GenerateOptions{MaxTokens: maxTokens})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	want := out[len(prompt):]
+
+	if len(got) != len(want) {
+		t.Fatalf("engine produced %d tokens, Generate produced %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("token %d: engine %d, Generate %d (%q vs %q)",
+				i, got[i], want[i], tok.Decode(got), tok.Decode(want))
+		}
+	}
+}

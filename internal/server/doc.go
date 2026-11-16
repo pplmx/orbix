@@ -18,4 +18,12 @@
 // dependency to evaluate it. The chat endpoint therefore renders a neutral
 // "Role: content" transcript, and a caller who needs a model's exact template sends
 // that prompt to the completions endpoint, which passes text through verbatim.
+//
+// The one thing this layer adds beyond transport is /metrics, because exporting the
+// engine's counters is a job that belongs to whoever owns the process lifetime. The
+// numbers themselves are collected in internal/engine: a server that inferred queue
+// depth or pool occupancy from the outside would be reporting a guess. What lives
+// here is only the encoding, and it is written by hand -- four lines of Prometheus
+// text format do not justify a client library in a repository whose point is to make
+// each layer legible.
 package server

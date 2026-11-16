@@ -105,6 +105,7 @@ func New(eng *engine.Engine, tok *tokenize.Tokenizer, cfg Config) (*Server, erro
 	mux.HandleFunc("POST /v1/completions", s.handleCompletion)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux = mux
 	return s, nil
 }

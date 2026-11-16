@@ -111,6 +111,13 @@ type Engine struct {
 	mu     sync.Mutex
 	active map[int]*sequence
 	nextID int
+
+	// counters are cumulative and guarded by mu, so a Stats reading is a consistent
+	// snapshot rather than a mix of moments.
+	requestsSubmitted uint64
+	requestsFinished  uint64
+	tokensGenerated   uint64
+	rounds            uint64
 }
 
 // Options configures an Engine.
@@ -236,6 +243,7 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 		s.sampler = llama.Greedy{}
 	}
 	e.active[id] = s
+	e.requestsSubmitted++
 	e.mu.Unlock()
 
 	return s.events, nil
@@ -276,6 +284,12 @@ func (e *Engine) Pump() int {
 	// without the lock would race with Round().
 	e.mu.Lock()
 	e.round++
+	if len(seqs) > 0 {
+		// round advances every call so PriorityFair's ordering stays monotonic, but the
+		// exported counter only advances when a round actually had work: a caller that
+		// pumps an idle engine must not make the throughput reading look busy.
+		e.rounds++
+	}
 	round := e.round
 	e.mu.Unlock()
 	// Admit a round's worth. When everything fits, no policy applies and ready is
@@ -369,6 +383,12 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 		return 0, false
 	}
 	s.out = append(s.out, tok)
+	// Count the token as soon as it is queued for the caller, which is the moment its
+	// throughput is committed to; counting at the forward pass would over-count a
+	// batched round.
+	e.mu.Lock()
+	e.tokensGenerated++
+	e.mu.Unlock()
 	s.events <- Event{Token: tok, HasToken: true}
 
 	if s.pos >= cfg.ContextLen {
@@ -432,6 +452,7 @@ func (s *sequence) cancelled() bool {
 func (e *Engine) finish(s *sequence, last Event) {
 	e.mu.Lock()
 	delete(e.active, s.id)
+	e.requestsFinished++
 	e.mu.Unlock()
 
 	if err := s.cache.Reset(); err != nil {

@@ -26,6 +26,7 @@ func cmdBench(args []string) error {
 	workers := fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
 	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
 	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
+	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix")
 	requests := fs.Int("requests", 0, "total requests; 0 means one per concurrency slot")
 	prompt := fs.String("prompt", "Once upon a time", "prompt for each request")
 	if err := fs.Parse(args); err != nil {
@@ -64,10 +65,11 @@ func cmdBench(args []string) error {
 		return err
 	}
 	eng, err := engine.New(*model, engine.Options{
-		MaxActive: *concurrency,
-		Workers:   *workers,
-		BlockSize: *blockSize,
-		Blocks:    *blocks,
+		MaxActive:   *concurrency,
+		Workers:     *workers,
+		BlockSize:   *blockSize,
+		Blocks:      *blocks,
+		PrefixCache: *prefixCache,
 	})
 	if err != nil {
 		return err

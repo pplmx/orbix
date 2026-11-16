@@ -102,6 +102,15 @@ type Options struct {
 	// attention.
 	BlockSize int
 	Blocks    int
+	// PrefixCache turns on prefix reuse for a paged cache. Requests whose prompts
+	// start with the same whole blocks of tokens attach the already-computed keys
+	// and values instead of prefilling them again, which is what makes a shared
+	// system prompt or a multi-turn conversation cheap: the part that is re-sent
+	// verbatim every turn costs one block lookup instead of a forward pass.
+	//
+	// It has no effect without Blocks, because a contiguous cache has no blocks to
+	// share.
+	PrefixCache bool
 }
 
 // New loads a model and returns an engine for it.
@@ -126,6 +135,9 @@ func New(path string, opts Options) (*Engine, error) {
 		})
 		if err != nil {
 			return nil, err
+		}
+		if opts.PrefixCache {
+			pool.EnablePrefixCache()
 		}
 		e.pool = pool
 	}
@@ -267,11 +279,14 @@ type pending struct {
 }
 
 // prefill processes a sequence's remaining prompt in one batched pass.
+//
+// pos doubles as the prompt index here because a sequence prefills before it
+// decodes anything: while pos < len(Prompt) the cache holds exactly the prompt
+// prefix, which is the invariant Prefill requires. The slices are still taken from
+// pos so a later, resumable prefill keeps working, but prefix reuse itself only
+// applies to a whole prompt from position zero.
 func (e *Engine) prefill(s *sequence) {
-	// pos doubles as the prompt index here because a sequence prefills before it
-	// decodes anything: while pos < len(Prompt) the cache holds exactly the prompt
-	// prefix, which is the invariant Prefill requires.
-	out, err := e.model.Prefill(s.cache, s.req.Prompt[s.pos:], s.pos)
+	out, err := e.model.PrefillWithPrefix(s.cache, s.req.Prompt[s.pos:], s.pos)
 	if err != nil {
 		e.finish(s, Event{Err: err, FinishReason: "error"})
 		return

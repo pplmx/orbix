@@ -631,3 +631,122 @@ func TestNilCancelNeverFires(t *testing.T) {
 		t.Errorf("finish reason = %q, want length", reason)
 	}
 }
+
+// TestPrefixCacheMatchesNoCache is the property that makes prefix reuse safe to
+// turn on: a request's tokens must not change. It runs the same prompts through an
+// engine with prefix reuse and one without, several times over, so the second round
+// is served from a warm index.
+func TestPrefixCacheMatchesNoCache(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	gf, _ := gguf.Open(path)
+	tok, _ := tokenize.New(gf)
+	prompts := []string{
+		"Once upon a time",
+		"Once upon a time, there was a little girl",
+		"Once upon a time, there was a little boy",
+		"The little girl",
+	}
+	const maxTokens = 5
+
+	run := func(opts Options) [][]int32 {
+		e, err := New(path, opts)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		out := make([][]int32, len(prompts))
+		// Two rounds: the first fills the index, the second is served from it.
+		for round := range 2 {
+			chans := make([]<-chan Event, len(prompts))
+			for i, p := range prompts {
+				ch, err := e.Submit(Request{Prompt: tok.Encode(p, true), MaxTokens: maxTokens})
+				if err != nil {
+					t.Fatalf("Submit: %v", err)
+				}
+				chans[i] = ch
+			}
+			for e.Pump() > 0 {
+			}
+			for i, ch := range chans {
+				tokens, _ := collect(t, ch)
+				if round == 0 {
+					out[i] = tokens
+					continue
+				}
+				if len(tokens) != len(out[i]) {
+					t.Fatalf("round 2 prompt %d produced %d tokens, round 1 produced %d", i, len(tokens), len(out[i]))
+				}
+				for j := range tokens {
+					if tokens[j] != out[i][j] {
+						t.Errorf("prompt %d token %d: round 2 %d, round 1 %d", i, j, tokens[j], out[i][j])
+					}
+				}
+			}
+		}
+		return out
+	}
+
+	plain := run(Options{BlockSize: 4, Blocks: 256})
+	cached := run(Options{BlockSize: 4, Blocks: 256, PrefixCache: true})
+	for i := range plain {
+		if len(cached[i]) != len(plain[i]) {
+			t.Fatalf("prompt %d: prefix cache produced %d tokens, plain produced %d", i, len(cached[i]), len(plain[i]))
+		}
+		for j := range plain[i] {
+			if cached[i][j] != plain[i][j] {
+				t.Errorf("prompt %d token %d: prefix cache %d, plain %d", i, j, cached[i][j], plain[i][j])
+			}
+		}
+	}
+}
+
+// TestPrefixCacheReusesAcrossRequests checks reuse actually happens at the engine
+// level, by observing that the index filled up.
+func TestPrefixCacheReusesAcrossRequests(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	gf, _ := gguf.Open(path)
+	tok, _ := tokenize.New(gf)
+	e, err := New(path, Options{BlockSize: 4, Blocks: 256, PrefixCache: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if e.Pool().PrefixIndex() == nil {
+		t.Fatal("PrefixCache option did not enable the index")
+	}
+	prompt := tok.Encode("Once upon a time there was a little girl named Lily", true)
+	for range 2 {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		for e.Pump() > 0 {
+		}
+		if _, reason := collect(t, ch); reason != "length" {
+			t.Errorf("finish reason = %q, want length", reason)
+		}
+	}
+	if got := e.Pool().PrefixIndex().Len(); got == 0 {
+		t.Error("index remembered no blocks across two identical requests")
+	}
+}
+
+// TestPrefixCacheOffByDefault pins that the optimization is opt-in: a plain paged
+// engine must not allocate an index or retain blocks it cannot use.
+func TestPrefixCacheOffByDefault(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file to run engine tests")
+	}
+	e, err := New(path, Options{BlockSize: 4, Blocks: 32})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if idx := e.Pool().PrefixIndex(); idx != nil {
+		t.Errorf("PrefixIndex() = %+v without PrefixCache", idx)
+	}
+}

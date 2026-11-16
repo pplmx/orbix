@@ -29,6 +29,7 @@ func cmdServe(args []string) error {
 	workers := fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
 	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
 	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
+	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -52,10 +53,11 @@ func cmdServe(args []string) error {
 		return err
 	}
 	eng, err := engine.New(*model, engine.Options{
-		MaxActive: *maxActive,
-		Workers:   *workers,
-		BlockSize: *blockSize,
-		Blocks:    *blocks,
+		MaxActive:   *maxActive,
+		Workers:     *workers,
+		BlockSize:   *blockSize,
+		Blocks:      *blocks,
+		PrefixCache: *prefixCache,
 	})
 	if err != nil {
 		return err
@@ -94,6 +96,9 @@ func cmdServe(args []string) error {
 	if pool := eng.Pool(); pool != nil {
 		fmt.Printf("kv cache: paged, %d blocks x %d positions = %.2f MiB shared\n",
 			pool.Blocks(), pool.BlockSize(), float64(pool.Bytes())/(1<<20))
+		if pool.PrefixIndex() != nil {
+			fmt.Println("prefix cache: on (shared prompt prefixes reuse their KV blocks)")
+		}
 	}
 
 	// A signal ends the server the way a caller would: stop accepting, stop

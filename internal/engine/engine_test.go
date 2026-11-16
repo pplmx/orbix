@@ -750,3 +750,24 @@ func TestPrefixCacheOffByDefault(t *testing.T) {
 		t.Errorf("PrefixIndex() = %+v without PrefixCache", idx)
 	}
 }
+
+// TestRenderChatPrompt pins the shared template: the REPL and the HTTP server both go
+// through it, so its exact shape is what keeps the same conversation producing the
+// same tokens however it was asked.
+func TestRenderChatPrompt(t *testing.T) {
+	got := RenderChatPrompt([]Turn{
+		{Role: "system", Text: "be brief"},
+		{Role: "user", Text: "  hi  "},
+		{Role: "assistant", Text: "hello"},
+		{Role: "", Text: "and?"},
+	})
+	want := "System: be brief\nUser: hi\nAssistant: hello\nUser: and?\nAssistant:"
+	if got != want {
+		t.Errorf("RenderChatPrompt =\n%q\nwant\n%q", got, want)
+	}
+	// An empty conversation still leaves the assistant's turn open, which is what a
+	// prompt-only request needs.
+	if got, want := RenderChatPrompt(nil), "Assistant:"; got != want {
+		t.Errorf("RenderChatPrompt(nil) = %q, want %q", got, want)
+	}
+}

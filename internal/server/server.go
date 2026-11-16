@@ -267,32 +267,17 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// renderChat applies the server's chat template.
+// renderChat applies the chat template.
 //
-// The template is the plain "Role: content" form, one per line, with the
-// assistant's turn left open for generation. It is not any particular model's
-// trained template: a Llama checkpoint expects "<|start_header_id|>" markers, and
-// producing them for a model that was not trained on them is worse than producing
-// a neutral transcript, because the markers change the distribution the model
-// expects.
-//
-// A caller who needs a model's exact template should render it themselves and use
-// /v1/completions, which takes the prompt verbatim.
+// The rendering itself lives in engine.RenderChatPrompt so the HTTP server and the REPL
+// cannot drift apart: the same conversation must produce the same tokens however it was
+// asked. See that function for why the template is neutral rather than a model's own.
 func (s *Server) renderChat(msgs []chatMessage) string {
-	var b strings.Builder
-	for _, m := range msgs {
-		role := m.Role
-		if role == "" {
-			role = "user"
-		}
-		b.WriteString(strings.ToUpper(role[:1]))
-		b.WriteString(role[1:])
-		b.WriteString(": ")
-		b.WriteString(strings.TrimSpace(m.Content))
-		b.WriteString("\n")
+	turns := make([]engine.Turn, len(msgs))
+	for i, m := range msgs {
+		turns[i] = engine.Turn{Role: m.Role, Text: m.Content}
 	}
-	b.WriteString("Assistant:")
-	return b.String()
+	return engine.RenderChatPrompt(turns)
 }
 
 // generateParams is what both endpoints share once their JSON is decoded.

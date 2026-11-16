@@ -5,13 +5,15 @@ import (
 	"math"
 )
 
-// rope is the rotary position embedding as ggml applies it to Llama models.
+// rope is the rotary position embedding as Llama models use it.
 //
-// Llama uses ggml's GGML_ROPE_TYPE_NEOX mode, which is not the interleaved
-// rotation described in the original RoPE paper: dimension i is paired with
-// i + n_dims/2 rather than with i+1. The two produce different results, and a
-// model rotated the wrong way still generates fluent-looking garbage, so this
-// follows ggml's rotate_pairs exactly.
+// Dimensions rotate in adjacent pairs (2i, 2i+1), the layout from the original
+// RoPE paper and ggml's GGML_ROPE_TYPE_NORMAL. The alternative -- pairing i with
+// i+n_dims/2, which ggml calls NEOX and Qwen-family models use -- differs on
+// every dimension past the first pair. The distinction is not cosmetic: rotating
+// the wrong way leaves the model fluent but measurably off, which showed up here
+// as log-probabilities diverging from llama.cpp by several nats while the text
+// still read as English.
 type rope struct {
 	// dims is the number of head dimensions the rotation covers. Dimensions
 	// past it are copied through untouched, which is what ggml's trailing
@@ -76,7 +78,7 @@ func newRope(cfg Config, nCtx int) (*rope, error) {
 
 // apply rotates one vector of headDim values at the given position, in place.
 //
-// x is a single head: dims [0, n_dims) are rotated as pairs (i, i + n_dims/2),
+// x is a single head: dims [0, n_dims) are rotated as adjacent pairs (2i, 2i+1),
 // and dims [n_dims, headDim) are left alone.
 func (r *rope) apply(x []float32, pos int) error {
 	if len(x) < r.headDim {
@@ -85,14 +87,14 @@ func (r *rope) apply(x []float32, pos int) error {
 	if pos < 0 || pos >= len(r.cos) {
 		return fmt.Errorf("llama: rope position %d outside the table (%d)", pos, len(r.cos))
 	}
-	half := r.dims / 2
 	cos := r.cos[pos]
 	sin := r.sin[pos]
-	for k := range half {
-		x0 := x[k]
-		x1 := x[k+half]
-		x[k] = x0*cos[k] - x1*sin[k]
-		x[k+half] = x0*sin[k] + x1*cos[k]
+	for k := range r.dims / 2 {
+		i0, i1 := 2*k, 2*k+1
+		x0 := x[i0]
+		x1 := x[i1]
+		x[i0] = x0*cos[k] - x1*sin[k]
+		x[i1] = x0*sin[k] + x1*cos[k]
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package llama
 
 import (
 	"math"
+	"os"
 	"testing"
 )
 
@@ -65,10 +66,10 @@ func TestRopeAtZeroIsIdentity(t *testing.T) {
 	}
 }
 
-func TestRopePairsHalvesNotNeighbours(t *testing.T) {
-	// Llama uses NEOX rotation: dimension i pairs with i + dims/2, not with
-	// i+1. Set one dimension to a vector that distinguishes the two schemes and
-	// check which one moved.
+func TestRopePairsAdjacentDimensions(t *testing.T) {
+	// Llama pairs dimension 2i with 2i+1. The alternative (i with i+n_dims/2,
+	// which ggml calls NEOX and Qwen models use) produces a different rotation,
+	// so this test distinguishes them with an input that only one can make.
 	cfg := testConfig()
 	cfg.RopeDim = 4
 	cfg.HeadDim = 4
@@ -76,47 +77,24 @@ func TestRopePairsHalvesNotNeighbours(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Position 1 with base 10000 and 4 dims: pair k rotates by 10000^(-2k/4).
-	x := []float32{1, 0, 0, 0}
-	if err := r.apply(x, 1); err != nil {
-		t.Fatal(err)
-	}
-	// At position 1 the first pair rotates by theta = 1 (10000^0 * pos).
-	// Under the halves scheme x[0] = cos(1)*1 - sin(1)*0 = cos(1). Under the
-	// neighbour scheme x[0] would pair with x[1], which is zero here, so it
-	// would also be cos(1) -- the two only diverge for the second half, which
-	// the following assertion pins down.
-	want0 := float32(math.Cos(1))
-	if math.Abs(float64(x[0]-want0)) > 1e-5 {
-		t.Errorf("x[0] = %v, want %v", x[0], want0)
-	}
-	// x[3] is index 1 of the second half. Under the halves scheme it pairs with
-	// x[1] (zero), so it stays zero; under the neighbour scheme it would pair
-	// with x[2] only, which is also zero. Neither distinguishes them alone.
-	// The discriminating case is a vector with a value in the second half.
-	if math.Abs(float64(x[1])) > 1e-6 {
-		t.Errorf("x[1] = %v, want 0 (not paired with x[0])", x[1])
-	}
 
-	// The discriminating input: weight only in dimension 1. Under halves
-	// pairing dimension 1 is index 1 of the *second* pair (k = 1), so it
-	// rotates against dimension 3 by theta = 0.01 at position 1 with
-	// base 10000 and 4 dims. A neighbour pairing would rotate it against
-	// dimension 0 at theta = 1 instead, which is what the expected values
-	// below rule out.
+	// A unit vector in dimension 1: adjacent pairing rotates it against
+	// dimension 0, so the result puts cos into index 1 and sin into index 0's
+	// partner. Halves pairing would rotate it against dimension 3 instead.
 	y := []float32{0, 1, 0, 0}
 	if err := r.apply(y, 1); err != nil {
 		t.Fatal(err)
 	}
-	const theta1 = 0.01 // 10000^(-2/4) * pos(1)
-	if want := float32(math.Cos(theta1)); math.Abs(float64(y[1]-want)) > 1e-6 {
-		t.Errorf("y[1] = %v, want cos(0.01) = %v", y[1], want)
+	const theta0 = 1.0 // base^0 * pos 1
+	if want := float32(math.Cos(theta0)); math.Abs(float64(y[1]-want)) > 1e-6 {
+		t.Errorf("y[1] = %v, want cos(1) = %v (adjacent pairing)", y[1], want)
 	}
-	if want := float32(math.Sin(theta1)); math.Abs(float64(y[3]-want)) > 1e-6 {
-		t.Errorf("y[3] = %v, want sin(0.01) = %v (halves pairing)", y[3], want)
+	if want := float32(math.Sin(theta0)); math.Abs(float64(y[0]-(-want))) > 1e-6 {
+		t.Errorf("y[0] = %v, want -sin(1) = %v", y[0], -want)
 	}
-	if math.Abs(float64(y[0])) > 1e-6 || math.Abs(float64(y[2])) > 1e-6 {
-		t.Errorf("y[0]=%v y[2]=%v, want 0", y[0], y[2])
+	// Dimensions 2 and 3 form the second pair and are untouched by this input.
+	if math.Abs(float64(y[2])) > 1e-6 || math.Abs(float64(y[3])) > 1e-6 {
+		t.Errorf("y[2]=%v y[3]=%v, want 0", y[2], y[3])
 	}
 }
 
@@ -265,4 +243,63 @@ func norm(x []float32) float32 {
 		sum += v * v
 	}
 	return float32(math.Sqrt(float64(sum)))
+}
+
+func TestRopeMatchesReferenceLogprobs(t *testing.T) {
+	// The decisive check for the rotation: run the real model over a fixed
+	// prefix and compare the resulting log-probabilities with llama.cpp's for
+	// the same tokens. Adjacent pairing lands within a few hundredths of a nat;
+	// the halves pairing used earlier was off by more than two nats on the same
+	// input while still producing fluent text, which is why this comparison
+	// exists rather than a shape-only test.
+	//
+	// Expected values come from llama-server's /completion endpoint
+	// (n_probs=5, temperature 0, -fa off) on stories15M-q4_0 with the prompt
+	// "Once" -> tokens [1, 9038].
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a stories15M GGUF to run this check")
+	}
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	cache, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logits []float32
+	for pos, id := range []int{1, 9038} {
+		logits, err = m.Forward(cache, id, pos)
+		if err != nil {
+			t.Fatalf("Forward: %v", err)
+		}
+	}
+
+	want := map[int]float64{
+		2501:  -0.0810, // " upon"
+		727:   -2.8706, // " there"
+		29892: -3.9226, // ","
+	}
+	const tol = 0.25
+	for id, wantLP := range want {
+		got := logSoftmaxOf(logits, id)
+		if math.Abs(got-wantLP) > tol {
+			t.Errorf("logprob[%d] = %.4f, want %.4f (+/- %.2f)", id, got, wantLP, tol)
+		}
+	}
+}
+
+// logSoftmaxOf returns log(softmax(logits)[i]).
+func logSoftmaxOf(logits []float32, i int) float64 {
+	max := float64(logits[0])
+	for _, v := range logits[1:] {
+		max = math.Max(max, float64(v))
+	}
+	var sum float64
+	for _, v := range logits {
+		sum += math.Exp(float64(v) - max)
+	}
+	return (float64(logits[i]) - max) - math.Log(sum)
 }

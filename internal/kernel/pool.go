@@ -14,13 +14,14 @@ import (
 // parallelizes cleanly: there is no shared state between output rows and no
 // reduction spanning rows.
 //
-// The split is always over output rows, never over the reduction dimension. That
-// is what makes a Runner a scheduling change rather than a numerical one: each
-// row's dot product is evaluated by exactly one worker in exactly the order the
-// serial kernel uses, so float32 addition is never reassociated and the result is
-// bit-identical to MatVec and MatMulTransposed. A kernel that split the
-// reduction would still be "about right" while quietly returning different
-// numbers, which is the kind of difference that later hides a real bug.
+// The split is always over independent output elements, never over the reduction
+// dimension. That is what makes a Runner a scheduling change rather than a
+// numerical one: every output element is evaluated by exactly one worker in
+// exactly the order the serial kernel uses, so float32 addition is never
+// reassociated and the result is bit-identical to MatVec and MatMulTransposed. A
+// kernel that split the reduction would still be "about right" while quietly
+// returning different numbers, which is the kind of difference that later hides
+// a real bug.
 //
 // A nil Runner is valid and means one worker, so a caller that never configures
 // concurrency still gets a usable value.
@@ -30,9 +31,9 @@ type Runner struct {
 
 // NewRunner returns a Runner that may use up to workers goroutines.
 //
-// workers <= 1 disables parallelism. There is no upper clamp here: a caller that
-// asks for more workers than there are rows gets fewer, because the row count is
-// what bounds the fan-out.
+// workers <= 1 disables parallelism. There is no upper clamp here: the work being
+// split bounds the fan-out, so asking for more workers than there is work simply
+// uses fewer.
 func NewRunner(workers int) *Runner {
 	return &Runner{workers: workers}
 }
@@ -55,18 +56,36 @@ func (r *Runner) MatVec(dst, a, v []float32, n, k int) error {
 	if err := checkMatVec(dst, a, v, n, k); err != nil {
 		return err
 	}
-	return r.split(r.parts(n*k, n), n, func(lo, hi int) { _ = matVecRows(dst, a, v, n, k, lo, hi) })
+	return r.splitRows(r.parts(n*k), n, func(lo, hi int) { _ = matVecRows(dst, a, v, n, k, lo, hi) })
 }
 
 // MatMulTransposed computes dst = a @ bᵀ where b is stored as n x k, splitting
-// the rows of a -- and therefore the rows of dst -- across the workers.
+// the product across the workers.
+//
+// The split is over output elements flattened into i*n+j order, not over the
+// rows of a alone. With m rows the two differ only when m is smaller than the
+// worker count, but that is exactly the decode case: a batch of m sequences has
+// m = B, so a row-only split would leave the vast majority of the product serial
+// for small B and would make batching strictly slower than looping over MatVec.
+// One row and a large n is a full-size product and should use the whole machine.
 //
 // The result is identical to MatMulTransposed.
 func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMulTransposed(dst, a, b, m, n, k); err != nil {
 		return err
 	}
-	return r.split(r.parts(m*n*k, m), m, func(lo, hi int) { _ = matMulTransposedRows(dst, a, b, m, n, k, lo, hi) })
+	return r.splitElems(r.parts(m*n*k), m, n, k, func(i, jlo, jhi int) {
+		aRow := a[i*k : (i+1)*k]
+		dstRow := dst[i*n : (i+1)*n]
+		for j := jlo; j < jhi; j++ {
+			bRow := b[j*k : (j+1)*k]
+			var sum float32
+			for p := range k {
+				sum += aRow[p] * bRow[p]
+			}
+			dstRow[j] = sum
+		}
+	})
 }
 
 // Parallelism is only worth its spawn-and-join cost above a certain size, and
@@ -87,15 +106,49 @@ const (
 
 // parts returns how many workers an operation of work multiply-adds should use.
 //
-// The count is bounded by the configured workers, by the work available, and by
-// the rows being split, so a projection that is too small -- or has fewer rows
-// than there are CPUs -- does not start goroutines that cannot pay for
+// The count is bounded by the configured workers and by the work available, so a
+// projection that is too small does not start goroutines that cannot pay for
 // themselves.
-func (r *Runner) parts(work, rows int) int {
-	if r == nil || r.workers <= 1 || work < minParallelWork || rows < 2 {
+func (r *Runner) parts(work int) int {
+	if r == nil || r.workers <= 1 || work < minParallelWork {
 		return 1
 	}
-	return min(r.workers, work/workPerWorker, rows)
+	return min(r.workers, work/workPerWorker)
+}
+
+// splitRows runs fn over the row range [0,n) in contiguous chunks.
+func (r *Runner) splitRows(parts, n int, fn func(lo, hi int)) error {
+	if parts > n {
+		parts = n
+	}
+	return r.split(parts, n, fn)
+}
+
+// splitElems runs fn over the flattened output space of an m x n product,
+// calling it once per row segment with that segment's column range.
+//
+// Splitting the flat index space rather than the row range is what keeps a
+// short-and-wide product -- a batched decode, or a single row against a large
+// vocabulary -- fully parallel: a chunk boundary may fall inside a row, so a
+// worker can be handed part of a row, but every element still belongs to exactly
+// one worker.
+func (r *Runner) splitElems(parts, m, n, k int, fn func(i, jlo, jhi int)) error {
+	if m <= 0 || n <= 0 {
+		return nil
+	}
+	total := m * n
+	if parts > total {
+		parts = total
+	}
+	return r.split(parts, total, func(lo, hi int) {
+		for e := lo; e < hi; {
+			i, j := e/n, e%n
+			// Take every remaining element of this row that is in this chunk.
+			end := min((i+1)*n, hi)
+			fn(i, j, end-i*n)
+			e = end
+		}
+	})
 }
 
 // split runs fn over [0,n) in at most parts contiguous chunks, returning when

@@ -157,7 +157,7 @@ func BenchmarkRunnerCrossover(b *testing.B) {
 			}
 		})
 		b.Run(sizeName(s.n, s.k, "workers"), func(b *testing.B) {
-			b.ReportMetric(float64(r.parts(work, s.n)), "workers")
+			b.ReportMetric(float64(r.parts(work)), "workers")
 			b.Skip("report-only: the split each size receives")
 		})
 	}
@@ -180,4 +180,71 @@ func itoa(v int) string {
 		v /= 10
 	}
 	return string(buf[i:])
+}
+
+// TestRunnerSplitsShortAndWideProducts is the regression for the split shape
+// itself. An m=1 product against a 32000-wide vocabulary has one row, so a split
+// over rows alone would run entirely on one goroutine -- the exact case a batched
+// decode depends on. This pins the values, and BenchmarkBatchAmortizes below
+// reports the speed.
+func TestRunnerSplitsShortAndWideProducts(t *testing.T) {
+	r := rand.New(rand.NewSource(21))
+	const n, k = 32000, 288
+	for _, m := range []int{1, 2, 5} {
+		a := randSlice(r, m*k)
+		b := randSlice(r, n*k)
+
+		want := make([]float32, m*n)
+		if err := MatMulTransposed(want, a, b, m, n, k); err != nil {
+			t.Fatalf("MatMulTransposed: %v", err)
+		}
+		got := make([]float32, m*n)
+		if err := NewRunner(16).MatMulTransposed(got, a, b, m, n, k); err != nil {
+			t.Fatalf("Runner.MatMulTransposed(m=%d): %v", m, err)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("m=%d: dst[%d] = %v, want %v", m, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// BenchmarkBatchAmortizes is the evidence that batched decode is worth building:
+// it compares B matvecs against one m=B product at the vocabulary projection,
+// which is where a decode step spends most of its time.
+func BenchmarkBatchAmortizes(b *testing.B) {
+	runner := NewRunner(runtime.GOMAXPROCS(0))
+	const vocab, hidden = 32000, 288
+	w := make([]float32, vocab*hidden)
+	for i := range w {
+		w[i] = float32(i%13)/13 - 0.5
+	}
+	for _, batch := range []int{1, 4, 8, 16, 32} {
+		x := make([]float32, batch*hidden)
+		for i := range x {
+			x[i] = float32(i%7)/7 - 0.5
+		}
+		dst := make([]float32, batch*vocab)
+		row := make([]float32, vocab)
+
+		b.Run("batched/"+itoa(batch), func(b *testing.B) {
+			b.SetBytes(int64(batch) * vocab * hidden * 8 / int64(batch))
+			for range b.N {
+				if err := runner.MatMulTransposed(dst, x, w, batch, vocab, hidden); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run("percall/"+itoa(batch), func(b *testing.B) {
+			b.SetBytes(int64(batch) * vocab * hidden * 8 / int64(batch))
+			for range b.N {
+				for s := range batch {
+					if err := runner.MatVec(row, w, x[s*hidden:(s+1)*hidden], vocab, hidden); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+	}
 }

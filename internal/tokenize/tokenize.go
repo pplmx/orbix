@@ -470,3 +470,108 @@ func hexVal(c byte) (byte, bool) {
 		return 0, false
 	}
 }
+
+// StreamDecoder decodes tokens incrementally as a sequence generates them.
+//
+// Decoding one token at a time with Decode is wrong for streaming, and both
+// reasons are visible in Decode's own contract:
+//
+//   - It drops the single leading space that the word marker contributed, so
+//     decoding each token alone would strip the space before every word after the
+//     first, turning "Once upon" into "Onceupon".
+//   - It renders an incomplete byte sequence with a replacement character, so a
+//     character whose bytes span several tokens would arrive broken in the middle
+//     and could not be repaired.
+//
+// A StreamDecoder therefore keeps the two pieces of state a stream needs: whether
+// any text has been emitted (so only the first one drops a leading space), and the
+// bytes of a character still waiting for the rest of its tokens. Token returns the
+// text that became available, which is empty when the token only completed part of
+// a character.
+//
+// The zero value is not usable; call Seq to start one. A StreamDecoder is not safe
+// for concurrent use, which matches the one-writer stream it serves.
+type StreamDecoder struct {
+	tok *Tokenizer
+
+	// pending holds bytes of a character whose remaining byte tokens have not
+	// arrived yet. Decode cannot render them, so they wait rather than becoming a
+	// replacement character.
+	pending []byte
+
+	// started reports whether any text has been emitted. Only the first text drops
+	// the leading space the word marker contributes, which is what Decode does to
+	// a whole sequence.
+	started bool
+}
+
+// Seq starts a stream decoder.
+func (t *Tokenizer) Seq() *StreamDecoder {
+	return &StreamDecoder{tok: t}
+}
+
+// Token returns the text token id contributes, given everything already emitted.
+//
+// The result is empty for a control token, and also for a byte token that only
+// completes part of a character: nothing can be shown yet.
+func (d *StreamDecoder) Token(id int32) string {
+	if id < 0 || int(id) >= len(d.tok.tokens) {
+		return ""
+	}
+	if d.tok.types[id] == Control {
+		return ""
+	}
+
+	if b, ok := parseByteToken(d.tok.tokens[id]); ok {
+		d.pending = append(d.pending, b)
+		return d.drainPending(false)
+	}
+
+	// A non-byte token ends any byte run: whatever is left is a character that will
+	// never be completed, so it is rendered the way Decode renders it.
+	var b strings.Builder
+	b.WriteString(d.drainPending(true))
+	if d.tok.types[id] == Unknown {
+		b.WriteString(unknownSurface)
+	} else {
+		b.WriteString(strings.ReplaceAll(d.tok.tokens[id], spacePrefix, " "))
+	}
+	out := b.String()
+	if !d.started && strings.HasPrefix(out, " ") {
+		out = out[1:]
+	}
+	if out != "" {
+		d.started = true
+	}
+	return out
+}
+
+// drainPending emits every complete character in pending, keeping a trailing
+// incomplete sequence for the next token.
+//
+// When force is set the caller knows no more bytes are coming, so an incomplete
+// tail is emitted with a replacement character instead of being kept.
+func (d *StreamDecoder) drainPending(force bool) string {
+	if len(d.pending) == 0 {
+		return ""
+	}
+	// Find the longest prefix that is valid UTF-8, stopping at the first invalid
+	// byte: that is where a character begins that the next token must complete.
+	cut := len(d.pending)
+	for i := 0; i < len(d.pending); {
+		if !utf8.FullRune(d.pending[i:]) {
+			cut = i
+			break
+		}
+		_, size := utf8.DecodeRune(d.pending[i:])
+		i += size
+	}
+	if !force && cut < len(d.pending) {
+		out := string(d.pending[:cut])
+		d.pending = append(d.pending[:0], d.pending[cut:]...)
+		return out
+	}
+	out := strings.ToValidUTF8(string(d.pending), "\uFFFD")
+	d.pending = d.pending[:0]
+	return out
+}

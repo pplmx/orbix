@@ -542,3 +542,92 @@ func TestBlockPoolDefaultIsClamped(t *testing.T) {
 		t.Errorf("BlockSize = %d, want a positive default", got)
 	}
 }
+
+// TestCancelStopsASequence checks that a cancelled request stops generating and
+// releases its resources. Without this, a client that disconnects would keep the
+// model busy generating into a channel nobody reads.
+func TestCancelStopsASequence(t *testing.T) {
+	e, tok := loadModel(t)
+
+	prompt := tok.Encode("Once upon a time", true)
+	cancel := make(chan struct{})
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 1000, Cancel: cancel})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	var generated int
+	var reason string
+	// Run a few rounds, then cancel.
+	for range 3 {
+		if e.Pump() == 0 {
+			break
+		}
+	}
+	close(cancel)
+
+	deadline := 200
+	for e.Pump() > 0 && deadline > 0 {
+		deadline--
+	}
+	if e.Active() != 0 {
+		t.Fatalf("cancelled sequence is still active (%d)", e.Active())
+	}
+	for ev := range ch {
+		if ev.Err != nil {
+			t.Fatalf("cancelled sequence reported an error: %v", ev.Err)
+		}
+		if ev.HasToken {
+			generated++
+		}
+		if ev.Done {
+			reason = ev.FinishReason
+		}
+	}
+	if reason != "cancel" {
+		t.Errorf("finish reason = %q, want cancel", reason)
+	}
+	// Cancel has to arrive quickly: the sequence must not have run out its budget.
+	if generated >= 1000 {
+		t.Errorf("generated %d tokens despite cancellation", generated)
+	}
+}
+
+// TestCancelBeforeStartNeverGenerates checks the boundary: a request cancelled
+// before any round must not produce a token.
+func TestCancelBeforeStartNeverGenerates(t *testing.T) {
+	e, tok := loadModel(t)
+	cancel := make(chan struct{})
+	close(cancel)
+	ch, err := e.Submit(Request{Prompt: tok.Encode("Once", true), MaxTokens: 10, Cancel: cancel})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	out, reason := collect(t, ch)
+	if len(out) != 0 {
+		t.Errorf("cancelled request produced %d tokens", len(out))
+	}
+	if reason != "cancel" {
+		t.Errorf("finish reason = %q, want cancel", reason)
+	}
+}
+
+// TestNilCancelNeverFires pins that the common case is unaffected: no cancel
+// channel means no cancellation, and the request runs its whole budget.
+func TestNilCancelNeverFires(t *testing.T) {
+	e, tok := loadModel(t)
+	ch, err := e.Submit(Request{Prompt: tok.Encode("Once", true), MaxTokens: 4})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	out, reason := collect(t, ch)
+	if len(out) != 4 {
+		t.Errorf("produced %d tokens, want 4", len(out))
+	}
+	if reason != "length" {
+		t.Errorf("finish reason = %q, want length", reason)
+	}
+}

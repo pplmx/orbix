@@ -32,6 +32,12 @@ type Request struct {
 	Stop []int32
 	// Sampler picks each next token. Nil means greedy.
 	Sampler llama.Sampler
+	// Cancel, when set, stops the sequence at the start of its next round. The
+	// sequence then reports Done with the finish reason "cancel". A caller that
+	// owns a connection sets this to its request context so a client that goes
+	// away does not keep the model busy: without it, a disconnected stream would
+	// generate its whole token budget into a channel nobody reads.
+	Cancel <-chan struct{}
 }
 
 // sequence is the scheduler's per-request state.
@@ -285,6 +291,10 @@ func (e *Engine) prefill(s *sequence) {
 func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 	cfg := e.model.Config()
 
+	if s.cancelled() {
+		e.finish(s, Event{Done: true, FinishReason: "cancel"})
+		return 0, false
+	}
 	if len(s.out) >= s.req.MaxTokens {
 		e.finish(s, Event{Done: true, FinishReason: "length"})
 		return 0, false
@@ -333,6 +343,21 @@ func (e *Engine) decode(batch []pending) {
 		if len(p.s.out) >= p.s.req.MaxTokens {
 			e.finish(p.s, Event{Done: true, FinishReason: "length"})
 		}
+	}
+}
+
+// cancelled reports whether the sequence's cancel channel is closed.
+//
+// A nil channel is never ready, so a request without Cancel never cancels.
+func (s *sequence) cancelled() bool {
+	if s.req.Cancel == nil {
+		return false
+	}
+	select {
+	case <-s.req.Cancel:
+		return true
+	default:
+		return false
 	}
 }
 

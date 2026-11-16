@@ -104,11 +104,11 @@ const q4_0BlockSize = 32
 // Codes are offset by 8, giving the range -8..7 before scaling.
 func decodeQ4_0(dst []float32, src []byte) {
 	const blockBytes = 18
-	for b := 0; b < len(dst)/q4_0BlockSize; b++ {
+	for b := range len(dst) / q4_0BlockSize {
 		blk := src[b*blockBytes:]
 		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
 		y := dst[b*q4_0BlockSize : (b+1)*q4_0BlockSize]
-		for j := 0; j < q4_0BlockSize/2; j++ {
+		for j := range q4_0BlockSize / 2 {
 			qs := blk[2+j]
 			y[j] = float32(int(qs&0x0f)-8) * d
 			y[j+q4_0BlockSize/2] = float32(int(qs>>4)-8) * d
@@ -125,11 +125,11 @@ const q8_0BlockSize = 32
 // order. Unlike Q4_0 there is no interleaving and no offset.
 func decodeQ8_0(dst []float32, src []byte) {
 	const blockBytes = 34
-	for b := 0; b < len(dst)/q8_0BlockSize; b++ {
+	for b := range len(dst) / q8_0BlockSize {
 		blk := src[b*blockBytes:]
 		d := f16.ToFloat32(binary.LittleEndian.Uint16(blk[0:]))
 		y := dst[b*q8_0BlockSize : (b+1)*q8_0BlockSize]
-		for j := 0; j < q8_0BlockSize; j++ {
+		for j := range q8_0BlockSize {
 			y[j] = float32(int8(blk[2+j])) * d
 		}
 	}

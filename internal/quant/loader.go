@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/pplmx/orbix/internal/gguf"
 )
@@ -112,6 +113,62 @@ func (l *Loader) TensorInto(name string, dst []float32) error {
 		return fmt.Errorf("quant: read tensor %q: %w", name, err)
 	}
 	return Decode(ti.Type, raw, dst)
+}
+
+// Preload reads and dequantizes several tensors concurrently and returns them
+// keyed by name.
+//
+// Loading a model is dominated by reading and decoding independent tensors;
+// there is no data dependency between them, so the work fans out across a few
+// goroutines. The count is bounded by workers rather than by the tensor count,
+// because decoding is memory-bandwidth bound and oversubscribing the CPUs makes
+// it slower, not faster.
+//
+// ReadAt is used instead of Seek precisely so concurrent reads share one file
+// descriptor without racing on its position.
+func (l *Loader) Preload(names []string, workers int) (map[string][]float32, error) {
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(names) {
+		workers = len(names)
+	}
+	out := make(map[string][]float32, len(names))
+	if len(names) == 0 {
+		return out, nil
+	}
+
+	var (
+		mu       sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+		// sem bounds the number of concurrent decodes to workers. Without it
+		// every tensor would start at once, which for a 7B model means hundreds
+		// of gigabytes of float32 buffers in flight.
+		sem = make(chan struct{}, workers)
+	)
+	for _, name := range names {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			t, err := l.Tensor(name)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			out[name] = t
+		})
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
 }
 
 // TensorReader returns a streaming reader over the raw encoded bytes of a

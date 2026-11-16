@@ -3,6 +3,7 @@ package quant
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -206,5 +207,104 @@ func closeLoader(t *testing.T, l *Loader) {
 	t.Helper()
 	if err := l.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestPreload(t *testing.T) {
+	// Two tensors of different quant types, loaded through the concurrent path,
+	// must decode exactly as the sequential one does.
+	data := make([]byte, 0, 32+18)
+	for i := 0; i < 8; i++ {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(float32(i+1)))
+		data = append(data, tmp[:]...)
+	}
+	data = append(data, q4_0Block(t, fill(32, 9), 1)...)
+
+	path := writeModel(t, []gguf.TensorInfo{
+		{Name: "a", Dims: []uint64{8}, Type: gguf.F32, Offset: 0},
+		{Name: "b", Dims: []uint64{32}, Type: gguf.Q4_0, Offset: 32},
+	}, data)
+
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+	defer closeLoader(t, l)
+
+	got, err := l.Preload([]string{"a", "b"}, 2)
+	if err != nil {
+		t.Fatalf("Preload: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Preload returned %d tensors, want 2", len(got))
+	}
+	for i := 0; i < 8; i++ {
+		if want := float32(i + 1); got["a"][i] != want {
+			t.Errorf("a[%d] = %v, want %v", i, got["a"][i], want)
+		}
+	}
+	if got["b"][0] != 1 {
+		t.Errorf("b[0] = %v, want 1", got["b"][0])
+	}
+
+	// An unknown name must fail the whole call rather than return a partial map
+	// the caller might mistake for a complete model.
+	if _, err := l.Preload([]string{"a", "missing"}, 2); err == nil {
+		t.Error("Preload with a missing tensor succeeded")
+	}
+	// Zero workers is normalised to one, not treated as "no work".
+	if got, err := l.Preload([]string{"a"}, 0); err != nil || len(got) != 1 {
+		t.Errorf("Preload(workers=0) = %v, %v", got, err)
+	}
+	// An empty request is a valid no-op.
+	if got, err := l.Preload(nil, 4); err != nil || len(got) != 0 {
+		t.Errorf("Preload(nil) = %v, %v", got, err)
+	}
+}
+
+func TestPreloadConcurrentReads(t *testing.T) {
+	// Exercise the shared file descriptor with many tensors at once. ReadAt is
+	// position-independent, so this must be race-free; the -race build of this
+	// test is what proves the claim.
+	const n = 16
+	tensors := make([]gguf.TensorInfo, n)
+	data := make([]byte, 0, n*32)
+	for i := 0; i < n; i++ {
+		tensors[i] = gguf.TensorInfo{
+			Name:   fmt.Sprintf("t%d", i),
+			Dims:   []uint64{8},
+			Type:   gguf.F32,
+			Offset: uint64(i * 32),
+		}
+		for j := 0; j < 8; j++ {
+			var tmp [4]byte
+			binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(float32(i*100+j)))
+			data = append(data, tmp[:]...)
+		}
+	}
+	path := writeModel(t, tensors, data)
+
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+	defer closeLoader(t, l)
+
+	names := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprintf("t%d", i)
+	}
+	got, err := l.Preload(names, 4)
+	if err != nil {
+		t.Fatalf("Preload: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("t%d", i)
+		for j := 0; j < 8; j++ {
+			if want := float32(i*100 + j); got[name][j] != want {
+				t.Errorf("%s[%d] = %v, want %v", name, j, got[name][j], want)
+			}
+		}
 	}
 }

@@ -70,11 +70,17 @@ func cmdServe(args []string) error {
 	}
 	cfg := eng.Model().Config()
 
+	renderer, err := engine.NewChatRenderer(gf)
+	if err != nil {
+		return err
+	}
+
 	srv, err := server.New(eng, tok, server.Config{
-		ModelName:   cfg.Name,
-		MaxTokens:   *maxTokens,
-		ContextLen:  cfg.ContextLen,
-		Temperature: 0,
+		ModelName:    cfg.Name,
+		MaxTokens:    *maxTokens,
+		ContextLen:   cfg.ContextLen,
+		Temperature:  0,
+		ChatRenderer: renderer,
 	})
 	if err != nil {
 		return err
@@ -99,6 +105,14 @@ func cmdServe(args []string) error {
 
 	fmt.Printf("orbix serving %s on %s\n", cfg, url)
 	fmt.Printf("scheduling: %d active, %s policy\n", *maxActive, schedPolicy)
+	// Report which chat format is in use. A fallback is not an error -- the server
+	// still answers -- but an operator who sees oddly shaped replies should be able to
+	// tell whether the model's own format was applied.
+	if renderer.UsesModelTemplate() {
+		fmt.Println("chat:       model template")
+	} else {
+		fmt.Printf("chat:       neutral transcript (%s)\n", renderer.FallbackReason())
+	}
 	fmt.Printf("POST %s/v1/chat/completions\n", url)
 	if pool := eng.Pool(); pool != nil {
 		fmt.Printf("kv cache: paged, %d blocks x %d positions = %.2f MiB shared\n",

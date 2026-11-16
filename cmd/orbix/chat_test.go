@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/engine"
 )
 
 // The chat REPL is driven through its session function rather than through the
@@ -123,21 +125,26 @@ func TestChatHistoryOnlyGrowsOnSuccess(t *testing.T) {
 }
 
 func TestRenderChatPrompt(t *testing.T) {
-	// The template has to match the server's, or the same conversation produces
-	// different tokens over HTTP and in the REPL. This pins the shape.
-	got := renderChatPrompt("be brief", []chatTurn{
+	// This pins the neutral transcript, which is what a model without a usable
+	// template gets. The flattening from a session to turns lives here, so a wrong
+	// turn list is caught without running the REPL.
+	neutral := func(system string, history []chatTurn, user string) string {
+		return engine.RenderChatPrompt(chatTurns(system, history, user))
+	}
+
+	got := neutral("be brief", []chatTurn{
 		{role: "user", text: "hi"},
 		{role: "assistant", text: "hello"},
 	}, "how are you")
 	want := "System: be brief\nUser: hi\nAssistant: hello\nUser: how are you\nAssistant:"
 	if got != want {
-		t.Errorf("renderChatPrompt =\n%q\nwant\n%q", got, want)
+		t.Errorf("neutral transcript =\n%q\nwant\n%q", got, want)
 	}
 
 	// No system prompt means no System line at all, not an empty one.
-	got = renderChatPrompt("", nil, "hi")
+	got = neutral("", nil, "hi")
 	if want := "User: hi\nAssistant:"; got != want {
-		t.Errorf("renderChatPrompt without system = %q, want %q", got, want)
+		t.Errorf("neutral transcript without system = %q, want %q", got, want)
 	}
 }
 

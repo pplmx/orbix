@@ -22,7 +22,7 @@ hand-written writer makes and the format's own readers catch:
 - The tensor count appears once, in the header. The directory after the metadata is
   just the entries.
 """
-import json, struct, sys
+import json, os, struct, sys
 import numpy as np
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else "/models/Qwen2.5-0.5B-Instruct"
@@ -103,6 +103,25 @@ def gstr(s):
     b = s.encode("utf-8")
     return struct.pack("<Q", len(b)) + b
 
+def tokenizer_chat_template():
+    """Emit tokenizer.chat_template when the source model declares one.
+
+    A missing template is not an error -- a base model has no chat format -- so this
+    contributes nothing rather than writing an empty string, which a reader would treat
+    as a template that renders to nothing.
+    """
+    path = os.path.join(SRC, "tokenizer_config.json")
+    try:
+        with open(path) as fh:
+            tcfg = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return []
+    tmpl = tcfg.get("chat_template")
+    if not isinstance(tmpl, str) or not tmpl.strip():
+        return []
+    return [kv_str("tokenizer.chat_template", tmpl)]
+
+
 def kv_str(k, v):
     return gstr(k) + struct.pack("<I", 8) + gstr(v)
 def kv_u32(k, v):
@@ -152,6 +171,9 @@ _meta_list = ([
     kv_f32("qwen2.attention.layer_norm_rms_epsilon", CFG["rms_norm_eps"]),
     kv_u32("qwen2.rope.dimension_count", CFG["hidden_size"]//CFG["num_attention_heads"]),
     kv_f32("qwen2.rope.freq_base", CFG["rope_theta"]),
+    # The chat format is part of the model: a checkpoint trained on im_start turns
+    # answers a neutral transcript badly, so the template travels with the weights.
+    *tokenizer_chat_template(),
     # The vocab family, which decides how a space is represented before merging.
     # Omitting it makes a reader fall back to SentencePiece's convention and silently
     # drop every space in the prompt, so this key is not optional.

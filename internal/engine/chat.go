@@ -1,6 +1,11 @@
 package engine
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/pplmx/orbix/internal/chat"
+	"github.com/pplmx/orbix/internal/gguf"
+)
 
 // Turn is one message in a chat conversation.
 //
@@ -43,4 +48,96 @@ func RenderChatPrompt(turns []Turn) string {
 	}
 	b.WriteString("Assistant:")
 	return b.String()
+}
+
+// ChatRenderer renders conversations with a checkpoint's own chat template when that
+// template is one this project can evaluate, and with a neutral transcript otherwise.
+//
+// The template is a property of the model, so the renderer is built once per model
+// rather than per request. It records why it fell back, because "the model's format was
+// not used" is something an operator needs to see: the server prints it at startup and
+// the REPL shows it on the first turn.
+type ChatRenderer struct {
+	tmpl *chat.Template
+	// fallbackReason is empty when the model's template is in use.
+	fallbackReason string
+	// bos and eos are the vocabulary's special pieces as text, which a template
+	// interpolates.
+	bos, eos string
+}
+
+// NewChatRenderer reads tokenizer.chat_template from a GGUF file and compiles it.
+//
+// A model without a template, or with one using a construct outside the supported
+// subset, gets the neutral transcript and a reason. That is deliberate: a partially
+// rendered template would produce a prompt that looks plausible and is wrong, while a
+// neutral transcript is merely less good than the model's own format.
+func NewChatRenderer(f *gguf.File) (*ChatRenderer, error) {
+	r := &ChatRenderer{}
+	r.bos, r.eos = specialPieceText(f, "tokenizer.ggml.bos_token_id"), specialPieceText(f, "tokenizer.ggml.eos_token_id")
+
+	src, ok := f.Get[string]("tokenizer.chat_template")
+	if !ok || strings.TrimSpace(src) == "" {
+		r.fallbackReason = "the model declares no tokenizer.chat_template"
+		return r, nil
+	}
+	tmpl, err := chat.Parse(src)
+	if err != nil {
+		r.fallbackReason = err.Error()
+		return r, nil
+	}
+	r.tmpl = tmpl
+	return r, nil
+}
+
+// UsesModelTemplate reports whether the model's own format is in use.
+func (r *ChatRenderer) UsesModelTemplate() bool { return r != nil && r.tmpl != nil }
+
+// FallbackReason explains the fallback, or is empty when there is none.
+func (r *ChatRenderer) FallbackReason() string { return r.fallbackReason }
+
+// Render produces the prompt for a conversation.
+//
+// A template that compiles can still fail at render time -- an undefined variable in a
+// branch this conversation takes, for instance -- so a render error also falls back
+// rather than failing the request. The error is recorded so it is visible instead of
+// silent.
+func (r *ChatRenderer) Render(turns []Turn) (string, error) {
+	if r == nil || r.tmpl == nil {
+		return RenderChatPrompt(turns), nil
+	}
+	msgs := make([]chat.Message, len(turns))
+	for i, t := range turns {
+		role := t.Role
+		if role == "" {
+			role = "user"
+		}
+		msgs[i] = chat.Message{Role: role, Content: strings.TrimSpace(t.Text)}
+	}
+	out, err := r.tmpl.Render(msgs, chat.Inputs{
+		BOSToken:            r.bos,
+		EOSToken:            r.eos,
+		AddGenerationPrompt: true,
+	})
+	if err != nil {
+		return RenderChatPrompt(turns), nil
+	}
+	return out, nil
+}
+
+// specialPieceText returns the surface text of a token id, or the empty string.
+//
+// A template interpolates bos_token as text rather than as an id, so the piece has to be
+// looked up in the vocabulary; getting it wrong prepends something the model reads as
+// content.
+func specialPieceText(f *gguf.File, key string) string {
+	id, ok := f.Get[int](key)
+	if !ok || id < 0 {
+		return ""
+	}
+	pieces, ok := f.Strings("tokenizer.ggml.tokens")
+	if !ok || id >= len(pieces) {
+		return ""
+	}
+	return pieces[id]
 }

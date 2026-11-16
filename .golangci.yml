@@ -24,6 +24,13 @@ linters:
       - linters: [errcheck]
         path: _test\.go
         text: "(ReadFrom|w\\.Close|rc\\.Close)"
+      # The template lexer's outer switch dispatches on a byte classification whose
+      # cases are compound (three whitespace bytes, two quote bytes) and whose bodies
+      # are unlike. A tagged switch would move those conditions into the case labels,
+      # where they are harder to read than the `case c == ' ' || ...` form.
+      - linters: [staticcheck]
+        path: internal/chat/expr\.go
+        text: "QF1002"
 
 formatters:
   enable:

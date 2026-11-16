@@ -71,6 +71,11 @@ type chatOptions struct {
 	blockSize   int
 	blocks      int
 	prefixCache bool
+
+	// renderer produces the prompt for a conversation. It is resolved once per
+	// session, because compiling the model's template per turn would reparse the
+	// same few hundred bytes on every message.
+	renderer *engine.ChatRenderer
 }
 
 // chatSession runs the read-eval-print loop.
@@ -85,6 +90,24 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	}
 	tok, err := tokenize.New(gf)
 	if err != nil {
+		return err
+	}
+	// The model's own chat format when this project can evaluate it, the neutral
+	// transcript otherwise. Built once per session: compiling a template per turn
+	// would reparse the same few hundred bytes every time.
+	renderer, err := engine.NewChatRenderer(gf)
+	if err != nil {
+		return err
+	}
+	opts.renderer = renderer
+	// Say which format is in use. It is worth one line: a model whose template was
+	// not applied answers in a shape the caller did not expect, and knowing that from
+	// the start is the difference between a bug report and a mystery.
+	banner := "(using the model's own chat template)"
+	if !renderer.UsesModelTemplate() {
+		banner = fmt.Sprintf("(using a neutral transcript: %s)", renderer.FallbackReason())
+	}
+	if _, err := fmt.Fprintln(out, banner); err != nil {
 		return err
 	}
 
@@ -213,7 +236,10 @@ type chatTurn struct {
 // previous turn's prompt, so the engine can attach those blocks instead of
 // recomputing them.
 func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, system string, history []chatTurn, user string, opts chatOptions) (string, error) {
-	prompt := renderChatPrompt(system, history, user)
+	prompt, err := opts.renderer.Render(chatTurns(system, history, user))
+	if err != nil {
+		return "", err
+	}
 	cfg := eng.Model().Config()
 	// The chat transcript is markup, not prose: its markers are control tokens the
 	// model was trained to see, so they have to be matched whole.
@@ -312,7 +338,8 @@ func drainChatEvents(ch <-chan engine.Event, out io.Writer, dec *tokenize.Stream
 
 // renderChatPrompt renders a conversation through the shared template, so a REPL
 // session and an HTTP request over the same conversation produce the same tokens.
-func renderChatPrompt(system string, history []chatTurn, user string) string {
+// chatTurns flattens a session's history into the turn list a renderer consumes.
+func chatTurns(system string, history []chatTurn, user string) []engine.Turn {
 	turns := make([]engine.Turn, 0, len(history)+2)
 	if system != "" {
 		turns = append(turns, engine.Turn{Role: "system", Text: system})
@@ -321,7 +348,7 @@ func renderChatPrompt(system string, history []chatTurn, user string) string {
 		turns = append(turns, engine.Turn{Role: turn.role, Text: turn.text})
 	}
 	turns = append(turns, engine.Turn{Role: "user", Text: user})
-	return engine.RenderChatPrompt(turns)
+	return turns
 }
 
 // chatCommand handles a slash command, reporting whether the session should end.

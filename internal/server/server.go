@@ -58,6 +58,16 @@ type Config struct {
 
 	// TopK is the default top-k cutoff. Zero disables it.
 	TopK int
+
+	// ChatRenderer renders conversations with the model's own template when one is
+	// available. Nil means the neutral transcript, which is also what a model without
+	// a usable template gets.
+	//
+	// It is passed in rather than built here because the server never opens the GGUF
+	// file: the tokenizer and engine are already constructed by the time a Config
+	// exists, and reopening the file for one metadata string would make the server
+	// responsible for a file it otherwise does not touch.
+	ChatRenderer *engine.ChatRenderer
 }
 
 // Server serves one loaded model over HTTP.
@@ -290,7 +300,11 @@ func (s *Server) renderChat(msgs []chatMessage) string {
 	for i, m := range msgs {
 		turns[i] = engine.Turn{Role: m.Role, Text: m.Content}
 	}
-	return engine.RenderChatPrompt(turns)
+	// Render always returns a usable prompt: a model template that fails at render time
+	// falls back to the neutral transcript inside the renderer, so this call cannot
+	// leave the request without a prompt.
+	prompt, _ := s.cfg.ChatRenderer.Render(turns)
+	return prompt
 }
 
 // generateParams is what both endpoints share once their JSON is decoded.

@@ -1,0 +1,472 @@
+package tokenize
+
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/pplmx/orbix/internal/gguf"
+)
+
+// TokenType is the role a vocabulary entry plays.
+//
+// The numbering is GGUF's, and it decides behaviour: control tokens are never
+// produced by encoding ordinary text, byte tokens are the fallback for
+// characters the vocabulary cannot spell, and unknown tokens mark the one
+// entry that represents everything else.
+type TokenType int32
+
+// Vocabulary entry roles, in GGUF's numbering.
+const (
+	Undefined   TokenType = 0
+	Normal      TokenType = 1
+	Unknown     TokenType = 2
+	Control     TokenType = 3
+	UserDefined TokenType = 4
+	Unused      TokenType = 5
+	Byte        TokenType = 6
+)
+
+// spacePrefix is the marker SentencePiece uses for a leading space (U+2581,
+// "▁"). Models are trained with spaces folded into the following token, so
+// " hello" is one token while "hello" may be several.
+const spacePrefix = "\u2581"
+
+// unknownSurface is how SentencePiece renders an unknown token on decode.
+const unknownSurface = " \u2047 "
+
+// Tokenizer is a SentencePiece-style vocabulary.
+type Tokenizer struct {
+	tokens []string
+	scores []float32
+	types  []TokenType
+
+	// index maps a piece to its ID, for the merge search.
+	index map[string]int32
+
+	// byteID maps a byte value to the ID of its <0xNN> token, or -1 when the
+	// vocabulary has no byte token for that value.
+	byteID [256]int32
+
+	unknownID int32
+	bosID     int32
+	eosID     int32
+
+	// addSpacePrefix prepends a space to encoded text. SentencePiece models
+	// are trained on text that starts with a space, and some GGUF files state
+	// this explicitly with tokenizer.ggml.add_space_prefix.
+	addSpacePrefix bool
+}
+
+// New builds a Tokenizer from a parsed GGUF file.
+func New(f *gguf.File) (*Tokenizer, error) {
+	tokens, ok := f.Strings("tokenizer.ggml.tokens")
+	if !ok {
+		return nil, fmt.Errorf("tokenize: missing tokenizer.ggml.tokens")
+	}
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("tokenize: empty vocabulary")
+	}
+
+	t := &Tokenizer{
+		tokens: tokens,
+		index:  make(map[string]int32, len(tokens)),
+		// Defaults are -1 so a model that omits an ID does not silently point
+		// at token 0, which is usually <unk> and would corrupt output.
+		unknownID: -1,
+		bosID:     -1,
+		eosID:     -1,
+		byteID:    fillNeg1(),
+	}
+
+	for i, tok := range tokens {
+		t.index[tok] = int32(i)
+	}
+	// Scores are optional: a vocabulary without them still encodes, using
+	// insertion order as the tie-break, which is what llama.cpp does.
+	if scores, ok := f.Float32s("tokenizer.ggml.scores"); ok {
+		if len(scores) != len(tokens) {
+			return nil, fmt.Errorf("tokenize: %d scores for %d tokens", len(scores), len(tokens))
+		}
+		t.scores = scores
+	} else {
+		t.scores = make([]float32, len(tokens))
+	}
+
+	if types, ok := f.Int32s("tokenizer.ggml.token_type"); ok {
+		if len(types) != len(tokens) {
+			return nil, fmt.Errorf("tokenize: %d token types for %d tokens", len(types), len(tokens))
+		}
+		t.types = make([]TokenType, len(types))
+		for i, v := range types {
+			t.types[i] = TokenType(v)
+		}
+	} else {
+		t.types = make([]TokenType, len(tokens))
+		for i := range t.types {
+			t.types[i] = Normal
+		}
+	}
+
+	// Index the byte tokens so encoding can fall back to them.
+	for i, tok := range tokens {
+		if b, ok := parseByteToken(tok); ok {
+			t.byteID[b] = int32(i)
+		}
+	}
+
+	if id, ok := f.Uint32("tokenizer.ggml.unknown_token_id"); ok {
+		t.unknownID = int32(id)
+	}
+	if id, ok := f.Uint32("tokenizer.ggml.bos_token_id"); ok {
+		t.bosID = int32(id)
+	}
+	if id, ok := f.Uint32("tokenizer.ggml.eos_token_id"); ok {
+		t.eosID = int32(id)
+	}
+	if v, ok := f.Lookup("tokenizer.ggml.add_space_prefix"); ok && v.Type == gguf.TypeBool {
+		t.addSpacePrefix = v.Bool
+	} else {
+		// SentencePiece always prepends a space during training, and a model
+		// that omits the key is following that convention.
+		t.addSpacePrefix = true
+	}
+
+	return t, nil
+}
+
+func fillNeg1() (out [256]int32) {
+	for i := range out {
+		out[i] = -1
+	}
+	return out
+}
+
+// VocabSize returns the number of entries in the vocabulary.
+func (t *Tokenizer) VocabSize() int { return len(t.tokens) }
+
+// UnknownID returns the ID of the unknown token, or -1 when the model has
+// none.
+func (t *Tokenizer) UnknownID() int32 { return t.unknownID }
+
+// BOSID returns the beginning-of-sequence token ID, or -1 when unset.
+func (t *Tokenizer) BOSID() int32 { return t.bosID }
+
+// EOSID returns the end-of-sequence token ID, or -1 when unset.
+func (t *Tokenizer) EOSID() int32 { return t.eosID }
+
+// Token returns the piece stored at id.
+func (t *Tokenizer) Token(id int32) (string, bool) {
+	if id < 0 || int(id) >= len(t.tokens) {
+		return "", false
+	}
+	return t.tokens[id], true
+}
+
+// TokenType returns the role of the token at id.
+func (t *Tokenizer) TokenType(id int32) TokenType {
+	if id < 0 || int(id) >= len(t.types) {
+		return Undefined
+	}
+	return t.types[id]
+}
+
+// symbol is one span of the normalized text during segmentation.
+//
+// start and len delimit the text slice the symbol covers; prev and next form
+// a doubly linked list over the symbols so a merge can unlink a neighbour in
+// constant time. len == 0 marks a symbol that has been merged away, which is
+// how a stale queue entry is detected.
+type symbol struct {
+	start, len int
+	prev, next int
+}
+
+// bigram is a merge candidate: two adjacent symbols and the score of the piece
+// they would form.
+type bigram struct {
+	left, right int
+	score       float32
+	size        int // combined byte length, used to detect stale entries
+}
+
+// bigramQueue is a max-heap on (score, then leftmost first).
+//
+// The tie-break on the left index is not cosmetic: it makes the resulting
+// segmentation deterministic when several pairs score equally, and it matches
+// the reference implementation's comparator exactly, which is what lets a
+// GGUF model produce the same tokens llama.cpp would.
+type bigramQueue []bigram
+
+func (q *bigramQueue) push(b bigram) {
+	*q = append(*q, b)
+	i := len(*q) - 1
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !q.less(i, parent) {
+			break
+		}
+		(*q)[i], (*q)[parent] = (*q)[parent], (*q)[i]
+		i = parent
+	}
+}
+
+func (q *bigramQueue) pop() (bigram, bool) {
+	old := *q
+	if len(old) == 0 {
+		return bigram{}, false
+	}
+	top := old[0]
+	last := len(old) - 1
+	old[0] = old[last]
+	*q = old[:last]
+	if len(*q) > 0 {
+		i := 0
+		for {
+			l, r := 2*i+1, 2*i+2
+			best := i
+			if l < len(*q) && q.less(l, best) {
+				best = l
+			}
+			if r < len(*q) && q.less(r, best) {
+				best = r
+			}
+			if best == i {
+				break
+			}
+			(*q)[i], (*q)[best] = (*q)[best], (*q)[i]
+			i = best
+		}
+	}
+	return top, true
+}
+
+// less reports whether entry i outranks entry j, i.e. whether i should come out
+// of the heap first.
+func (q bigramQueue) less(i, j int) bool {
+	if q[i].score != q[j].score {
+		return q[i].score > q[j].score
+	}
+	return q[i].left < q[j].left
+}
+
+// Encode converts text into token IDs.
+//
+// When addSpecial is true and the model defines a beginning-of-sequence
+// token, it is prepended. Ordinary text never produces control tokens: a
+// token like "<s>" typed by a user is encoded as characters, not as the
+// control token, which is what a chat template expects.
+func (t *Tokenizer) Encode(text string, addSpecial bool) []int32 {
+	var out []int32
+	if addSpecial && t.bosID >= 0 {
+		out = append(out, t.bosID)
+	}
+	out = append(out, t.encodeText(text)...)
+	return out
+}
+
+// encodeText is the SentencePiece segmentation of one string.
+//
+// It follows llama.cpp's llm_tokenizer_spm_session: seed a priority queue with
+// every adjacent pair that is itself a vocabulary piece, then repeatedly merge
+// the highest-scoring pair, pushing the two new pairs the merge creates. The
+// score is the piece's unigram log-probability, so a long, likely piece wins
+// over a sequence of shorter ones.
+func (t *Tokenizer) encodeText(text string) []int32 {
+	if text == "" {
+		return nil
+	}
+	if t.addSpacePrefix {
+		text = " " + text
+	}
+	// Fold spaces into the U+2581 marker. Every space becomes a marker, not
+	// just leading ones: SentencePiece treats the marker as part of the token
+	// that follows it.
+	text = strings.ReplaceAll(text, " ", spacePrefix)
+
+	symbols := make([]symbol, 0, len(text))
+	for off := 0; off < len(text); {
+		_, size := utf8.DecodeRuneInString(text[off:])
+		i := len(symbols)
+		symbols = append(symbols, symbol{start: off, len: size, prev: i - 1, next: -1})
+		if i > 0 {
+			symbols[i-1].next = i
+		}
+		off += size
+	}
+
+	// rev records how a merged span was formed, so a span that is not itself a
+	// token can be split back into the two pieces it came from. A single left
+	// reduction would lose the intermediate pieces -- e.g. "abcdef" formed from
+	// "abc"+"def" where neither "abc" nor "def" is a whole token.
+	rev := make(map[string][2]string, len(symbols))
+
+	var queue bigramQueue
+	tryAddBigram := func(left, right int) {
+		if left < 0 || right < 0 {
+			return
+		}
+		span := text[symbols[left].start : symbols[right].start+symbols[right].len]
+		id, ok := t.index[span]
+		if !ok {
+			return
+		}
+		queue.push(bigram{left: left, right: right, score: t.scores[id], size: len(span)})
+		rev[span] = [2]string{
+			text[symbols[left].start : symbols[left].start+symbols[left].len],
+			text[symbols[right].start : symbols[right].start+symbols[right].len],
+		}
+	}
+
+	for i := 1; i < len(symbols); i++ {
+		tryAddBigram(i-1, i)
+	}
+
+	for {
+		b, ok := queue.pop()
+		if !ok {
+			break
+		}
+		l, r := &symbols[b.left], &symbols[b.right]
+		// A stale entry: one side was already merged into something else, or
+		// the pair no longer spans what it did when it was queued.
+		if l.len == 0 || r.len == 0 || l.len+r.len != b.size {
+			continue
+		}
+		l.len += r.len
+		r.len = 0
+		l.next = r.next
+		if r.next >= 0 {
+			symbols[r.next].prev = b.left
+		}
+		tryAddBigram(l.prev, b.left)
+		tryAddBigram(b.left, l.next)
+	}
+
+	var out []int32
+	for i := 0; i >= 0 && i < len(symbols); i = symbols[i].next {
+		span := text[symbols[i].start : symbols[i].start+symbols[i].len]
+		out = t.resegment(span, rev, out)
+	}
+	return out
+}
+
+// resegment turns one merged span into tokens.
+//
+// A span that is a vocabulary piece becomes that token. Otherwise it is split
+// back into the pair that formed it and each half is examined. A span with no
+// recorded split is emitted as byte tokens, which is the fallback for
+// characters the vocabulary cannot spell.
+func (t *Tokenizer) resegment(span string, rev map[string][2]string, out []int32) []int32 {
+	todo := []string{span}
+	for len(todo) > 0 {
+		cur := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+
+		if id, ok := t.index[cur]; ok {
+			out = append(out, id)
+			continue
+		}
+		if halves, ok := rev[cur]; ok {
+			// Push in reverse so the left half is processed first and the
+			// output order matches the text.
+			todo = append(todo, halves[1], halves[0])
+			continue
+		}
+		out = t.encodeBytes(cur, out)
+	}
+	return out
+}
+
+// encodeBytes appends the byte-token sequence for a piece the vocabulary
+// cannot represent directly.
+func (t *Tokenizer) encodeBytes(piece string, out []int32) []int32 {
+	for i := 0; i < len(piece); i++ {
+		if id := t.byteID[piece[i]]; id >= 0 {
+			out = append(out, id)
+		} else if t.unknownID >= 0 {
+			out = append(out, t.unknownID)
+		}
+		// With neither a byte token nor an unknown token there is nothing
+		// honest to emit, so the byte is dropped rather than guessed at.
+	}
+	return out
+}
+
+// Decode converts token IDs back into text.
+//
+// The piece-to-text mapping mirrors SentencePiece's decoder exactly, because
+// a mismatch shows up as a stray leading space or a lost character in
+// generated output:
+//
+//   - the word marker U+2581 becomes a space,
+//   - a single leading space is then dropped, so "▁Once" decodes to "Once",
+//   - an unknown token renders as U+2047, the reference's "⁇" surface form,
+//   - control tokens are skipped: they are metadata, not text,
+//   - byte tokens are accumulated and decoded as one UTF-8 sequence, since a
+//     single non-ASCII character spans several of them.
+func (t *Tokenizer) Decode(ids []int32) string {
+	var b strings.Builder
+	var pending []byte
+
+	flushBytes := func() {
+		if len(pending) == 0 {
+			return
+		}
+		b.WriteString(strings.ToValidUTF8(string(pending), "\uFFFD"))
+		pending = pending[:0]
+	}
+
+	for _, id := range ids {
+		if id < 0 || int(id) >= len(t.tokens) {
+			continue
+		}
+		if t.types[id] == Control {
+			continue
+		}
+		if tok, ok := parseByteToken(t.tokens[id]); ok {
+			pending = append(pending, tok)
+			continue
+		}
+		flushBytes()
+		if t.types[id] == Unknown {
+			b.WriteString(unknownSurface)
+			continue
+		}
+		b.WriteString(strings.ReplaceAll(t.tokens[id], spacePrefix, " "))
+	}
+	flushBytes()
+
+	// Drop the single leading space that the word marker contributed.
+	out := b.String()
+	return strings.TrimPrefix(out, " ")
+}
+
+// parseByteToken recognizes a SentencePiece byte token of the form <0xNN>.
+func parseByteToken(s string) (byte, bool) {
+	if len(s) != 6 || s[0] != '<' || s[1] != '0' || s[2] != 'x' || s[5] != '>' {
+		return 0, false
+	}
+	hi, ok := hexVal(s[3])
+	if !ok {
+		return 0, false
+	}
+	lo, ok := hexVal(s[4])
+	if !ok {
+		return 0, false
+	}
+	return hi<<4 | lo, true
+}
+
+func hexVal(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	default:
+		return 0, false
+	}
+}

@@ -429,13 +429,13 @@ alone.
 
 Orbix targets the GGUF ecosystem. Initial support:
 
-| Family                  | Architectures        | Status       |
-| ----------------------- | -------------------- | ------------ |
-| **Llama / Llama 2 / 3** | `llama`              | v0.1         |
-| **Qwen 2 / 2.5**        | `qwen2`              | v0.2         |
-| **Mistral**             | `mistral`            | v0.3         |
-| **Mixtral**             | `llama` with experts | v0.3         |
-| **Gemma**               | `gemma`              | planned v0.4 |
+| Family                  | Architectures        | Status        |
+| ----------------------- | -------------------- | ------------- |
+| **Llama / Llama 2 / 3** | `llama`              | v0.1          |
+| **Qwen 2 / 2.5**        | `qwen2`              | v0.2          |
+| **Mistral**             | `mistral`            | v0.3          |
+| **Mixtral**             | `llama` with experts | v0.3          |
+| **Gemma**               | `gemma`              | not supported |
 
 | Quantization                   | Status |
 | ------------------------------ | ------ |
@@ -443,15 +443,28 @@ Orbix targets the GGUF ecosystem. Initial support:
 | `Q8_0`                         | v0.1   |
 | `Q4_0`, `Q4_1`                 | v0.2   |
 | `Q5_0`, `Q5_1`                 | v0.3   |
+| `BF16`                         | done   |
+| `IQ4_NL`                       | done   |
 | `K-quants` (`Q2_K`-`Q6_K`)     | done   |
 
 GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally.
 
-Both supported architectures are checked against real checkpoints, not only against
-synthetic fixtures. So is the quantization: the official Qwen2.5-0.5B checkpoints in
-Q4_0, Q4_K_M, and Q6_K form all produce the same continuation, and Q4_K_M exercises
-four decoders at once. `scripts/hf_to_gguf.py` converts a Qwen2.5 safetensors checkpoint
-to GGUF for that purpose; it is deliberately independent of the Go code, because a
+Two of the three architectures are checked against real checkpoints, not only against
+synthetic fixtures: `llama` by comparison with llama.cpp's own log-probabilities, and
+`qwen2` by a converted official checkpoint whose continuation is on-topic. The
+mixture-of-experts path has its own real file. `mistral` does not: its configuration and
+its sliding window are covered against constructed files, and adding a real checkpoint
+test would need a Mistral GGUF that this project has not had.
+
+The quantization is checked at the block level rather than by comparing whole
+generations across formats: each 32-weight format has exact-value tests on constructed
+blocks, the 256-weight K-quants add a round-trip error bound, and a test reads a real
+K-quant tensor from a checkpoint when one is available. Comparing a single prompt's
+continuation across quantizations would test the model more than the decoder -- a
+4-bit rounding difference is expected to change a greedy continuation eventually.
+
+`scripts/hf_to_gguf.py` converts a Qwen2.5 safetensors checkpoint to GGUF for the
+weight-level cross-check; it is deliberately independent of the Go code, because a
 converter that shared the loader's assumptions could not catch a wrong one. With
 `QWEN2_MODEL` set it runs those tests:
 

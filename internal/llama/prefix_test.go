@@ -1,8 +1,9 @@
 package llama
 
 import (
-	"os"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // Prefix reuse is a correctness-critical optimization: a wrong hit attaches keys
@@ -63,10 +64,10 @@ func TestPrefixIndexMatch(t *testing.T) {
 // TestPrefixReuseProducesIdenticalOutput is the decisive test: prefilling with a
 // warm prefix index must give exactly the logits of a cold run.
 func TestPrefixReuseProducesIdenticalOutput(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	// A constructed model: the property is that a warm prefix index gives the same logits
+	// as a cold run, which is exact equality and does not depend on the weights being
+	// trained ones.
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	m, err := New(path)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -74,7 +75,7 @@ func TestPrefixReuseProducesIdenticalOutput(t *testing.T) {
 	cfg := m.Config()
 	const blockSize = 4
 	// A shared prefix of two full blocks, then a divergent tail.
-	prompt := []int32{1, 9038, 2501, 263, 931, 29871, 13, 29906, 350, 400}
+	prompt := fixtureTokens(cfg, 10)
 
 	// Cold: no prefix index at all.
 	coldPool := pagedPool(t, cfg, blockSize)
@@ -123,17 +124,14 @@ func TestPrefixReuseProducesIdenticalOutput(t *testing.T) {
 // TestPrefixReuseSkipsPrefillWork checks that reuse actually saves the work: a warm
 // second request must reuse blocks rather than recompute them.
 func TestPrefixReuseSkipsPrefillWork(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	m, err := New(path)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	cfg := m.Config()
 	const blockSize = 4
-	prompt := []int32{1, 9038, 2501, 263, 931, 29871, 13, 29906}
+	prompt := fixtureTokens(cfg, 8)
 
 	pool := pagedPool(t, cfg, blockSize)
 	idx := pool.EnablePrefixCache()
@@ -169,17 +167,14 @@ func TestPrefixReuseSkipsPrefillWork(t *testing.T) {
 // TestPrefixReuseIsCredited checks the reported number of reused positions, which
 // is what a caller shows as "saved work" and what the benchmark measures.
 func TestPrefixReuseIsCredited(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	m, err := New(path)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	cfg := m.Config()
 	const blockSize = 4
-	prompt := []int32{1, 9038, 2501, 263, 931, 29871, 13, 29906, 350}
+	prompt := fixtureTokens(cfg, 9)
 
 	pool := pagedPool(t, cfg, blockSize)
 	pool.EnablePrefixCache()

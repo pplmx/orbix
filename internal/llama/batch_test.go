@@ -399,10 +399,10 @@ func BenchmarkDecode(b *testing.B) {
 // forward pass, where a buffer shared between two projections would show up as a
 // wrong value only under concurrency.
 func TestParallelMatchesSerialWeights(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	// A constructed model: the property is that eight workers give the serial answer
+	// exactly, and it holds for any weights because every output row is computed by one
+	// worker in the serial order.
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	serial, err := NewWithOptions(path, Options{Workers: 1})
 	if err != nil {
 		t.Fatalf("NewWithOptions(serial): %v", err)

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -696,10 +695,7 @@ func TestPriorityFieldReachesTheEngine(t *testing.T) {
 // TestPriorityIsOptional pins the compatibility property: a client that never heard of
 // `priority` must keep working, and an explicit 0 must mean the same as omitting it.
 func TestPriorityIsOptional(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
 	for _, body := range []string{
 		`{"prompt": "Hi", "max_tokens": 2}`,

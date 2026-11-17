@@ -74,17 +74,14 @@ func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMulTransposed(dst, a, b, m, n, k); err != nil {
 		return err
 	}
-	return r.splitElems(r.parts(m*n*k), m, n, k, func(i, jlo, jhi int) {
-		aRow := a[i*k : (i+1)*k]
-		dstRow := dst[i*n : (i+1)*n]
-		for j := jlo; j < jhi; j++ {
-			bRow := b[j*k : (j+1)*k]
-			var sum float32
-			for p := range k {
-				sum += aRow[p] * bRow[p]
-			}
-			dstRow[j] = sum
-		}
+	// Split over row ranges rather than elements: each worker then gets a contiguous band
+	// of output rows, and the row tiling inside matMulTransposedRows reuses a row of b
+	// across the band instead of re-reading it for every output row.
+	//
+	// Every output element depends only on its own row of a, so the split cannot change
+	// a value: two workers write disjoint rows and read the same b.
+	return r.splitRows(r.parts(m*n*k), m, func(lo, hi int) {
+		_ = matMulTransposedRows(dst, a, b, m, n, k, lo, hi)
 	})
 }
 
@@ -122,33 +119,6 @@ func (r *Runner) splitRows(parts, n int, fn func(lo, hi int)) error {
 		parts = n
 	}
 	return r.split(parts, n, fn)
-}
-
-// splitElems runs fn over the flattened output space of an m x n product,
-// calling it once per row segment with that segment's column range.
-//
-// Splitting the flat index space rather than the row range is what keeps a
-// short-and-wide product -- a batched decode, or a single row against a large
-// vocabulary -- fully parallel: a chunk boundary may fall inside a row, so a
-// worker can be handed part of a row, but every element still belongs to exactly
-// one worker.
-func (r *Runner) splitElems(parts, m, n, k int, fn func(i, jlo, jhi int)) error {
-	if m <= 0 || n <= 0 {
-		return nil
-	}
-	total := m * n
-	if parts > total {
-		parts = total
-	}
-	return r.split(parts, total, func(lo, hi int) {
-		for e := lo; e < hi; {
-			i, j := e/n, e%n
-			// Take every remaining element of this row that is in this chunk.
-			end := min((i+1)*n, hi)
-			fn(i, j, end-i*n)
-			e = end
-		}
-	})
 }
 
 // split runs fn over [0,n) in at most parts contiguous chunks, returning when

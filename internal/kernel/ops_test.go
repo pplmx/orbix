@@ -385,3 +385,77 @@ func BenchmarkRMSNorm(b *testing.B) {
 		}
 	}
 }
+
+// TestMatMulTransposedRowTilingIsExact pins the property the row tiling in
+// matMulTransposedRows depends on: the order output rows are visited changes, but each
+// element is still the same p loop over the same two rows, so the result must be
+// bit-identical to a naive element-at-a-time multiply.
+//
+// The tiling exists for memory traffic -- a row of b is read once per tile instead of
+// once per output row -- and it would be a poor trade if it changed a single value.
+func TestMatMulTransposedRowTilingIsExact(t *testing.T) {
+	// Sizes chosen so a row tile boundary falls inside the range: m is not a multiple of
+	// the tile, and the last tile is partial.
+	const m, n, k = 19, 7, 5
+	a := make([]float32, m*k)
+	b := make([]float32, n*k)
+	for i := range a {
+		a[i] = float32(i%13-6) / 11
+	}
+	for i := range b {
+		b[i] = float32(i%9-4) / 7
+	}
+
+	got := make([]float32, m*n)
+	if err := MatMulTransposed(got, a, b, m, n, k); err != nil {
+		t.Fatalf("MatMulTransposed: %v", err)
+	}
+
+	// Naive reference: one element at a time, same p order.
+	want := make([]float32, m*n)
+	for i := range m {
+		for j := range n {
+			var sum float32
+			for p := range k {
+				sum += a[i*k+p] * b[j*k+p]
+			}
+			want[i*n+j] = sum
+		}
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("element %d = %v, want %v (row tiling changed a value)", i, got[i], want[i])
+		}
+	}
+}
+
+// TestMatMulTransposedMatchesRowRange checks that the row-tiled serial path and the
+// row-split parallel path agree exactly, which is what makes the split safe.
+func TestMatMulTransposedMatchesRowRange(t *testing.T) {
+	const m, n, k = 33, 11, 9
+	a := make([]float32, m*k)
+	b := make([]float32, n*k)
+	for i := range a {
+		a[i] = float32(i%17-8) / 13
+	}
+	for i := range b {
+		b[i] = float32(i%7-3) / 9
+	}
+
+	serial := make([]float32, m*n)
+	if err := MatMulTransposed(serial, a, b, m, n, k); err != nil {
+		t.Fatalf("MatMulTransposed: %v", err)
+	}
+	for _, workers := range []int{2, 5, 16} {
+		parallel := make([]float32, m*n)
+		r := NewRunner(workers)
+		if err := r.MatMulTransposed(parallel, a, b, m, n, k); err != nil {
+			t.Fatalf("MatMulTransposed(%d workers): %v", workers, err)
+		}
+		for i := range serial {
+			if parallel[i] != serial[i] {
+				t.Fatalf("workers=%d element %d = %v, serial %v", workers, i, parallel[i], serial[i])
+			}
+		}
+	}
+}

@@ -62,16 +62,27 @@ func MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 // element depends only on its own row of a, so a caller may split the row range
 // without changing any value.
 func matMulTransposedRows(dst, a, b []float32, m, n, k, lo, hi int) error {
-	for i := lo; i < hi; i++ {
-		aRow := a[i*k : (i+1)*k]
-		dstRow := dst[i*n : (i+1)*n]
+	// Rows are processed in tiles so each row of b is read once per tile instead of once
+	// per output row. The naive form reads b in full for every row of a -- 134 GB of
+	// traffic for a 2001x8192x2048 product, which runs at memory speed long before it
+	// runs out of arithmetic.
+	//
+	// The tiling changes only the order the elements are visited, never the order they
+	// are summed in: every output element is still the same p loop over the same two
+	// rows, so the result is bit-identical to the unblocked form.
+	const rowTile = 8
+	for base := lo; base < hi; base += rowTile {
+		end := min(base+rowTile, hi)
 		for j := range n {
 			bRow := b[j*k : (j+1)*k]
-			var sum float32
-			for p := range k {
-				sum += aRow[p] * bRow[p]
+			for i := base; i < end; i++ {
+				aRow := a[i*k : (i+1)*k]
+				var sum float32
+				for p := range k {
+					sum += aRow[p] * bRow[p]
+				}
+				dst[i*n+j] = sum
 			}
-			dstRow[j] = sum
 		}
 	}
 	return nil

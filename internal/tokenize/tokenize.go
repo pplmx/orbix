@@ -96,6 +96,10 @@ const (
 	// out before the main rule runs. llama.cpp groups starcoder, refact, command-r, smollm,
 	// codeshell, exaone, minerva, and mellum2 under it.
 	preStarCoder
+	// preDeepseek3 is the three-expression rule deepseek-v3 uses: digit groups of up to
+	// three, a CJK run, then a main rule whose letter class includes combining marks and
+	// whose punctuation alternative names the categories rather than their complement.
+	preDeepseek3
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -343,6 +347,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		case "starcoder", "refact", "command-r", "smollm", "codeshell", "exaone",
 			"minerva", "mellum2":
 			t.pre = preStarCoder
+		case "deepseek-v3", "hunyuan-dense", "joyai-llm", "hy_v4":
+			t.pre = preDeepseek3
 		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2":
 			t.pre = preLlama3
 			// A whole chunk that the vocabulary already spells as one piece is taken as

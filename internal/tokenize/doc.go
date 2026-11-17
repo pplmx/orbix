@@ -30,10 +30,15 @@
 // before merging. tokenizer.ggml.pre names the cut, and llama.cpp recognises about a hundred
 // names for it.
 //
-// Four of them are implemented here, chosen because they cover the models this project has
-// actually been run against: qwen2, llama-bpe, gpt-2, and starcoder. They share a shape --
-// contractions, a letter run, a digit run, a punctuation run, whitespace -- and differ in a
-// handful of choices, so the choices are data in preRule rather than a function each.
+// Five are implemented here: qwen2, llama-bpe, gpt-2, starcoder, and deepseek-v3. The first
+// four were chosen because they cover the models this project has been run against; the
+// fifth was taken next because it is the first that does not fit their shape. Families share
+// a template -- contractions, a letter run, a digit run, a punctuation run, whitespace -- and
+// differ in a handful of choices, so the choices are data in preRule rather than a function
+// each. deepseek-v3 stays within that: its letter class includes combining marks, its
+// punctuation alternative names the categories instead of their complement, its leading
+// character excludes punctuation, and it runs a digit-group and a CJK expression before the
+// main rule. What it added to preRule was fields, not a second code path.
 //
 // Everything else splits as one chunk. That is the correct answer for a file naming nothing
 // and for one naming "default", because llama.cpp applies no expression in those cases

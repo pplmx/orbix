@@ -393,7 +393,8 @@ func TestPreTokenizerStates(t *testing.T) {
 		{"llama-bpe", true, true, "implemented"},
 		{"gpt-2", true, true, "implemented"},
 		{"starcoder", true, true, "implemented"},
-		{"deepseek-v3", false, true, "a real family, not implemented here"},
+		{"deepseek-v3", true, true, "implemented"},
+		{"hunyuan-dense", true, true, "same rule as deepseek-v3"},
 		{"tekken", false, true, "a real family, not implemented here"},
 		{"llama4", false, true, "a real family, not implemented here"},
 		{"qwen-2", false, false, "a typo: not a family name at all"},
@@ -438,5 +439,57 @@ func TestKnownPreNamesHasNoDuplicates(t *testing.T) {
 	}
 	if len(knownPreNames) < 50 {
 		t.Errorf("knownPreNames has %d entries; llama.cpp maps about 100 names", len(knownPreNames))
+	}
+}
+
+// The deepseek-v3 family is the first with three expressions, and the first whose main rule
+// names the punctuation categories rather than their complement.
+func TestDeepseek3Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preDeepseek3}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// \p{N}{1,3} first, so digits group in threes rather than singly or as a run.
+		{"123456", []string{"123", "456"}},
+		{"x=42", []string{"x", "=", "42"}},
+		// The punctuation-then-letters alternative comes before the letter alternative, so
+		// a mark attaches to the following ASCII word.
+		{"a.b,c", []string{"a", ".b", ",c"}},
+		{"def f(x):", []string{"def", " f", "(x", "):"}},
+		// The CJK expression cuts its own runs.
+		{"日本", []string{"日本"}},
+		{"日a本", []string{"日", "a", "本"}},
+		// \p{L}\p{M} -- a combining mark joins the letter run.
+		{"cafe\u0301", []string{"cafe\u0301"}},
+		{"hello  world", []string{"hello", " ", " world"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("deepseek-v3 preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDeepseek3DiffersFromQwen2InPunctuation is the sharpest difference between the two:
+// qwen2's leading character is "[^\r\n\p{L}\p{N}]?", so a mark prefixes the next word;
+// deepseek's excludes punctuation, and pairs it with letters through a separate alternative
+// that only runs while the letters are ASCII.
+func TestDeepseek3DiffersFromQwen2InPunctuation(t *testing.T) {
+	ds := &Tokenizer{pre: preDeepseek3}
+	qw := &Tokenizer{pre: preQwen2}
+	if got, want := ds.preSplit("a.b"), []string{"a", ".b"}; !sameStrings(got, want) {
+		t.Errorf("deepseek-v3 preSplit(\"a.b\") = %q, want %q", got, want)
+	}
+	if got, want := qw.preSplit("a.b"), []string{"a", ".b"}; !sameStrings(got, want) {
+		t.Errorf("qwen2 preSplit(\"a.b\") = %q, want %q", got, want)
+	}
+	// A digit after a mark separates them: qwen2's digit rule has no prefix, and deepseek's
+	// number grouping starts its own chunk.
+	if got, want := ds.preSplit("x=42"), []string{"x", "=", "42"}; !sameStrings(got, want) {
+		t.Errorf("deepseek-v3 preSplit(\"x=42\") = %q, want %q", got, want)
+	}
+	if got, want := qw.preSplit("x=42"), []string{"x", "=", "4", "2"}; !sameStrings(got, want) {
+		t.Errorf("qwen2 preSplit(\"x=42\") = %q, want %q", got, want)
 	}
 }

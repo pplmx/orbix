@@ -30,37 +30,100 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if !ok || text == "" {
 		return []string{text}
 	}
-	if !fam.preSplitDigits {
+	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
+	// main rule then runs on every piece that leaves.
+	pieces := []string{text}
+	if fam.preDigits > 0 {
+		pieces = splitDigitGroups(pieces, fam.preDigits)
+	}
+	if fam.cjk {
+		pieces = splitCJK(pieces)
+	}
+	if len(pieces) == 1 && pieces[0] == text {
 		return splitByRule(text, fam)
 	}
-	// The family's first expression is a bare "\p{N}": it cuts each digit out, and the main
-	// rule then runs on every piece that leaves. A digit is already alone when the main rule
-	// sees it, so its " ?\p{N}+" alternative has nothing to join.
 	var out []string
-	for _, piece := range splitDigits(text) {
+	for _, piece := range pieces {
 		out = append(out, splitByRule(piece, fam)...)
 	}
 	return out
 }
 
-// splitDigits cuts text at every digit, leaving each digit as its own piece and keeping
-// the runs between them intact.
-func splitDigits(text string) []string {
+// splitDigitGroups cuts each piece at digit groups of at most max digits.
+func splitDigitGroups(pieces []string, max int) []string {
+	var out []string
+	for _, piece := range pieces {
+		out = append(out, splitDigits(piece, max)...)
+	}
+	return out
+}
+
+// splitCJK cuts each piece so runs of CJK characters stand alone.
+func splitCJK(pieces []string) []string {
+	var out []string
+	for _, piece := range pieces {
+		out = append(out, splitCJKRuns(piece)...)
+	}
+	return out
+}
+
+// splitDigits cuts text at digit groups of at most max digits, keeping the runs between
+// them intact. A max of 0 is not allowed; callers check first.
+func splitDigits(text string, max int) []string {
 	var pieces []string
 	start := 0
-	for i := 0; i < len(text); {
+	i := 0
+	for i < len(text) {
 		n := runeLenAt(text[i:])
 		if n == 0 {
 			n = 1
 		}
-		if isDigitAt(text[i:]) {
-			if i > start {
-				pieces = append(pieces, text[start:i])
-			}
-			pieces = append(pieces, text[i:i+n])
-			start = i + n
+		if !isDigitAt(text[i:]) {
+			i += n
+			continue
 		}
-		i += n
+		// Found a digit: emit what came before, then the group.
+		if i > start {
+			pieces = append(pieces, text[start:i])
+		}
+		groupStart := i
+		count := 0
+		for i < len(text) && isDigitAt(text[i:]) && (max <= 0 || count < max) {
+			i += runeLenAt(text[i:])
+			count++
+		}
+		pieces = append(pieces, text[groupStart:i])
+		start = i
+	}
+	if start < len(text) {
+		pieces = append(pieces, text[start:])
+	}
+	return pieces
+}
+
+// splitCJKRuns cuts text so each run of CJK characters is its own piece.
+func splitCJKRuns(text string) []string {
+	var pieces []string
+	start := 0
+	i := 0
+	for i < len(text) {
+		n := runeLenAt(text[i:])
+		if n == 0 {
+			n = 1
+		}
+		if !isCJKAt(text[i:]) {
+			i += n
+			continue
+		}
+		if i > start {
+			pieces = append(pieces, text[start:i])
+		}
+		runStart := i
+		for i < len(text) && isCJKAt(text[i:]) {
+			i += runeLenAt(text[i:])
+		}
+		pieces = append(pieces, text[runStart:i])
+		start = i
 	}
 	if start < len(text) {
 		pieces = append(pieces, text[start:])
@@ -115,14 +178,36 @@ type preRule struct {
 	// with the spaces before it as one chunk. The GPT-2 expression has no such rule, so a
 	// newline there falls through to the whitespace alternative and groups differently.
 	newlineChunk bool
-	// preSplitDigits is whether a bare "\p{N}" runs before the main expression, cutting
-	// every digit into its own chunk regardless of what the main rule would do with it.
+	// preDigits is the length of each digit group the family cuts out *before* the main
+	// expression, or 0 for none.
 	//
-	// llama.cpp applies a family's expressions in sequence, each cutting the previous
-	// round's chunks further, so this is not a different digit count: the digit is already
-	// alone before the main rule sees it. That is why a number becomes one chunk per digit
-	// here while the same rule with a " ?" prefix would have kept it whole.
-	preSplitDigits bool
+	// llama.cpp applies a family's expressions in sequence, each cutting the previous round's
+	// chunks further. A leading "\p{N}" therefore isolates digits before the main rule runs,
+	// so the main rule's digit alternative has nothing left to join: starcoder's bare
+	// "\p{N}" gives one chunk per digit while deepseek's "\p{N}{1,3}" gives groups of up to
+	// three, and neither is the same as setting the main rule's digit count.
+	preDigits int
+	// punctIsCategory is whether the punctuation alternative names the categories
+	// (\p{P}\p{S}) rather than taking everything that is not a letter, digit, or space.
+	//
+	// The two differ on characters that are neither: an emoji or a currency sign is a symbol,
+	// so it belongs to the run under either spelling; a combining mark is neither, so the
+	// complement form swallows it and the category form does not.
+	punctIsCategory bool
+	// punctLetterRun is whether the expression's first alternative is
+	// "[!-/:-@\\[-`{-~][A-Za-z]+": one ASCII punctuation character followed by a run of
+	// ASCII letters, as a single chunk.
+	//
+	// It takes precedence over the letter alternative, so ".b" and "(x" are one chunk each.
+	// The leading-character alternative does not cover this case -- it excludes punctuation --
+	// which is why the rule has to exist separately rather than falling out of it.
+	punctLetterRun bool
+	// cjk is whether a run of CJK characters is its own chunk, from the family's
+	// "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+" expression. Without it those
+	// characters go through the letter rule, which groups them the same way -- but the family
+	// applies the CJK expression first, so the grouping is independent of what the letter
+	// rule would have done with neighbouring text.
+	cjk bool
 }
 
 // leadKind is what a run may take as its prefix.
@@ -136,6 +221,13 @@ const (
 	// leadAnyNonLetter takes one character that is not a letter, digit, or newline, which
 	// is qwen2's "[^\\r\\n\\p{L}\\p{N}]?".
 	leadAnyNonLetter
+	// leadNotLetterPunctSymbol takes one character that is not a letter, punctuation, or
+	// symbol and not a newline, which is deepseek's "[^\\r\\n\\p{L}\\p{P}\\p{S}]?".
+	//
+	// It is narrower than leadAnyNonLetter: punctuation is excluded, so a mark like "." is
+	// its own chunk instead of a prefix on the word after it. That difference is why
+	// "a.b" splits as ["a", ".b"] under qwen2 and ["a", ".", "b"] under deepseek.
+	leadNotLetterPunctSymbol
 )
 
 // preFamilyOf returns the rule for a pre-tokenizer, or false when this package does not
@@ -161,7 +253,20 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// The GPT-2 expression with a bare `\p{N}` applied first, so every digit is its own
 		// chunk before the main rule runs. starcoder, refact, command-r, smollm, and the
 		// others llama.cpp groups with them all mean exactly this.
-		return preRule{digits: 0, lead: leadSpace, preSplitDigits: true}, true
+		return preRule{digits: 0, lead: leadSpace, preDigits: 1}, true
+	case preDeepseek3:
+		// Three expressions in sequence:
+		//   \p{N}{1,3}
+		//   [\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+
+		//   [!..~][A-Za-z]+ | [^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+
+		//     | ?[\\p{P}\\p{S}]+[\\r\\n]* | \\s*[\\r\\n]+ | \\s+(?!\\S) | \\s+
+		//
+		// llama.cpp groups deepseek-v3, hunyuan-dense, joyai-llm, and hy_v4 on it.
+		return preRule{
+			digits: 0, lead: leadNotLetterPunctSymbol, letterMarks: true,
+			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
+			preDigits: 3, cjk: true, punctLetterRun: true,
+		}, true
 	default:
 		return preRule{}, false
 	}
@@ -175,6 +280,13 @@ func preFamilyOf(p preType) (preRule, bool) {
 func chunkLen(s string, fam preRule) int {
 	if n := qwen2ContractionLen(s); n > 0 {
 		return n
+	}
+	// [!-/:-@\\[-`{-~][A-Za-z]+ -- one ASCII punctuation character followed by ASCII
+	// letters. It comes first, so it wins over the letter alternative's own prefix handling.
+	if fam.punctLetterRun {
+		if n := punctLetterRunLen(s); n > 0 {
+			return n
+		}
 	}
 	// [^\r\n\p{L}\p{N}]?\p{L}+ -- one non-letter, non-digit, non-newline character
 	// followed by a run of letters. The leading character is optional, and that is what
@@ -251,6 +363,30 @@ func qwen2ContractionLen(s string) int {
 	return 0
 }
 
+// punctLetterRunLen matches "[!-/:-@\\[-`{-~][A-Za-z]+": one ASCII punctuation character
+// then one or more ASCII letters.
+func punctLetterRunLen(s string) int {
+	n := runeLenAt(s)
+	if n != 1 || s[0] >= 0x80 {
+		return 0
+	}
+	c := s[0]
+	// The class is ASCII punctuation: the printable range minus letters, digits, and space.
+	isPunct := c >= '!' && c <= '/' || c >= ':' && c <= '@' ||
+		c >= '[' && c <= '`' || c >= '{' && c <= '~'
+	if !isPunct {
+		return 0
+	}
+	i := 1
+	for i < len(s) && s[i] < 0x80 && (s[i] >= 'A' && s[i] <= 'Z' || s[i] >= 'a' && s[i] <= 'z') {
+		i++
+	}
+	if i == 1 {
+		return 0
+	}
+	return i
+}
+
 // letterRunLen matches the letter-run alternative for one family.
 func letterRunLen(s string, fam preRule) int {
 	i := 0
@@ -261,6 +397,10 @@ func letterRunLen(s string, fam preRule) int {
 		}
 	case leadAnyNonLetter:
 		if !isLetterAt(s) && !isNewlineAt(s) && !isDigitAt(s) && runeLenAt(s) > 0 {
+			i = runeLenAt(s)
+		}
+	case leadNotLetterPunctSymbol:
+		if !isLetterAt(s) && !isNewlineAt(s) && !isPunctOrSymbolAt(s) && runeLenAt(s) > 0 {
 			i = runeLenAt(s)
 		}
 	}
@@ -295,8 +435,21 @@ func punctRunLen(s string, fam preRule) int {
 	start := i
 	for i < len(s) {
 		n := runeLenAt(s[i:])
-		if n == 0 || isSpaceAt(s[i:]) || isLetterAt(s[i:]) || isDigitAt(s[i:]) || isMarkAt(s[i:]) {
+		if n == 0 || isSpaceAt(s[i:]) {
 			break
+		}
+		if fam.punctIsCategory {
+			// ?[\p{P}\p{S}]+ -- only the two categories. A combining mark is neither, so it
+			// ends the run rather than joining it, which is what lets the letter alternative
+			// take it instead.
+			if !isPunctOrSymbolAt(s[i:]) {
+				break
+			}
+		} else {
+			// ?[^\s\p{L}\p{N}]+ -- everything that is not a space, letter, or digit.
+			if isLetterAt(s[i:]) || isDigitAt(s[i:]) {
+				break
+			}
 		}
 		i += n
 	}
@@ -398,6 +551,23 @@ func isNewlineAt(s string) bool { return classifyAt(s, isNewline) }
 func isMark(r rune) bool { return unicode.IsMark(r) }
 
 func isMarkAt(s string) bool { return classifyAt(s, isMark) }
+
+// isCJK reports whether r falls in the ranges the CJK alternative names: CJK Unified
+// Ideographs (U+4E00-U+9FA5), Hiragana (U+3040-U+309F), and Katakana (U+30A0-U+30FF).
+//
+// These are listed explicitly rather than taken from unicode.Is(unicode.Han) because the
+// expression names ranges, not scripts: Han covers far more of the ideograph blocks, and
+// using it would group characters this rule leaves to the letter alternative.
+func isCJK(r rune) bool {
+	return (r >= 0x4E00 && r <= 0x9FA5) || (r >= 0x3040 && r <= 0x309F) || (r >= 0x30A0 && r <= 0x30FF)
+}
+
+func isCJKAt(s string) bool { return classifyAt(s, isCJK) }
+
+// isPunctOrSymbol reports whether r is punctuation (\p{P}) or a symbol (\p{S}).
+func isPunctOrSymbol(r rune) bool { return unicode.IsPunct(r) || unicode.IsSymbol(r) }
+
+func isPunctOrSymbolAt(s string) bool { return classifyAt(s, isPunctOrSymbol) }
 
 // classifyAt applies pred to the first rune of s.
 func classifyAt(s string, pred func(rune) bool) bool {

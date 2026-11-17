@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -147,6 +148,14 @@ func (m Model) resolve() Model {
 	}
 	if len(m.Vocab) == 0 {
 		m.Vocab = DefaultVocab
+		// A byte-level vocabulary spells a word's leading space as the escaped rune
+		// (U+0120, "Ġ"), not SentencePiece's marker (U+2581, "▁"). Getting this wrong
+		// does not fail anything: the pieces are simply never found, and every word
+		// falls back to one token per byte. That is why it went unnoticed -- the
+		// encodings were valid, just not the ones the vocabulary implies.
+		if m.TokenizerModel == "gpt2" {
+			m.Vocab = byteLevelSpelling(m.Vocab)
+		}
 	}
 	// The 256 byte-fallback pieces are part of the vocabulary, not an addition to it at
 	// write time: the embedding and output tensors are shaped from the declared
@@ -431,6 +440,25 @@ func (m Model) kvs() []kv {
 // NoEOSSentinel is an EOS id that no vocabulary contains, so a generated sequence never
 // reaches it.
 const NoEOSSentinel = 1 << 30
+
+// spaceMarker and byteLevelSpace are the two spellings of a piece's leading space.
+const (
+	spaceMarker    = "\u2581"
+	byteLevelSpace = "\u0120"
+)
+
+// byteLevelSpelling rewrites SentencePiece's space marker to the byte-level escape.
+//
+// The two vocabularies describe the same vocabulary of words and differ only in how the
+// leading space is spelled, so the transformation is exact: replace the marker rune with
+// the escaped space rune in every piece that starts with it.
+func byteLevelSpelling(vocab []string) []string {
+	out := make([]string, len(vocab))
+	for i, piece := range vocab {
+		out[i] = strings.Replace(piece, spaceMarker, byteLevelSpace, 1)
+	}
+	return out
+}
 
 // bytePieces returns the 256 single-byte pieces, spelled the way this vocabulary family
 // spells them.

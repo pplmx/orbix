@@ -1,6 +1,7 @@
 package gguftest
 
 import (
+	"strings"
 	"testing"
 
 	"os"
@@ -194,5 +195,62 @@ func TestModelRejectsBadShapes(t *testing.T) {
 				t.Errorf("%s was accepted; Bytes should reject a shape the loader cannot run", name)
 			}
 		})
+	}
+}
+
+// TestByteLevelVocabularySpelling checks the fixture spells a byte-level vocabulary the way
+// that vocabulary expects.
+//
+// A byte-level model's pieces carry an escaped space (U+0120, "Ġ") where SentencePiece's
+// carry a marker (U+2581, "▁"). The fixture emitted the marker either way, so a vocabulary
+// built for a byte-level tokenizer contained pieces that tokenizer can never look up: every
+// word fell back to one token per byte. Nothing failed -- the ids were valid, and the
+// round trip still worked -- which is why this went unnoticed until a downstream test tried
+// to compare two pre-tokenizers and got identical answers.
+func TestByteLevelVocabularySpelling(t *testing.T) {
+	bpe := Default()
+	bpe.TokenizerModel = "gpt2"
+	path := bpe.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tokens, ok := f.GetArray[string]("tokenizer.ggml.tokens")
+	if !ok {
+		t.Fatal("no token list in the fixture")
+	}
+	sawEscaped := false
+	for _, piece := range tokens {
+		if strings.Contains(piece, "▁") {
+			t.Errorf("byte-level vocabulary contains the SentencePiece marker in %q", piece)
+		}
+		if strings.Contains(piece, "Ġ") {
+			sawEscaped = true
+		}
+	}
+	if !sawEscaped {
+		t.Error("byte-level vocabulary has no piece with an escaped space, so no word piece " +
+			"can ever match")
+	}
+
+	// The SentencePiece spelling is unchanged.
+	spm := Default()
+	path = spm.Write(t, t.TempDir())
+	f, err = gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tokens, _ = f.GetArray[string]("tokenizer.ggml.tokens")
+	sawMarker := false
+	for _, piece := range tokens {
+		if strings.Contains(piece, "Ġ") {
+			t.Errorf("SentencePiece vocabulary contains the byte-level escape in %q", piece)
+		}
+		if strings.Contains(piece, "▁") {
+			sawMarker = true
+		}
+	}
+	if !sawMarker {
+		t.Error("SentencePiece vocabulary has no space marker")
 	}
 }

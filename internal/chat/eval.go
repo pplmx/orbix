@@ -178,6 +178,8 @@ func evalExpr(e expr, sc *scope) (value, error) {
 	switch t := e.(type) {
 	case litExpr:
 		return strValue(t.val), nil
+	case boolLitExpr:
+		return boolValue(t.val), nil
 	case varExpr:
 		v, ok := sc.lookup(t.name)
 		if !ok {
@@ -301,6 +303,38 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		}
 	case filterExpr:
 		return evalFilter(t, sc)
+	case isNoneExpr:
+		// An undefined name is none, so the lookup is done directly rather than by
+		// evaluating first and catching the error.
+		var absent bool
+		if v, ok := t.operand.(varExpr); ok {
+			_, present := sc.lookup(v.name)
+			absent = !present
+		}
+		if absent {
+			return boolValue(!t.negate), nil
+		}
+		v, err := evalExpr(t.operand, sc)
+		if err != nil {
+			return value{}, err
+		}
+		isNone := !v.isBool && !v.isList && !v.isMap && v.text == ""
+		if t.negate {
+			return boolValue(!isNone), nil
+		}
+		return boolValue(isNone), nil
+	case isMappingExpr:
+		v, err := evalExpr(t.operand, sc)
+		if err != nil {
+			return value{}, err
+		}
+		return boolValue(v.isMap), nil
+	case isIterableExpr:
+		v, err := evalExpr(t.operand, sc)
+		if err != nil {
+			return value{}, err
+		}
+		return boolValue(v.isList), nil
 	case definedExpr:
 		_, ok := sc.lookup(t.name)
 		return boolValue(ok), nil

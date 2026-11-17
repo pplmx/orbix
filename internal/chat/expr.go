@@ -27,6 +27,25 @@ type indexExpr struct {
 	index expr
 }
 
+// isNoneExpr tests for an absent or empty value, which is what `x is none` means in the
+// templates this package reads: an unset variable and a null one are the same thing here
+// because no distinction reaches the renderer.
+type isNoneExpr struct {
+	operand expr
+	negate  bool
+}
+
+// isMappingExpr tests whether a value is a dictionary, which tool-call templates branch on
+// to decide between re-emitting JSON and writing text.
+type isMappingExpr struct{ operand expr }
+
+// isIterableExpr tests whether a value is a sequence.
+type isIterableExpr struct{ operand expr }
+
+// boolLitExpr is a true or false literal, kept distinct from a string because a condition
+// has to see the boolean rather than a non-empty text.
+type boolLitExpr struct{ val bool }
+
 // sliceExpr takes the elements of a sequence from an index to its end.
 type sliceExpr struct {
 	base expr
@@ -42,6 +61,10 @@ type filterExpr struct {
 	operand expr
 	name    string
 	arg     expr
+	// kwargs holds name=value arguments. They are parsed so a template that passes one
+	// compiles, and stored so a filter can read the ones it understands; tojson's indent
+	// only selects a whitespace style, and this package emits compact JSON either way.
+	kwargs map[string]expr
 }
 
 // definedExpr reports whether a name is bound, which templates use to test optional
@@ -176,8 +199,13 @@ func lexExpr(src string) ([]token, error) {
 				i += 2
 				continue
 			}
+			// A bare '=' is only legal inside a filter's keyword argument, where the parser
+			// consumes it; emitting it as a token lets that happen, and parseOr still
+			// rejects it anywhere else.
 			if c == '=' {
-				return nil, fmt.Errorf("chat: '=' is not a comparison; use '=='")
+				toks = append(toks, token{text: "="})
+				i++
+				continue
 			}
 			toks = append(toks, token{text: string(c)})
 			i++
@@ -345,8 +373,26 @@ func (p *exprParser) parseCompare() (expr, error) {
 			left = binaryExpr{op: "in", left: left, right: right}
 		case "is":
 			p.pos++
+			// "is not ..." only appears with none in practice, and negating it here keeps
+			// the negation next to the test it applies to.
+			negate := p.accept("not")
+			if p.accept("none") {
+				left = isNoneExpr{operand: left, negate: negate}
+				continue
+			}
+			if !negate && p.accept("mapping") {
+				left = isMappingExpr{operand: left}
+				continue
+			}
+			if !negate && p.accept("iterable") {
+				left = isIterableExpr{operand: left}
+				continue
+			}
+			if negate {
+				return nil, fmt.Errorf("chat: only 'is not none' is supported after 'is not'")
+			}
 			if !p.accept("defined") {
-				return nil, fmt.Errorf("chat: only 'is defined' is supported after 'is'")
+				return nil, fmt.Errorf("chat: only 'is defined' and 'is none' are supported after 'is'")
 			}
 			// "x is defined" and "x.y is defined" are both used: the first asks
 			// whether a name is bound, the second whether a mapping has a key.
@@ -453,14 +499,31 @@ func (p *exprParser) parsePostfix() (expr, error) {
 			// A filter may take one parenthesised argument: trim has none, tojson
 			// has none, and selectattr-style filters are outside the subset.
 			if p.accept("(") {
-				arg, err := p.parseOr()
-				if err != nil {
-					return nil, err
+				for {
+					// name=value is a keyword argument; anything else is the single
+					// positional one. The lookahead decides before consuming, so a plain
+					// argument is not mistaken for a name.
+					if name, value, ok, err := p.parseKwarg(); err != nil {
+						return nil, err
+					} else if ok {
+						if fe.kwargs == nil {
+							fe.kwargs = make(map[string]expr, 1)
+						}
+						fe.kwargs[name] = value
+					} else {
+						arg, err := p.parseOr()
+						if err != nil {
+							return nil, err
+						}
+						fe.arg = arg
+					}
+					if p.accept(")") {
+						break
+					}
+					if !p.accept(",") {
+						return nil, fmt.Errorf("chat: missing ')' in filter arguments")
+					}
 				}
-				if !p.accept(")") {
-					return nil, fmt.Errorf("chat: missing ')' in filter arguments")
-				}
-				fe.arg = arg
 			}
 			e = fe
 		default:
@@ -469,11 +532,36 @@ func (p *exprParser) parsePostfix() (expr, error) {
 	}
 }
 
+// parseKwarg consumes "name = expr" when that is what comes next, and reports whether it
+// did so. It looks ahead before consuming anything so a positional argument still parses.
+func (p *exprParser) parseKwarg() (string, expr, bool, error) {
+	first, ok := p.peekToken()
+	if !ok || !isIdentifier(first.text) {
+		return "", nil, false, nil
+	}
+	if p.pos+1 >= len(p.toks) || p.toks[p.pos+1].text != "=" {
+		return "", nil, false, nil
+	}
+	p.pos += 2 // name and '='
+	v, err := p.parseOr()
+	if err != nil {
+		return "", nil, false, err
+	}
+	return first.text, v, true, nil
+}
+
 // parsePrimary handles literals, names, and parenthesised expressions.
 func (p *exprParser) parsePrimary() (expr, error) {
-	tok := p.peek()
-	if tok == "" {
+	// The token's text is not enough to tell "no more tokens" from an empty string literal,
+	// which is a real value templates use -- {% set system_message = "" %} among them. The
+	// position decides.
+	if p.pos >= len(p.toks) {
 		return nil, fmt.Errorf("chat: expression ends early")
+	}
+	tok := p.peek()
+	if p.toks[p.pos].isString {
+		p.pos++
+		return litExpr{val: tok}, nil
 	}
 	if tok == "(" {
 		p.pos++
@@ -504,9 +592,12 @@ func (p *exprParser) parsePrimary() (expr, error) {
 	}
 	switch tok {
 	case "true", "True":
-		return litExpr{val: "true"}, nil
+		// A boolean literal, not the string "true": as a literal it is non-empty, which
+		// makes every condition using it true and turns `{% if false %}` into an
+		// always-taken branch.
+		return boolLitExpr{val: true}, nil
 	case "false", "False":
-		return litExpr{val: "false"}, nil
+		return boolLitExpr{val: false}, nil
 	case "none", "None":
 		return litExpr{val: ""}, nil
 	}

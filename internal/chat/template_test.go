@@ -443,3 +443,124 @@ func TestTemplateCallAndSlice(t *testing.T) {
 		}
 	})
 }
+
+// TestBooleanLiteralsAreNotStrings covers a defect that made every condition constant.
+//
+// "true" and "false" were parsed as string literals. A non-empty string is truthy, so
+// {% if false %} took the true branch -- and since a template's whole structure is
+// conditions, every branch that tested a literal was decided wrongly. Nothing failed: the
+// output was well-formed text from the wrong branch.
+func TestBooleanLiteralsAreNotStrings(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{%- if false %}A{%- else %}B{%- endif %}`, "B"},
+		{`{%- if true %}A{%- else %}B{%- endif %}`, "A"},
+		{`{%- if none %}A{%- else %}B{%- endif %}`, "B"},
+		{`{%- if false and true %}A{%- else %}B{%- endif %}`, "B"},
+		{`{%- if true or false %}A{%- else %}B{%- endif %}`, "A"},
+	}
+	for _, c := range cases {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", c.src, err)
+			continue
+		}
+		got, err := tpl.Render(nil, Inputs{})
+		if err != nil {
+			t.Errorf("Render(%q): %v", c.src, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%q rendered %q, want %q", c.src, got, c.want)
+		}
+	}
+}
+
+// TestEmptyStringLiteral covers a value that could not be parsed at all: the lexer reports
+// "no more tokens" as an empty token, and an empty string literal produced the same, so
+// {% set x = "" %} looked like a truncated expression.
+func TestEmptyStringLiteral(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`[{{- "" }}]`, "[]"},
+		{`[{{- '' }}]`, "[]"},
+		{`{%- set x = "" %}[{{- x }}]`, "[]"},
+		{`{%- set x = "" %}{%- if x == "" %}empty{%- endif %}`, "empty"},
+	}
+	for _, c := range cases {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", c.src, err)
+			continue
+		}
+		got, err := tpl.Render(nil, Inputs{})
+		if err != nil {
+			t.Errorf("Render(%q): %v", c.src, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%q rendered %q, want %q", c.src, got, c.want)
+		}
+	}
+}
+
+// TestFilterKeywordArgument covers tojson(indent=4), which Llama 3's template uses.
+//
+// indent only selects a JSON whitespace style; this package emits compact JSON, so the
+// argument is parsed and ignored. Parsing it matters because the template does not compile
+// otherwise, and every name it uses goes through this code path.
+func TestFilterKeywordArgument(t *testing.T) {
+	for _, src := range []string{
+		`{{- t | tojson(indent=4) }}`,
+		`{{- t | tojson }}`,
+	} {
+		if _, err := Parse(src); err != nil {
+			t.Errorf("Parse(%q): %v", src, err)
+		}
+	}
+	// A bare "=" outside a keyword argument is still a mistake, not a comparison.
+	if _, err := Parse(`{{- a = b }}`); err == nil {
+		t.Error("a bare '=' was accepted outside a filter's keyword argument")
+	}
+}
+
+// TestIsTests covers the three "is" tests Llama 3's template needs beyond "is defined".
+func TestIsTests(t *testing.T) {
+	t.Run("is none", func(t *testing.T) {
+		tpl, err := Parse(`{%- if x is none %}Y{%- else %}N{%- endif %}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// An unbound name is none.
+		if got, _ := tpl.Render(nil, Inputs{}); got != "Y" {
+			t.Errorf("unbound name is none rendered %q, want Y", got)
+		}
+	})
+	t.Run("is not none", func(t *testing.T) {
+		tpl, err := Parse(`{%- if messages is not none %}Y{%- else %}N{%- endif %}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := tpl.Render(nil, Inputs{}); got != "Y" {
+			t.Errorf("a bound list is not none rendered %q, want Y", got)
+		}
+	})
+	t.Run("is mapping and is iterable", func(t *testing.T) {
+		for _, c := range []struct{ src, want string }{
+			{`{%- for m in messages %}{%- if m is mapping %}M{%- endif %}{%- endfor %}`, "M"},
+			{`{%- for m in messages %}{%- if m is iterable %}I{%- else %}-{%- endif %}{%- endfor %}`, "-"},
+		} {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Errorf("Parse(%q): %v", c.src, err)
+				continue
+			}
+			got, err := tpl.Render([]Message{{Role: "user", Content: "u"}}, Inputs{})
+			if err != nil {
+				t.Errorf("Render(%q): %v", c.src, err)
+				continue
+			}
+			if got != c.want {
+				t.Errorf("%q rendered %q, want %q", c.src, got, c.want)
+			}
+		}
+	})
+}

@@ -602,6 +602,11 @@ func TestWhitespacePreTokenizer(t *testing.T) {
 // chunk per character when nothing matches -- yields extra punctuation pieces and still
 // covers every byte of the input, so it looks correct until compared.
 func TestBloomPreTokenizer(t *testing.T) {
+	// The expected splits were rechecked against llama.cpp's expression: the characters the
+	// rule stops at are not separators to be dropped, they are text the splitter carries
+	// through as their own chunks, and the gap between two matches is one chunk rather than
+	// one per character. The earlier expectations here dropped the stop characters outright,
+	// which is what the implementation did at the time.
 	tok := bpeFixture(t, gguftest.Model{Pre: "bloom"})
 	if !tok.PreImplemented() {
 		t.Fatal("the bloom pre-tokenizer is not implemented")
@@ -613,12 +618,12 @@ func TestBloomPreTokenizer(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"Hello world.", []string{"Hello", " world"}},
-		{" hi there!", []string{" hi", " there"}},
-		{"a,b.c", []string{"a", "b", "c"}},
-		{"x (y) z", []string{"x", "y", " z"}},
-		{"中文，测试", []string{"中文", "测试"}},
-		{"  two spaces", []string{" two", " spaces"}},
+		{"Hello world.", []string{"Hello", " world", "."}},
+		{" hi there!", []string{" hi", " there", "!"}},
+		{"a,b.c", []string{"a", ",", "b", ".", "c"}},
+		{"x (y) z", []string{"x", " (", "y", ")", " z"}},
+		{"中文，测试", []string{"中文", "，", "测试"}},
+		{"  two spaces", []string{" ", " two", " spaces"}},
 	}
 	for _, c := range cases {
 		got := tok.preSplit(c.in)

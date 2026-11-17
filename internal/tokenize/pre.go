@@ -259,46 +259,49 @@ func splitWhitespaceRuns(text string) []string {
 // The optional space is part of the following chunk, not a chunk of its own, which is what
 // makes " hello" one piece where "hello" is also one piece.
 func splitAtStopSet(text, stop string) []string {
-	var out []string
-	i := 0
-	for i < len(text) {
-		start := i
-		// One optional leading space belongs to the chunk, but only when a character that
-		// can follow it does: a lone space before a stop character is not a match, and
-		// emitting it alone would produce a chunk the expression never yields.
-		if text[i] == ' ' {
-			if i+1 >= len(text) || isStopRune(text[i+1:], stop) {
-				_, size := utf8.DecodeRuneInString(text[i:])
-				i += size
-				continue
-			}
-			i++
+	// The expression is " ?[^(...)]+": an optional space, then a run that stops at the listed
+	// characters. Everything the expression does not match is still a chunk -- llama.cpp's
+	// splitter carries the text between matches through as one offset -- so the loop
+	// alternates between matches and the gaps between them.
+	matchAt := func(s string) int {
+		// Returns the byte length of a match starting at s, or 0.
+		i := 0
+		if s[0] == ' ' && len(s) > 1 {
+			i = 1
 		}
-		for i < len(text) {
-			r, n := utf8.DecodeRuneInString(text[i:])
+		start := i
+		for i < len(s) {
+			r, n := utf8.DecodeRuneInString(s[i:])
 			if r == utf8.RuneError || strings.ContainsRune(stop, r) {
 				break
 			}
 			i += n
 		}
 		if i == start {
-			// The character at start is in the stop set, so no match begins here. A
-			// findall-style splitter drops it rather than emitting it alone: the stop
-			// characters are separators, and the vocabulary has its own pieces for them
-			// that the caller assembles. Advancing keeps progress guaranteed.
-			_, n := utf8.DecodeRuneInString(text[i:])
+			return 0
+		}
+		return i
+	}
+
+	var out []string
+	for i := 0; i < len(text); {
+		if n := matchAt(text[i:]); n > 0 {
+			out = append(out, text[i:i+n])
 			i += n
 			continue
 		}
-		out = append(out, text[start:i])
+		// Gap text: extend it until a match can start again. A space that begins a match
+		// belongs to that match, not to the gap, which is why the test is a match attempt
+		// rather than a membership check.
+		j := i
+		for j < len(text) && matchAt(text[j:]) == 0 {
+			_, n := utf8.DecodeRuneInString(text[j:])
+			j += n
+		}
+		out = append(out, text[i:j])
+		i = j
 	}
 	return out
-}
-
-// isStopRune reports whether text begins with a rune in stop.
-func isStopRune(text, stop string) bool {
-	r, _ := utf8.DecodeRuneInString(text)
-	return r == utf8.RuneError || strings.ContainsRune(stop, r)
 }
 
 // splitDigitGroups cuts each piece at digit groups of at most max digits.

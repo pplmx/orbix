@@ -528,14 +528,49 @@ func (e *Engine) decode(batch []pending) {
 //
 // Returning false means the events were not delivered and the sequence is finished with.
 func (s *sequence) emit(ev Event) bool {
+	if s.abandoned {
+		return false
+	}
 	select {
 	case s.events <- ev:
 		return true
 	default:
+	}
+	// The buffer is full, which is not proof the caller is gone: a pump running flat out
+	// can fill 64 slots before a reading goroutine is scheduled even once.
+	//
+	// A cancelled request is a definite goodbye and lets the send give up at once. Without
+	// a cancel channel there is no signal to wait on, so the wait is bounded instead: a
+	// caller that is merely behind drains within that window, and one that has left for
+	// good is abandoned rather than stalling the shared pump.
+	wait := abandonGrace
+	if s.req.Cancel != nil {
+		select {
+		case s.events <- ev:
+			return true
+		case <-s.req.Cancel:
+			s.abandoned = true
+			return false
+		}
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case s.events <- ev:
+		return true
+	case <-timer.C:
 		s.abandoned = true
 		return false
 	}
 }
+
+// abandonGrace is how long a send waits for a full event buffer to drain before deciding
+// the caller is gone. It only applies to requests with no cancel channel.
+//
+// Large enough that a reading caller always wins the race, small enough that a pump with
+// several stalled sequences does not look hung. The HTTP server always supplies a cancel
+// channel, so this bound is for callers of the engine API directly.
+const abandonGrace = 2 * time.Second
 
 // cancelled reports whether the sequence's cancel channel is closed.
 //

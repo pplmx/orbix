@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -830,4 +831,191 @@ func TestReadingConsumerReceivesEveryToken(t *testing.T) {
 	if got != want {
 		t.Errorf("read %d tokens, want %d", got, want)
 	}
+}
+
+// The block pool is reference counted, and a missed release shows up as a pool that
+// shrinks over time rather than as a failing request: the first few cycles work, then
+// requests start failing with "block pool exhausted" on a server with plenty of memory.
+// A single lifecycle is therefore not enough to catch it, which is why these run many.
+
+// TestPoolIsBalancedAcrossManyLifecycles checks that finishing requests returns every block
+// they took.
+func TestPoolIsBalancedAcrossManyLifecycles(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{MaxActive: 2, Blocks: 32, BlockSize: 8})
+	pool := e.Pool()
+	if pool == nil {
+		t.Fatal("the paged cache was not configured, so this would test nothing")
+	}
+	start := pool.Free()
+	for i := range 20 {
+		ch, err := e.Submit(Request{Prompt: tok.Encode("Once upon a time", true), MaxTokens: 12})
+		if err != nil {
+			t.Fatalf("cycle %d Submit: %v", i, err)
+		}
+		// Drain and pump concurrently: events only exist because Pump makes them, so
+		// reading first would wait forever.
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for range ch {
+			}
+		}()
+		for e.Pump() > 0 {
+		}
+		<-drained
+		if f := pool.Free(); f != start {
+			t.Fatalf("cycle %d left %d of %d blocks free, want %d", i, f, pool.Blocks(), start)
+		}
+	}
+}
+
+// TestAbandonedSequenceReturnsItsBlocks checks the path a disconnected client takes. It is
+// the one most likely to leak, because the sequence ends without its caller ever seeing a
+// normal completion.
+func TestAbandonedSequenceReturnsItsBlocks(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{MaxActive: 1, Blocks: 16, BlockSize: 4})
+	pool := e.Pool()
+	if pool == nil {
+		t.Fatal("the paged cache was not configured")
+	}
+	start := pool.Free()
+	// Never read the channel, so the sequence is abandoned mid-generation.
+	if _, err := e.Submit(Request{
+		Prompt:    tok.Encode("Once upon a time", true),
+		MaxTokens: 200,
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	if f := pool.Free(); f != start {
+		t.Errorf("an abandoned sequence left %d of %d blocks free, want %d",
+			f, pool.Blocks(), start)
+	}
+	if n := e.Active(); n != 0 {
+		t.Errorf("Active() = %d, want 0", n)
+	}
+}
+
+// TestPoolExhaustionStillCompletes checks that a pool too small for the requests degrades
+// into per-request errors rather than into a stuck engine. The engine reports exhaustion
+// through the sequence's event stream, so the pump still reaches zero.
+func TestPoolExhaustionStillCompletes(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{MaxActive: 4, Blocks: 2, BlockSize: 4})
+	pool := e.Pool()
+	if pool == nil {
+		t.Fatal("the paged cache was not configured")
+	}
+	var chans []<-chan Event
+	for range 4 {
+		ch, err := e.Submit(Request{Prompt: tok.Encode("Once upon a time", true), MaxTokens: 20})
+		if err != nil {
+			continue
+		}
+		chans = append(chans, ch)
+	}
+	go func() {
+		for _, ch := range chans {
+			for range ch {
+			}
+		}
+	}()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e.Pump() > 0 {
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the pump stalled with %d sequences active", e.Active())
+	}
+	if f := pool.Free(); f != pool.Blocks() {
+		t.Errorf("pool not restored after exhaustion: %d of %d free", f, pool.Blocks())
+	}
+}
+
+// TestEmitDistinguishesSlowFromGone covers the matrix that the non-blocking send has to get
+// right. Blocking unconditionally wedges the whole server on a caller that left; dropping
+// unconditionally loses tokens for a caller that is merely behind, because a pump running
+// flat out fills the 64-event buffer before a reading goroutine is scheduled even once.
+//
+// The cancel channel is what separates the two, so all four combinations are checked.
+func TestEmitDistinguishesSlowFromGone(t *testing.T) {
+	t.Run("reading, no cancel: gets every token", func(t *testing.T) {
+		e, tok, _ := loadModelPath(t, Options{MaxActive: 1})
+		const want = 100
+		ch, err := e.Submit(Request{Prompt: tok.Encode("Once upon a time", true), MaxTokens: want})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		var got int
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			for ev := range ch {
+				if ev.HasToken {
+					got++
+				}
+			}
+		}()
+		for e.Active() > 0 {
+			e.Pump()
+		}
+		<-finished
+		if got != want {
+			t.Errorf("read %d tokens, want %d", got, want)
+		}
+	})
+
+	t.Run("unread, no cancel: abandoned without stalling", func(t *testing.T) {
+		e, tok, _ := loadModelPath(t, Options{MaxActive: 1})
+		if _, err := e.Submit(Request{
+			Prompt: tok.Encode("Once upon a time", true), MaxTokens: 200,
+		}); err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for e.Pump() > 0 {
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("Pump blocked on a channel nobody reads and nobody cancelled")
+		}
+		if n := e.Active(); n != 0 {
+			t.Errorf("Active() = %d, want 0", n)
+		}
+	})
+
+	t.Run("unread, cancelled: cancel unblocks the send", func(t *testing.T) {
+		e, tok, _ := loadModelPath(t, Options{MaxActive: 1})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if _, err := e.Submit(Request{
+			Prompt:    tok.Encode("Once upon a time", true),
+			MaxTokens: 500,
+			Cancel:    ctx.Done(),
+		}); err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for e.Pump() > 0 {
+			}
+		}()
+		// Let the pump fill the buffer first, so the cancel is what releases it.
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("cancel did not unblock a full event buffer")
+		}
+	})
 }

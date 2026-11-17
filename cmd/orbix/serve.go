@@ -181,10 +181,13 @@ func cmdServe(args []string) error {
 	}
 	fmt.Printf("POST %s/v1/chat/completions\n", url)
 	if pool := eng.Pool(); pool != nil {
-		fmt.Printf("kv cache: paged, %d blocks x %d positions = %.2f MiB shared\n",
-			pool.Blocks(), pool.BlockSize(), float64(pool.Bytes())/(1<<20))
+		fmt.Printf("kv cache:   paged, %d blocks x %d positions, %s shared\n",
+			pool.Blocks(), pool.BlockSize(), humanBytes(pool.Bytes()))
 		if pool.PrefixIndex() != nil {
 			fmt.Println("prefix cache: on (shared prompt prefixes reuse their KV blocks)")
+		}
+		if note := poolReservationWarning(pool.Bytes()); note != "" {
+			fmt.Printf("%s\n", note)
 		}
 	}
 
@@ -224,6 +227,23 @@ func contiguousMemoryNote(cfg llama.Config, maxActive, queued int) string {
 	total := perRequest * int64(maxActive+queued)
 	return fmt.Sprintf("kv cache:   contiguous, about %s per request, %s for %d active + %d queued",
 		humanBytes(perRequest), humanBytes(total), maxActive, queued)
+}
+
+// poolReservationWarning says when a block pool reserves more than a machine should hand out
+// casually, and returns "" when it does not.
+//
+// The pool allocates its whole backing store up front -- one slice per layer covering every
+// block -- so the reservation is the block count times the per-block cost, whether or not the
+// blocks are ever used. A block count that reads as a round number can therefore ask the
+// kernel for tens of gigabytes, and the same virtual-not-resident caveat applies as for the
+// contiguous cache: resident memory stays low until the blocks are touched.
+func poolReservationWarning(reserved int64) string {
+	if reserved <= 1<<30 {
+		return ""
+	}
+	return fmt.Sprintf("warning:    the pool reserves all %s up front; a smaller --blocks lowers "+
+		"it, and Linux commits pages only as blocks are used, so resident memory will be lower "+
+		"until the pool fills.", humanBytes(reserved))
 }
 
 // humanBytes renders a byte count the way an operator reads it: one decimal above a

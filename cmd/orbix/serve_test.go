@@ -94,3 +94,38 @@ func TestReservationWarning(t *testing.T) {
 		t.Error("no warning for a single 8GiB request")
 	}
 }
+
+// TestPoolReservationWarning covers the counterpart of the contiguous warning, for the mode
+// where the reservation comes from a block count rather than a context length.
+//
+// A block pool allocates every block up front, so --blocks 20000 on a 128k-window model asks
+// the kernel for 19.5GB whether or not a request ever touches those blocks. Measured on a
+// running server at that setting: VmSize 32GB against VmRSS 7.4GB after eight requests, so
+// the resident figure is not the reservation and an operator watching RSS would not see it.
+func TestPoolReservationWarning(t *testing.T) {
+	// Below the threshold: the small fixture's 2048 x 16 pool is 432MiB, which is a normal
+	// thing to configure and should not print a warning.
+	if got := poolReservationWarning(432 << 20); got != "" {
+		t.Errorf("warning for a 432MiB pool: %q", got)
+	}
+	// Exactly at the threshold stays quiet: the condition is "more than a gibibyte".
+	if got := poolReservationWarning(1 << 30); got != "" {
+		t.Errorf("warning for exactly 1GiB: %q", got)
+	}
+
+	got := poolReservationWarning(20 << 30)
+	if got == "" {
+		t.Fatal("no warning for a 20GiB pool")
+	}
+	// The advice and the reason both have to be there: a warning that does not say what to
+	// change, or why the resident number will disagree, is not actionable.
+	if !strings.Contains(got, "--blocks") {
+		t.Errorf("warning does not name the flag that fixes it: %q", got)
+	}
+	if !strings.Contains(got, "20.0 GB") {
+		t.Errorf("warning does not state the reservation: %q", got)
+	}
+	if !strings.Contains(got, "virtual") && !strings.Contains(got, "commits pages") {
+		t.Errorf("warning does not explain why resident memory will be lower: %q", got)
+	}
+}

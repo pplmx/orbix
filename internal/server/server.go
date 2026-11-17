@@ -239,6 +239,11 @@ type chatRequest struct {
 	TopK        int       `json:"top_k"`
 	Stream      bool      `json:"stream"`
 	Stop        stopField `json:"stop"`
+
+	// Seed makes a sampled reply reproducible: the same prompt, settings and seed produce
+	// the same text. It is ignored when temperature is 0, because greedy is already
+	// deterministic and spending a generator on it would only slow the request down.
+	Seed int64 `json:"seed"`
 }
 
 type chatMessage struct {
@@ -258,6 +263,11 @@ type completionRequest struct {
 	TopK        int       `json:"top_k"`
 	Stream      bool      `json:"stream"`
 	Stop        stopField `json:"stop"`
+
+	// Seed makes a sampled reply reproducible: the same prompt, settings and seed produce
+	// the same text. It is ignored when temperature is 0, because greedy is already
+	// deterministic and spending a generator on it would only slow the request down.
+	Seed int64 `json:"seed"`
 }
 
 // stopField accepts OpenAI's two spellings: a string or an array of strings.
@@ -344,6 +354,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		stream:      req.Stream,
 		stop:        req.Stop,
 		chat:        true,
+		seed:        req.Seed,
 	})
 }
 
@@ -368,6 +379,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		topK:        req.TopK,
 		stream:      req.Stream,
 		stop:        req.Stop,
+		seed:        req.Seed,
 	})
 }
 
@@ -398,6 +410,9 @@ type generateParams struct {
 	stream      bool
 	stop        []string
 	chat        bool
+	// seed makes sampling reproducible. Zero means "choose one", which is what a caller
+	// that did not ask for reproducibility gets.
+	seed int64
 }
 
 func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generateParams) {
@@ -434,7 +449,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		maxTokens = room
 	}
 
-	sampler, err := s.sampler(p.temperature, p.topK)
+	sampler, err := s.sampler(p.temperature, p.topK, p.seed)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -685,7 +700,7 @@ func chunkPayload(chat bool, text string) map[string]any {
 }
 
 // sampler builds the sampler a request asked for, or the server default.
-func (s *Server) sampler(temp *float64, topK int) (llama.Sampler, error) {
+func (s *Server) sampler(temp *float64, topK int, seed int64) (llama.Sampler, error) {
 	t := s.cfg.Temperature
 	if temp != nil {
 		t = *temp
@@ -700,9 +715,13 @@ func (s *Server) sampler(temp *float64, topK int) (llama.Sampler, error) {
 		// Greedy is the default and the reproducible choice.
 		return greedySampler{}, nil
 	}
-	seed := time.Now().UnixNano()
-	r := newRand(seed)
-	return temperatureSampler{temp: float32(t), topK: topK, src: r}, nil
+	// A caller-supplied seed makes the request reproducible, which is the whole point of
+	// the parameter: the same prompt and settings give the same text. Leaving it to the
+	// clock is what makes two otherwise identical requests differ.
+	if seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+	return temperatureSampler{temp: float32(t), topK: topK, src: newRand(seed)}, nil
 }
 
 // stopTokenIDs maps stop strings onto token ids for the engine's early-out.

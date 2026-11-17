@@ -1229,3 +1229,76 @@ func TestUnknownModelIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestSeedMakesSamplingReproducible covers the seed request field.
+//
+// Sampling is random by definition, which makes a sampled reply impossible to assert on and
+// impossible to reproduce when a user reports bad output. The seed is what makes it
+// reproducible: the same prompt, settings and seed must give the same text, and different
+// seeds must be able to differ.
+//
+// The fixture vocabulary is tiny, so two seeds can coincide by chance. The test therefore
+// asserts the property that matters -- the same seed twice is identical -- and checks that
+// some pair of different seeds diverges, which is a population statement rather than one
+// pair's, so a collision on one pair does not fail it.
+func TestSeedMakesSamplingReproducible(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	temp := 1.5
+
+	gen := func(seed int64) string {
+		t.Helper()
+		reqBody := fmt.Sprintf(`{"model": %q, "prompt": "Once upon a time",
+			"max_tokens": 16, "temperature": %v, "seed": %d}`, srv.cfg.ModelName, temp, seed)
+		resp := post(t, h, "/v1/completions", reqBody)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("seed %d: status = %d", seed, resp.StatusCode)
+		}
+		out := decodeBody[completionResponse](t, resp)
+		if len(out.Choices) == 0 {
+			t.Fatalf("seed %d: no choices", seed)
+		}
+		return out.Choices[0].Text
+	}
+
+	// The same seed twice is the contract.
+	const seed = 1234
+	first, second := gen(seed), gen(seed)
+	if first != second {
+		t.Errorf("the same seed produced different text:\n  %q\n  %q", first, second)
+	}
+
+	// Some seed must produce something else; otherwise the generator is not being used.
+	var differs bool
+	for s := int64(1); s <= 8 && !differs; s++ {
+		if gen(s) != first {
+			differs = true
+		}
+	}
+	if !differs {
+		t.Error("every seed produced the same text, so the seed is not reaching the sampler")
+	}
+}
+
+// TestGreedyIgnoresSeed covers the interaction between seed and temperature.
+//
+// Greedy is already deterministic, so a seed cannot change its output and must not appear to:
+// two different seeds at temperature 0 have to agree, or a caller would conclude the seed
+// works and be misled about what it controls.
+func TestGreedyIgnoresSeed(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	gen := func(seed int64) string {
+		t.Helper()
+		reqBody := fmt.Sprintf(`{"model": %q, "prompt": "Once upon a time",
+			"max_tokens": 12, "seed": %d}`, srv.cfg.ModelName, seed)
+		resp := post(t, h, "/v1/completions", reqBody)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("seed %d: status = %d", seed, resp.StatusCode)
+		}
+		return decodeBody[completionResponse](t, resp).Choices[0].Text
+	}
+	if a, b := gen(42), gen(999); a != b {
+		t.Errorf("greedy replied differently for two seeds:\n  %q\n  %q", a, b)
+	}
+}

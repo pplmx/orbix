@@ -148,9 +148,15 @@ Solid boxes above are what the code does today. Two components that a project li
 this usually has are deliberately *not* drawn, because drawing them would imply they
 exist:
 
-- There is no `Backend` abstraction. One compute path exists -- the in-process
-  kernels -- and introducing an interface with a single implementation would be
-  ceremony rather than a seam. A remote backend is the change that would earn it.
+- There is no `Backend` abstraction, and there will not be one. A remote backend was
+  considered and rejected: everything the scheduler is worth -- continuous batching,
+  prefix reuse, a paged cache -- works by driving one batched forward pass over local
+  KV blocks, and a backend reachable over HTTP can only be asked for a prompt and
+  answer with tokens. Adding the seam would not extend those mechanisms to a remote
+  backend; it would mean the local path carries them and the remote path silently
+  does not. Two implementations with different capabilities behind one interface is
+  worse than one implementation, because the difference is invisible from the call
+  site.
 - There is no `KVCacheManager` interface, and no radix tree. The paged cache and its
   hashed prefix index cover the same job: a shared pool of reference-counted blocks,
   and an index that hands back the blocks a repeated prompt prefix already produced.
@@ -202,12 +208,12 @@ type Event struct {
 Progress against those interfaces, stated plainly so the block above reads as a target
 rather than as a description:
 
-| Interface        | State                                                                                                                 |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `Engine`         | Exists as `engine.Engine`, but takes a model path rather than a `LoadOptions` struct                                  |
-| `Scheduler`      | Exists as `Engine.Submit` + `Engine.Pump`; there is no `Stats()` yet, and a round is driven by the caller, not a loop |
-| `KVCacheManager` | Not a separate interface: `llama.BlockPool` owns allocation and `llama.PrefixIndex` owns prefix matching              |
-| `Backend`        | Not implemented. There is one compute path (the in-process kernels); a remote backend would be the place to add it    |
+| Interface        | State                                                                                                             |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `Engine`         | Exists as `engine.Engine`, but takes a model path rather than a `LoadOptions` struct                              |
+| `Scheduler`      | Exists as `Engine.Submit` + `Engine.Pump` + `Engine.Stats`; a round is driven by the caller, not a loop           |
+| `KVCacheManager` | Not a separate interface: `llama.BlockPool` owns allocation and `llama.PrefixIndex` owns prefix matching          |
+| `Backend`        | Not implemented, by decision. One compute path exists, and a remote one could not support what the scheduler does |
 
 The compute kernels are internal but exposed for testing and benchmarking:
 
@@ -482,8 +488,15 @@ The roadmap is a learning path as much as a feature list. Each version adds one 
 - [x] `v0.2` — **Scheduling and cache**: continuous batching, a paged KV cache, Q4_0/Q4_1, Qwen2 — batched prefill and decode with an admission policy, a reference-counted paged cache with prefix reuse, every 32-weight ggml block format, Llama and Qwen2
 - [x] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — SSE streaming, client-disconnect cancellation, a per-request `priority` field, an admission policy, every 32-weight and K-quant block format, the `mistral` architecture with its sliding window, chat templates rendered from `tokenizer.chat_template`, and mixture-of-experts layers
 - [x] `v0.4` — **Performance paths**: K-quants, prefix-aware cache — every K-quant and IQ4_NL decode, and a paged cache whose prefix index records which block continues which so eviction gives up a chain's end rather than its middle. Assembly is deliberately out of scope: see below
-- [ ] `v0.5` — **Measurement and observability**: `orbix bench` suite, remote HTTP backend, Prometheus and OpenTelemetry — *partial: `orbix bench --suite` prints every scenario as one table, `/metrics` exports Prometheus-format counters and gauges, and `--otlp-endpoint` exports traces in OTLP/HTTP+JSON, and `serve --log-format` writes one structured access record per request via `log/slog`; a remote HTTP backend is not done*
-- [ ] `v1.0` — **Stable API**: cross-platform CI matrix, published benchmarks, documented reading path
+- [x] `v0.5` — **Measurement and observability**: `orbix bench --suite` prints every scenario as one table with the conditions that produced it, `/metrics` exports Prometheus-format counters and gauges, `--otlp-endpoint` exports traces in OTLP/HTTP+JSON, and `serve --log-format` writes one structured access record per request. A remote HTTP backend was considered and dropped: see the note under Architecture
+- [x] `v1.0` — **Stable interface**: a cross-platform CI matrix that builds five targets and runs the suite on two, benchmarks published with the machine and flags that produced them, and a documented reading path through every layer. "Stable" means the interfaces are settled enough to read as a whole, not that they will not change: the project is still pre-alpha
+
+Every version on that list is complete, and that means less than a green checklist
+suggests. It means each layer has an implementation that is correct against its reference
+and small enough to read; it does not mean the project is production-ready. There is no
+GPU path, no request queuing beyond one process, no model architecture beyond the
+Llama-family, and no plan to add those. The roadmap was a reading order, and it is
+finished because the reading order is finished.
 
 ## Design Principles
 

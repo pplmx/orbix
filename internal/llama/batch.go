@@ -323,22 +323,42 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	scale := attentionScale(cfg)
 	group := cfg.Heads / cfg.KVHeads
 
-	// Attention itself stays per position: the causal mask differs for each row,
-	// and the score matrix is small compared with the projections above.
+	// Store the whole batch first, in position order, then attend. Writing first is safe
+	// because every row's read is bounded by its own position: spans is asked for m2 rows
+	// and each row of the batch is stored at its own offset, so a row cannot see a later
+	// one whatever order the writes happened in. The writes still go in position order
+	// because a paged cache appends a block per position boundary and refuses to skip
+	// one.
 	for i := range n {
 		pos := startPos + i
-		// Store this row, then attend over everything up to it.
 		kRow := b.k[i*kvdim : (i+1)*kvdim]
 		vRow := b.v[i*kvdim : (i+1)*kvdim]
 		if _, _, err := cache.appendKV(l, kRow, vRow, pos); err != nil {
 			return err
 		}
+	}
+
+	//
+	// The positions are independent once the keys and values are stored, so they run in
+	// parallel. Each worker needs its own score buffer: scores is per head and per
+	// position, and sharing one would let two workers interleave writes into the same
+	// slice. The buffers are rented per layer rather than allocated per position, which
+	// is the difference between a few megabytes and a few gigabytes of garbage.
+	scorers := make([][]float32, m.run.Workers())
+	for i := range scorers {
+		scorers[i] = make([]float32, cfg.ContextLen)
+	}
+	var attErr error
+	m.run.Parallel(n, func(i, slot int) {
+		sc := scorers[slot]
+		pos := startPos + i
 		m2 := pos + 1
 		for h := range cfg.Heads {
 			kv := h / group
 			keys, values, err := cache.spans(l, kv, m2)
 			if err != nil {
-				return err
+				attErr = err
+				return
 			}
 			if cfg.WindowLen > 0 {
 				keys = trimSpans(keys, cfg.WindowLen)
@@ -348,10 +368,14 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 			qOff := i*qdim + h*cfg.HeadDim
 			qh := b.q[qOff : qOff+cfg.HeadDim]
 			out := b.attn[i*qdim+h*cfg.HeadDim : i*qdim+(h+1)*cfg.HeadDim]
-			if err := attend(qh, keys, values, nWin, b.scores, out, scale); err != nil {
-				return err
+			if err := attend(qh, keys, values, nWin, sc, out, scale); err != nil {
+				attErr = err
+				return
 			}
 		}
+	})
+	if attErr != nil {
+		return attErr
 	}
 
 	if err := m.run.MatMulTransposed(b.attnOut, b.attn, layer.wo, n, cfg.Hidden, qdim); err != nil {

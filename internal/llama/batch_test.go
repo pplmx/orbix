@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
 )
 
@@ -279,6 +280,20 @@ func benchPrompt(b *testing.B) (*Model, []int32) {
 		ids[i] = int32(100 + i)
 	}
 	return m, ids
+}
+
+// loadConfigAt reads a fixture's configuration.
+func loadConfigAt(t *testing.T, path string) Config {
+	t.Helper()
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	return cfg
 }
 
 // fixtureTokens returns n token ids the model can embed.
@@ -728,6 +743,52 @@ func TestDecodeStepTinyModel(t *testing.T) {
 		for j := range want[i] {
 			if row[j] != want[i][j] {
 				t.Errorf("sequence %d logit[%d] = %v, want %v", i, j, row[j], want[i][j])
+			}
+		}
+	}
+}
+
+// TestParallelAttentionIsBitIdentical pins what makes the parallel attention safe to
+// ship: positions are independent once keys and values are stored, so running them on
+// several workers must produce exactly the serial answer, not an approximation of it.
+//
+// Workers=1 takes the serial path inside Runner.Parallel, so the comparison is against
+// the same code with the fan-out removed rather than against a second implementation.
+func TestParallelAttentionIsBitIdentical(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	cfg := loadConfigAt(t, path)
+
+	prompt := make([]int32, 1, 32)
+	prompt[0] = int32(cfg.BOSID)
+	for i := 1; i < 32; i++ {
+		prompt = append(prompt, int32((i*7)%cfg.VocabSize))
+	}
+
+	run := func(workers int) []float32 {
+		m, err := NewWithOptions(path, Options{Workers: workers})
+		if err != nil {
+			t.Fatalf("NewWithOptions(%d): %v", workers, err)
+		}
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		logits, err := m.Prefill(cache, prompt, 0)
+		if err != nil {
+			t.Fatalf("Prefill(%d workers): %v", workers, err)
+		}
+		return append([]float32(nil), logits...)
+	}
+
+	want := run(1)
+	for _, workers := range []int{2, 4, 16} {
+		got := run(workers)
+		if len(got) != len(want) {
+			t.Fatalf("workers=%d returned %d logits, want %d", workers, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("workers=%d logit[%d] = %v, serial %v", workers, i, got[i], want[i])
 			}
 		}
 	}

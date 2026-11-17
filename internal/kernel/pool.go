@@ -113,6 +113,52 @@ func (r *Runner) parts(work int) int {
 	return min(r.workers, work/workPerWorker)
 }
 
+// Parallel runs fn over [0,count) across the runner's workers and returns when every call
+// is done.
+//
+// fn receives the index and the slot of the worker running it: slots are distinct for
+// concurrently running workers, so a caller that needs per-worker scratch indexes an
+// array by slot. Passing the slot rather than letting the caller derive it is what makes
+// that safe -- a caller guessing from the index cannot know how this function chunked the
+// range, and a wrong guess is two workers writing the same scratch.
+//
+// It exists for work that is independent per index but is not a projection: attention over
+// one position's heads, for example, where each position writes its own slice of the
+// output and reads only the cache. The caller owns the disjointness of the output; this
+// only owns the distinctness of the slots.
+func (r *Runner) Parallel(count int, fn func(i, slot int)) {
+	if count <= 0 {
+		return
+	}
+	workers := 1
+	if r != nil {
+		workers = r.workers
+	}
+	parts := min(workers, count)
+	if parts <= 1 {
+		for i := range count {
+			fn(i, 0)
+		}
+		return
+	}
+	// ceil division: with count not divisible by parts the first chunks take one extra
+	// index, so the ranges stay contiguous and cover [0,count) exactly once.
+	chunk := (count + parts - 1) / parts
+	var wg sync.WaitGroup
+	for n, lo := 0, 0; lo < count; lo, n = lo+chunk, n+1 {
+		hi := min(lo+chunk, count)
+		// slot is passed as a parameter rather than captured: a closure over a variable
+		// the loop mutates makes every goroutine read whatever value it holds when it
+		// runs, which is how two workers end up sharing one slot.
+		wg.Go(func() {
+			for i := lo; i < hi; i++ {
+				fn(i, n)
+			}
+		})
+	}
+	wg.Wait()
+}
+
 // splitRows runs fn over the row range [0,n) in contiguous chunks.
 func (r *Runner) splitRows(parts, n int, fn func(lo, hi int)) error {
 	if parts > n {

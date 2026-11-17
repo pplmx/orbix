@@ -26,13 +26,14 @@ import (
 // With no pre-tokenizer the whole text is one chunk, which is the behaviour this package
 // had before it read the key: merges run across every character boundary.
 func (t *Tokenizer) preSplit(text string) []string {
-	if t.pre != preQwen2 || text == "" {
+	maxDigits := t.preDigitRun()
+	if maxDigits == 0 || text == "" {
 		return []string{text}
 	}
 	var chunks []string
 	i := 0
 	for i < len(text) {
-		n := qwen2ChunkLen(text[i:])
+		n := chunkLen(text[i:], maxDigits)
 		if n <= 0 {
 			// A zero-length chunk would loop forever; take one byte so progress is
 			// guaranteed even if the rules below have a gap.
@@ -48,12 +49,28 @@ func (t *Tokenizer) preSplit(text string) []string {
 // at the start of the text.
 var qwen2Contractions = []string{"'s", "'t", "'re", "'ve", "'m", "'ll", "'d"}
 
-// qwen2ChunkLen returns the length in bytes of the Qwen2 pre-tokenizer's first match at
-// the start of s, or 0 if no rule applies.
+// preDigitRun is how many digits one chunk may hold under this pre-tokenizer.
+//
+// The Qwen2 and Llama 3 rules are the same expression except for this number, so it is a
+// property of the family rather than a second implementation: Qwen2 takes one digit at a
+// time and Llama 3 takes up to three. Zero means no pre-tokenizer applies.
+func (t *Tokenizer) preDigitRun() int {
+	switch t.pre {
+	case preQwen2:
+		return 1
+	case preLlama3:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// chunkLen returns the length in bytes of the pre-tokenizer's first match at the start of
+// s, or 0 if no rule applies.
 //
 // The alternatives are tried in the order the expression lists them, because that order is
 // the rule: a contraction wins over a letter run, which is why "'s" is its own chunk.
-func qwen2ChunkLen(s string) int {
+func chunkLen(s string, maxDigits int) int {
 	if n := qwen2ContractionLen(s); n > 0 {
 		return n
 	}
@@ -63,9 +80,9 @@ func qwen2ChunkLen(s string) int {
 	if n := qwen2LetterRunLen(s); n > 0 {
 		return n
 	}
-	// \p{N} -- a single digit, not a run: the Qwen2 rule differs from GPT-2 here, and a
-	// run of digits would otherwise become one chunk.
-	if n := runeLenAt(s); n > 0 && isDigitAt(s) {
+	// \p{N}{1,3} -- at most maxDigits digits. A run of digits is not one chunk: a number
+	// is split into groups, and the group size is what the two families disagree about.
+	if n := qwen2DigitRunLen(s, maxDigits); n > 0 {
 		return n
 	}
 	// " ?[^\s\p{L}\p{N}]+[\r\n]* -- an optional space, then a run of punctuation,
@@ -83,6 +100,16 @@ func qwen2ChunkLen(s string) int {
 		return qwen2SpaceRunLen(s)
 	}
 	return 0
+}
+
+// qwen2DigitRunLen matches \p{N}{1,max}.
+func qwen2DigitRunLen(s string, max int) int {
+	i, count := 0, 0
+	for i < len(s) && count < max && isDigitAt(s[i:]) {
+		i += runeLenAt(s[i:])
+		count++
+	}
+	return i
 }
 
 // qwen2ContractionLen matches a clitic at the start of s.

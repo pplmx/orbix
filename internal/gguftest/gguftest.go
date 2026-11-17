@@ -60,6 +60,15 @@ type Model struct {
 	// and what the score-ordered fallback path expects.
 	Merges []string
 
+	// AddBOS is tokenizer.ggml.add_bos_token. Nil omits the key, which is what a file
+	// that accepts the default does; a non-nil value states it explicitly.
+	AddBOS *bool
+
+	// Pre is tokenizer.ggml.pre: the pre-tokenizer name, which selects how text is cut
+	// into chunks before merging. Empty omits the key, which is what a SentencePiece
+	// vocabulary does and what a byte-level model without a chunking rule does.
+	Pre string
+
 	// TokenizerModel is tokenizer.ggml.model: "llama" for SentencePiece, "gpt2" for
 	// byte-level BPE. Empty means "llama".
 	//
@@ -356,6 +365,12 @@ func (m Model) kvs() []kv {
 	// and writing it there makes the encoder add a leading space the model never saw.
 	if model == "llama" {
 		out = append(out, boolKV("tokenizer.ggml.add_space_prefix", true))
+	}
+	if m.AddBOS != nil {
+		out = append(out, boolKV("tokenizer.ggml.add_bos_token", *m.AddBOS))
+	}
+	if m.Pre != "" {
+		out = append(out, strKV("tokenizer.ggml.pre", m.Pre))
 	}
 	if len(m.Merges) > 0 {
 		vals := make([]gguf.Value, len(m.Merges))

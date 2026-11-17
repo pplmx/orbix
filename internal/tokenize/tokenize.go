@@ -83,6 +83,10 @@ const (
 	// preQwen2 is the Qwen2 family rule: contractions, then letter runs, then single
 	// digits, then the remaining punctuation runs, then whitespace runs.
 	preQwen2
+	// preLlama3 is the same rule with digit groups of up to three. It also carries two
+	// behaviours that are not part of the expression: a chunk that is itself a whole
+	// vocabulary piece skips the merges, and BOS is added by default.
+	preLlama3
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -159,6 +163,23 @@ type Tokenizer struct {
 	// pre is which pre-tokenizer the vocabulary was trained with, or preNone when the
 	// model carries no pre-tokenizer name.
 	pre preType
+
+	// ignoreMerges takes a chunk that is already one vocabulary piece as that piece,
+	// skipping the merge loop. Some pre-tokenizers imply it; see preLlama3.
+	ignoreMerges bool
+
+	// addBOS is whether Encode prepends the beginning-of-sequence token for ordinary
+	// text.
+	//
+	// Its default is true, which is what this package has always done for a file that
+	// names a BOS token: every GGUF llama.cpp writes is trained to expect one, and a
+	// file that does not want it says so. tokenizer.ggml.add_bos_token overrides it in
+	// both directions.
+	//
+	// It is a pointer rather than a bool because the zero value of a bool cannot mean
+	// "true": a Tokenizer built as a struct literal -- which the tests do -- would
+	// silently lose the default.
+	addBOS *bool
 
 	// merges maps a pair of pieces to its rank in the vocabulary's merge list, for a
 	// byte-level BPE vocabulary that ships one. Rank order is the definition of the
@@ -273,6 +294,12 @@ func New(f *gguf.File) (*Tokenizer, error) {
 	if id, ok := f.Uint32("tokenizer.ggml.bos_token_id"); ok {
 		t.bosID = int32(id)
 	}
+	// The family default is the pre-tokenizer's, so the file's explicit answer is read
+	// after it. A false here must not only stop the default; it has to suppress a BOS the
+	// family would otherwise have added.
+	if v, ok := f.Get[bool]("tokenizer.ggml.add_bos_token"); ok {
+		t.addBOS = &v
+	}
 	if id, ok := f.Uint32("tokenizer.ggml.eos_token_id"); ok {
 		t.eosID = int32(id)
 	}
@@ -293,6 +320,14 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		switch name {
 		case "qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "hunyuan", "solar-open":
 			t.pre = preQwen2
+		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2":
+			t.pre = preLlama3
+			// A whole chunk that the vocabulary already spells as one piece is taken as
+			// that piece without merging. Without it a word the vocabulary contains can
+			// still come out as several tokens, because the merge loop has no reason to
+			// prefer the single piece.
+			t.ignoreMerges = true
+
 		case "", "default":
 			t.pre = preNone
 		default:
@@ -351,6 +386,12 @@ func (t *Tokenizer) UnknownID() int32 { return t.unknownID }
 
 // BOSID returns the beginning-of-sequence token ID, or -1 when unset.
 func (t *Tokenizer) BOSID() int32 { return t.bosID }
+
+// addsBOS reports whether Encode prepends BOS for ordinary text. An unset field means the
+// default, which is yes.
+func (t *Tokenizer) addsBOS() bool {
+	return t.addBOS == nil || *t.addBOS
+}
 
 // EOSID returns the end-of-sequence token ID, or -1 when unset.
 func (t *Tokenizer) EOSID() int32 { return t.eosID }
@@ -484,7 +525,7 @@ func (q bigramQueue) less(i, j int) bool {
 // control token, which is what a chat template expects.
 func (t *Tokenizer) Encode(text string, addSpecial bool) []int32 {
 	var out []int32
-	if addSpecial && t.bosID >= 0 {
+	if addSpecial && t.addsBOS() && t.bosID >= 0 {
 		out = append(out, t.bosID)
 	}
 	out = append(out, t.encodeText(text)...)
@@ -500,7 +541,7 @@ func (t *Tokenizer) Encode(text string, addSpecial bool) []int32 {
 // cannot be one function: only the caller knows whether a marker is markup or prose.
 func (t *Tokenizer) EncodeWithSpecials(text string, addSpecial bool) []int32 {
 	var out []int32
-	if addSpecial && t.bosID >= 0 {
+	if addSpecial && t.addsBOS() && t.bosID >= 0 {
 		out = append(out, t.bosID)
 	}
 	if len(t.specials) == 0 {
@@ -574,7 +615,18 @@ func (t *Tokenizer) encodeText(text string) []int32 {
 		// around it.
 		var out []int32
 		for _, chunk := range t.preSplit(text) {
-			out = append(out, t.encodeChunk(bpeEscape(chunk))...)
+			escaped := bpeEscape(chunk)
+			// A chunk the vocabulary spells as one piece is emitted as that piece. The
+			// merge loop would usually find it anyway, but not always: a shorter merge
+			// with a better rank can win first and leave a split the model was not
+			// trained to see.
+			if t.ignoreMerges {
+				if id, ok := t.index[escaped]; ok {
+					out = append(out, id)
+					continue
+				}
+			}
+			out = append(out, t.encodeChunk(escaped)...)
 		}
 		return out
 	} else {

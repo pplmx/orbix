@@ -2,6 +2,9 @@ package tokenize
 
 import (
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // The pre-tokenizer decides where a merge may not cross. These tests use the chunk
@@ -83,5 +86,143 @@ func TestQwen2Contractions(t *testing.T) {
 	}
 	if n := qwen2ContractionLen("'x"); n != 0 {
 		t.Errorf("qwen2ContractionLen(\"'x\") = %d, want 0", n)
+	}
+}
+
+// The Llama 3 family rule is the Qwen2 rule with digit groups of up to three, plus two
+// behaviours that are not part of the expression at all. Both are tested here because
+// both are invisible when wrong: the tokenizer still produces valid ids.
+
+// TestLlama3DigitGroups checks the one rule the two families disagree about.
+func TestLlama3DigitGroups(t *testing.T) {
+	llama := &Tokenizer{pre: preLlama3}
+	qwen := &Tokenizer{pre: preQwen2}
+	cases := []struct {
+		in          string
+		llama, qwen []string
+	}{
+		{"999", []string{"999"}, []string{"9", "9", "9"}},
+		{"123456", []string{"123", "456"}, []string{"1", "2", "3", "4", "5", "6"}},
+		{"a1234b", []string{"a", "123", "4", "b"}, []string{"a", "1", "2", "3", "4", "b"}},
+		{"x=42", []string{"x", "=", "42"}, []string{"x", "=", "4", "2"}},
+	}
+	for _, c := range cases {
+		if got := llama.preSplit(c.in); !sameStrings(got, c.llama) {
+			t.Errorf("llama3 preSplit(%q) = %q, want %q", c.in, got, c.llama)
+		}
+		if got := qwen.preSplit(c.in); !sameStrings(got, c.qwen) {
+			t.Errorf("qwen2 preSplit(%q) = %q, want %q", c.in, got, c.qwen)
+		}
+	}
+}
+
+// TestLlama3IgnoresMergesForWholePieces checks the behaviour that is not in the
+// expression: a chunk the vocabulary spells as one piece is emitted as that piece, even
+// when the merge ranks would have split it.
+func TestLlama3IgnoresMergesForWholePieces(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{
+		Vocab: []string{"<unk>", "<s>", "</s>", "\u0120", "a", "b", "c", "ab", "abc"},
+		// "a b" outranks "b c", so the merge path forms ab+c rather than taking the
+		// "abc" piece that exists.
+		Merges:         []string{"a b", "b c"},
+		TokenizerModel: "gpt2",
+		NoBytes:        true,
+		Pre:            "llama-bpe",
+	})
+	if !tok.ignoreMerges {
+		t.Fatal("a llama-bpe vocabulary did not set ignoreMerges")
+	}
+	got := tok.Encode("abc", false)
+	want := []int32{tok.index["abc"]}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("Encode(abc) = %v, want [%d] (the whole piece, not the merges)", got, want[0])
+	}
+
+	// Dropping the flag must change the answer, which is what makes this a test of the
+	// flag rather than of the vocabulary.
+	tok.ignoreMerges = false
+	if split := tok.Encode("abc", false); len(split) == 1 && split[0] == want[0] {
+		t.Error("without ignoreMerges the result is unchanged; this fixture does not exercise it")
+	}
+}
+
+// TestAddBOSIsOverridableByTheFile checks tokenizer.ggml.add_bos_token in both
+// directions.
+//
+// The default is to add it, which is what every checkpoint that names a BOS token expects.
+// A file that states add_bos_token = false must suppress it -- and that override has to be
+// read rather than assumed from the family, because a pre-tokenizer and a file that
+// disagreed silently would produce a prompt with one token too many or too few.
+func TestAddBOSIsOverridableByTheFile(t *testing.T) {
+	base := gguftest.Model{
+		Vocab:          []string{"<unk>", "<s>", "</s>", "\u0120", "a"},
+		TokenizerModel: "gpt2",
+		NoBytes:        true,
+		Pre:            "llama-bpe",
+		BOSID:          1,
+	}
+
+	defaults := bpeFixture(t, base)
+	if ids := defaults.Encode("a", true); len(ids) == 0 || ids[0] != 1 {
+		t.Errorf("Encode(a, addSpecial) = %v, want BOS 1 first by default", ids)
+	}
+
+	off := base
+	off.AddBOS = ptrTo(false)
+	if ids := bpeFixture(t, off).Encode("a", true); len(ids) > 0 && ids[0] == 1 {
+		t.Errorf("add_bos_token = false was ignored: %v starts with BOS", ids)
+	}
+}
+
+// ptrTo returns a pointer to v, for the tri-state fixture fields.
+func ptrTo[T any](v T) *T { return &v }
+
+// bpeFixture builds a tokenizer over a fixture model.
+func bpeFixture(t *testing.T, m gguftest.Model) *Tokenizer {
+	t.Helper()
+	f, err := gguf.Open(m.Write(t, t.TempDir()))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return tok
+}
+
+// sameStrings reports whether two string slices are equal.
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestUnknownPreTokenizerIsInert checks that a name this package does not know falls back
+// to no chunking rather than to a guess. A wrong chunking rule produces text the model was
+// never trained on with nothing to report it, while no rule is what this package did
+// before it read the key at all.
+func TestUnknownPreTokenizerIsInert(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{
+		Vocab:          []string{"<unk>", "<s>", "</s>", "\u0120", "a", "b", "ab"},
+		Merges:         []string{"a b"},
+		TokenizerModel: "gpt2",
+		NoBytes:        true,
+		Pre:            "no-such-pre-tokenizer",
+	})
+	if tok.pre != preNone {
+		t.Errorf("unknown pre-tokenizer mapped to %v, want preNone", tok.pre)
+	}
+	if got := tok.preSplit("a  b"); !sameStrings(got, []string{"a  b"}) {
+		t.Errorf("preSplit with an unknown pre-tokenizer = %q, want the whole text", got)
+	}
+	if tok.ignoreMerges {
+		t.Error("an unknown pre-tokenizer set ignoreMerges")
 	}
 }

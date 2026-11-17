@@ -417,7 +417,11 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// cases fall through to the same regex, and the source says so in a comment. What
 		// differs in llama.cpp is "clean_up_tokenization_spaces", a decoding-side setting
 		// this package does not model, so the split is the same.
-		case "dbrx", "smaug-bpe",
+		// chatglm-bpe and glm5 are in llama.cpp's CHATGLM4 branch, whose expression is
+		// llama3's verbatim. The branch differs only in settings this package does not model
+		// -- a null BOS id, ignore_merges, and clean_up_tokenization_spaces.
+		case "chatglm-bpe", "glm5",
+			"dbrx", "smaug-bpe",
 			"llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2",
 			// jina-v5-nano is in llama.cpp's llama3 branch, ignore_merges and all.
 			"jina-v5-nano":

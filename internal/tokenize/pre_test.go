@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 70
+		wantImplemented = 72
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1286,5 +1286,38 @@ func TestSopranoChunks(t *testing.T) {
 	}
 	if got := real.preSplit("hi there"); !sameStrings(got, []string{"hi", " ", "there"}) {
 		t.Errorf("soprano preSplit(\"hi there\") = %q, want the space on its own", got)
+	}
+}
+
+// TestChatGLMNamesShareTheLlama3Rule checks the two names llama.cpp maps to CHATGLM4, whose
+// expression is llama3's verbatim.
+//
+// The branch differs only in settings this package does not model -- a null BOS id,
+// ignore_merges, and clean_up_tokenization_spaces -- so mapping the names is the whole change.
+// As with dbrx and smaug-bpe, the risk is not that the rule is wrong but that a name resolves
+// to something else.
+func TestChatGLMNamesShareTheLlama3Rule(t *testing.T) {
+	llama := &Tokenizer{pre: preLlama3}
+	for _, name := range []string{"chatglm-bpe", "glm5"} {
+		path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New(pre=%q): %v", name, err)
+		}
+		if !tok.PreImplemented() {
+			t.Errorf("%q is not reported as implemented", name)
+		}
+		// The same inputs, split the same way as llama3: digits in threes, a punctuation
+		// prefix on the following word, contractions whole.
+		for _, in := range []string{"a1234b", "Hello, world!", "don't", "中文测试"} {
+			want := llama.preSplit(in)
+			if got := tok.preSplit(in); !sameStrings(got, want) {
+				t.Errorf("%q preSplit(%q) = %q, want llama3's %q", name, in, got, want)
+			}
+		}
 	}
 }

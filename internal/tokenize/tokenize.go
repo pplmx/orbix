@@ -110,6 +110,13 @@ type Tokenizer struct {
 	// emitting its end-of-turn token. Matching longest first matters because
 	// markers share prefixes.
 
+	// merges maps a pair of pieces to its rank in the vocabulary's merge list, for a
+	// byte-level BPE vocabulary that ships one. Rank order is the definition of the
+	// tokenization, not a preference: a model with 151387 rules cannot be reproduced by
+	// any scoring heuristic over its pieces, and a wrong application of them produces
+	// valid token ids for text the model was never trained on.
+	merges map[string]int
+
 	// byteLevel reports that the vocabulary is GPT-2 byte-level BPE rather than
 	// SentencePiece, which changes how a space is represented before merging.
 	//
@@ -232,6 +239,24 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		}
 	}
 
+	if raw, ok := f.GetArray[string]("tokenizer.ggml.merges"); ok && len(raw) > 0 {
+		// Each entry is "left right". The pieces can themselves contain spaces -- "Ġ Ġ"
+		// is the real first merge of a byte-level vocabulary -- so the split is on the
+		// first space: the left piece is an escaped single character or a merged run with
+		// no space of its own until the separator.
+		t.merges = make(map[string]int, len(raw))
+		for rank, entry := range raw {
+			left, right, found := strings.Cut(entry, " ")
+			if !found || left == "" || right == "" {
+				// Reported rather than skipped: a vocabulary missing one rule tokenizes
+				// differently, and ignoring the entry would make the model produce subtly
+				// wrong text with no error anywhere.
+				return nil, fmt.Errorf("tokenize: merge %d is not a pair: %q", rank, entry)
+			}
+			t.merges[left+"\x00"+right] = rank
+		}
+	}
+
 	if v, ok := f.Lookup("tokenizer.ggml.add_space_prefix"); ok && v.Type == gguf.TypeBool {
 		t.addSpacePrefix = v.Bool
 	} else {
@@ -296,8 +321,16 @@ type symbol struct {
 // they would form.
 type bigram struct {
 	left, right int
-	score       float32
-	size        int // combined byte length, used to detect stale entries
+	// rank orders the merge. With a merge list, lower rank is applied first, which is
+	// what the list defines. Without one, the vocabulary's own score is used and the
+	// direction is reversed by the queue, because a unigram vocabulary scores longer
+	// pieces higher.
+	rank  int
+	score float32
+	// byRank reports which of the two orderings this entry uses, so a vocabulary with a
+	// merge list cannot be sorted by a score it does not define.
+	byRank bool
+	size   int // combined byte length, used to detect stale entries
 }
 
 // bigramQueue is a max-heap on (score, then leftmost first).
@@ -353,7 +386,25 @@ func (q *bigramQueue) pop() (bigram, bool) {
 
 // less reports whether entry i outranks entry j, i.e. whether i should come out
 // of the heap first.
+//
+// With a merge list the lower rank wins: the list is ordered by when the merge was
+// learned, and applying a later rule before an earlier one tokenizes text the model never
+// saw. Without one, the vocabulary's own score decides and the larger score wins, which
+// is what a unigram vocabulary means by it. Ties go to the leftmost pair, which is what
+// makes the result deterministic rather than heap-order dependent.
 func (q bigramQueue) less(i, j int) bool {
+	if q[i].byRank != q[j].byRank {
+		// Two orderings in one heap would be meaningless; it cannot happen because
+		// byRank comes from the tokenizer, but ordering by rank first keeps the
+		// comparison total if it ever does.
+		return q[i].byRank
+	}
+	if q[i].byRank {
+		if q[i].rank != q[j].rank {
+			return q[i].rank < q[j].rank
+		}
+		return q[i].left < q[j].left
+	}
 	if q[i].score != q[j].score {
 		return q[i].score > q[j].score
 	}
@@ -484,7 +535,22 @@ func (t *Tokenizer) encodeText(text string) []int32 {
 		if !ok {
 			return
 		}
-		queue.push(bigram{left: left, right: right, score: t.scores[id], size: len(span)})
+		entry := bigram{left: left, right: right, size: len(span)}
+		if t.merges != nil {
+			// The pair is keyed by the two pieces it merges, which is what the list
+			// records. A pair absent from the list never merges, whatever its score.
+			key := text[symbols[left].start : symbols[left].start+symbols[left].len]
+			key += "\x00"
+			key += text[symbols[right].start : symbols[right].start+symbols[right].len]
+			rank, ok := t.merges[key]
+			if !ok {
+				return
+			}
+			entry.rank, entry.byRank = rank, true
+		} else {
+			entry.score = t.scores[id]
+		}
+		queue.push(entry)
 		rev[span] = [2]string{
 			text[symbols[left].start : symbols[left].start+symbols[left].len],
 			text[symbols[right].start : symbols[right].start+symbols[right].len],

@@ -55,6 +55,20 @@ type Model struct {
 	// ChatTemplate, when set, is written to tokenizer.chat_template.
 	ChatTemplate string
 
+	// Merges is tokenizer.ggml.merges: the BPE merge list, in rank order, written as
+	// "left right". Empty omits the key, which is what a SentencePiece vocabulary does
+	// and what the score-ordered fallback path expects.
+	Merges []string
+
+	// TokenizerModel is tokenizer.ggml.model: "llama" for SentencePiece, "gpt2" for
+	// byte-level BPE. Empty means "llama".
+	//
+	// It is separate from Merges because the two encode the same intent from different
+	// directions: a merge list only makes sense with byte-level BPE, whose pieces are
+	// the escaped bytes, and a fixture that pairs a merge list with a SentencePiece
+	// vocabulary builds a tokenizer that reads its own pieces wrong.
+	TokenizerModel string
+
 	// vocabBase is where the byte-fallback pieces start, recorded during resolve so the
 	// writer knows which pieces are bytes without searching the list again.
 	vocabBase int
@@ -296,6 +310,10 @@ func (m Model) kvs() []kv {
 			u32KV(a+".expert_used_count", m.ExpertUsed),
 		)
 	}
+	model := m.TokenizerModel
+	if model == "" {
+		model = "llama"
+	}
 	// The tokenizer is SentencePiece-of-characters: model "llama", an explicit
 	// add_space_prefix, and the 256 byte-fallback pieces a SentencePiece model always
 	// carries.
@@ -325,15 +343,27 @@ func (m Model) kvs() []kv {
 	}
 
 	out = append(out,
-		strKV("tokenizer.ggml.model", "llama"),
+		strKV("tokenizer.ggml.model", model),
 		arrayKV("tokenizer.ggml.tokens", gguf.TypeString, tokens),
 		arrayKV("tokenizer.ggml.token_type", gguf.TypeInt32, types),
 		arrayKV("tokenizer.ggml.scores", gguf.TypeFloat32, scores),
 		u32KV("tokenizer.ggml.bos_token_id", m.BOSID),
 		u32KV("tokenizer.ggml.eos_token_id", m.EOSID),
 		u32KV("tokenizer.ggml.unknown_token_id", 0),
-		boolKV("tokenizer.ggml.add_space_prefix", true),
 	)
+	// A SentencePiece vocabulary prepends a space during training, so the key is written
+	// for it. A byte-level BPE vocabulary does not -- the space is part of the text --
+	// and writing it there makes the encoder add a leading space the model never saw.
+	if model == "llama" {
+		out = append(out, boolKV("tokenizer.ggml.add_space_prefix", true))
+	}
+	if len(m.Merges) > 0 {
+		vals := make([]gguf.Value, len(m.Merges))
+		for i, merge := range m.Merges {
+			vals[i] = gguf.Value{Type: gguf.TypeString, Str: merge}
+		}
+		out = append(out, arrayKV("tokenizer.ggml.merges", gguf.TypeString, vals))
+	}
 	if m.ChatTemplate != "" {
 		out = append(out, strKV("tokenizer.chat_template", m.ChatTemplate))
 	}

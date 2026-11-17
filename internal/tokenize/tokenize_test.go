@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // newTestTokenizer builds a Tokenizer directly from the fixture vocabulary,
@@ -247,5 +248,127 @@ func BenchmarkEncode(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = tok.Encode(text, true)
+	}
+}
+
+// A byte-level BPE vocabulary ships a merge list, and the order of that list is the
+// definition of the tokenization: lower rank applies first. A scoring heuristic over the
+// pieces cannot reproduce it, which is why a model with 151387 rules needs the list read
+// rather than approximated. These tests use a small vocabulary where the two orders
+// disagree, so a regression in either direction shows up as a different token sequence.
+
+// mergeFixture builds a byte-level BPE tokenizer over a vocabulary chosen so that rank
+// order and score order disagree.
+func mergeFixture(t *testing.T, merges []string) *Tokenizer {
+	t.Helper()
+	// Pieces: single characters, the space marker, and the merged runs the tests expect.
+	// Scores descend with position, so a score-ordered merge prefers the *later* piece --
+	// the opposite of what rank order does in the case below.
+	path := gguftest.Model{
+		Vocab: []string{
+			"<unk>", "<s>", "</s>",
+			"\u0120", "a", "b", "c", "d",
+			"ab", "bc", "abc", "bcd", "abcd",
+			"\u0120a", "\u0120ab",
+		},
+		Merges: merges,
+		// A merge list belongs to a byte-level BPE vocabulary: the pieces are escaped
+		// bytes, and the two together are what a merge operates on. Pairing the list with
+		// a SentencePiece vocabulary builds a tokenizer that reads its own pieces wrong.
+		TokenizerModel: "gpt2",
+		NoBytes:        true,
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return tok
+}
+
+// TestMergeRankOrderDecides checks the property the merge list exists for: two rules that
+// could both apply are applied in rank order, not in an order derived from anything else.
+func TestMergeRankOrderDecides(t *testing.T) {
+	// "ab" is ranked before "bc", so "abc" forms as ("ab")+"c", which is not a piece, and
+	// the encoder has to fall back to "ab"+"c". If "bc" were applied first the result
+	// would be "a"+"bc" instead.
+	tok := mergeFixture(t, []string{"a b", "b c"})
+	ids := tok.Encode("abc", false)
+	if tok.byteLevel != true {
+		t.Fatalf("fixture is not byte-level; the merge list would not apply")
+	}
+	want := []int32{tok.index["ab"], tok.index["c"]}
+	if len(ids) != len(want) {
+		t.Fatalf("Encode(abc) = %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("Encode(abc) = %v, want %v (rank order, not insertion order)", ids, want)
+		}
+	}
+}
+
+// TestMergeReversingRankOrderChangesOutput is the other half: the same vocabulary with the
+// ranks swapped must tokenize differently. Without this, an encoder that ignored the list
+// and used its own preference would pass the test above.
+func TestMergeReversingRankOrderChangesOutput(t *testing.T) {
+	ab := mergeFixture(t, []string{"a b", "b c"})
+	ba := mergeFixture(t, []string{"b c", "a b"})
+	first := ab.Encode("abc", false)
+	second := ba.Encode("abc", false)
+	if len(first) == len(second) && len(first) == 2 &&
+		first[0] == second[0] && first[1] == second[1] {
+		t.Errorf("reversing the merge ranks produced the same tokens %v; "+
+			"rank order is not being used", first)
+	}
+}
+
+// TestMergeListOmitsUnlistedPairs checks that a pair absent from the list never merges,
+// however the pieces are scored.
+func TestMergeListOmitsUnlistedPairs(t *testing.T) {
+	// "c d" is listed, "b c" is not, so "bcd" cannot form by merging bc then d.
+	tok := mergeFixture(t, []string{"c d"})
+	ids := tok.Encode("bcd", false)
+	for _, id := range ids {
+		if id == tok.index["bcd"] {
+			t.Fatalf("Encode(bcd) = %v includes bcd, which needs an unlisted merge", ids)
+		}
+	}
+}
+
+// TestNoMergeListFallsBackToScores checks that a vocabulary without a merge list still
+// tokenizes: that is the SentencePiece path, and it must not become a regression of the
+// byte-level support.
+func TestNoMergeListFallsBackToScores(t *testing.T) {
+	tok := mergeFixture(t, nil)
+	if tok.merges != nil {
+		t.Fatal("a vocabulary with no merges key set a merge table")
+	}
+	ids := tok.Encode("abc", false)
+	if len(ids) == 0 {
+		t.Fatal("Encode(abc) produced nothing without a merge list")
+	}
+	if got := tok.Decode(ids); got != "abc" {
+		t.Errorf("round trip = %q, want abc", got)
+	}
+}
+
+// TestMalformedMergeIsReported keeps a corrupt list from tokenizing silently: a merge
+// entry with no separator means the vocabulary is damaged, and the loader says so.
+func TestMalformedMergeIsReported(t *testing.T) {
+	path := gguftest.Model{
+		Vocab:   gguftest.DefaultVocab,
+		Merges:  []string{"a b", "broken"},
+		NoBytes: true,
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := New(f); err == nil {
+		t.Fatal("New accepted a merge entry with no separator")
 	}
 }

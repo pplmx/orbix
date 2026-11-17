@@ -92,6 +92,10 @@ const (
 	// number of vocabularies name it -- olmo, mpt, jais, trillion, granite-docling -- and
 	// most of them mean exactly this expression.
 	preGPT2
+	// preStarCoder is the GPT-2 expression preceded by a bare \p{N}, so every digit is cut
+	// out before the main rule runs. llama.cpp groups starcoder, refact, command-r, smollm,
+	// codeshell, exaone, minerva, and mellum2 under it.
+	preStarCoder
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -329,6 +333,9 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			"jina-v2-de", "a.x-4.0", "mellum", "modern-bert", "olmo", "mpt", "jais",
 			"trillion", "granite-docling":
 			t.pre = preGPT2
+		case "starcoder", "refact", "command-r", "smollm", "codeshell", "exaone",
+			"minerva", "mellum2":
+			t.pre = preStarCoder
 		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2":
 			t.pre = preLlama3
 			// A whole chunk that the vocabulary already spells as one piece is taken as

@@ -30,6 +30,46 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if !ok || text == "" {
 		return []string{text}
 	}
+	if !fam.preSplitDigits {
+		return splitByRule(text, fam)
+	}
+	// The family's first expression is a bare "\p{N}": it cuts each digit out, and the main
+	// rule then runs on every piece that leaves. A digit is already alone when the main rule
+	// sees it, so its " ?\p{N}+" alternative has nothing to join.
+	var out []string
+	for _, piece := range splitDigits(text) {
+		out = append(out, splitByRule(piece, fam)...)
+	}
+	return out
+}
+
+// splitDigits cuts text at every digit, leaving each digit as its own piece and keeping
+// the runs between them intact.
+func splitDigits(text string) []string {
+	var pieces []string
+	start := 0
+	for i := 0; i < len(text); {
+		n := runeLenAt(text[i:])
+		if n == 0 {
+			n = 1
+		}
+		if isDigitAt(text[i:]) {
+			if i > start {
+				pieces = append(pieces, text[start:i])
+			}
+			pieces = append(pieces, text[i:i+n])
+			start = i + n
+		}
+		i += n
+	}
+	if start < len(text) {
+		pieces = append(pieces, text[start:])
+	}
+	return pieces
+}
+
+// splitByRule cuts text once with the family's main expression.
+func splitByRule(text string, fam preRule) []string {
 	var chunks []string
 	i := 0
 	for i < len(text) {
@@ -75,6 +115,14 @@ type preRule struct {
 	// with the spaces before it as one chunk. The GPT-2 expression has no such rule, so a
 	// newline there falls through to the whitespace alternative and groups differently.
 	newlineChunk bool
+	// preSplitDigits is whether a bare "\p{N}" runs before the main expression, cutting
+	// every digit into its own chunk regardless of what the main rule would do with it.
+	//
+	// llama.cpp applies a family's expressions in sequence, each cutting the previous
+	// round's chunks further, so this is not a different digit count: the digit is already
+	// alone before the main rule sees it. That is why a number becomes one chunk per digit
+	// here while the same rule with a " ?" prefix would have kept it whole.
+	preSplitDigits bool
 }
 
 // leadKind is what a run may take as its prefix.
@@ -109,6 +157,11 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// -- an optional space rather than an optional any-non-letter, digits as a run,
 		// and no newline alternative.
 		return preRule{digits: 0, lead: leadSpace}, true
+	case preStarCoder:
+		// The GPT-2 expression with a bare `\p{N}` applied first, so every digit is its own
+		// chunk before the main rule runs. starcoder, refact, command-r, smollm, and the
+		// others llama.cpp groups with them all mean exactly this.
+		return preRule{digits: 0, lead: leadSpace, preSplitDigits: true}, true
 	default:
 		return preRule{}, false
 	}

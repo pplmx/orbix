@@ -302,3 +302,73 @@ func TestPreSplitNeverLosesText(t *testing.T) {
 		}
 	}
 }
+
+// The starcoder family is the GPT-2 expression with a bare `\p{N}` applied first.
+//
+// llama.cpp applies a family's expressions in sequence, each cutting the previous round's
+// chunks further rather than picking one of them. That is why the result is one chunk per
+// digit and not a different digit count: by the time the main rule sees a digit it is
+// already alone, so its " ?\p{N}+" alternative has nothing to join.
+func TestStarCoderChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preStarCoder}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"123456", []string{"1", "2", "3", "4", "5", "6"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		{"abc123def", []string{"abc", "1", "2", "3", "def"}},
+		// Everything that is not a digit keeps the GPT-2 grouping.
+		{"hello  world", []string{"hello", " ", " world"}},
+		{"a.b,c", []string{"a", ".", "b", ",", "c"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("starcoder preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestStarCoderDiffersFromGPT2OnlyInDigits pins the relationship between the two families:
+// the same expression, plus a digit cut. Asserting the difference is what would catch the
+// first expression being dropped.
+func TestStarCoderDiffersFromGPT2OnlyInDigits(t *testing.T) {
+	sc := &Tokenizer{pre: preStarCoder}
+	gpt := &Tokenizer{pre: preGPT2}
+
+	// A number: the two must disagree.
+	if sameStrings(sc.preSplit("123456"), gpt.preSplit("123456")) {
+		t.Error("starcoder and gpt-2 agree on a number; the digit cut is not happening")
+	}
+	// Text without digits: the two must agree, since only the digit rule differs.
+	for _, in := range []string{"hello  world", "don't stop", "a.b,c", "   spaces   "} {
+		if !sameStrings(sc.preSplit(in), gpt.preSplit(in)) {
+			t.Errorf("%q splits differently under starcoder and gpt-2, but neither has a "+
+				"digit in it", in)
+		}
+	}
+}
+
+// TestPreSplitDigitsIsTwoPasses checks the property that distinguishes the starcoder
+// implementation from "the digit count is one": the digit cut happens before the main rule,
+// not as a parameter of it.
+//
+// A single pass with digits=1 would also produce one digit per chunk for "123", so that
+// case does not tell the two apart. These do: the digit rule is a separate expression, so
+// digits that the main rule would have grouped with a neighbour are already separated when
+// it runs.
+func TestPreSplitDigitsIsTwoPasses(t *testing.T) {
+	sc := &Tokenizer{pre: preStarCoder}
+
+	// "1 " -- the main rule's " ?\p{N}+" would take the space with the digit if the digit
+	// cut had not already isolated it.
+	if got := sc.preSplit(" 1"); !sameStrings(got, []string{" ", "1"}) {
+		t.Errorf("preSplit(%q) = %q, want [\" \" \"1\"]: the space prefix must not be "+
+			"available once the digit is alone", " 1", got)
+	}
+	// A digit adjacent to a letter is separated by the first pass, and the letter keeps its
+	// own grouping from the second.
+	if got := sc.preSplit("ab1cd"); !sameStrings(got, []string{"ab", "1", "cd"}) {
+		t.Errorf("preSplit(%q) = %q, want [\"ab\" \"1\" \"cd\"]", "ab1cd", got)
+	}
+}

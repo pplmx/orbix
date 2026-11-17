@@ -697,7 +697,11 @@ func (d *StreamDecoder) Token(id int32) string {
 
 	if b, ok := parseByteToken(d.tok.tokens[id]); ok {
 		d.pending = append(d.pending, b)
-		return d.drainPending(false)
+		// The leading-space rule applies here too. A leading space can arrive as a byte
+		// token rather than as a word marker -- a byte-level vocabulary spells it <0x20>
+		// -- and routing this path around the rule made the streamed text differ from
+		// Decode's by one space.
+		return d.emit(d.drainPending(false))
 	}
 
 	// A non-byte token ends any byte run: whatever is left is a character that will
@@ -709,9 +713,23 @@ func (d *StreamDecoder) Token(id int32) string {
 	} else {
 		b.WriteString(bpeUnescape(d.tok.tokens[id]))
 	}
-	out := b.String()
+	return d.emit(b.String())
+}
+
+// emit applies the leading-space rule and records that text has been produced.
+//
+// Every path that can produce text goes through here, which is what keeps the streamed
+// output equal to Decode's: both drop exactly one space at the start, and neither can
+// forget to.
+func (d *StreamDecoder) emit(out string) string {
 	if !d.started && strings.HasPrefix(out, " ") {
 		out = out[1:]
+		// The drop happens once, whether or not text remains afterwards. Leaving
+		// started false when the piece was nothing but a space would drop the next
+		// space too, and a sequence of word markers would lose all of them while
+		// Decode, which trims after joining, loses exactly one.
+		d.started = true
+		return out
 	}
 	if out != "" {
 		d.started = true
@@ -744,6 +762,8 @@ func (d *StreamDecoder) drainPending(force bool) string {
 		d.pending = append(d.pending[:0], d.pending[cut:]...)
 		return out
 	}
+	// Every pending byte is converted at once, matching Decode: a run of bytes that never
+	// forms a character becomes one replacement character, not one per byte.
 	out := strings.ToValidUTF8(string(d.pending), "\uFFFD")
 	d.pending = d.pending[:0]
 	return out

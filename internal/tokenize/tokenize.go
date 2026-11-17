@@ -181,6 +181,10 @@ const (
 	// "\s*[\r\n]+" alternative instead, so a run of them is still one chunk -- but a
 	// punctuation run no longer absorbs the newlines after it.
 	preSeedCoder
+	// preMiniCPM5 cuts digit groups of up to three first, then applies llama3's expression with
+	// a digit run where llama3 has \p{N}{1,3}. The first pass leaves only remainders for the
+	// second, so the digit alternative there is a plain run.
+	preMiniCPM5
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -476,6 +480,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// laguna runs bailingmoe's expression after a newline pass. The newline pass separates
 		// runs of newlines from everything else, which cannot change what the main rule does
 		// to a chunk that already contains no newline.
+		case "minicpm5":
+			t.pre = preMiniCPM5
 		case "seed-coder":
 			t.pre = preSeedCoder
 		case "qwen35":

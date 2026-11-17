@@ -689,6 +689,14 @@ func preFamilyOf(p preType) (preRule, bool) {
 			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
 			preDigits: 3, cjk: true, contractionSuffix: true,
 		}, true
+	case preMiniCPM5:
+		// "\\p{N}{1,3}" then a llama3-shaped rule with "\\p{N}+" where llama3 has
+		// "\\p{N}{1,3}". The first expression leaves only remainders for the second, so the
+		// digit alternative there is a plain run rather than another grouping.
+		return preRule{
+			digits: 0, lead: leadAnyNonLetter,
+			newlinesAfterPunct: true, newlineChunk: true, preDigits: 3,
+		}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
 		// "|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"

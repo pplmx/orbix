@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 88
+		wantImplemented = 89
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1736,5 +1736,57 @@ func TestSeedCoderChunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("seed-coder is not reported as implemented")
+	}
+}
+
+// TestMiniCPM5Chunks pins the minicpm5 rule: digit groups first, then a llama3-shaped rule
+// whose digit alternative is a plain run.
+//
+// The two passes matter for where a remainder lands. The first cuts groups of up to three, so
+// "1234567" becomes ["123", "456", "7"]; the second never sees a digit run longer than three,
+// which is why its alternative is "\p{N}+" rather than llama3's "\p{N}{1,3}" even though the
+// result on short runs is the same.
+func TestMiniCPM5Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preMiniCPM5}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"1234", []string{"123", "4"}},
+		{"1234567", []string{"123", "456", "7"}},
+		{"a1234b", []string{"a", "123", "4", "b"}},
+		// A short run reaches the second pass whole and stays one chunk there.
+		{"x=42", []string{"x", "=", "42"}},
+		// The rest is llama3's shape.
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"don't", []string{"don", "'t"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"a.b", []string{"a", ".b"}},
+		{"中文测试", []string{"中文测试"}},
+		{",,,\n\nx", []string{",,,\n\n", "x"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// llama3 groups up to three with no leading pass, so a long run splits differently there.
+	l3 := &Tokenizer{pre: preLlama3}
+	if got := l3.preSplit("1234567"); !sameStrings(got, []string{"123", "456", "7"}) {
+		t.Errorf("llama3 preSplit(\"1234567\") = %q", got)
+	}
+
+	path := gguftest.Model{Pre: "minicpm5", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("minicpm5 is not reported as implemented")
 	}
 }

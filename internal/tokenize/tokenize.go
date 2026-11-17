@@ -119,6 +119,11 @@ const (
 	// preTekken is the GPT-4o rule: a letter run cut at a lower-to-upper case boundary, single
 	// digits, and a punctuation tail that absorbs slashes as well as newlines.
 	preTekken
+	// preWhitespace is \S+: the whole rule is where runs of non-space characters end.
+	preWhitespace
+	// preBloom is " ?[^(\s|.,!?…。，、।۔،)]+": an optional space, then a run that stops at
+	// those characters.
+	preBloom
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -353,7 +358,10 @@ func New(f *gguf.File) (*Tokenizer, error) {
 	if name, ok := f.Get[string]("tokenizer.ggml.pre"); ok {
 		t.preName = name
 		switch name {
-		case "qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "hunyuan", "solar-open":
+		case "qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "hunyuan", "solar-open",
+			// llama.cpp puts stablelm2 in the Qwen2 branch: same expression, so the
+			// only difference from the names above is the spelling.
+			"stablelm2":
 			t.pre = preQwen2
 		case "gpt-2", "phi-2", "jina-es", "jina-de", "gigachat", "jina-v2-es",
 			"jina-v2-de", "a.x-4.0", "mellum", "modern-bert", "olmo", "mpt", "jais",
@@ -373,6 +381,11 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			// still come out as several tokens, because the merge loop has no reason to
 			// prefer the single piece.
 			t.ignoreMerges = true
+
+		case "whitespace":
+			t.pre = preWhitespace
+		case "bloom", "gpt3-finnish":
+			t.pre = preBloom
 
 		case "", "default":
 			t.pre = preNone

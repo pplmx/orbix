@@ -30,6 +30,19 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if !ok || text == "" {
 		return []string{text}
 	}
+	// One family is not an expression over alternatives but a single class: \S+ keeps each
+	// run of non-space characters and drops the spaces between them. Expressing that
+	// through preRule would need a rule type that matches the complement of a class, which
+	// the other seven do not want.
+	if fam.whitespaceOnly {
+		return splitWhitespaceRuns(text)
+	}
+	// The BLOOM expression is the same shape: an optional leading space, then a run of
+	// characters outside a fixed stop set. The set contains no letter or digit, so it is
+	// the punctuation-and-space complement rather than a category.
+	if fam.stopSet != "" {
+		return splitAtStopSet(text, fam.stopSet)
+	}
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
@@ -47,6 +60,80 @@ func (t *Tokenizer) preSplit(text string) []string {
 		out = append(out, splitByRule(piece, fam)...)
 	}
 	return out
+}
+
+// splitWhitespaceRuns cuts text into runs of non-space characters, the \S+ rule.
+//
+// The spaces between runs are not emitted: llama.cpp's whitespace pre-tokenizer
+// (jina-embeddings-v2-base-zh) produces only the runs, and the vocabulary has no separate
+// space piece to give them.
+func splitWhitespaceRuns(text string) []string {
+	var out []string
+	start := -1
+	for i, r := range text {
+		if unicode.IsSpace(r) {
+			if start >= 0 {
+				out = append(out, text[start:i])
+				start = -1
+			}
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	if start >= 0 {
+		out = append(out, text[start:])
+	}
+	return out
+}
+
+// splitAtStopSet cuts text into chunks of an optional leading space plus a run of
+// characters outside stop.
+//
+// The optional space is part of the following chunk, not a chunk of its own, which is what
+// makes " hello" one piece where "hello" is also one piece.
+func splitAtStopSet(text, stop string) []string {
+	var out []string
+	i := 0
+	for i < len(text) {
+		start := i
+		// One optional leading space belongs to the chunk, but only when a character that
+		// can follow it does: a lone space before a stop character is not a match, and
+		// emitting it alone would produce a chunk the expression never yields.
+		if text[i] == ' ' {
+			if i+1 >= len(text) || isStopRune(text[i+1:], stop) {
+				_, size := utf8.DecodeRuneInString(text[i:])
+				i += size
+				continue
+			}
+			i++
+		}
+		for i < len(text) {
+			r, n := utf8.DecodeRuneInString(text[i:])
+			if r == utf8.RuneError || strings.ContainsRune(stop, r) {
+				break
+			}
+			i += n
+		}
+		if i == start {
+			// The character at start is in the stop set, so no match begins here. A
+			// findall-style splitter drops it rather than emitting it alone: the stop
+			// characters are separators, and the vocabulary has its own pieces for them
+			// that the caller assembles. Advancing keeps progress guaranteed.
+			_, n := utf8.DecodeRuneInString(text[i:])
+			i += n
+			continue
+		}
+		out = append(out, text[start:i])
+	}
+	return out
+}
+
+// isStopRune reports whether text begins with a rune in stop.
+func isStopRune(text, stop string) bool {
+	r, _ := utf8.DecodeRuneInString(text)
+	return r == utf8.RuneError || strings.ContainsRune(stop, r)
 }
 
 // splitDigitGroups cuts each piece at digit groups of at most max digits.
@@ -206,6 +293,16 @@ type preRule struct {
 	// ("camelCase" splits). Writing it as a boundary is what makes it one check inside the
 	// letter loop instead of a second copy of the letter rule.
 	caseSplit bool
+	// whitespaceOnly marks a family whose whole rule is \S+: runs of non-space
+	// characters, with the separators dropped. It is handled before the rule engine
+	// because the other fields describe alternatives within a run, and this one is about
+	// where runs end.
+	whitespaceOnly bool
+	// stopSet, when non-empty, is the set of characters a chunk may not contain: the whole
+	// rule is an optional leading space followed by a run from the complement. It is a set
+	// literal rather than a category because BLOOM's expression lists the punctuation it
+	// stops at, and a category would stop at more.
+	stopSet string
 	// punctLetterRun is whether the expression's first alternative is
 	// "[!-/:-@\\[-`{-~][A-Za-z]+": one ASCII punctuation character followed by a run of
 	// ASCII letters, as a single chunk.
@@ -277,6 +374,13 @@ func preFamilyOf(p preType) (preRule, bool) {
 			digits: 1, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
 			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
 		}, true
+	case preWhitespace:
+		return preRule{whitespaceOnly: true}, true
+	case preBloom:
+		// " ?[^(\s|.,!?…。，、।۔،)]+" -- the parentheses and inner pipes are literal in
+		// llama.cpp's expression, so the stop set is those characters, the pipe itself,
+		// and whitespace.
+		return preRule{stopSet: " \t\r\n|()" + ".,!?…。，、।۔،"}, true
 	case preDeepseek3:
 		// Three expressions in sequence:
 		//   \p{N}{1,3}

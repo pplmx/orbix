@@ -556,3 +556,104 @@ func TestTekkenCaseSplitNeedsLowerBeforeUpper(t *testing.T) {
 		}
 	}
 }
+
+// The two families below are single expressions rather than the ordered alternatives the
+// others use, so they get their own splitter and their own tests. The expected values were
+// produced by running the expressions from llama.cpp's llama-vocab.cpp through Python's re
+// module, not by reading the Go code: a test written from the implementation would agree
+// with it whatever it did.
+
+// TestWhitespacePreTokenizer covers jina-embeddings-v2-base-zh's rule, which is just \S+.
+func TestWhitespacePreTokenizer(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{Pre: "whitespace"})
+	if !tok.PreImplemented() {
+		t.Fatal("the whitespace pre-tokenizer is not implemented")
+	}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"Hello world  123", []string{"Hello", "world", "123"}},
+		{" a b ", []string{"a", "b"}},
+		{"a\tb\nc", []string{"a", "b", "c"}},
+		{"中文 测试", []string{"中文", "测试"}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// TestBloomPreTokenizer covers " ?[^(\s|.,!?…。，、।۔،)]+", which BLOOM, PORO and
+// gpt3-finnish share.
+//
+// The separators are dropped rather than emitted alone, which is what a findall over the
+// expression produces: the expression matches runs of non-separator characters, and the
+// separators between them are not matches at all. Writing the splitter the other way -- one
+// chunk per character when nothing matches -- yields extra punctuation pieces and still
+// covers every byte of the input, so it looks correct until compared.
+func TestBloomPreTokenizer(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{Pre: "bloom"})
+	if !tok.PreImplemented() {
+		t.Fatal("the bloom pre-tokenizer is not implemented")
+	}
+	if !bpeFixture(t, gguftest.Model{Pre: "gpt3-finnish"}).PreImplemented() {
+		t.Error("gpt3-finnish shares BLOOM's expression but is not implemented")
+	}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"Hello world.", []string{"Hello", " world"}},
+		{" hi there!", []string{" hi", " there"}},
+		{"a,b.c", []string{"a", "b", "c"}},
+		{"x (y) z", []string{"x", "y", " z"}},
+		{"中文，测试", []string{"中文", "测试"}},
+		{"  two spaces", []string{" two", " spaces"}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// TestStableLM2SharesQwen2Rule checks the alias rather than the rule: llama.cpp puts
+// stablelm2 in the same branch as qwen2, so the two must chunk identically.
+func TestStableLM2SharesQwen2Rule(t *testing.T) {
+	a := bpeFixture(t, gguftest.Model{Pre: "qwen2"})
+	b := bpeFixture(t, gguftest.Model{Pre: "stablelm2"})
+	if !b.PreImplemented() {
+		t.Fatal("stablelm2 is not implemented")
+	}
+	for _, s := range []string{"HelloWorld 123", "don't stop", "a,b.c!"} {
+		got, want := b.preSplit(s), a.preSplit(s)
+		if len(got) != len(want) {
+			t.Errorf("preSplit(%q): stablelm2 %q, qwen2 %q", s, got, want)
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("preSplit(%q): stablelm2 %q, qwen2 %q", s, got, want)
+				break
+			}
+		}
+	}
+}

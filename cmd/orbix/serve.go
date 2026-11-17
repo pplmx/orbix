@@ -15,6 +15,7 @@ import (
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/server"
 	"github.com/pplmx/orbix/internal/tokenize"
@@ -142,7 +143,20 @@ func cmdServe(args []string) error {
 	srv.StartPump(ctx)
 
 	fmt.Printf("orbix serving %s on %s\n", cfg, url)
-	fmt.Printf("scheduling: %d active, %s policy\n", *maxActive, schedPolicy)
+	queued := *maxQueued
+	if queued <= 0 {
+		queued = 8 * *maxActive
+	}
+	fmt.Printf("scheduling: %d active, %d queued max, %s policy\n", *maxActive, queued, schedPolicy)
+	// Say what the contiguous cache costs, which nothing else reports. A paged cache prints
+	// its pool size below from the pool itself; a contiguous one reserves a whole context per
+	// accepted request, so the backlog multiplies whatever one request costs and the model
+	// file size says nothing about it. For a small model that is a few MB; for a 4k-context
+	// model with a wide KV it is hundreds, and the operator reading this at startup is the one
+	// who can still change the flags.
+	if *cache.blocks == 0 {
+		fmt.Printf("%s\n", contiguousMemoryNote(cfg, *maxActive, queued))
+	}
 	// Report which chat format is in use. A fallback is not an error -- the server
 	// still answers -- but an operator who sees oddly shaped replies should be able to
 	// tell whether the model's own format was applied.
@@ -190,5 +204,33 @@ func cmdServe(args []string) error {
 		err := httpSrv.Shutdown(shutdownCtx)
 		srv.Shutdown()
 		return err
+	}
+}
+
+// contiguousMemoryNote describes the KV footprint of the contiguous cache, which is the mode
+// where the reservation is not obvious from a flag.
+func contiguousMemoryNote(cfg llama.Config, maxActive, queued int) string {
+	// A sequence reserves its whole context the moment it is accepted, so the worst case is
+	// every slot plus every queued request holding one.
+	perRequest := int64(cfg.ContextLen) * int64(cfg.KVHeads) * int64(cfg.HeadDim) * 2 * 4 * int64(cfg.Layers)
+	total := perRequest * int64(maxActive+queued)
+	return fmt.Sprintf("kv cache:   contiguous, about %s per request, %s for %d active + %d queued",
+		humanBytes(perRequest), humanBytes(total), maxActive, queued)
+}
+
+// humanBytes renders a byte count the way an operator reads it: one decimal above a
+// megabyte, whole megabytes above a gigabyte.
+func humanBytes(n int64) string {
+	const (
+		mb = 1 << 20
+		gb = 1 << 30
+	)
+	switch {
+	case n >= gb:
+		return fmt.Sprintf("%.1f GB", float64(n)/gb)
+	case n >= mb:
+		return fmt.Sprintf("%.1f MB", float64(n)/mb)
+	default:
+		return fmt.Sprintf("%d KB", n/(1<<10))
 	}
 }

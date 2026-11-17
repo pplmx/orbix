@@ -92,7 +92,36 @@ Each layer maps to a concept in LLM inference. The code is organized to make tha
 | **Scheduler**       | Continuous batching, prefill/decode, priority | Why serving is a scheduling problem, not just a compute problem                          |
 | **Server**          | OpenAI-compatible API, SSE, request lifecycle | How a serving layer maps HTTP requests onto an inference engine                          |
 
-If you are learning LLM inference, the intended reading order is top to bottom: start with GGUF, then kernels, then cache, then scheduler, then server. Each layer has a `doc.go` explaining the concept and the design choices.
+If you are learning LLM inference, read in this order. Each entry links to that layer's
+`doc.go`, which explains what the layer is responsible for and why it is built the way it
+is; the code below it is written to be read in the same order.
+
+1. **[`internal/gguf`](internal/gguf/doc.go)** — the container: how a model file is laid
+   out, and why this package describes tensors by offset instead of loading them.
+2. **[`internal/f16`](internal/f16/doc.go)** and
+   **[`internal/quant`](internal/quant/doc.go)** — half precision and block quantization:
+   how a weight becomes a float32, and why the K-quant layouts are checked against exact
+   values rather than a round trip.
+3. **[`internal/kernel`](internal/kernel/doc.go)** — the numerics: matmul, RMSNorm,
+   softmax, SiLU, and the one rule everything else depends on, that parallelism is over
+   output rows so a parallel result equals the serial one exactly.
+4. **[`internal/llama`](internal/llama/doc.go)** — attention, RoPE, and the KV cache. The
+   cache is in this package rather than its own because it is a data structure the
+   architecture owns: the contiguous and paged implementations are here, along with the
+   prefix index and the mixture-of-experts feed-forward.
+5. **[`internal/tokenize`](internal/tokenize/doc.go)** — text to token ids, including the
+   byte-level and SentencePiece conventions GGUF records.
+6. **[`internal/engine`](internal/engine/doc.go)** — scheduling: continuous batching,
+   admission policy, and why a round is the unit of progress.
+7. **[`internal/chat`](internal/chat/doc.go)** — the chat template subset, and what a
+   template outside it falls back to.
+8. **[`internal/server`](internal/server/doc.go)** — the OpenAI-compatible API, SSE
+   streaming, `/metrics`, and the access log.
+
+Two layers are not on that path because nothing in the forward pass goes through them:
+**[`internal/otel`](internal/otel/doc.go)** exports traces, and
+**[`internal/gguftest`](internal/gguftest/doc.go)** builds the model fixtures the tests run
+on.
 
 ## Architecture
 

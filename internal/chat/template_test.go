@@ -320,3 +320,53 @@ func TestIsDefinedIsSupported(t *testing.T) {
 		t.Errorf("rendered %q for an unbound name, want %q", got, "unbound")
 	}
 }
+
+// TestCloseTagInsideStringLiteral covers a delimiter that appears as data inside a quoted
+// literal in an expression.
+//
+// The lexer used to find a tag's end with a plain search for "}}", which stops at the first
+// one it sees wherever it is. Qwen's own chat template embeds a JSON example in a string --
+// {{"name": <function-name>, "arguments": <args-json-object>}} -- so the search cut the
+// expression in half, the leftover quote count did not balance, and the whole template was
+// rejected as having an unterminated string. The visible effect was a warning that the model
+// declared no usable template and a fallback to a neutral transcript, on a model whose
+// template was perfectly good.
+func TestCloseTagInsideStringLiteral(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{
+			name: "double-braced JSON in a double-quoted string",
+			src:  `{{- "{{\"name\": \"x\"}}" }}`,
+			want: `{{"name": "x"}}`,
+		},
+		{
+			name: "single-braced JSON in a single-quoted string",
+			src:  `{{- '{"a": 1}' }}`,
+			want: `{"a": 1}`,
+		},
+		{
+			name: "closing delimiter only, in a string",
+			src:  `{{- "a}}b" }}`,
+			want: `a}}b`,
+		},
+		{
+			name: "statement tag after an expression with a delimiter in it",
+			src:  `{% if true %}{{- "a}}" }}{% endif %}`,
+			want: `a}}`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", c.src, err)
+			}
+			got, err := tpl.Render(nil, Inputs{})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("Render = %q, want %q", got, c.want)
+			}
+		})
+	}
+}

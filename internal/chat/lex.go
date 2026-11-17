@@ -38,6 +38,41 @@ type piece struct {
 // It is a scanner rather than a parser: deciding what an expression means is the
 // parser's job, and keeping the two apart is what lets a lexing error name a position
 // while a parser error names a construct.
+// indexCloseTag finds the closing delimiter of a tag, ignoring delimiters that appear
+// inside a quoted literal.
+//
+// A plain search is wrong because a template can contain the delimiter as data: Qwen's chat
+// template embeds a JSON example, {{"name": <function-name>, "arguments": ...}}, inside a
+// string literal in an expression. Stopping at the first "}}" there cuts the expression in
+// half and reports an unterminated string, which is what happened before this existed.
+//
+// Only expressions need the scan: a statement or comment cannot contain a quoted literal
+// with the delimiter in it, and scanning them the same way costs nothing.
+func indexCloseTag(src, closeTag string) int {
+	quote := byte(0)
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++ // the escaped byte cannot close the literal
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			continue
+		}
+		if strings.HasPrefix(src[i:], closeTag) {
+			return i
+		}
+	}
+	return -1
+}
+
 func lex(src string) ([]piece, error) {
 	var out []piece
 	var text strings.Builder
@@ -91,7 +126,7 @@ func lex(src string) ([]piece, error) {
 			closeTag, kind = "#}", pieceText
 		}
 
-		end := strings.Index(src[i+2:], closeTag)
+		end := indexCloseTag(src[i+2:], closeTag)
 		if end < 0 {
 			return nil, fmt.Errorf("chat: template has an unclosed %q at offset %d", open, i)
 		}

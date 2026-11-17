@@ -148,6 +148,8 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	}
 
 	var history []chatTurn
+	// notedFallback records that the session has already explained a render-time fallback.
+	notedFallback := false
 	var systemTurn string
 	if opts.system != "" {
 		systemTurn = opts.system
@@ -196,6 +198,19 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 			chatTurn{role: "user", text: line},
 			chatTurn{role: "assistant", text: reply},
 		)
+		// The template can parse and still fail to render this conversation -- an
+		// unsupported field on a message, for instance. That fallback happens inside the
+		// renderer, so the banner printed above cannot know about it; say it once, the
+		// first time it happens, rather than leaving the session silently on the neutral
+		// transcript.
+		if !notedFallback && opts.renderer != nil && !opts.renderer.UsesModelTemplate() {
+			notedFallback = true
+			if _, werr := fmt.Fprintf(out, "(the model's template could not render this "+
+				"conversation: %s; using a neutral transcript)\n",
+				opts.renderer.FallbackReason()); werr != nil {
+				return werr
+			}
+		}
 	}
 }
 

@@ -230,7 +230,13 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		}
 		v, ok := base.fields[t.name]
 		if !ok {
-			return value{}, fmt.Errorf("chat: mapping has no field %q", t.name)
+			// A field that is not there is empty, not an error. Templates disagree about
+			// how to ask: Qwen2 writes `not message.tool_calls`, Llama 3 writes
+			// `'tool_calls' in message`, and the second only means "no tool calls" if the
+			// field is genuinely absent. Both read the same conversation, so a missing
+			// field has to be empty for the first and absent for the second -- which is
+			// what an empty value plus a key test give.
+			return value{}, nil
 		}
 		return v, nil
 	case indexExpr:

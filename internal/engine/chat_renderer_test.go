@@ -163,3 +163,43 @@ func TestNilChatRendererUsesNeutral(t *testing.T) {
 		t.Errorf("nil renderer produced %q", got)
 	}
 }
+
+// TestChatRendererReportsARenderFailure checks the case between the two the file already
+// covers: a template that compiles but cannot render a particular conversation.
+//
+// Falling back is right -- the session stays usable -- but the renderer used to fall back
+// silently, so UsesModelTemplate stayed true and the caller reported the model's own format
+// while every prompt was the neutral transcript. Qwen2's template did exactly this: it reads
+// message.tool_calls, the field was missing, and a two-turn conversation came out in the
+// neutral format with "Human:" in it and nothing to suggest why.
+func TestChatRendererReportsARenderFailure(t *testing.T) {
+	// Parses, but fails to render: for over a name that is not a sequence. A missing
+	// map field is empty rather than an error, so it would not do here.
+	const src = `{%- for x in bos_token %}{{ x }}{%- endfor %}`
+	f := buildFileWithMeta([]kvPair{
+		{name: "tokenizer.chat_template", kind: gguf.TypeString, str: src},
+	})
+	r, err := NewChatRenderer(f)
+	if err != nil {
+		t.Fatalf("NewChatRenderer: %v", err)
+	}
+	if !r.UsesModelTemplate() {
+		t.Fatalf("the template compiled, so it should be in use before rendering: %s",
+			r.FallbackReason())
+	}
+
+	out, err := r.Render([]Turn{{Role: "user", Text: "hi"}})
+	if err != nil {
+		t.Fatalf("Render should fall back rather than fail: %v", err)
+	}
+	if !strings.Contains(out, "User: hi") {
+		t.Errorf("the fallback did not produce a neutral transcript: %q", out)
+	}
+
+	if r.UsesModelTemplate() {
+		t.Error("after a render failure the template is still reported as in use")
+	}
+	if r.FallbackReason() == "" {
+		t.Error("no reason was recorded for the render failure")
+	}
+}

@@ -651,3 +651,49 @@ func TestInTestsMappingKeys(t *testing.T) {
 		t.Errorf("rendered %q, want has-role: the key present is found and the one absent is not", got)
 	}
 }
+
+// TestMessagesCarryToolCalls checks that a message dictionary always has the field, even for
+// a conversation with no tool calls at all.
+//
+// Qwen2's template reads `message.tool_calls` inside a branch guarded by
+// "not message.tool_calls", so the field has to exist to be tested. Leaving it out made every
+// render fail with "mapping has no field tool_calls", which the renderer then silently
+// replaced with a neutral transcript -- the session worked, in the wrong format, and the
+// startup banner still said the model's own template was in use.
+func TestMessagesCarryToolCalls(t *testing.T) {
+	// The shape Qwen2's template tests.
+	tpl, err := Parse(`{%- for m in messages %}` +
+		`{%- if not m.tool_calls %}plain{%- else %}tools{%- endif %}{%- endfor %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := tpl.Render([]Message{{Role: "user", Content: "u"}}, Inputs{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got != "plain" {
+		t.Errorf("rendered %q, want plain", got)
+	}
+}
+
+// TestQwen2TemplateRendersAConversation is the end-to-end version: the real template, two
+// turns, no tools.
+func TestQwen2TemplateRendersAConversation(t *testing.T) {
+	parsed, err := Parse(qwen2Template)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := parsed.Render([]Message{
+		{Role: "user", Content: "What is the capital of France?"},
+		{Role: "assistant", Content: "Paris."},
+		{Role: "user", Content: "And of Italy?"},
+	}, Inputs{AddGenerationPrompt: true})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{"Paris.", "And of Italy?", "<|im_start|>assistant"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt is missing %q:\n%s", want, got)
+		}
+	}
+}

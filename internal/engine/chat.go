@@ -2,6 +2,7 @@ package engine
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/pplmx/orbix/internal/chat"
 	"github.com/pplmx/orbix/internal/gguf"
@@ -61,6 +62,10 @@ type ChatRenderer struct {
 	tmpl *chat.Template
 	// fallbackReason is empty when the model's template is in use.
 	fallbackReason string
+	// mu guards renderReason, which Render sets from whichever goroutine is serving a
+	// request. It holds the first render failure, or "" while rendering succeeds.
+	mu           sync.Mutex
+	renderReason string
 	// bos and eos are the vocabulary's special pieces as text, which a template
 	// interpolates.
 	bos, eos string
@@ -91,10 +96,31 @@ func NewChatRenderer(f *gguf.File) (*ChatRenderer, error) {
 }
 
 // UsesModelTemplate reports whether the model's own format is in use.
-func (r *ChatRenderer) UsesModelTemplate() bool { return r != nil && r.tmpl != nil }
+//
+// A template that failed to render is not in use: the prompts it produces are the neutral
+// transcript. Reporting true there would tell a caller its sessions use the model's format
+// when every one of them has fallen back.
+func (r *ChatRenderer) UsesModelTemplate() bool {
+	if r == nil || r.tmpl == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.renderReason == ""
+}
 
-// FallbackReason explains the fallback, or is empty when there is none.
-func (r *ChatRenderer) FallbackReason() string { return r.fallbackReason }
+// FallbackReason explains why the model's format is not in use, or is empty when it is.
+func (r *ChatRenderer) FallbackReason() string {
+	if r == nil {
+		return ""
+	}
+	if r.fallbackReason != "" {
+		return r.fallbackReason
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.renderReason
+}
 
 // Render produces the prompt for a conversation.
 //
@@ -120,6 +146,14 @@ func (r *ChatRenderer) Render(turns []Turn) (string, error) {
 		AddGenerationPrompt: true,
 	})
 	if err != nil {
+		// The template parsed but cannot render this conversation. Falling back keeps the
+		// session usable, but the reason has to be recorded: the alternative is a prompt in
+		// the neutral format while the caller reports the model's own template, which is
+		// how a multi-turn Qwen2 conversation ended up with "Human:" in it and no
+		// indication why.
+		r.mu.Lock()
+		r.renderReason = err.Error()
+		r.mu.Unlock()
 		return RenderChatPrompt(turns), nil
 	}
 	return out, nil

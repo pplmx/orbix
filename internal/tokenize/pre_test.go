@@ -757,6 +757,16 @@ func TestFamilyAliasesAreEquivalent(t *testing.T) {
 		{"jina-v5-nano", "llama-bpe"},
 		{"minerva-7b", "starcoder"},
 		{"poro-chat", "bloom"},
+		// llama.cpp's GPT2 branch also holds these four. roberta-bpe, jina-v1-en and
+		// jina-v2-code set add_sep there, which is a caller-facing flag for joining
+		// sequences rather than part of the split; exaone4 sets clean_spaces, which only
+		// tidies decoded text. Neither changes where a chunk ends.
+		{"roberta-bpe", "gpt-2"},
+		{"jina-v1-en", "gpt-2"},
+		{"jina-v2-code", "gpt-2"},
+		{"exaone4", "gpt-2"},
+		{"megrez", "qwen2"},
+		{"pixtral", "tekken"},
 	}
 	inputs := []string{"Hello world", "a,b.c", "x1234y", "don't stop", "a  b"}
 	for _, p := range pairs {

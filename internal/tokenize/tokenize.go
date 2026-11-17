@@ -365,20 +365,27 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		t.preName = name
 		switch name {
 		case "qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "hunyuan", "solar-open",
+			"megrez",
 			// llama.cpp puts stablelm2 in the Qwen2 branch: same expression, so the
 			// only difference from the names above is the spelling.
 			"stablelm2":
 			t.pre = preQwen2
 		case "gpt-2", "phi-2", "jina-es", "jina-de", "gigachat", "jina-v2-es",
 			"jina-v2-de", "a.x-4.0", "mellum", "modern-bert", "olmo", "mpt", "jais",
-			"trillion", "granite-docling":
+			"trillion", "granite-docling",
+			// llama.cpp puts these on GPT2 as well. roberta-bpe, jina-v1-en and
+			// jina-v2-code additionally set add_sep, which is a caller-facing flag for
+			// joining sequences and not part of the chunk boundaries; exaone4 sets
+			// clean_spaces, which only affects how decoded text is tidied. Neither
+			// changes where a chunk ends, so the chunking aliases are exact.
+			"roberta-bpe", "jina-v1-en", "jina-v2-code", "exaone4":
 			t.pre = preGPT2
 		case "starcoder", "refact", "command-r", "smollm", "codeshell", "exaone",
 			"minerva", "mellum2", "minerva-7b":
 			t.pre = preStarCoder
 		case "deepseek-v3", "hunyuan-dense", "joyai-llm", "hy_v4":
 			t.pre = preDeepseek3
-		case "tekken", "gpt-4o", "nemotron-3.5-embed":
+		case "tekken", "gpt-4o", "nemotron-3.5-embed", "pixtral":
 			t.pre = preTekken
 		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2",
 			// jina-v5-nano is in llama.cpp's llama3 branch, ignore_merges and all.

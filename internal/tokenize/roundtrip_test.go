@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // Round-trip tests over a real checkpoint.
@@ -147,5 +148,58 @@ func TestNonASCIILatinSurvivesDecode(t *testing.T) {
 		if got := tok.Decode(tok.Encode(s, false)); got != s {
 			t.Errorf("U+%04X %q round-trips to %q", r, s, got)
 		}
+	}
+}
+
+// TestFixtureRoundTripsNonASCII is the same check as TestRoundTripText, run against a
+// constructed byte-level vocabulary instead of a checkpoint.
+//
+// It exists because the checkpoint versions are gated on MODEL and therefore do not run in
+// CI, while the bugs they caught were in code CI does run. The fixture could not catch them
+// before for a specific reason: its byte pieces were spelled the SentencePiece way ("<0xC3>")
+// even for a byte-level vocabulary, which writes the escaped rune instead. Every ASCII byte
+// is its own escaped rune, so the two spellings agree there and disagreed only above 0x7E --
+// exactly the range that had gone untested.
+func TestFixtureRoundTripsNonASCII(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{TokenizerModel: "gpt2"})
+	if !tok.byteLevel {
+		t.Fatal("the fixture is not byte-level, so this is testing the wrong path")
+	}
+	inputs := []string{
+		"a", "¡", "¢", "Über", "naïve", "àéîõü", "ÆØÅ", "ß",
+		"中文", "日本語", "русский", "ελληνικά",
+		"a\u0301", "cafe\u0301",
+		"Hello, 世界! 123", "a/b/c",
+		"😀", "…—…",
+		" ", "  ", " a", "\n\t",
+	}
+	for _, s := range inputs {
+		if got := tok.Decode(tok.Encode(s, false)); got != s {
+			t.Errorf("%q round-trips to %q", s, got)
+		}
+	}
+}
+
+// TestFixtureBytePiecesAreEscapedRunes checks the fixture spells its byte pieces the way a
+// byte-level vocabulary does, which is what makes the test above able to fail.
+//
+// A "<0xNN>" piece in a byte-level vocabulary would still be found by the byte fallback, so
+// nothing reports an error; the bytes simply never merge with their neighbours, and
+// multi-byte characters decode as mojibake. Pinning the spelling is cheaper than noticing
+// the mojibake.
+func TestFixtureBytePiecesAreEscapedRunes(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{TokenizerModel: "gpt2"})
+	// A byte-level vocabulary's piece for 0xC3 must be the escaped rune U+00C3, and the
+	// piece for 0x81 must be the rune the table assigns it.
+	if id, ok := tok.index["Ã"]; !ok || tok.tokens[id] != "Ã" {
+		t.Errorf("no escaped-rune piece for byte 0xC3 in a byte-level fixture vocabulary")
+	}
+	if _, ok := tok.index["<0xC3>"]; ok {
+		t.Error("the byte-level fixture vocabulary contains a SentencePiece byte piece")
+	}
+	// The SentencePiece fixture is the other way round.
+	spm := bpeFixture(t, gguftest.Model{TokenizerModel: "llama"})
+	if _, ok := spm.index["<0xC3>"]; !ok {
+		t.Error("the SentencePiece fixture vocabulary has no <0xC3> piece")
 	}
 }

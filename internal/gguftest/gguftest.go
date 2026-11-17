@@ -44,8 +44,10 @@ type Model struct {
 	// scheduler advances a long sequence need it to keep going, and "it happened to stop
 	// after six tokens this build" is not a property any assertion can rest on.
 	NoEOS bool
-	// NoBytes omits the 256 byte-fallback pieces, so every token in the vocabulary is a
-	// character and no token run can be an invalid byte sequence.
+	// NoBytes omits the 256 single-byte pieces, so every token in the vocabulary is a
+	// character and no token run can be an invalid byte sequence. How those pieces are
+	// spelled follows TokenizerModel: "<0xC3>" for SentencePiece, the escaped rune for a
+	// byte-level vocabulary.
 	//
 	// The stream decoder and Decode legitimately differ on a byte run that never forms a
 	// character: Decode joins every pending byte before deciding how to render it, while a
@@ -152,7 +154,7 @@ func (m Model) resolve() Model {
 	// fails the loader's shape check.
 	m.vocabBase = len(m.Vocab)
 	if !m.NoBytes {
-		m.Vocab = append(append([]string(nil), m.Vocab...), bytePieces()...)
+		m.Vocab = append(append([]string(nil), m.Vocab...), m.bytePieces()...)
 	}
 	if m.BOSID == 0 && m.EOSID == 0 {
 		m.BOSID, m.EOSID = 1, 2
@@ -430,14 +432,54 @@ func (m Model) kvs() []kv {
 // reaches it.
 const NoEOSSentinel = 1 << 30
 
-// bytePieces returns the 256 fallback pieces, named as SentencePiece names them.
-func bytePieces() []string {
+// bytePieces returns the 256 single-byte pieces, spelled the way this vocabulary family
+// spells them.
+//
+// The two families name a byte differently and a file that uses the wrong spelling has no
+// piece for the bytes it needs. A SentencePiece vocabulary writes "<0xC3>" and the tokenizer
+// recognises it as a byte token; a byte-level vocabulary writes the escaped rune GPT-2's
+// table assigns to the byte, so 0xC3 is "Ã". Getting this wrong is invisible in ASCII --
+// every ASCII byte is its own escaped rune, so both spellings agree -- and produced a
+// fixture whose non-ASCII round trips came back as mojibake: "¡" encoded to the escaped
+// runes for 0xC2 and 0xA1, found no such pieces, and fell back to byte tokens it could not
+// merge.
+func (m Model) bytePieces() []string {
 	out := make([]string, 256)
+	if m.TokenizerModel == "gpt2" {
+		for i := range out {
+			out[i] = string(gpt2ByteRunes[i])
+		}
+		return out
+	}
 	for i := range out {
 		out[i] = fmt.Sprintf("<0x%02X>", i)
 	}
 	return out
 }
+
+// gpt2ByteRunes is GPT-2's bytes_to_unicode, written out here because a fixture must not
+// borrow the implementation's table: a test that shares the code under test cannot catch it
+// being wrong, and this table being wrong is exactly the bug the round-trip tests were added
+// to find.
+var gpt2ByteRunes = func() [256]rune {
+	var keep [256]bool
+	for _, r := range [][2]int{{0x21, 0x7E}, {0xA1, 0xAC}, {0xAE, 0xFF}} {
+		for b := r[0]; b <= r[1]; b++ {
+			keep[b] = true
+		}
+	}
+	var table [256]rune
+	next := 0
+	for b := range 256 {
+		if keep[b] {
+			table[b] = rune(b)
+		} else {
+			table[b] = rune(256 + next)
+			next++
+		}
+	}
+	return table
+}()
 
 // Default is the standard fixture: two layers, 32 hidden, a character vocabulary.
 func Default() Model { return Model{} }

@@ -350,3 +350,95 @@ func TestEncodeWithSpecialsWithoutSpecials(t *testing.T) {
 		}
 	}
 }
+
+// TestByteTableMatchesGPT2 pins the escaping table against the one GPT-2 published.
+//
+// Getting the kept set wrong is silent in a way that is hard to overstate. The table is a
+// two-way mapping, so an error does not just mis-render one byte: it shifts every byte after
+// the mistake by the number of entries missed. The first version of this table kept only
+// printable ASCII, omitting the Latin-1 ranges 0xA1-0xAC and 0xAE-0xFF. Byte 0xCC then mapped
+// to U+016E instead of itself, the vocabulary had no such piece, and the encoder dropped the
+// byte without a word -- "café" written with a combining acute decoded as "cafe\x81".
+//
+// The table below is written out from the published definition rather than derived from the
+// implementation, so a change to one cannot silently agree with a change to the other.
+func TestByteTableMatchesGPT2(t *testing.T) {
+	// bs: the bytes rendered as themselves, as GPT-2 lists them: three ranges.
+	var kept []int
+	for b := 0x21; b <= 0x7E; b++ { // '!' .. '~'
+		kept = append(kept, b)
+	}
+	for b := 0xA1; b <= 0xAC; b++ {
+		kept = append(kept, b)
+	}
+	for b := 0xAE; b <= 0xFF; b++ {
+		kept = append(kept, b)
+	}
+	if len(kept) != 188 {
+		t.Fatalf("the kept set is %d bytes, want 188", len(kept))
+	}
+
+	want := make(map[byte]rune, 256)
+	inKept := make(map[byte]bool, len(kept))
+	for _, b := range kept {
+		inKept[byte(b)] = true
+		want[byte(b)] = rune(b)
+	}
+	next := 0
+	for b := range 256 {
+		if inKept[byte(b)] {
+			continue
+		}
+		want[byte(b)] = rune(256 + next)
+		next++
+	}
+
+	for b := range 256 {
+		if got := bpeRunes[b]; got != want[byte(b)] {
+			t.Errorf("byte 0x%02X escapes to U+%04X, want U+%04X", b, got, want[byte(b)])
+		}
+		if got, ok := bpeBytes[want[byte(b)]]; !ok || got != byte(b) {
+			t.Errorf("U+%04X decodes to 0x%02X (present=%v), want 0x%02X",
+				want[byte(b)], got, ok, byte(b))
+		}
+	}
+
+	// Spot checks on the values a reader would recognise, so a future rewrite of the loop
+	// above cannot agree with a rewrite of the table.
+	for _, c := range []struct {
+		b    byte
+		want rune
+	}{
+		{' ', 0x0120},  // Ġ, the space piece
+		{'\n', 0x010A}, // Ċ
+		{'\t', 0x0109}, // ĉ
+		{0xCC, 0x00CC}, // Ì: Latin-1 printable, so it is itself
+		{0x81, 0x0123}, // ģ: not printable, so it is renumbered
+		{0xE4, 0x00E4}, // ä
+	} {
+		if got := bpeRunes[c.b]; got != c.want {
+			t.Errorf("byte 0x%02X escapes to U+%04X, want U+%04X", c.b, got, c.want)
+		}
+	}
+}
+
+// TestEscapingRoundTripsEveryByte checks the two directions agree for all 256 bytes, which is
+// the property that makes decoding possible at all.
+func TestEscapingRoundTripsEveryByte(t *testing.T) {
+	seen := make(map[rune]bool, 256)
+	for b := range 256 {
+		r := bpeRunes[b]
+		if seen[r] {
+			t.Errorf("U+%04X is produced by more than one byte", r)
+		}
+		seen[r] = true
+		got, ok := bpeBytes[r]
+		if !ok {
+			t.Errorf("byte 0x%02X escapes to U+%04X, which does not decode", b, r)
+			continue
+		}
+		if got != byte(b) {
+			t.Errorf("byte 0x%02X round-trips to 0x%02X", b, got)
+		}
+	}
+}

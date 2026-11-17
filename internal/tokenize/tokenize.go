@@ -48,17 +48,11 @@ const spacePrefix = "\u2581"
 // tab token as "ĉ", which is what a Qwen checkpoint produces out of the box: the
 // text is legible enough to be mistaken for a sampling problem.
 var bpeBytes = func() map[rune]byte {
-	// The reversible table GPT-2 uses: printable ASCII (except space) maps to
-	// itself, and everything else is assigned the next unused code point from 256.
-	var keep [256]bool
-	for b := '!'; b <= '~'; b++ {
-		keep[b] = true
-	}
 	table := make(map[rune]byte, 256)
 	next := 0
 	for b := range 256 {
 		var r rune
-		if keep[b] {
+		if bpeKeep[b] {
 			r = rune(b)
 		} else {
 			r = rune(256 + next)
@@ -67,6 +61,28 @@ var bpeBytes = func() map[rune]byte {
 		table[r] = byte(b)
 	}
 	return table
+}()
+
+// bpeKeep marks the bytes GPT-2's table renders as themselves.
+//
+// It is not "printable ASCII except space", which is the part that is easy to get wrong.
+// The original list is three ranges: '!'..'~', 0xA1..0xAC, and 0xAE..0xFF. Those last two
+// are the printable Latin-1 characters, and leaving them out shifts every later byte by 94
+// -- so 0xCC, which should be itself, becomes U+016E. A vocabulary trained with the right
+// table then cannot find the piece at all, and the encoder drops it: "café" written with a
+// combining mark lost the mark instead of reporting anything.
+var bpeKeep = func() [256]bool {
+	var keep [256]bool
+	for b := '!'; b <= '~'; b++ {
+		keep[b] = true
+	}
+	for b := 0xA1; b <= 0xAC; b++ {
+		keep[b] = true
+	}
+	for b := 0xAE; b <= 0xFF; b++ {
+		keep[b] = true
+	}
+	return keep
 }()
 
 // preType is tokenizer.ggml.pre: which pre-tokenizer the vocabulary was trained with.
@@ -113,14 +129,10 @@ const (
 // so a newline or a tab reached the merge step as itself -- a rune no piece contains --
 // and the character either vanished from the token stream or split the word around it.
 var bpeRunes = func() [256]rune {
-	var keep [256]bool
-	for b := '!'; b <= '~'; b++ {
-		keep[b] = true
-	}
 	var table [256]rune
 	next := 0
 	for b := range 256 {
-		if keep[b] {
+		if bpeKeep[b] {
 			table[b] = rune(b)
 		} else {
 			table[b] = rune(256 + next)

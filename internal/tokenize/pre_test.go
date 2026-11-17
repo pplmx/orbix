@@ -701,3 +701,46 @@ func TestDeepseekCoderPreTokenizer(t *testing.T) {
 		}
 	}
 }
+
+// TestFalconPreTokenizer covers falcon's three expressions: a punctuation-and-symbol run,
+// the GPT-2 expression, then groups of exactly three digits.
+//
+// The order is what makes it falcon rather than GPT-2 with a digit rule: the punctuation
+// expression runs first, so an apostrophe never forms a contraction and "don't" splits as
+// ["don", "'", "t"] where GPT-2 gives ["don", "'t"]. The third expression matches digit
+// triples only, so a run of four digits becomes "123" then "4", and text it does not match
+// stays whole.
+//
+// Expected values from applying the three expressions to each input with Python's re.
+func TestFalconPreTokenizer(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{Pre: "falcon"})
+	if !tok.PreImplemented() {
+		t.Fatal("the falcon pre-tokenizer is not implemented")
+	}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"Hello world", []string{"Hello", " world"}},
+		{"a,b.c", []string{"a", ",", "b", ".", "c"}},
+		{"x1234y", []string{"x", "123", "4", "y"}},
+		{"'s test", []string{"'", "s", " test"}},
+		{"if (x) {y}", []string{"if", " ", "(", "x", ")", " ", "{", "y", "}"}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"123456", []string{"123", "456"}},
+		{"don't", []string{"don", "'", "t"}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}

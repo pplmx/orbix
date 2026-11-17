@@ -127,6 +127,9 @@ const (
 	// preDeepseekCoder applies five expressions in order: newline, \s?letters,
 	// \s?punctuation, a CJK run, then a single digit.
 	preDeepseekCoder
+	// preFalcon applies a punctuation-and-symbol run, the GPT-2 expression, then groups of
+	// three digits.
+	preFalcon
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -391,6 +394,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preBloom
 		case "deepseek-coder":
 			t.pre = preDeepseekCoder
+		case "falcon":
+			t.pre = preFalcon
 
 		case "", "default":
 			t.pre = preNone

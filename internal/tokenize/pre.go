@@ -46,6 +46,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.coder {
 		return splitDeepseekCoder(text)
 	}
+	if fam.falcon {
+		return splitFalcon(text)
+	}
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
@@ -158,6 +161,64 @@ func splitRunsOf(text string, pred func(string) bool, spacePrefix, single bool) 
 	}
 	if start < len(text) {
 		out = append(out, text[start:])
+	}
+	return out
+}
+
+// splitFalcon applies falcon's three expressions in order.
+//
+//	[\p{P}$+<=>^~|`]+   -- a run of punctuation or one of the listed symbols
+//	the GPT-2 expression -- which preGPT2 already describes
+//	[0-9][0-9][0-9]      -- groups of exactly three digits
+//
+// The first expression runs before the second, so an apostrophe is taken as punctuation and
+// never forms a contraction: "don't" splits as ["don", "'", "t"] rather than ["don", "'t"].
+func splitFalcon(text string) []string {
+	gpt2, _ := preFamilyOf(preGPT2)
+	var out []string
+	// Step 1: punctuation and symbol runs.
+	for _, piece := range splitRunsOf(text, isFalconPunctAt, false, false) {
+		// Step 2: the GPT-2 expression on what is left.
+		out = append(out, splitByRule(piece, gpt2)...)
+	}
+	// Step 3: three-digit groups, applied to every piece the first two produced.
+	var grouped []string
+	for _, piece := range out {
+		grouped = append(grouped, splitThreeDigitRuns(piece)...)
+	}
+	return grouped
+}
+
+// isFalconPunctAt reports whether s begins with a character falcon's first expression takes:
+// Unicode punctuation, or one of the ASCII symbols it lists.
+func isFalconPunctAt(s string) bool {
+	return classifyAt(s, func(r rune) bool {
+		return unicode.IsPunct(r) || strings.ContainsRune("$+<=>^~|`", r)
+	})
+}
+
+// splitThreeDigitRuns cuts each run of digits into groups of three, keeping any remainder.
+func splitThreeDigitRuns(text string) []string {
+	var out []string
+	i := 0
+	for i < len(text) {
+		if !isDigitAt(text[i:]) {
+			// Everything up to the next digit stays together: the expression only matches
+			// digit triples, so text it does not match is left as one piece.
+			start := i
+			for i < len(text) && !isDigitAt(text[i:]) {
+				i += runeLenAt(text[i:])
+			}
+			out = append(out, text[start:i])
+			continue
+		}
+		start := i
+		count := 0
+		for i < len(text) && isDigitAt(text[i:]) && count < 3 {
+			i += runeLenAt(text[i:])
+			count++
+		}
+		out = append(out, text[start:i])
 	}
 	return out
 }
@@ -408,6 +469,10 @@ type preRule struct {
 	// preDigits and cjk describe. Keeping it separate avoids a rule type whose fields are
 	// only meaningful together.
 	coder bool
+	// falcon marks falcon's three expressions: a punctuation-and-symbol run, the GPT-2
+	// expression, then groups of three digits. The middle one is the rule preGPT2 already
+	// describes, so only the two outer steps need code.
+	falcon bool
 	// punctLetterRun is whether the expression's first alternative is
 	// "[!-/:-@\\[-`{-~][A-Za-z]+": one ASCII punctuation character followed by a run of
 	// ASCII letters, as a single chunk.
@@ -483,6 +548,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preFalcon:
+		return preRule{falcon: true}, true
 	case preBloom:
 		// " ?[^(\s|.,!?…。，、।۔،)]+" -- the parentheses and inner pipes are literal in
 		// llama.cpp's expression, so the stop set is those characters, the pipe itself,

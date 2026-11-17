@@ -132,6 +132,13 @@ func (m *Model) Generate(cache Cache, prompt []int32, sampler Sampler, opts Gene
 	if len(prompt) == 0 {
 		return nil, fmt.Errorf("llama: empty prompt")
 	}
+	// A negative budget is not a small budget: the generation loop simply never runs and the
+	// caller gets an empty continuation with a nil error, which reads as "the model produced
+	// nothing" rather than "the flag was wrong". The engine rejects this already; Generate
+	// is reachable without it.
+	if opts.MaxTokens < 0 {
+		return nil, fmt.Errorf("llama: negative max tokens (%d)", opts.MaxTokens)
+	}
 	if sampler == nil {
 		sampler = Greedy{}
 	}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/llama"
 )
 
 // The CLI tests drive run() directly, which keeps them free of subprocesses
@@ -223,4 +225,70 @@ func hasField(out, label, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestNegativeSamplingFlagsAreRejected checks the flags that read as "sample less" but were
+// silently the same as zero.
+//
+// Both --temp and --top-k are tested with "> 0" to decide whether they apply, so a negative
+// value means greedy decoding and no top-k cut -- the opposite of turning sampling down. The
+// flags are checked before the model is opened, so this needs no checkpoint.
+func TestNegativeSamplingFlagsAreRejected(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		args []string
+		want string
+	}{
+		{"run", []string{"--model", "unused.gguf", "--temp", "-1", "hi"}, "--temp"},
+		{"run", []string{"--model", "unused.gguf", "--top-k", "-1", "hi"}, "--top-k"},
+		{"chat", []string{"--model", "unused.gguf", "--temp", "-1"}, "--temp"},
+		{"chat", []string{"--model", "unused.gguf", "--top-k", "-1"}, "--top-k"},
+	}
+	for _, c := range cases {
+		t.Run(c.cmd+" "+c.want, func(t *testing.T) {
+			var err error
+			if c.cmd == "run" {
+				err = cmdRun(c.args)
+			} else {
+				err = cmdChat(c.args)
+			}
+			if err == nil {
+				t.Fatalf("%s accepted %v", c.cmd, c.args)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not name %s", err, c.want)
+			}
+			if strings.Contains(err.Error(), "unused.gguf") {
+				t.Errorf("error %q came from opening the model, so the flag was not validated", err)
+			}
+		})
+	}
+}
+
+// TestNegativeMaxTokensIsRejected checks the flag that produced a silent empty answer.
+//
+// The engine rejected a negative count, but only on the path through Submit; run reaches the
+// model through Generate, which had no check, so --max-tokens -1 printed nothing and exited
+// successfully. Both commands must refuse it rather than leave the user looking at blank
+// output with no error.
+func TestNegativeMaxTokensIsRejected(t *testing.T) {
+	err := cmdRun([]string{"--model", "unused.gguf", "--max-tokens", "-1", "hi"})
+	if err == nil {
+		t.Fatal("run accepted --max-tokens -1")
+	}
+	// The message names the flag as the user typed it, which is what makes it findable.
+	if !strings.Contains(err.Error(), "max-tokens") {
+		t.Errorf("error %q does not name --max-tokens", err)
+	}
+}
+
+// TestGenerateRejectsNegativeMaxTokens covers the library check that the command relies on.
+func TestGenerateRejectsNegativeMaxTokens(t *testing.T) {
+	// A nil model is enough: the check runs before anything touches the weights.
+	var m *llama.Model
+	if _, err := m.Generate(nil, []int32{1}, nil, llama.GenerateOptions{MaxTokens: -1}); err == nil {
+		t.Fatal("Generate accepted a negative MaxTokens")
+	} else if !strings.Contains(err.Error(), "negative") {
+		t.Errorf("error %q does not say the count was negative", err)
+	}
 }

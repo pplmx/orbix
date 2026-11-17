@@ -43,6 +43,14 @@ func cmdChat(args []string) error {
 	if err := cache.validate("chat"); err != nil {
 		return err
 	}
+	// Sampling is switched on by "temp > 0" and top-k applies at "topK > 0", so a negative
+	// value is the same as zero: the session goes greedy without saying so.
+	if *temp < 0 {
+		return fmt.Errorf("chat: --temp must not be negative (0 means greedy)")
+	}
+	if *topK < 0 {
+		return fmt.Errorf("chat: --top-k must not be negative (0 disables it)")
+	}
 
 	return chatSession(os.Stdin, os.Stdout, chatOptions{
 		model:       *model,

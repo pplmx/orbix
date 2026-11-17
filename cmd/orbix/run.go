@@ -34,6 +34,22 @@ func cmdRun(args []string) error {
 	if prompt == "" {
 		return fmt.Errorf("run: missing prompt")
 	}
+	// Both of these are compared with "> 0" to decide whether sampling applies at all, so a
+	// negative value silently means the same as zero: greedy decoding, and a top-k that is
+	// never applied. A flag that reads as "turn sampling down" and turns it off is worth
+	// refusing rather than interpreting.
+	if *temp < 0 {
+		return fmt.Errorf("run: --temp must not be negative (0 means greedy)")
+	}
+	if *topK < 0 {
+		return fmt.Errorf("run: --top-k must not be negative (0 disables it)")
+	}
+	// The library rejects this too, but only once the model is loaded and Generate is
+	// reached. Reporting it here means a typo costs nothing and does not depend on which
+	// generation path the command happens to use.
+	if *maxTokens < 0 {
+		return fmt.Errorf("run: --max-tokens must not be negative")
+	}
 
 	// Open the file twice: once for metadata and the tokenizer, once for the
 	// weights. The directory parse is cheap and keeps the two concerns from

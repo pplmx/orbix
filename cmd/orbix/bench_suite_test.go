@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/pplmx/orbix/internal/engine"
+	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/llama"
 )
 
 // The suite is a measurement tool, so its tests check the things that make its numbers
@@ -157,10 +159,17 @@ func TestSuiteRejectsUnknownPolicyFlag(t *testing.T) {
 // eventually reaches it; a request that stops early must be counted rather than silently
 // producing fewer tokens than its row's neighbours.
 func TestEarlyStopsAreCounted(t *testing.T) {
-	// A model that can stop, unlike the NoEOS fixture the other suite tests use. NoBytes
-	// keeps the vocabulary to characters, so the greedy path reaches the end-of-sequence
-	// token in a couple of steps instead of wandering through byte pieces.
-	path := gguftest.Model{ContextLen: 256, NoBytes: true}.Write(t, t.TempDir())
+	// A model that must stop on its first step, rather than one that happens to. The EOS
+	// id is pointed at the piece this fixture's greedy path emits -- the score table is
+	// derived from the vocabulary, so which piece wins is a property of the fixture and
+	// not something a test should bet on.
+	//
+	// Finding it first is the honest way to do this: the alternative, choosing a
+	// vocabulary that happens to reach EOS in a couple of steps, is what broke when the
+	// fixture's words changed.
+	probe := gguftest.Model{ContextLen: 256, NoBytes: true}.Write(t, t.TempDir())
+	eos := firstGreedyToken(t, probe)
+	path := gguftest.Model{ContextLen: 256, NoBytes: true, EOSID: eos, BOSID: 1}.Write(t, t.TempDir())
 	o := suiteOptions{
 		model:   path,
 		prompt:  []int32{1, 4, 5},
@@ -182,4 +191,38 @@ func TestEarlyStopsAreCounted(t *testing.T) {
 		t.Errorf("tokens = %d reached the full budget despite %d early stops",
 			res.tokens, res.earlyStops)
 	}
+}
+
+// firstGreedyToken returns the id the model emits for a fixed prompt, so a test that
+// needs generation to stop immediately can point EOS at it instead of hoping the
+// vocabulary produces an end-of-sequence token on its own.
+func firstGreedyToken(t *testing.T, path string) int {
+	t.Helper()
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	cfg, err := llama.LoadConfig(gf)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	m, err := llama.New(path)
+	if err != nil {
+		t.Fatalf("llama.New: %v", err)
+	}
+	cache, err := llama.NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	logits, err := m.Prefill(cache, []int32{1, 4, 5}, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	best := 0
+	for i, v := range logits {
+		if v > logits[best] {
+			best = i
+		}
+	}
+	return best
 }

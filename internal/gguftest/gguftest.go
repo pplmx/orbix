@@ -64,6 +64,11 @@ type Model struct {
 	// that accepts the default does; a non-nil value states it explicitly.
 	AddBOS *bool
 
+	// AttnBias adds the q, k, and v bias tensors the Qwen2 family uses and Llama does
+	// not. The loader infers the flag from the tensors' presence, so writing them is the
+	// whole of what a fixture needs to be a Qwen2-shaped model.
+	AttnBias bool
+
 	// Pre is tokenizer.ggml.pre: the pre-tokenizer name, which selects how text is cut
 	// into chunks before merging. Empty omits the key, which is what a SentencePiece
 	// vocabulary does and what a byte-level model without a chunking rule does.
@@ -95,8 +100,21 @@ var DefaultVocab = []string{
 	"<unk>", "<s>", "</s>",
 	"\u2581", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
 	"n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-	".", ",", "'", "\u2581the", "\u2581once", "\u2581upon", "\u2581time",
-	"\u2581a", "\u2581t", "he", "on", "ti", "me", "up",
+	// Uppercase letters, so a capitalized word is not silently a run of unknowns.
+	"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+	"N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+	".", ",", "'", "!", "?",
+	// Whole words, with the space marker, so ordinary prose encodes to few tokens rather
+	// than one per character. A vocabulary of bare characters makes every word a long run
+	// and every generated string unreadable, which is fine for a shape test and useless
+	// for one that has to find a word in the output.
+	"\u2581the", "\u2581The", "\u2581once", "\u2581Once", "\u2581upon", "\u2581time", "\u2581a", "\u2581and",
+	"\u2581of", "\u2581to", "\u2581in", "\u2581was", "\u2581is", "\u2581it",
+	"\u2581there", "\u2581little", "\u2581girl", "\u2581she", "\u2581her",
+	"\u2581so", "\u2581happy", "\u2581city", "\u2581France", "\u2581Paris",
+	// Multi-character pieces for the words above, so a merge has something to build.
+	"\u2581t", "\u2581th", "\u2581ti", "he", "on", "ti", "me", "up", "in", "er",
+	"re", "es", "an", "ar", "is", "hi", "app", "ppy", "it", "tt", "le", "irl",
 }
 
 // resolve fills in the defaults and returns a complete description.
@@ -184,6 +202,13 @@ func (m Model) tensors() []tensorSpec {
 			tensorSpec{p + "attn_output.weight", []uint64{h, h}},
 			tensorSpec{p + "ffn_norm.weight", []uint64{h}},
 		)
+		if m.AttnBias {
+			out = append(out,
+				tensorSpec{p + "attn_q.bias", []uint64{h}},
+				tensorSpec{p + "attn_k.bias", []uint64{uint64(m.kvDim())}},
+				tensorSpec{p + "attn_v.bias", []uint64{uint64(m.kvDim())}},
+			)
+		}
 		if m.Experts > 0 {
 			e := uint64(m.Experts)
 			out = append(out,
@@ -346,9 +371,11 @@ func (m Model) kvs() []kv {
 			typ = 6 // byte
 		}
 		types[i] = gguf.Value{Type: gguf.TypeInt32, Int: typ}
-		// Descending scores make the merge prefer longer pieces, which is what a
-		// trained unigram model does.
-		scores[i] = gguf.Value{Type: gguf.TypeFloat32, Float: -float64(i) / float64(len(vocab))}
+		// The length decides the score, which is what lets a whole-word piece win over the
+		// characters it is built from. Scoring by position instead -- the first version --
+		// gave every piece after the first few a score too low to ever be chosen, so a
+		// word the vocabulary contained still came out as one token per character.
+		scores[i] = gguf.Value{Type: gguf.TypeFloat32, Float: float64(len([]rune(tok))) / 32}
 	}
 
 	out = append(out,

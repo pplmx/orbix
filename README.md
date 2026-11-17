@@ -565,7 +565,7 @@ orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --pr
 | `--max-active`             | Sequences advanced per round, and therefore the batch size          |
 | `--max-queued`             | Backlog accepted before new requests get 503; 0 means 8x max-active |
 | `--policy`                 | Which sequences fill a round: `fifo`, `shortest`, or `fair`         |
-| `--workers`                | Kernel goroutines; 0 means one per CPU                              |
+| `--workers`                | Kernel goroutines per batched pass; 0 means one per CPU             |
 | `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context  |
 | `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix             |
 
@@ -578,6 +578,15 @@ when it arrives, so the cost is `context x KV width x layers`, multiplied by the
 and queued slots. A paged cache takes blocks as a sequence generates, so memory follows
 what is actually in flight. The server prints the figure it computed at startup, and warns
 when a contiguous reservation passes a gibibyte.
+
+`--workers` divides one batched pass across goroutines, so the useful setting is bounded by
+what a pass contains: a round advances at most `--max-active` sequences, and a prefill has
+one position row per prompt token in the batch. Above that the extra workers have nothing to
+split. Measured on a 128-core host with eight concurrent requests, medians of five interleaved runs
+gave 324.9 tokens per second at 8 workers and 327.6 at 128 -- the same within noise, so the
+count is not a throughput knob once it passes the batch, and the default of one per CPU is
+already more than an eight-way batch can use. A single run of either setting varies by more
+than that difference, which is why the numbers here are medians of interleaved runs.
 
 For scale: the 128k-window Llama 3.2 checkpoint in this repository's test set reserves
 about 8 GB per request that way, while the small test fixture reserves 1.7 MB. Any model

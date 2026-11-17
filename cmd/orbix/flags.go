@@ -52,7 +52,9 @@ func registerCacheFlags(fs *flag.FlagSet, workers bool) cacheFlags {
 	c.blockSize = fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
 	c.blocks = fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
 	if workers {
-		c.workers = fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
+		c.workers = fs.Int("workers", 0,
+			"kernel goroutines per batched pass; 0 means one per CPU. A pass can only use as many "+
+				"as it has sequences (or prompt rows), so a larger number adds nothing")
 	}
 	return c
 }

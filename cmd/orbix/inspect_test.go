@@ -25,10 +25,9 @@ func TestInspectReportsPreTokenizer(t *testing.T) {
 		{"deepseek-v3", "implemented"},
 		{"tekken", "implemented"},
 		// Still unimplemented: the warning path needs a family that really is missing, and
-		// afmoe is one whose rule differs from every implemented family -- a digit
-		// grouping with its own custom matcher in llama.cpp, then a CJK class and a
-		// punctuation run named by category.
-		{"afmoe", "NOT implemented"},
+		// kimi-k2 is one whose rule differs from every implemented family -- it cuts a CJK
+		// run first, then applies a case-splitting letter rule that excludes Han.
+		{"kimi-k2", "NOT implemented"},
 		{"qwen-2", "NOT a name this package knows"},
 	}
 	for _, c := range cases {

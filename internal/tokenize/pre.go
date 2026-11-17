@@ -89,6 +89,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.cjk {
 		pieces = splitCJK(pieces)
 	}
+	if fam.asian {
+		pieces = splitEach(pieces, splitAsianRuns)
+	}
 	if fam.youtuScripts {
 		pieces = splitYoutuScripts(text)
 	}
@@ -778,6 +781,16 @@ type preRule struct {
 	// only family without it, and the removal is what keeps a Turkish apostrophe suffix
 	// whole: "'da" is one chunk there and "'d" plus "a" with the alternative present.
 	noContraction bool
+	// noContractionOnceMore marks a family whose expression has *no* contraction alternative
+	// even though it also has a punctuation-letter run. That combination is deepseek-v3's
+	// and afmoe's: the first alternative is "[!..~][A-Za-z]+", so an apostrophe is taken as
+	// the punctuation character and the letters after it follow, giving "'ta" as one chunk
+	// where the contraction reading gives ["'t", "a"].
+	//
+	// It is a separate field from noContraction because that one names ufakzeka's spelling,
+	// where the alternative is absent but the leading-character one may still take the
+	// apostrophe as a prefix.
+	noContractionAlt bool
 	// contractionSuffix is whether the letter alternatives may absorb a clitic, which is
 	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
 	// alternative, so a word and its "'s" stay one chunk.
@@ -833,6 +846,11 @@ type preRule struct {
 	// applies the CJK expression first, so the grouping is independent of what the letter
 	// rule would have done with neighbouring text.
 	cjk bool
+	// asian selects afmoe's wider CJK class in place of the three-range cjk one. The two are
+	// separate because the sets are different, not nested: afmoe's class has no Hiragana
+	// range beyond U+309F either, but it reaches Thai, Lao, Khmer, Myanmar, Cham, Javanese,
+	// Hangul and the halfwidth katakana block, none of which "cjk" covers.
+	asian bool
 }
 
 // leadKind is what a run may take as its prefix.
@@ -1024,6 +1042,23 @@ func preFamilyOf(p preType) (preRule, bool) {
 			digits: 1, lead: leadAnyNonLetter, letterMarks: true, punctExcludesMarks: true,
 			newlinesAfterPunct: true, newlineChunk: true,
 		}, true
+	case preAfMoE:
+		// "\p{AFMoE_digits}",
+		// "[\u4e00-\u9fff\u3400-\u4dbf ... \u0e40-\u0e7f ... \uac00-\ud7af \u1100-\u11ff]+",
+		// the deepseek-v3 main expression.
+		//
+		// The first step is not a regex in llama.cpp but a custom matcher (see
+		// unicode_regex_split_custom_afmoe): a digit run is cut into groups of three counted
+		// from the right, with the one- or two-digit remainder leading, which is exactly what
+		// digitsFromRight describes. The second is a much wider CJK class than the other
+		// families name. The main expression is deepseek-v3's, so the rest is fields those
+		// families already set.
+		return preRule{
+			digitsFromRight: true, asian: true,
+			digits: 0, lead: leadNotLetterPunctSymbol, letterMarks: true,
+			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
+			punctLetterRun: true, noContractionAlt: true,
+		}, true
 	case preK2Horizon:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}|\\p{M}|\\u200C|\\u200D)+"
 		// "|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
@@ -1083,7 +1118,7 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{
 			digits: 0, lead: leadNotLetterPunctSymbol, letterMarks: true,
 			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
-			preDigits: 3, cjk: true, punctLetterRun: true,
+			preDigits: 3, cjk: true, punctLetterRun: true, noContractionAlt: true,
 		}, true
 	default:
 		return preRule{}, false
@@ -1102,7 +1137,7 @@ func chunkLen(s string, fam preRule) int {
 	// The contraction alternative is the expression's first, so it is tried first -- but only
 	// for families that have it. ufakzeka is qwen2 with that alternative removed precisely so
 	// an apostrophe suffix stays whole.
-	if !fam.noContraction {
+	if !fam.noContraction && !fam.noContractionAlt {
 		if n := qwen2ContractionLen(s); n > 0 {
 			return n
 		}
@@ -1437,18 +1472,19 @@ func punctRunLen(s string, fam preRule) int {
 
 // qwen2NewlineRunLen matches "\s*[\r\n]+".
 func qwen2NewlineRunLen(s string) int {
-	i := 0
-	for i < len(s) && isSpaceAt(s[i:]) && !isNewlineAt(s[i:]) {
-		i += runeLenAt(s[i:])
+	// The expression is "\s*[\r\n]+", greedy and anchored on a newline. A match therefore
+	// runs to the farthest newline the leading "\s*" can reach: "\n  \n" is one chunk, while
+	// "\n\t" is "\n" with the tab left to the "\s+" alternatives, because the run cannot end
+	// on a tab.
+	end := 0
+	for i := 0; i < len(s) && isSpaceAt(s[i:]); {
+		n := runeLenAt(s[i:])
+		if isNewlineAt(s[i:]) {
+			end = i + n
+		}
+		i += n
 	}
-	start := i
-	for i < len(s) && isNewlineAt(s[i:]) {
-		i += runeLenAt(s[i:])
-	}
-	if i == start {
-		return 0
-	}
-	return i
+	return end
 }
 
 // qwen2SpaceRunLen matches "\s+(?!\S)" then "\s+".
@@ -1587,6 +1623,78 @@ func isCJK(r rune) bool {
 }
 
 func isCJKAt(s string) bool { return classifyAt(s, isCJK) }
+
+// isAsianAt reports whether s begins with a character in afmoe's much wider class.
+//
+// The family lists fifteen ranges rather than the three the other families name: CJK
+// extension A, the Kangxi radicals and compatibility ideographs, halfwidth katakana, and the
+// Thai, Lao, Khmer, Myanmar, Cham, Javanese, Hangul and Hangul-jamo runs. Those scripts are
+// matched by no other alternative in the expression, so without this class they would fall
+// through to the letter run and group differently.
+func isAsianAt(s string) bool { return classifyAt(s, isAsian) }
+
+// asianRanges is afmoe's CJK expression as inclusive codepoint ranges, in the order the
+// expression lists them.
+var asianRanges = [...][2]rune{
+	{0x4E00, 0x9FFF}, // CJK Unified Ideographs
+	{0x3400, 0x4DBF}, // CJK Extension A
+	{0x8C48, 0xFAFF}, // CJK Radicals, Kangxi Radicals, compatibility ideographs
+	{0x3040, 0x309F}, // Hiragana
+	{0x30A0, 0x30FF}, // Katakana
+	{0xFF65, 0xFF9F}, // Halfwidth katakana
+	{0x2F00, 0x2FDF}, // Kangxi Radicals
+	{0x0E40, 0x0E7F}, // Thai
+	{0x0E80, 0x0EFF}, // Lao
+	{0x1780, 0x17FF}, // Khmer
+	{0x1000, 0x109F}, // Myanmar
+	{0xAA60, 0xAA7F}, // Cham
+	{0xA9E0, 0xA9FF}, // Javanese
+	{0xAC00, 0xD7AF}, // Hangul syllables
+	{0x1100, 0x11FF}, // Hangul jamo
+}
+
+// isAsian reports whether r is in afmoe's CJK class.
+//
+// The ranges are listed rather than taken from unicode.Is(unicode.Han) for the same reason
+// isCJK lists its three: the expression names codepoint ranges, and the scripts it covers
+// are not all Han.
+func isAsian(r rune) bool {
+	for _, rg := range asianRanges {
+		if r >= rg[0] && r <= rg[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// splitAsianRuns cuts each run of afmoe's wider CJK class into its own chunk.
+//
+// It mirrors splitCJKRuns with the broader predicate, and the two stay separate because the
+// classes are different sets rather than one containing the other.
+func splitAsianRuns(text string) []string {
+	var pieces []string
+	start := 0
+	i := 0
+	for i < len(text) {
+		if !isAsianAt(text[i:]) {
+			i += runeLenAt(text[i:])
+			continue
+		}
+		if i > start {
+			pieces = append(pieces, text[start:i])
+		}
+		runStart := i
+		for i < len(text) && isAsianAt(text[i:]) {
+			i += runeLenAt(text[i:])
+		}
+		pieces = append(pieces, text[runStart:i])
+		start = i
+	}
+	if start < len(text) {
+		pieces = append(pieces, text[start:])
+	}
+	return pieces
+}
 
 // isPunctOrSymbol reports whether r is punctuation (\p{P}) or a symbol (\p{S}).
 func isPunctOrSymbol(r rune) bool { return unicode.IsPunct(r) || unicode.IsSymbol(r) }

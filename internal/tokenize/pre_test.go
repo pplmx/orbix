@@ -954,7 +954,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 98
+		wantImplemented = 99
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -2593,5 +2593,149 @@ func TestWordSpaceRunNeedsALetterAtTheStart(t *testing.T) {
 	// That makes the two rules differ on exactly the inputs above.
 	if got, want := (&Tokenizer{pre: preQwen35}).preSplit("\u0301a"), []string{"\u0301a"}; !sameStrings(got, want) {
 		t.Errorf("qwen35 preSplit(%q) = %q, want %q", "\u0301a", got, want)
+	}
+}
+
+// TestAfMoEChunks pins the afmoe rule, which is three passes: right-aligned digit groups, a
+// wide class of Asian scripts, then deepseek-v3's main expression.
+//
+// The digit pass is llama.cpp's custom matcher rather than a regex -- a run is cut into groups
+// of three counted from the right, with a one- or two-digit remainder leading -- so "12345" is
+// ["12", "345"] where deepseek-v3's leading "\p{N}{1,3}" gives ["123", "45"]. The Asian class
+// is far wider than the three ranges the other families name: it reaches extension A, the
+// Kangxi radicals, halfwidth katakana, and the Thai, Lao, Khmer, Myanmar, Cham, Javanese,
+// Roman-numeral-free Hangul and jamo runs.
+//
+// Expectations come from a transcription of the three expressions into Python's regex module,
+// with the digit pass written out by hand from llama.cpp's custom matcher.
+func TestAfMoEChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preAfMoE}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Right-aligned groups of three.
+		{"1234", []string{"1", "234"}},
+		{"12345", []string{"12", "345"}},
+		{"1234567", []string{"1", "234", "567"}},
+		{"1234567890", []string{"1", "234", "567", "890"}},
+		{"12", []string{"12"}},
+		{"12\u0663\u0664", []string{"1", "2\u0663\u0664"}},
+		{"a1234b", []string{"a", "1", "234", "b"}},
+		{"\u0661\u0662\u0663\u0664", []string{"\u0661", "\u0662\u0663\u0664"}},
+		// The wide Asian class: one run per script, and each stays whole.
+		{"\u4e00\u4e01", []string{"\u4e00\u4e01"}},
+		{"\u3400\u3401", []string{"\u3400\u3401"}},
+		{"\u3041\u3042", []string{"\u3041\u3042"}},
+		{"\u30a1\u30a2", []string{"\u30a1\u30a2"}},
+		{"\u2f00\u2f01", []string{"\u2f00\u2f01"}},
+		{"\u0e40\u0e41", []string{"\u0e40\u0e41"}},
+		{"\u0e80\u0e81", []string{"\u0e80\u0e81"}},
+		{"\u1780\u1781", []string{"\u1780\u1781"}},
+		{"\u1000\u1001", []string{"\u1000\u1001"}},
+		{"\uaa60\uaa61", []string{"\uaa60\uaa61"}},
+		{"\ua9e0\ua9e1", []string{"\ua9e0\ua9e1"}},
+		{"\uac00\uac01", []string{"\uac00\uac01"}},
+		{"\u1100\u1101", []string{"\u1100\u1101"}},
+		{"a\u3400b", []string{"a", "\u3400", "b"}},
+		// Halfwidth katakana is in the class but its members are not all letters, so the
+		// main rule then cuts it: the reference gives the same two chunks.
+		{"\uff65\uff66", []string{"\uff65", "\uff66"}},
+		// The main expression is deepseek-v3's: the punctuation-letter run comes first, and
+		// there is no contraction alternative, so an apostrophe leads a word.
+		{"'ta", []string{"'ta"}},
+		{"don't", []string{"don", "'t"}},
+		{"a.b", []string{"a", ".b"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"a--b", []string{"a", "--", "b"}},
+		{"a,,\n\nb", []string{"a", ",,\n\n", "b"}},
+		// "\s*[\r\n]+" consumes a whitespace run that ends on a newline.
+		{"\n\t\r", []string{"\n\t\r"}},
+		{"\n  \n", []string{"\n  \n"}},
+		{"\n\t\u00b2", []string{"\n", "\t", "\u00b2"}},
+		{"a b", []string{"a", " b"}},
+		{"a \u2003b", []string{"a", " ", "\u2003b"}},
+		{"e\u0301clair", []string{"e\u0301clair"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// The digit grouping is the opposite of deepseek-v3's, so an alias would be wrong.
+	d3 := &Tokenizer{pre: preDeepseek3}
+	if got, want := d3.preSplit("12345"), []string{"123", "45"}; !sameStrings(got, want) {
+		t.Errorf("deepseek-v3 preSplit(%q) = %q, want %q", "12345", got, want)
+	}
+
+	path := gguftest.Model{Pre: "afmoe", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("afmoe is not reported as implemented")
+	}
+}
+
+// TestNewlineAlternativeEndsOnANewline covers "\s*[\r\n]+", which is greedy and anchored: the
+// match runs to the farthest newline its leading \s* can reach, and whitespace after that is
+// left to the "\s+" alternatives.
+//
+// Reading it as "leading spaces then newlines" instead splits "\n  \n" into pieces and glues
+// "\n\t" together, both of which the reference contradicts: the first is one chunk because
+// the run ends on a newline, the second is two because it does not.
+func TestNewlineAlternativeEndsOnANewline(t *testing.T) {
+	tok := &Tokenizer{pre: preLlama3}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"\n  \n", []string{"\n  \n"}},
+		{"\n\n  \n", []string{"\n\n  \n"}},
+		{"  \n", []string{"  \n"}},
+		{"\n\t", []string{"\n", "\t"}},
+		{"\n\t\u00b2", []string{"\n", "\t", "\u00b2"}},
+		{"a\n\t\rb", []string{"a", "\n\t\r", "b"}},
+		// The two spaces after the newline do not continue the chunk: the run cannot end on
+		// them, so the "\s+(?!\S)" alternative takes the first and the space before the digit
+		// run is the next chunk's leading character.
+		{"a\n  12345b", []string{"a", "\n", " ", " ", "123", "45", "b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("llama-bpe preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestPunctuationLetterRunHasNoContraction covers the families whose first alternative is
+// "[!..~][A-Za-z]+" and whose expression has no contraction alternative at all.
+//
+// The engine applies the contraction rule unconditionally unless a family opts out, so
+// deepseek-v3 read "'ta" as ["'t", "a"]. Its expression has no "'s|'t|..." alternative: the
+// apostrophe is the punctuation character of the first alternative and the letters after it
+// follow, which is one chunk.
+func TestPunctuationLetterRunHasNoContraction(t *testing.T) {
+	for _, fam := range []preType{preDeepseek3, preAfMoE} {
+		tok := &Tokenizer{pre: fam}
+		if got, want := tok.preSplit("'ta"), []string{"'ta"}; !sameStrings(got, want) {
+			t.Errorf("pre=%v preSplit(%q) = %q, want %q", fam, "'ta", got, want)
+		}
+		// A contraction the expression *does* cover is still cut, because the apostrophe
+		// and the letters after it are the punctuation-letter run.
+		if got, want := tok.preSplit("don't"), []string{"don", "'t"}; !sameStrings(got, want) {
+			t.Errorf("pre=%v preSplit(%q) = %q, want %q", fam, "don't", got, want)
+		}
+	}
+	// A family with the alternative must still produce the clitic chunk.
+	llama := &Tokenizer{pre: preLlama3}
+	if got, want := llama.preSplit("'ta"), []string{"'t", "a"}; !sameStrings(got, want) {
+		t.Errorf("llama-bpe preSplit(%q) = %q, want %q", "'ta", got, want)
 	}
 }

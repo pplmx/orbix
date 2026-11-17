@@ -52,6 +52,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.deepseekLLM {
 		return splitDeepseekLLM(text)
 	}
+	if fam.newlineRuns {
+		return splitNewlineRuns(text)
+	}
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
@@ -523,6 +526,10 @@ type preRule struct {
 	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
 	// alternative, so a word and its "'s" stay one chunk.
 	contractionSuffix bool
+	// newlineRuns marks "[^\n]+|[\n]+": the text alternates between runs that are newlines
+	// and runs that are not, and nothing else separates a chunk. It is the only rule whose
+	// chunks can contain a space, a comma and a word at once.
+	newlineRuns bool
 	// deepseekLLM marks the five-expression rule whose letter class is spelled out as 87
 	// ranges rather than written as \p{L}. The shape matches deepseek-coder's, but none of
 	// the terms do, so it has its own splitter.
@@ -594,6 +601,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preMMBert:
+		return preRule{newlineRuns: true}, true
 	case preDeepseekLLM:
 		return preRule{deepseekLLM: true}, true
 	case preGPT4O:
@@ -1196,4 +1205,22 @@ func splitDeepseekLLM(text string) []string {
 		pieces = next
 	}
 	return pieces
+}
+
+// splitNewlineRuns applies "[^\n]+|[\n]+": alternating runs of newlines and of everything
+// else. A run of newlines is one chunk however long it is, and a run of anything else is one
+// chunk however much punctuation or whitespace it holds -- "Hello, world!" is a single chunk
+// under this rule.
+func splitNewlineRuns(text string) []string {
+	var out []string
+	i := 0
+	for i < len(text) {
+		newline := text[i] == '\n'
+		start := i
+		for i < len(text) && (text[i] == '\n') == newline {
+			i++
+		}
+		out = append(out, text[start:i])
+	}
+	return out
 }

@@ -138,6 +138,10 @@ const (
 	// written \p{L}, the punctuation is a range list rather than \p{P}, and numbers group as
 	// a run rather than singly.
 	preDeepseekLLM
+	// preMMBert is "[^\n]+|[\n]+": the text is cut into runs, separated only by whether the
+	// run is newlines or not. Everything else -- spaces, punctuation, words -- stays in one
+	// chunk, which is why this family splits so much less than the others.
+	preMMBert
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -416,6 +420,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preWhitespace
 		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
+		case "mmbert":
+			t.pre = preMMBert
 		case "deepseek-llm":
 			t.pre = preDeepseekLLM
 		case "deepseek-coder":

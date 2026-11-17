@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 66
+		wantImplemented = 67
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1089,5 +1089,51 @@ func TestDeepseekLLMRangesAreSorted(t *testing.T) {
 		if !isDeepseekLLMLetter(r) && !isDeepseekLLMPunct(r) {
 			t.Errorf("%U is in neither class but was expected to be", r)
 		}
+	}
+}
+
+// TestMMBertChunks pins the mmbert rule, which splits less than any other family: the only
+// boundary is between newlines and everything else, so a whole sentence with punctuation and
+// spaces is one chunk.
+//
+// The expected splits come from running the expression through Python's regex module and
+// keeping the gaps, which is the same independent check the other families were held to.
+func TestMMBertChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preMMBert}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Nothing but a newline separates a chunk, so punctuation and spaces stay inside.
+		{"Hello, world!", []string{"Hello, world!"}},
+		{" hi 5. ", []string{" hi 5. "}},
+		{"中文测试", []string{"中文测试"}},
+		// A run of newlines is one chunk however long it is.
+		{"a\nb", []string{"a", "\n", "b"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"\n\n\n", []string{"\n\n\n"}},
+		{"x", []string{"x"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// And the name has to reach that rule through a file, which is how a model gets here.
+	path := gguftest.Model{Pre: "mmbert", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("mmbert is not reported as implemented")
+	}
+	if got := real.preSplit("Hello, world!"); !sameStrings(got, []string{"Hello, world!"}) {
+		t.Errorf("mmbert preSplit(\"Hello, world!\") = %q, want one chunk", got)
 	}
 }

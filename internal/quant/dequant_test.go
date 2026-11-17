@@ -1116,3 +1116,55 @@ func TestDecodeQ3_K(t *testing.T) {
 		}
 	}
 }
+
+// TestIQ4NLCodebookMatchesGGML pins the 16 table values against ggml's own definition.
+//
+// The other IQ4_NL tests compare against kValuesIQ4NL itself, which is the right way to
+// check the indexing -- but it cannot catch the table being transcribed wrongly, because
+// the expectation would be wrong in the same way. That failure is silent: a wrong codebook
+// still decodes to values of plausible magnitude, and every existing assertion would pass.
+//
+// These sixteen numbers are copied from ggml-common.h (GGML_TABLE_BEGIN(int8_t,
+// kvalues_iq4nl, 16)) and deliberately not written by referring to the Go table, so the two
+// have to agree independently.
+func TestIQ4NLCodebookMatchesGGML(t *testing.T) {
+	want := [16]int8{
+		-127, -104, -83, -65, -49, -35, -22, -10,
+		1, 13, 25, 38, 53, 69, 89, 113,
+	}
+	for i := range want {
+		if got := kValuesIQ4NL[i]; got != want[i] {
+			t.Errorf("kValuesIQ4NL[%d] = %d, want %d", i, got, want[i])
+		}
+	}
+
+	// The values are strictly increasing, which is what makes the table a quantizer's
+	// levels rather than an arbitrary lookup: a decoder cannot detect a mis-ordered table
+	// any more than a wrong one, so the ordering is asserted here.
+	for i := 1; i < len(want); i++ {
+		if want[i] <= want[i-1] {
+			t.Errorf("codebook is not increasing at %d: %d then %d", i, want[i-1], want[i])
+		}
+	}
+
+	// Decode one block whose nibbles are the identity, so each value lands where the
+	// table says it should: this checks the table against the decoder's arithmetic rather
+	// than only against itself.
+	src := make([]byte, 18)
+	src[0], src[1] = 0x00, 0x3C // f16 1.0, so d == 1 and the values pass through
+	for j := range 16 {
+		src[2+j] = byte(j) | byte(j)<<4
+	}
+	dst := make([]float32, 32)
+	if err := Decode(gguf.IQ4_NL, src, dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	for j := range 16 {
+		if got, expected := dst[j], float32(want[j]); got != expected {
+			t.Errorf("low nibble %d decoded to %v, want %v", j, got, expected)
+		}
+		if got, expected := dst[j+16], float32(want[j]); got != expected {
+			t.Errorf("high nibble %d decoded to %v, want %v", j, got, expected)
+		}
+	}
+}

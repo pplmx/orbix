@@ -118,8 +118,10 @@ func TestRenderFor(t *testing.T) {
 // TestRenderLoopVariables covers the loop fields templates read.
 func TestRenderLoopVariables(t *testing.T) {
 	msgs := []Message{{Role: "a", Content: "1"}, {Role: "b", Content: "2"}}
+	// A boolean prints as Python's repr does -- "True", not "true" -- which is what Jinja2
+	// produces and what the reference implementation was checked against.
 	src := `{% for m in messages %}{{ loop.index0 }}/{{ loop.index }}/{{ loop.first }}/{{ loop.last }}/{{ loop.length }} {% endfor %}`
-	want := "0/1/true/false/2 1/2/false/true/2 "
+	want := "0/1/True/False/2 1/2/False/True/2 "
 	if got := render(t, src, msgs, Inputs{}); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -263,7 +265,9 @@ func TestRenderToJSONShape(t *testing.T) {
 	out := render(t, `{{ tools | tojson }}`, nil, Inputs{Tools: []Tool{
 		{Name: "get", Description: "fetch", Parameters: `{"type":"object"}`},
 	}})
-	want := `[{"function":{"description":"fetch","name":"get","parameters":{"type":"object"}},"type":"function"}]`
+	// Jinja2's tojson is Python's json.dumps with sort_keys=True, so keys are sorted and
+	// the default separators are ", " and ": ". The spacing is part of the prompt text.
+	want := `[{"function": {"description": "fetch", "name": "get", "parameters": {"type":"object"}}, "type": "function"}]`
 	if out != want {
 		t.Errorf("got  %s\nwant %s", out, want)
 	}
@@ -695,5 +699,87 @@ func TestQwen2TemplateRendersAConversation(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestBooleanPrintMatchesJinja2 pins how a bare boolean reaches the prompt.
+//
+// Jinja2 prints a boolean with Python's repr, so "{{ loop.first }}" gives "True" while
+// "{{ loop.first|tojson }}" gives "true". Both spellings are observable in the prompt, so a
+// template that writes one and gets the other hands the model text it was not trained on.
+// The expected strings are Jinja2's own output.
+func TestBooleanPrintMatchesJinja2(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "yo"}}
+	cases := []struct{ src, want string }{
+		{`{% for m in messages %}{{ loop.first }}{% endfor %}`, "TrueFalse"},
+		{`{% for m in messages %}{{ loop.last }}{% endfor %}`, "FalseTrue"},
+		{`{% for m in messages %}{{ loop.first|tojson }}{% endfor %}`, "truefalse"},
+		{`{% for m in messages %}{% if loop.first %}yes{% else %}no{% endif %}{% endfor %}`, "yesno"},
+	}
+	for _, c := range cases {
+		if got := render(t, c.src, msgs, Inputs{}); got != c.want {
+			t.Errorf("%q = %q, want %q", c.src, got, c.want)
+		}
+	}
+}
+
+// TestToJSONMatchesJinja2 pins the exact bytes tojson produces.
+//
+// Jinja2's tojson is Python's json.dumps with sort_keys=True and the default separators
+// (", " and ": "), so keys are sorted and the output is not compact. The spacing becomes the
+// prompt text: a tool call written "{"name": "get"}" is not the same string as
+// "{"name":"get"}", and the model was trained on whatever its template produced. The
+// expected strings are Jinja2's own output.
+func TestToJSONMatchesJinja2(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	cases := []struct{ src, want string }{
+		{`{{ 'a' | tojson }}`, `"a"`},
+		{`{{ messages[0] | tojson }}`, `{"content": "hi", "role": "user"}`},
+		{`{{ messages | tojson }}`, `[{"content": "hi", "role": "user"}]`},
+		// The message mapping's keys are sorted, not in insertion order: a struct's field
+		// order would otherwise leak into the prompt.
+		{`{{ messages[0] | tojson }}`, `{"content": "hi", "role": "user"}`},
+		// An indent spreads the value over lines, as json.dumps does.
+		{`{{ messages | tojson(indent=4) }}`,
+			"[\n    {\n        \"content\": \"hi\",\n        \"role\": \"user\"\n    }\n]"},
+		{`{{ messages | tojson(indent=2) }}`,
+			"[\n  {\n    \"content\": \"hi\",\n    \"role\": \"user\"\n  }\n]"},
+	}
+	for _, c := range cases {
+		if got := render(t, c.src, msgs, Inputs{}); got != c.want {
+			t.Errorf("%q = %q, want %q", c.src, got, c.want)
+		}
+	}
+	// An empty sequence stays on one line, as json.dumps does -- with an indent or without.
+	for _, src := range []string{`{{ messages | tojson(indent=4) }}`, `{{ messages | tojson }}`} {
+		if got := render(t, src, nil, Inputs{}); got != "[]" {
+			t.Errorf("%q with no messages = %q, want %q", src, got, "[]")
+		}
+	}
+}
+
+// TestPrintingAContainerIsAnError covers the shape this subset cannot print.
+//
+// Jinja2 prints a dict as Python's repr, which has no use in a chat prompt and is not
+// implemented here. Rendering it as the empty string would be the quiet half-rendering the
+// package exists to prevent, so it is reported instead, and the caller falls back to a
+// neutral transcript.
+func TestPrintingAContainerIsAnError(t *testing.T) {
+	for _, src := range []string{
+		`{{ messages }}`,
+		`{{ messages[0] }}`,
+		`{% for m in messages %}{{ m }}{% endfor %}`,
+	} {
+		tmpl, err := Parse(src)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", src, err)
+		}
+		if out, err := tmpl.Render([]Message{{Role: "user", Content: "hi"}}, Inputs{}); err == nil {
+			t.Errorf("%q rendered %q, want an error naming the unsupported shape", src, out)
+		}
+	}
+	// The fields a template actually reads are still printable.
+	if got := render(t, `{{ messages[0].role }}`, []Message{{Role: "user"}}, Inputs{}); got != "user" {
+		t.Errorf("role = %q, want %q", got, "user")
 	}
 }

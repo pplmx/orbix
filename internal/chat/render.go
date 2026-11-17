@@ -137,14 +137,67 @@ func rawJSONValue(s string) value {
 }
 
 // toJSON renders a value as JSON, which is what a template's tojson filter produces.
+//
+// The output matches Jinja2's, because that is what a checkpoint's template was written and
+// tested against: Python's json.dumps with sort_keys=True, and the default separators
+// (", " and ": ") unless an indent was asked for. The spacing is part of the prompt text, so
+// compact JSON here would hand the model a tool call spelled differently from the one it was
+// trained on -- harmless-looking, and a difference the model may well act on.
 func toJSON(v value) string {
 	var b strings.Builder
-	writeJSON(&b, v)
+	writeJSON(&b, v, jsonStyle{})
 	return b.String()
 }
 
-// writeJSON writes one value as JSON.
-func writeJSON(b *strings.Builder, v value) {
+// toJSONIndent renders a value as JSON with an indent of n spaces per level, which is what
+// "tojson(indent=n)" produces. A non-positive indent means the default style.
+func toJSONIndent(v value, indent int) string {
+	var b strings.Builder
+	writeJSON(&b, v, jsonStyle{indent: indent})
+	return b.String()
+}
+
+// jsonStyle carries the formatting choices Python's json.dumps exposes.
+type jsonStyle struct {
+	// indent is spaces per nesting level; 0 means compact with default separators.
+	indent int
+}
+
+// level renders the indentation for a depth, or the empty string when compact.
+func (st jsonStyle) level(depth int) string {
+	if st.indent <= 0 {
+		return ""
+	}
+	return "\n" + strings.Repeat(" ", st.indent*depth)
+}
+
+// itemSep is what goes between sequence items.
+func (st jsonStyle) itemSep(depth int) string {
+	if st.indent > 0 {
+		return "," + st.level(depth)
+	}
+	return ", "
+}
+
+// keySep is what goes between a key and its value, which Python writes the same way in both
+// styles.
+func (st jsonStyle) keySep() string { return ": " }
+
+// closeSep is what goes before the closing bracket of a non-empty container.
+func (st jsonStyle) closeSep(depth int) string {
+	if st.indent > 0 {
+		return st.level(depth)
+	}
+	return ""
+}
+
+// writeJSON writes one value as JSON at the given depth.
+func writeJSON(b *strings.Builder, v value, st jsonStyle) {
+	writeJSONDepth(b, v, st, 0)
+}
+
+// writeJSONDepth writes one value as JSON, tracking nesting so indentation is right.
+func writeJSONDepth(b *strings.Builder, v value, st jsonStyle, depth int) {
 	switch {
 	case v.isRawJSON:
 		// Already JSON; emitting it quoted would double-encode the schema.
@@ -158,27 +211,37 @@ func writeJSON(b *strings.Builder, v value) {
 		for k := range v.fields {
 			keys = append(keys, k)
 		}
-		// Sorted so the output is stable: a prompt that changed order between runs
-		// would change the tokens.
+		// Sorted, as Python's sort_keys=True does: a prompt whose key order changed between
+		// runs would change the tokens.
 		sortStrings(keys)
 		b.WriteByte('{')
 		for i, k := range keys {
 			if i > 0 {
-				b.WriteByte(',')
+				b.WriteString(st.itemSep(depth + 1))
+			} else {
+				b.WriteString(st.level(depth + 1))
 			}
 			writeJSONString(b, k)
-			b.WriteByte(':')
-			writeJSON(b, v.fields[k])
+			b.WriteString(st.keySep())
+			writeJSONDepth(b, v.fields[k], st, depth+1)
 		}
+		b.WriteString(st.closeSep(depth))
 		b.WriteByte('}')
 	case v.isList:
+		if len(v.list) == 0 {
+			b.WriteString("[]")
+			return
+		}
 		b.WriteByte('[')
 		for i, item := range v.list {
 			if i > 0 {
-				b.WriteByte(',')
+				b.WriteString(st.itemSep(depth + 1))
+			} else {
+				b.WriteString(st.level(depth + 1))
 			}
-			writeJSON(b, item)
+			writeJSONDepth(b, item, st, depth+1)
 		}
+		b.WriteString(st.closeSep(depth))
 		b.WriteByte(']')
 	case v.isBool:
 		b.WriteString(v.text)

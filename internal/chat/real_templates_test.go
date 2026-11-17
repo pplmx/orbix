@@ -158,37 +158,51 @@ func TestLlama32TemplateWithTools(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 
-	// The tool list is a line of JSON, which is what the template's tojson produces. Finding
-	// and parsing it checks the shape rather than the presence of a substring: a missing
-	// brace or a doubled key would still contain the tool's name.
-	var found bool
-	for _, line := range strings.Split(got, "\n") {
-		if !strings.HasPrefix(line, `{"function":`) {
-			continue
+	// The tool list is JSON produced by the template's tojson(indent=4), so it is a
+	// multi-line block. Finding and parsing it checks the shape rather than the presence of
+	// a substring: a missing brace or a doubled key would still contain the tool's name.
+	start := strings.Index(got, `{
+    "function": {`)
+	if start < 0 {
+		t.Fatalf("no indented tool JSON block in the prompt:\n%s", got)
+	}
+	// The block ends at the closing brace that matches the opening one.
+	depth, end := 0, -1
+	for i := start; i < len(got); i++ {
+		switch got[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i + 1
+			}
 		}
-		found = true
-		var v struct {
-			Type     string `json:"type"`
-			Function struct {
-				Name        string          `json:"name"`
-				Description string          `json:"description"`
-				Parameters  json.RawMessage `json:"parameters"`
-			} `json:"function"`
-		}
-		if err := json.Unmarshal([]byte(line), &v); err != nil {
-			t.Fatalf("the tool line is not valid JSON: %v\n%s", err, line)
-		}
-		if v.Type != "function" || v.Function.Name != "get_weather" {
-			t.Errorf("tool JSON = %+v, want the function get_weather", v)
-		}
-		// parameters is passed through verbatim, so it must still be the caller's document
-		// and not a re-encoding that dropped a field.
-		if string(v.Function.Parameters) != params {
-			t.Errorf("parameters = %s, want %s", v.Function.Parameters, params)
+		if end >= 0 {
+			break
 		}
 	}
-	if !found {
-		t.Errorf("no tool JSON line in the prompt:\n%s", got)
+	if end < 0 {
+		t.Fatalf("the tool JSON block is not closed:\n%s", got[start:])
+	}
+	var v struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal([]byte(got[start:end]), &v); err != nil {
+		t.Fatalf("the tool block is not valid JSON: %v\n%s", err, got[start:end])
+	}
+	if v.Type != "function" || v.Function.Name != "get_weather" {
+		t.Errorf("tool JSON = %+v, want the function get_weather", v)
+	}
+	// parameters is passed through verbatim, so it must still be the caller's document
+	// and not a re-encoding that dropped a field.
+	if string(v.Function.Parameters) != params {
+		t.Errorf("parameters = %s, want %s", v.Function.Parameters, params)
 	}
 
 	// The no-tools guidance must not appear when tools were supplied.

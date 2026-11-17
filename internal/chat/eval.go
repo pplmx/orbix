@@ -41,6 +41,49 @@ func boolValue(b bool) value { return value{isBool: true, boolean: b, text: strc
 // listValue wraps a sequence.
 func listValue(items []value) value { return value{list: items, isList: true} }
 
+// print renders the value the way Jinja2 prints it: a bare boolean is "True" or "False".
+//
+// This differs from the JSON spelling in text, and the difference is observable. A template
+// that writes "{{ loop.first }}" gets "True", while "{{ loop.first|tojson }}" gets "true" --
+// Jinja2 uses Python's repr for the first and JSON for the second. The text field holds the
+// JSON spelling because tojson and the type comparisons read it; output goes through here.
+func (v value) print() string {
+	if v.isBool && v.boolean {
+		return "True"
+	}
+	if v.isBool {
+		return "False"
+	}
+	return v.text
+}
+
+// printErr renders a value to output, reporting the shapes this package cannot print rather
+// than emitting nothing for them.
+//
+// A dict prints in Jinja2 as Python's repr -- "{'role': 'user'}" -- which has no use in a
+// chat prompt and is not implemented here. Emitting the empty string instead would be the
+// quiet half-rendering the package exists to avoid, so it is an error: a template that does
+// this is not one this subset supports, and the caller's fallback is better than a prompt
+// with a hole in it.
+func (v value) printErr() (string, error) {
+	if v.isMap || v.isList {
+		return "", fmt.Errorf("chat: cannot print a %s directly; a template that does is "+
+			"outside the supported subset", v.shapeName())
+	}
+	return v.print(), nil
+}
+
+// shapeName names a value's container shape for an error message.
+func (v value) shapeName() string {
+	switch {
+	case v.isMap:
+		return "mapping"
+	case v.isList:
+		return "sequence"
+	}
+	return "value"
+}
+
 // truthy reports whether a value counts as true in a condition.
 //
 // Jinja's rule: an empty string, an empty list, and a false boolean are false; a
@@ -145,7 +188,11 @@ func (r *renderer) renderNode(n node, sc *scope) error {
 		if err != nil {
 			return err
 		}
-		r.buf.WriteString(v.text)
+		out, err := v.printErr()
+		if err != nil {
+			return err
+		}
+		r.buf.WriteString(out)
 		return nil
 	case setNode:
 		v, err := evalExpr(t.expr, sc)
@@ -313,7 +360,7 @@ func evalExpr(e expr, sc *scope) (value, error) {
 			if err != nil {
 				return value{}, err
 			}
-			b.WriteString(v.text)
+			b.WriteString(v.print())
 		}
 		return strValue(b.String()), nil
 	case arithExpr:
@@ -406,6 +453,34 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 	case "trim":
 		return strValue(strings.TrimSpace(v.text)), nil
 	case "tojson":
+		// "tojson(indent=n)" asks for indented JSON; with no argument Python's json.dumps
+		// default applies. The indent is a formatting choice the template made, so it has
+		// to be honored -- the tool call is part of the prompt text.
+		if f.kwargs != nil {
+			if ie, ok := f.kwargs["indent"]; ok {
+				iv, err := evalExpr(ie, sc)
+				if err != nil {
+					return value{}, err
+				}
+				n, convErr := strconv.Atoi(iv.print())
+				if convErr != nil {
+					return value{}, fmt.Errorf("chat: tojson indent %q is not a number", iv.print())
+				}
+				return strValue(toJSONIndent(v, n)), nil
+			}
+		}
+		if f.arg != nil {
+			av, err := evalExpr(f.arg, sc)
+			if err != nil {
+				return value{}, err
+			}
+			// Jinja2's tojson takes the indent positionally too.
+			n, convErr := strconv.Atoi(av.print())
+			if convErr != nil {
+				return value{}, fmt.Errorf("chat: tojson indent %q is not a number", av.print())
+			}
+			return strValue(toJSONIndent(v, n)), nil
+		}
 		return strValue(toJSON(v)), nil
 	case "length":
 		if v.isList {

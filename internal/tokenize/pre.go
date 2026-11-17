@@ -541,6 +541,10 @@ type preRule struct {
 	// The leading-character alternative does not cover this case -- it excludes punctuation --
 	// which is why the rule has to exist separately rather than falling out of it.
 	punctLetterRun bool
+	// noContraction removes the expression's leading contraction alternative. ufakzeka is the
+	// only family without it, and the removal is what keeps a Turkish apostrophe suffix
+	// whole: "'da" is one chunk there and "'d" plus "a" with the alternative present.
+	noContraction bool
 	// contractionSuffix is whether the letter alternatives may absorb a clitic, which is
 	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
 	// alternative, so a word and its "'s" stay one chunk.
@@ -685,6 +689,16 @@ func preFamilyOf(p preType) (preRule, bool) {
 			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
 			preDigits: 3, cjk: true, contractionSuffix: true,
 		}, true
+	case preUfakzeka:
+		// "[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+		//
+		// qwen2's shape with the contraction alternatives removed. That removal is the whole
+		// point: without it the leading character takes the apostrophe and the suffix is one
+		// run, so "İstanbul'da" keeps "'da" rather than splitting at "'d".
+		return preRule{
+			digits: 1, lead: leadAnyNonLetter,
+			newlinesAfterPunct: true, newlineChunk: true, noContraction: true,
+		}, true
 	case preViking:
 		// The first expression is BLOOM's verbatim, so the stop set is the same string; the
 		// second cuts every digit out on its own.
@@ -735,8 +749,13 @@ func preFamilyOf(p preType) (preRule, bool) {
 // The alternatives are tried in the order the expression lists them, because that order is
 // the rule: a contraction wins over a letter run, which is why "'s" is its own chunk.
 func chunkLen(s string, fam preRule) int {
-	if n := qwen2ContractionLen(s); n > 0 {
-		return n
+	// The contraction alternative is the expression's first, so it is tried first -- but only
+	// for families that have it. ufakzeka is qwen2 with that alternative removed precisely so
+	// an apostrophe suffix stays whole.
+	if !fam.noContraction {
+		if n := qwen2ContractionLen(s); n > 0 {
+			return n
+		}
 	}
 	// [!-/:-@\\[-`{-~][A-Za-z]+ -- one ASCII punctuation character followed by ASCII
 	// letters. It comes first, so it wins over the letter alternative's own prefix handling.

@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 85
+		wantImplemented = 86
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1578,5 +1578,61 @@ func TestFlintChunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("flint is not reported as implemented")
+	}
+}
+
+// TestUfakzekaChunks pins the ufakzeka rule: qwen2's expression with the contraction
+// alternative removed.
+//
+// That removal is the whole reason the family exists. llama.cpp's comment says it keeps
+// Turkish apostrophe suffixes attached, and it does so through the leading character: with no
+// contraction alternative to match first, "'da" is taken as an apostrophe plus a letter run,
+// giving ["İstanbul", "'da"]. Every family whose expression carries the alternative splits it
+// at "'d" instead.
+func TestUfakzekaChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preUfakzeka}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The discriminating input: the suffix stays whole.
+		{"İstanbul'da", []string{"İstanbul", "'da"}},
+		// English contractions still split, because the leading character takes the
+		// apostrophe and the letters after it form the run.
+		{"don't", []string{"don", "'t"}},
+		{"can't", []string{"can", "'t"}},
+		{"we're", []string{"we", "'re"}},
+		{"I'll", []string{"I", "'ll"}},
+		// The rest is qwen2's: single digits, a punctuation prefix, newline runs, CJK.
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"a.b", []string{"a", ".b"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// bailingmoe carries the contraction alternative, so it splits the same suffix at "'d".
+	bm := &Tokenizer{pre: preBailingMoE}
+	if got := bm.preSplit("İstanbul'da"); !sameStrings(got, []string{"İstanbul", "'d", "a"}) {
+		t.Errorf("bailingmoe preSplit(\"İstanbul'da\") = %q, want the suffix split at \"'d\"", got)
+	}
+
+	path := gguftest.Model{Pre: "ufakzeka", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("ufakzeka is not reported as implemented")
 	}
 }

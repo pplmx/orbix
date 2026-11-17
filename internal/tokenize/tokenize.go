@@ -169,6 +169,10 @@ const (
 	// preFlint cuts digit groups and the CJK block first, then applies a case-splitting letter
 	// rule, then a punctuation run named by category.
 	preFlint
+	// preUfakzeka is qwen2's expression without the contraction alternative, so a Turkish
+	// apostrophe suffix stays whole: "İstanbul'da" is ["İstanbul", "'da"] where bailingmoe's
+	// contraction group matches "'d" and leaves "a" behind.
+	preUfakzeka
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -464,6 +468,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// laguna runs bailingmoe's expression after a newline pass. The newline pass separates
 		// runs of newlines from everything else, which cannot change what the main rule does
 		// to a chunk that already contains no newline.
+		case "ufakzeka":
+			t.pre = preUfakzeka
 		case "flint":
 			t.pre = preFlint
 		case "laguna":

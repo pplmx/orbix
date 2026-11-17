@@ -793,3 +793,77 @@ func TestShutdownIsIdempotent(t *testing.T) {
 		newSrv().Shutdown()
 	})
 }
+
+// TestResponseObjectAndIDFollowOpenAI checks the two envelope fields a client reads before
+// it reads any text, across all four endpoint and streaming combinations.
+//
+// They are easy to get subtly wrong and impossible to notice by testing text: the body is
+// right, the model answers correctly, and only a client that switches on "object" or logs
+// the id sees the difference. OpenAI's own streaming example for a completion carries
+// object="text_completion", the same as the non-streaming one -- the chat endpoint is the
+// one that changes to "chat.completion.chunk" when it streams.
+func TestResponseObjectAndIDFollowOpenAI(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	cases := []struct {
+		name       string
+		path       string
+		body       string
+		stream     bool
+		wantObject string
+		wantPrefix string
+	}{
+		{"completion", "/v1/completions",
+			`{"prompt": "Once", "max_tokens": 2}`, false, "text_completion", "cmpl-"},
+		{"completion streaming", "/v1/completions",
+			`{"prompt": "Once", "max_tokens": 2, "stream": true}`, true, "text_completion", "cmpl-"},
+		{"chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}`, false,
+			"chat.completion", "chatcmpl-"},
+		{"chat streaming", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "stream": true}`, true,
+			"chat.completion.chunk", "chatcmpl-"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, h, c.path, c.body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			var envelope struct {
+				ID     string `json:"id"`
+				Object string `json:"object"`
+			}
+			if c.stream {
+				// The first SSE frame carries the envelope.
+				var first string
+				sc := bufio.NewScanner(resp.Body)
+				for sc.Scan() {
+					if p := strings.TrimPrefix(sc.Text(), "data: "); p != sc.Text() && p != "[DONE]" {
+						first = p
+						break
+					}
+				}
+				_ = resp.Body.Close()
+				if first == "" {
+					t.Fatal("no SSE frame")
+				}
+				if err := json.Unmarshal([]byte(first), &envelope); err != nil {
+					t.Fatalf("frame %q: %v", first, err)
+				}
+			} else {
+				if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				_ = resp.Body.Close()
+			}
+			if envelope.Object != c.wantObject {
+				t.Errorf("object = %q, want %q", envelope.Object, c.wantObject)
+			}
+			if !strings.HasPrefix(envelope.ID, c.wantPrefix) {
+				t.Errorf("id = %q, want the %q prefix", envelope.ID, c.wantPrefix)
+			}
+		})
+	}
+}

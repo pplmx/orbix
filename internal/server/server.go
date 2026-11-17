@@ -411,7 +411,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 	s.requests.Add(1)
 
-	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	// OpenAI prefixes a completion id with "cmpl-" and a chat completion with "chatcmpl-".
+	// The prefix is cosmetic to a parser but visible to anyone reading a log, and the wrong
+	// one makes a completion look like a chat response.
+	prefix := "cmpl-"
+	if p.chat {
+		prefix = "chatcmpl-"
+	}
+	id := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
 	if p.stream {
 		s.streamResponse(w, r, ch, id, p.chat)
 		return
@@ -490,7 +497,11 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	h.Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	object := "text_completion.delta"
+	// OpenAI's spec is explicit that a completion is "always" text_completion, and its own
+	// streaming example carries the same value as the non-streaming one -- the two endpoints
+	// differ here, since chat streams object="chat.completion.chunk". A client that switches
+	// on this field to tell a delta from a whole body looks for the chunk name it knows.
+	object := "text_completion"
 	if chat {
 		object = "chat.completion.chunk"
 	}

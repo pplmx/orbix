@@ -149,6 +149,11 @@ const (
 	// the right into threes, so a remainder stays at the left. "1234" is ["1", "234"], not
 	// ["123", "4"].
 	preSuperBPE
+	// preSoprano cuts each digit out first, then groups the rest into three mutually
+	// exclusive classes: whitespace, word characters (letters, digits, underscore), and
+	// everything else. It is the only family whose main expression is a partition rather than
+	// a run with a leading character.
+	preSoprano
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -427,6 +432,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preWhitespace
 		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
+		case "soprano":
+			t.pre = preSoprano
 		case "superbpe":
 			t.pre = preSuperBPE
 		case "viking":

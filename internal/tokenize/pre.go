@@ -62,6 +62,12 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.digitsFromRight {
 		return splitDigitsFromRight(text)
 	}
+	if fam.partition {
+		// The digit cut runs first, as llama.cpp applies the expressions in order: this
+		// family's first expression is a bare \p{N}, so "a1b2" is cut at the digits before the
+		// partition groups what is left.
+		return splitDigitGroups(splitPartition(text), 1)
+	}
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
@@ -533,6 +539,10 @@ type preRule struct {
 	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
 	// alternative, so a word and its "'s" stay one chunk.
 	contractionSuffix bool
+	// partition marks a main rule that is three disjoint classes -- whitespace, word
+	// characters, and the rest -- rather than a run with a leading character. Every chunk is
+	// one class, so "Hi, there" is ["Hi", ",", " ", "there"] with no leading-character pass.
+	partition bool
 	// digitsFromRight is whether a digit run is cut into threes counting from its end, so
 	// the remainder -- if any -- is the leftmost chunk. The superbpe lookahead asserts a
 	// multiple of three digits remain, which puts the boundary there.
@@ -616,6 +626,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preSoprano:
+		return preRule{partition: true, preDigits: 1}, true
 	case preSuperBPE:
 		return preRule{digitsFromRight: true}, true
 	case preViking:
@@ -1286,6 +1298,40 @@ func splitDigitsFromRight(text string) []string {
 			out = append(out, text[offs[k]:offs[k+3]])
 		}
 		i = j
+	}
+	return out
+}
+
+// splitPartition applies a rule whose main expression is three disjoint classes: whitespace,
+// word characters, and everything else. Consecutive characters of the same class form one
+// chunk, and no class takes a leading character from another -- which is what separates this
+// shape from the run-with-a-prefix rules most families use.
+func splitPartition(text string) []string {
+	kind := func(r rune) int {
+		switch {
+		case unicode.IsSpace(r):
+			return 0
+		case unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_':
+			return 1
+		default:
+			return 2
+		}
+	}
+	var out []string
+	i := 0
+	for i < len(text) {
+		r, n := utf8.DecodeRuneInString(text[i:])
+		k := kind(r)
+		start := i
+		i += n
+		for i < len(text) {
+			r2, n2 := utf8.DecodeRuneInString(text[i:])
+			if kind(r2) != k {
+				break
+			}
+			i += n2
+		}
+		out = append(out, text[start:i])
 	}
 	return out
 }

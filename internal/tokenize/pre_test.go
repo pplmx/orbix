@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 69
+		wantImplemented = 70
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1237,5 +1237,54 @@ func TestSuperBPEChunks(t *testing.T) {
 	}
 	if got := real.preSplit("1234"); !sameStrings(got, []string{"1", "234"}) {
 		t.Errorf("superbpe preSplit(\"1234\") = %q, want the remainder first", got)
+	}
+}
+
+// TestSopranoChunks pins the soprano rule, whose main expression is a partition.
+//
+// Every other family's main expression is a run with an optional leading character, so a
+// space joins the word after it. Here the classes are disjoint and no class takes a character
+// from another, which is why "Hello, world!" has a separate " " chunk and why "x_y" stays
+// whole -- the underscore is a word character.
+//
+// The digit expression runs first, so digits are cut out before the partition sees them.
+func TestSopranoChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preSoprano}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Whitespace is its own class, so the space is a chunk rather than a prefix.
+		{"Hello, world!", []string{"Hello", ",", " ", "world", "!"}},
+		{"hi there", []string{"hi", " ", "there"}},
+		{"  two  ", []string{"  ", "two", "  "}},
+		// Underscore is a word character and joins the run.
+		{"x_y z", []string{"x_y", " ", "z"}},
+		// Digits are cut one at a time before the partition runs.
+		{"a1b2", []string{"a", "1", "b", "2"}},
+		{"123456", []string{"1", "2", "3", "4", "5", "6"}},
+		{"a-b.c", []string{"a", "-", "b", ".", "c"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	path := gguftest.Model{Pre: "soprano", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("soprano is not reported as implemented")
+	}
+	if got := real.preSplit("hi there"); !sameStrings(got, []string{"hi", " ", "there"}) {
+		t.Errorf("soprano preSplit(\"hi there\") = %q, want the space on its own", got)
 	}
 }

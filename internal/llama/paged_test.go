@@ -251,3 +251,103 @@ func TestBlockPoolSizes(t *testing.T) {
 		t.Errorf("default BlockSize = %d, want %d", got, defaultBlockSize)
 	}
 }
+
+// The prefix index holds blocks speculatively -- some future request might match them --
+// while a running sequence holds the blocks it adopted. The pool distinguishes the two by
+// reference count, and the property that matters is that eviction, which is free to drop
+// the speculative claim, can never drop the one a cache still holds. Getting this wrong
+// would not fail a request: it would hand a block to a new sequence while an old one was
+// still reading it, which is silent corruption rather than an error.
+
+// TestEvictionKeepsAdoptedBlocks checks a block survives the index giving it up.
+func TestEvictionKeepsAdoptedBlocks(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 6, BlockSize: 4})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+
+	prompt := append([]int32{1}, fixtureTokens(cfg, 8)...)
+	c := pool.New()
+	if _, err := m.PrefillWithPrefix(c, prompt, 0); err != nil {
+		t.Fatalf("PrefillWithPrefix: %v", err)
+	}
+	// Reset keeps the blocks alive: the index still names them.
+	if err := c.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	a := pool.New()
+	n, adopted := pool.index.Match(prompt)
+	if n == 0 || len(adopted) == 0 {
+		t.Fatal("the remembered prefix did not match")
+	}
+	if err := a.adopt(adopted); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+
+	// Give up every speculative claim.
+	for pool.index.evictOne() {
+	}
+	for _, id := range adopted {
+		if pool.RefCount(id) < 1 {
+			t.Errorf("block %d has no reference although a cache still holds it", id)
+		}
+	}
+	if err := a.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if got := pool.Free(); got != pool.Blocks() {
+		t.Errorf("free = %d of %d after everything was released", got, pool.Blocks())
+	}
+}
+
+// TestPoolAccountingStaysBalanced runs the index and the pool together past their capacity
+// and checks the counts still add up, which catches a missed retain or release that a
+// single request would not.
+func TestPoolAccountingStaysBalanced(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 12, BlockSize: 4})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+
+	held := func() int {
+		n := 0
+		for id := range pool.Blocks() {
+			if pool.RefCount(int32(id)) > 0 {
+				n++
+			}
+		}
+		return n
+	}
+	for i := range 20 {
+		cache := pool.New()
+		prompt := append([]int32{1}, fixtureTokens(cfg, 8+i)...)
+		if _, err := m.PrefillWithPrefix(cache, prompt, 0); err != nil {
+			t.Fatalf("cycle %d: %v", i, err)
+		}
+		if got, want := pool.Free()+held(), pool.Blocks(); got != want {
+			t.Fatalf("cycle %d: %d free + %d held != %d blocks", i, pool.Free(), held(), pool.Blocks())
+		}
+		if err := cache.Reset(); err != nil {
+			t.Fatalf("cycle %d Reset: %v", i, err)
+		}
+		if got, want := pool.Free()+held(), pool.Blocks(); got != want {
+			t.Fatalf("cycle %d after Reset: %d free + %d held != %d blocks",
+				i, pool.Free(), held(), pool.Blocks())
+		}
+	}
+}

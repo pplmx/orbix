@@ -12,12 +12,12 @@
 // extensions, and by anything with a base-URL setting, which makes the layer
 // testable against real clients instead of against a bespoke protocol.
 //
-// One deliberate limitation: the chat template is not read from the GGUF file.
-// Models store their template as Jinja2 in a metadata string, and evaluating Jinja
-// in Go is a dependency this project will not take. The server instead renders a
-// documented, minimal template and says so in its README section, so a caller who
-// needs a model's real template knows to send a pre-rendered prompt through the
-// completions endpoint.
+// The chat format is the model's own. Models store it as Jinja2 in a metadata string
+// under tokenizer.chat_template, and internal/chat evaluates the subset published
+// templates actually use; a template outside that subset is rejected at parse time and
+// the endpoint falls back to a neutral transcript, which the server reports at startup.
+// A caller who wants exact control sends a pre-rendered prompt to the completions
+// endpoint, which passes text through verbatim.
 package server
 
 import (

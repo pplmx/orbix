@@ -23,25 +23,22 @@ import (
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	model := fs.String("model", "", "path to a GGUF model file (required)")
+	model := modelFlag(fs)
 	addr := fs.String("addr", ":8080", "address to listen on")
-	maxTokens := fs.Int("max-tokens", 256, "default generation budget per request")
+	maxTokens := maxTokensFlag(fs, 256)
 	maxActive := fs.Int("max-active", 8, "requests advanced per scheduling round")
-	workers := fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
-	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
-	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
+	cache := registerCacheFlags(fs, true)
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
 	otlpEndpoint := fs.String("otlp-endpoint", "", "OTLP/HTTP collector for traces, e.g. http://localhost:4318; empty disables tracing")
 	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --max-active: fifo, shortest, or fair")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *model == "" {
-		if v := os.Getenv("ORBIX_MODEL"); v != "" {
-			*model = v
-		} else {
-			return fmt.Errorf("serve: --model is required (or set ORBIX_MODEL)")
-		}
+	if err := resolveModel(fs, model); err != nil {
+		return err
+	}
+	if err := cache.validate("serve"); err != nil {
+		return err
 	}
 	if *maxActive < 1 {
 		return fmt.Errorf("serve: --max-active must be at least 1")
@@ -62,9 +59,9 @@ func cmdServe(args []string) error {
 	eng, err := engine.New(*model, engine.Options{
 		MaxActive:   *maxActive,
 		Policy:      schedPolicy,
-		Workers:     *workers,
-		BlockSize:   *blockSize,
-		Blocks:      *blocks,
+		Workers:     *cache.workers,
+		BlockSize:   *cache.blockSize,
+		Blocks:      *cache.blocks,
 		PrefixCache: *prefixCache,
 	})
 	if err != nil {

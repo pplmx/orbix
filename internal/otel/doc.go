@@ -1,12 +1,14 @@
 // Package otel exports traces in OpenTelemetry's wire format, without the SDK.
 //
-// Orbix has no module dependencies, and the tracing story is built to keep it that
-// way. The official OpenTelemetry SDK is a large tree of packages; what it produces is
-// a protobuf message posted to an HTTP endpoint, and the JSON encoding of that message
-// is a handful of structs. Writing those structs is the same choice this project makes
-// everywhere else -- a GGUF parser and a Prometheus exposition are in the tree for the
-// same reason -- and it keeps a reader able to follow a span from creation to wire
-// format inside one language.
+// The official OpenTelemetry SDK is a large tree of packages, and what it ultimately
+// produces is a protobuf message posted to an HTTP endpoint. The JSON encoding of that
+// message is a handful of structs, and this package writes them for the same reason the
+// GGUF parser and the Prometheus exposition are written here: a reader can follow a span
+// from creation to wire format inside one language.
+//
+// Dependencies are allowed in this project -- it is a judgement per dependency, not a
+// rule. This one was not taken because the surface it replaces is small enough to read,
+// not because importing anything is forbidden.
 //
 // The protocol details that are easy to get wrong, and that this package pins:
 //

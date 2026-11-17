@@ -13,11 +13,13 @@
 // by editor plugins rather than by a bespoke protocol, and it means the layer can
 // be checked against a client that was not written for it.
 //
-// One limitation is deliberate and documented rather than hidden: a GGUF file
-// stores its chat template as Jinja2, and this project will not take a Jinja
-// dependency to evaluate it. The chat endpoint therefore renders a neutral
-// "Role: content" transcript, and a caller who needs a model's exact template sends
-// that prompt to the completions endpoint, which passes text through verbatim.
+// The chat endpoint renders a checkpoint's own format: a GGUF file stores its chat
+// template as Jinja2 under tokenizer.chat_template, and internal/chat evaluates the
+// subset of it that published templates use. A template outside that subset is reported
+// at parse time and the endpoint falls back to a neutral "Role: content" transcript,
+// which the server prints at startup so the choice is visible. A caller who wants to
+// control the prompt exactly sends it to the completions endpoint, which passes text
+// through verbatim.
 //
 // The one thing this layer adds beyond transport is /metrics, because exporting the
 // engine's counters is a job that belongs to whoever owns the process lifetime. The

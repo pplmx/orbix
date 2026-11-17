@@ -16,8 +16,8 @@ import (
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	model := fs.String("model", "", "path to a GGUF model file (required)")
-	maxTokens := fs.Int("max-tokens", 128, "maximum tokens to generate")
+	model := modelFlag(fs)
+	maxTokens := maxTokensFlag(fs, 128)
 	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
 	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it")
 	seed := fs.Int64("seed", 0, "sampling seed; 0 uses the current time")
@@ -27,12 +27,8 @@ func cmdRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *model == "" {
-		if v := os.Getenv("ORBIX_MODEL"); v != "" {
-			*model = v
-		} else {
-			return fmt.Errorf("run: --model is required (or set ORBIX_MODEL)")
-		}
+	if err := resolveModel(fs, model); err != nil {
+		return err
 	}
 	prompt := fs.Arg(0)
 	if prompt == "" {

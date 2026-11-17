@@ -27,24 +27,21 @@ import (
 func cmdChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	model := fs.String("model", "", "path to a GGUF model file (required)")
+	model := modelFlag(fs)
 	system := fs.String("system", "", "system prompt prepended to the conversation")
-	maxTokens := fs.Int("max-tokens", 128, "maximum tokens per reply")
+	maxTokens := maxTokensFlag(fs, 128)
 	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
 	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it")
-	workers := fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
-	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
-	blocks := fs.Int("blocks", 0, "KV cache blocks to share; implies a paged cache sized for the context")
+	cache := registerCacheFlags(fs, true)
 	noPrefix := fs.Bool("no-prefix-cache", false, "disable prefix reuse between turns")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *model == "" {
-		if v := os.Getenv("ORBIX_MODEL"); v != "" {
-			*model = v
-		} else {
-			return fmt.Errorf("chat: --model is required (or set ORBIX_MODEL)")
-		}
+	if err := resolveModel(fs, model); err != nil {
+		return err
+	}
+	if err := cache.validate("chat"); err != nil {
+		return err
 	}
 
 	return chatSession(os.Stdin, os.Stdout, chatOptions{
@@ -53,9 +50,9 @@ func cmdChat(args []string) error {
 		maxTokens:   *maxTokens,
 		temp:        *temp,
 		topK:        *topK,
-		workers:     *workers,
-		blockSize:   *blockSize,
-		blocks:      *blocks,
+		workers:     *cache.workers,
+		blockSize:   *cache.blockSize,
+		blocks:      *cache.blocks,
 		prefixCache: !*noPrefix,
 	})
 }

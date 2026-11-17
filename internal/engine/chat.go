@@ -21,18 +21,18 @@ type Turn struct {
 	Text string
 }
 
-// RenderChatPrompt renders a conversation as the plain-text transcript this project
-// uses as its chat template.
+// RenderChatPrompt renders a conversation as a neutral "Role: content" transcript.
 //
-// The template is deliberately neutral -- "Role: content" lines with the assistant's
-// turn left open -- rather than any model's real one. GGUF stores a model's template
-// as a Jinja2 string, and evaluating Jinja is a dependency this project will not take;
-// producing a Llama checkpoint's "<|start_header_id|>" markers for a model that was
-// not trained on them would be worse than producing a neutral transcript, because the
-// markers move the model off the distribution it expects.
+// It is the fallback, not the default: ChatRenderer renders a checkpoint's own template
+// from tokenizer.chat_template whenever that template falls inside internal/chat's
+// supported subset, and calls this only when it does not. The neutral form is what a
+// model without a usable template gets -- a base model, or one whose template uses a
+// construct this project has not implemented.
 //
-// A caller that needs a model's exact template renders it itself and sends the result
-// to the completions endpoint, which takes text verbatim.
+// Producing a model's markers for a model that was not trained on them would be worse
+// than a neutral transcript, because the markers move it off the distribution it expects.
+// That is why the two paths exist separately rather than one template approximating the
+// other.
 func RenderChatPrompt(turns []Turn) string {
 	var b strings.Builder
 	for _, t := range turns {

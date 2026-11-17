@@ -25,12 +25,10 @@ import (
 func cmdBench(args []string) error {
 	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	model := fs.String("model", "", "path to a GGUF model file (required)")
-	maxTokens := fs.Int("max-tokens", 32, "tokens to generate per request")
+	model := modelFlag(fs)
+	maxTokens := maxTokensFlag(fs, 32)
 	concurrency := fs.Int("concurrency", 1, "requests in flight at once")
-	workers := fs.Int("workers", 0, "kernel worker goroutines; 0 means one per CPU")
-	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
-	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
+	cache := registerCacheFlags(fs, true)
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix")
 	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --concurrency: fifo, shortest, or fair")
 	requests := fs.Int("requests", 0, "total requests; 0 means one per concurrency slot")
@@ -39,12 +37,8 @@ func cmdBench(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *model == "" {
-		if v := os.Getenv("ORBIX_MODEL"); v != "" {
-			*model = v
-		} else {
-			return fmt.Errorf("bench: --model is required (or set ORBIX_MODEL)")
-		}
+	if err := resolveModel(fs, model); err != nil {
+		return err
 	}
 	if *concurrency < 1 {
 		return fmt.Errorf("bench: --concurrency must be at least 1")
@@ -52,11 +46,8 @@ func cmdBench(args []string) error {
 	if *maxTokens < 1 {
 		return fmt.Errorf("bench: --max-tokens must be at least 1")
 	}
-	if *workers < 0 {
-		return fmt.Errorf("bench: --workers must not be negative")
-	}
-	if *blocks < 0 || *blockSize < 0 {
-		return fmt.Errorf("bench: --blocks and --block-size must not be negative")
+	if err := cache.validate("bench"); err != nil {
+		return err
 	}
 	total := *requests
 	if total <= 0 {
@@ -78,7 +69,7 @@ func cmdBench(args []string) error {
 			model:   *model,
 			prompt:  promptIDs,
 			maxTok:  *maxTokens,
-			workers: *workers,
+			workers: *cache.workers,
 		})
 	}
 
@@ -97,9 +88,9 @@ func cmdBench(args []string) error {
 	eng, err := engine.New(*model, engine.Options{
 		MaxActive:   *concurrency,
 		Policy:      schedPolicy,
-		Workers:     *workers,
-		BlockSize:   *blockSize,
-		Blocks:      *blocks,
+		Workers:     *cache.workers,
+		BlockSize:   *cache.blockSize,
+		Blocks:      *cache.blocks,
 		PrefixCache: *prefixCache,
 	})
 	if err != nil {

@@ -248,12 +248,18 @@ func norm(x []float32) float32 {
 }
 
 func TestRopeMatchesReferenceLogprobs(t *testing.T) {
-	// The decisive check for the rotation: run the real model over a fixed
-	// prefix and compare the resulting log-probabilities with llama.cpp's for
-	// the same tokens. Adjacent pairing lands within a few hundredths of a nat;
-	// the halves pairing used earlier was off by more than two nats on the same
-	// input while still producing fluent text, which is why this comparison
-	// exists rather than a shape-only test.
+	// The decisive check for the rotation: run the real model over a fixed prefix and
+	// compare the resulting log-probabilities with llama.cpp's for the same tokens.
+	//
+	// The deviations measured here are 0.0014, 0.0728 and 0.1192 nats, so the tolerance
+	// below is about twice the largest of them. The halves pairing this test was written
+	// to catch was off by more than two nats on the same input while still producing
+	// fluent text, which is why a comparison against real numbers exists rather than a
+	// shape-only test.
+	//
+	// An earlier version of this comment said "within a few hundredths of a nat", which
+	// understated the true agreement by an order of magnitude for two of the three
+	// tokens. The tolerance is what protects the test; the comment now matches it.
 	//
 	// Expected values come from llama-server's /completion endpoint
 	// (n_probs=5, temperature 0, -fa off) on stories15M-q4_0 with the prompt
@@ -284,6 +290,8 @@ func TestRopeMatchesReferenceLogprobs(t *testing.T) {
 		727:   -2.8706, // " there"
 		29892: -3.9226, // ","
 	}
+	// Twice the largest measured deviation (0.1192), so a real regression shows up rather
+	// than hiding under a slack bound.
 	const tol = 0.25
 	for id, wantLP := range want {
 		got := logSoftmaxOf(logits, id)

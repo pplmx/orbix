@@ -465,6 +465,16 @@ QWEN2_MODEL=/tmp/qwen2-f32.gguf go test ./internal/llama/ -run Qwen2
 Orbix is a learning project, and it is honest about where it stands:
 
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
+- **Prefill is superlinear, and the cost is the matmuls.** Measured on Llama 3.2 1B
+  Q2_K with 128 workers: 501 tokens prefill in 21 s, 1001 in 57 s, 2001 in 177 s --
+  4x the tokens for 8.4x the time. The projections dominate: 96% of sampled CPU time
+  is in the transposed matmul. Their own work is linear in the token count, so the
+  extra growth is attention's O(n^2) term becoming large enough to matter -- one
+  layer of attention costs 0.6 s at 501 tokens and 2.1 s at 1001 on this model.
+  The matmul scales well with workers (2.1 GFLOPS serial, 88 GFLOPS at 128 on a
+  single 2001x8192x2048 product); what it cannot do is beat scalar float32
+  arithmetic. A 2000-token prompt is not interactive here. Short prompts and
+  generation are.
 - **Reference kernels are not optimized per instruction.** They are written to be
   readable, with no SIMD and no assembly. What they do use is more than one core: the
   row-partitioned products run on a bounded worker set, which took decoding on

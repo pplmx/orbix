@@ -910,3 +910,46 @@ func TestEveryHandledNameIsAKnownName(t *testing.T) {
 		}
 	}
 }
+
+// TestImplementedNameCountPinsTheReadmeNumber keeps the README's "covering 63 of the 100
+// names" checkable.
+//
+// It is a number a reader can compare against llama.cpp, and it changes by one every time a
+// family is added -- which is exactly the kind of figure that goes stale silently, since
+// nothing fails when it drifts. The two figures are separate assertions because they move
+// for different reasons: the table grows when llama.cpp adds a family, the implemented count
+// when one is written here.
+func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
+	// A real tokenizer per name, so the lookup under test is the one a file goes through:
+	// PreImplemented reads the parsed rule, not the name.
+	implemented := 0
+	for _, name := range knownPreNames {
+		path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New(pre=%q): %v", name, err)
+		}
+		if !tok.PreKnown() {
+			t.Errorf("%q is in knownPreNames but PreKnown reports false", name)
+		}
+		if tok.PreImplemented() {
+			implemented++
+		}
+	}
+
+	const (
+		wantNames       = 100
+		wantImplemented = 63
+	)
+	if got := len(knownPreNames); got != wantNames {
+		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
+	}
+	if implemented != wantImplemented {
+		t.Errorf("%d names are implemented, README says %d: update the README count in the "+
+			"same commit as the family", implemented, wantImplemented)
+	}
+}

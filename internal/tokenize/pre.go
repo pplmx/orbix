@@ -1273,6 +1273,12 @@ func leadLen(s string, fam preRule) int {
 // letterRunFrom matches "\p{L}..." starting at offset start of s, returning the length of
 // the whole chunk (prefix included) or false when no run begins there.
 func letterRunFrom(s string, fam preRule, start int) (int, bool) {
+	// The families whose run is "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+" begin with a letter and
+	// take marks only after one, so a mark at this offset is not a run. The channels that
+	// spell the class "[\p{L}\p{M}]+" accept a mark here.
+	if fam.wordSpaces && !isLetterAt(s[start:]) {
+		return 0, false
+	}
 	i := start
 	// prevLower records whether the previous letter was lower case, which is what the
 	// boundary test needs.

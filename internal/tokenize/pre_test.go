@@ -2566,3 +2566,32 @@ func TestPunctuationClassExcludesMarksOnlyForQwen35(t *testing.T) {
 		t.Errorf("llama-bpe preSplit(%q) = %q, want %q", "#\u0301", got, want)
 	}
 }
+
+// TestWordSpaceRunNeedsALetterAtTheStart covers exaone-moe's letter alternative,
+// "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+".
+//
+// The marks are a suffix on each word rather than members of one class, so a mark cannot open
+// the run: "\u0301|" is ["\u0301", "|"] here, where qwen35's "[\p{L}\p{M}]+" makes
+// ["\u0301|"] of it. The distinction shows whenever a mark follows text the run did not
+// take -- after a digit, say -- and the earlier code accepted the mark as a start.
+func TestWordSpaceRunNeedsALetterAtTheStart(t *testing.T) {
+	exa := &Tokenizer{pre: preExaoneMoE}
+	// A mark after a digit ends the digit's chunk and starts nothing, so it joins the
+	// punctuation-like gap that follows rather than leading a run of its own.
+	if got, want := exa.preSplit("1\u0301%"), []string{"1", "\u0301%"}; !sameStrings(got, want) {
+		t.Errorf("exaone-moe preSplit(%q) = %q, want %q", "1\u0301%", got, want)
+	}
+	if got, want := exa.preSplit("\u0301<"), []string{"\u0301<"}; !sameStrings(got, want) {
+		t.Errorf("exaone-moe preSplit(%q) = %q, want %q", "\u0301<", got, want)
+	}
+	// The same mark inside a word stays with it, which is what the suffix means.
+	if got, want := exa.preSplit("cafe\u0301"), []string{"cafe\u0301"}; !sameStrings(got, want) {
+		t.Errorf("exaone-moe preSplit(%q) = %q, want %q", "cafe\u0301", got, want)
+	}
+	// qwen35's class admits a mark, so a mark that starts the text is a run there: it is
+	// the leading character that is excluded when it is a digit or a newline, not a mark.
+	// That makes the two rules differ on exactly the inputs above.
+	if got, want := (&Tokenizer{pre: preQwen35}).preSplit("\u0301a"), []string{"\u0301a"}; !sameStrings(got, want) {
+		t.Errorf("qwen35 preSplit(%q) = %q, want %q", "\u0301a", got, want)
+	}
+}

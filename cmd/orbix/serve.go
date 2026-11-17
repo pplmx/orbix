@@ -156,6 +156,14 @@ func cmdServe(args []string) error {
 	// who can still change the flags.
 	if *cache.blocks == 0 {
 		fmt.Printf("%s\n", contiguousMemoryNote(cfg, *maxActive, queued))
+		// The number above is virtual, not resident: the arenas are one make per layer and
+		// Linux only backs a page when it is first written, so a server can look healthy
+		// while holding a reservation it could never fault in. Saying so is the difference
+		// between an operator who changes the flags now and one who finds out when a burst
+		// of long requests drives the process into the OOM killer.
+		if note := reservationWarning(cfg, *maxActive, queued); note != "" {
+			fmt.Printf("%s\n", note)
+		}
 	}
 	// Report which chat format is in use. A fallback is not an error -- the server
 	// still answers -- but an operator who sees oddly shaped replies should be able to
@@ -233,4 +241,24 @@ func humanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d KB", n/(1<<10))
 	}
+}
+
+// reservationWarning says when the contiguous reservation is large enough that the operator
+// should choose a paged cache instead, and returns "" when it is not worth mentioning.
+//
+// The threshold is deliberately a round number rather than a fraction of the machine: the
+// process cannot know how much memory it may use, and the point is to start the
+// conversation, not to make the decision. A gibibyte is where the reservation stops being
+// noise on a shared host.
+func reservationWarning(cfg llama.Config, maxActive, queued int) string {
+	const warnAbove = 1 << 30
+	perRequest := int64(cfg.ContextLen) * int64(cfg.KVHeads) * int64(cfg.HeadDim) * 2 * 4 * int64(cfg.Layers)
+	if perRequest*int64(maxActive+queued) < warnAbove {
+		return ""
+	}
+	return fmt.Sprintf(
+		"warning:    this reservation is virtual, and Linux only commits a page when it is " +
+			"written, so resident memory will look smaller than the figure above until long " +
+			"requests touch the whole context. Use --blocks and --block-size to share one " +
+			"pool instead of reserving a context per request.")
 }

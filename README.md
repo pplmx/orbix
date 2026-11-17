@@ -572,6 +572,18 @@ orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --pr
 A config file is on the roadmap, not in the code: the interface block at the top of
 this file describes the target, and this table describes what exists.
 
+The two cache layouts differ in what they reserve, and the difference is large enough to
+decide the flag. A contiguous cache reserves the whole context for every accepted request
+when it arrives, so the cost is `context x KV width x layers`, multiplied by the active
+and queued slots. A paged cache takes blocks as a sequence generates, so memory follows
+what is actually in flight. The server prints the figure it computed at startup, and warns
+when a contiguous reservation passes a gibibyte.
+
+For scale: the 128k-window Llama 3.2 checkpoint in this repository's test set reserves
+about 8 GB per request that way, while the small test fixture reserves 1.7 MB. Any model
+with a long window should be run with `--blocks`, where the total is the pool size and
+`--block-size` positions per block.
+
 ## Development
 
 ```bash

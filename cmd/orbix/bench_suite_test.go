@@ -104,10 +104,19 @@ func TestSuitePrefixReuseBeatsNoReuse(t *testing.T) {
 			plain = res
 		}
 	}
-	t.Logf("no reuse %v, reuse %v", plain.elapsed, reuse.elapsed)
-	if reuse.elapsed >= plain.elapsed {
-		t.Errorf("reuse took %v, no reuse %v; the pair exists to show reuse helping, "+
-			"so identical times mean it is not applied", reuse.elapsed, plain.elapsed)
+	// The elapsed times are logged but not asserted on. Comparing them was the original
+	// check and it is not reliable here: the two runs happen back to back on a shared
+	// machine, so a scheduling hiccup in the second one is enough to invert the comparison,
+	// and the difference reuse makes on a fixture this size is milliseconds. What is
+	// deterministic is the count -- reuse reports how many positions it served from the
+	// prefix, and no reuse cannot report any.
+	t.Logf("no reuse %v (%d reused), reuse %v (%d reused)",
+		plain.elapsed, plain.prefixReused, reuse.elapsed, reuse.prefixReused)
+	if plain.prefixReused != 0 {
+		t.Errorf("the reuse-off row reported %d reused positions", plain.prefixReused)
+	}
+	if reuse.prefixReused == 0 {
+		t.Error("the reuse-on row served no positions from the prefix, so reuse is not applied")
 	}
 }
 

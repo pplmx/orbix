@@ -370,3 +370,76 @@ func TestCloseTagInsideStringLiteral(t *testing.T) {
 		})
 	}
 }
+
+// TestTemplateCallAndSlice covers the two constructs Llama 3's template needs before it can
+// be parsed at all.
+//
+// strftime_now(...) is a Jinja function this package does not implement, and it appears
+// behind "if strftime_now is defined" -- a guard that is always false here, so the call can
+// never run. Rejecting the template over an unreachable construct was stricter than the
+// template requires; the call parses now and fails only if it is reached.
+//
+// messages[1:] is a slice with no upper bound, which is not an index expression. Llama 3
+// uses it to drop the system message before rendering the conversation.
+func TestTemplateCallAndSlice(t *testing.T) {
+	t.Run("guarded call is accepted and not evaluated", func(t *testing.T) {
+		src := `{%- if strftime_now is defined %}{{- strftime_now("%d %b %Y") }}` +
+			`{%- else %}{{- '26 Jul 2024' }}{%- endif %}`
+		tpl, err := Parse(src)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		got, err := tpl.Render(nil, Inputs{})
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got != "26 Jul 2024" {
+			t.Errorf("Render = %q, want the else branch", got)
+		}
+	})
+
+	t.Run("unguarded call is a render error, not a guess", func(t *testing.T) {
+		tpl, err := Parse(`{{- strftime_now("%d %b %Y") }}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		// A date this package invented would go into the system prompt unnoticed, so the
+		// honest outcome is an error.
+		if _, err := tpl.Render(nil, Inputs{}); err == nil {
+			t.Error("an unimplemented call rendered without error")
+		}
+	})
+
+	t.Run("slice drops the leading elements", func(t *testing.T) {
+		tpl, err := Parse(`{%- for m in messages[1:] %}{{- m.role }}|{%- endfor %}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		msgs := []Message{
+			{Role: "system", Content: "s"},
+			{Role: "user", Content: "u"},
+			{Role: "assistant", Content: "a"},
+		}
+		got, err := tpl.Render(msgs, Inputs{})
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got != "user|assistant|" {
+			t.Errorf("Render = %q, want the two messages after the first", got)
+		}
+	})
+
+	t.Run("slice past the end is empty rather than an error", func(t *testing.T) {
+		tpl, err := Parse(`{%- for m in messages[5:] %}{{- m.role }}{%- endfor %}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		got, err := tpl.Render([]Message{{Role: "user", Content: "u"}}, Inputs{})
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got != "" {
+			t.Errorf("Render = %q, want empty", got)
+		}
+	})
+}

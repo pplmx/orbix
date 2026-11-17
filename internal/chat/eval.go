@@ -184,6 +184,11 @@ func evalExpr(e expr, sc *scope) (value, error) {
 			return value{}, fmt.Errorf("chat: undefined variable %q", t.name)
 		}
 		return v, nil
+	case callExpr:
+		// No function is implemented. A template reaches this only if it does not guard the
+		// call, and then the honest answer is an error rather than a fabricated value:
+		// strftime_now in particular would otherwise put a wrong date in the system prompt.
+		return value{}, fmt.Errorf("chat: call to %q: no function is implemented", t.name)
 	case attrExpr:
 		base, err := evalExpr(t.base, sc)
 		if err != nil {
@@ -232,6 +237,35 @@ func evalExpr(e expr, sc *scope) (value, error) {
 			return value{}, fmt.Errorf("chat: index %d outside a sequence of %d", i, len(base.list))
 		}
 		return base.list[i], nil
+	case sliceExpr:
+		base, err := evalExpr(t.base, sc)
+		if err != nil {
+			return value{}, err
+		}
+		if !base.isList {
+			return value{}, fmt.Errorf("chat: slice applied to a non-sequence")
+		}
+		from, err := evalExpr(t.from, sc)
+		if err != nil {
+			return value{}, err
+		}
+		start, convErr := strconv.Atoi(from.text)
+		if convErr != nil {
+			return value{}, fmt.Errorf("chat: slice start %q is not a number", from.text)
+		}
+		if start < 0 {
+			start += len(base.list)
+		}
+		// An out-of-range start yields an empty sequence rather than an error: the point of
+		// messages[1:] on a one-message conversation is "nothing after the first", and a
+		// template that guards the length should not also have to guard this.
+		if start < 0 {
+			start = 0
+		}
+		if start > len(base.list) {
+			start = len(base.list)
+		}
+		return value{list: base.list[start:], isList: true}, nil
 	case concatExpr:
 		// Every part is converted to text and joined, which is what the + operator
 		// means for strings. Templates rely on mixed operands -- a marker plus a

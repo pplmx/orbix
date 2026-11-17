@@ -27,6 +27,12 @@ type indexExpr struct {
 	index expr
 }
 
+// sliceExpr takes the elements of a sequence from an index to its end.
+type sliceExpr struct {
+	base expr
+	from expr
+}
+
 // concatExpr joins its operands, converting each to text.
 type concatExpr struct{ parts []expr }
 
@@ -86,6 +92,41 @@ var supportedFilters = map[string]bool{
 	"length": true,
 }
 
+// callExpr is a function call. It is parsed so a guarded call does not reject the whole
+// template, and it fails at evaluation because no function is implemented.
+type callExpr struct {
+	name string
+	args []expr
+}
+
+// parseCall reads "( expr, ... )" after a function name.
+func (p *exprParser) parseCall(name string) (expr, error) {
+	p.pos++ // the "("
+	c := callExpr{name: name}
+	if next, ok := p.peekToken(); ok && next.text == ")" {
+		p.pos++
+		return c, nil
+	}
+	for {
+		arg, err := p.parseOr()
+		if err != nil {
+			return nil, err
+		}
+		c.args = append(c.args, arg)
+		next, ok := p.peekToken()
+		if !ok {
+			return nil, fmt.Errorf("chat: call to %q is not closed", name)
+		}
+		p.pos++
+		if next.text == ")" {
+			return c, nil
+		}
+		if next.text != "," {
+			return nil, fmt.Errorf("chat: expected \",\" or \")\" in call to %q, got %q", name, next.text)
+		}
+	}
+}
+
 // exprParser parses one expression from a token stream.
 type exprParser struct {
 	toks []token
@@ -141,7 +182,7 @@ func lexExpr(src string) ([]token, error) {
 			toks = append(toks, token{text: string(c)})
 			i++
 		case c == '|' || c == '(' || c == ')' || c == '[' || c == ']' ||
-			c == '+' || c == '-' || c == '.' || c == ',':
+			c == '+' || c == '-' || c == '.' || c == ',' || c == ':':
 			toks = append(toks, token{text: string(c)})
 			i++
 		default:
@@ -384,6 +425,17 @@ func (p *exprParser) parsePostfix() (expr, error) {
 			if err != nil {
 				return nil, err
 			}
+			// [n:] is a slice with no upper bound. Llama 3's template uses messages[1:]
+			// to drop the system message, and a slice is not reachable as an index
+			// expression, so it is a separate form rather than a general one: only the
+			// open tail appears in practice and a full [a:b:step] would be speculation.
+			if p.accept(":") {
+				if !p.accept("]") {
+					return nil, fmt.Errorf("chat: only [n:] slices are supported")
+				}
+				e = sliceExpr{base: e, from: idx}
+				continue
+			}
 			if !p.accept("]") {
 				return nil, fmt.Errorf("chat: missing ']' in index expression")
 			}
@@ -463,6 +515,15 @@ func (p *exprParser) parsePrimary() (expr, error) {
 	}
 	if !isIdentifier(tok) {
 		return nil, fmt.Errorf("chat: unexpected %q in expression", tok)
+	}
+	// name(...) is a call. Only strftime_now exists in Jinja's own function set, and this
+	// package implements none of them, so a call parses but cannot be evaluated. Parsing it
+	// anyway is what lets a template that guards the call -- "if strftime_now is defined" --
+	// be used at all: the guard is false here, the branch never runs, and rejecting the
+	// whole template over a construct that cannot execute would be stricter than the
+	// template requires.
+	if next, ok := p.peekToken(); ok && next.text == "(" {
+		return p.parseCall(tok)
 	}
 	return varExpr{name: tok}, nil
 }

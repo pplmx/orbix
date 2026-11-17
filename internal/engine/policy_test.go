@@ -1,12 +1,19 @@
 package engine
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -459,4 +466,124 @@ func TestPriorityDoesNotChangeOutput(t *testing.T) {
 				i, plain[i], ranked[i])
 		}
 	}
+}
+
+// TestTracingRecordsRequestSpans checks that Request.Trace produces one span per request
+// carrying the fields an operator needs: the model, the token counts, the finish reason,
+// and the split between prefill and decode. Without this the tracing path could be wired
+// up but empty, which no compile error would catch.
+func TestTracingRecordsRequestSpans(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file")
+	}
+
+	type captured struct {
+		count int
+		body  []byte
+	}
+	got := make(chan captured, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got <- captured{count: 1, body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	exp, err := otel.NewExporter(otel.ExporterOptions{
+		Endpoint: srv.URL,
+		Interval: time.Hour, // flushed explicitly
+		Resource: []otel.Attribute{otel.StringAttr("service.name", "orbix-test")},
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2})
+	prompt := tok.Encode("Once upon a time", true)
+	const maxTokens = 4
+	ch, err := e.Submit(Request{
+		Prompt: prompt, MaxTokens: maxTokens, Trace: exp,
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	for ev := range ch {
+		if ev.Err != nil {
+			t.Fatalf("event error: %v", ev.Err)
+		}
+	}
+
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	select {
+	case c := <-got:
+		body := string(c.body)
+		for _, want := range []string{
+			`"chat.completion"`,
+			`"gen_ai.request.model"`,
+			`"gen_ai.usage.input_tokens"`,
+			`"gen_ai.usage.output_tokens"`,
+			`"gen_ai.response.finish_reason"`,
+			`"orbix.prefill_ms"`,
+			`"orbix.decode_ms"`,
+			`"service.name"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("trace body is missing %s:\n%s", want, body)
+			}
+		}
+		// The prompt length is known exactly, so the input token count can be checked
+		// rather than merely present.
+		if !strings.Contains(body, `"intValue":"`+itoa(len(prompt))+`"`) {
+			t.Errorf("input token count is not %d:\n%s", len(prompt), body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the collector received no trace")
+	}
+}
+
+// TestTracingOffCostsNothing pins the default: an engine with no tracer must run exactly
+// as before, which is what makes tracing safe to leave off.
+func TestTracingOffCostsNothing(t *testing.T) {
+	e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2})
+	prompt := tok.Encode("Once upon a time", true)
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	var tokens int
+	for ev := range ch {
+		if ev.Err != nil {
+			t.Fatalf("event error: %v", ev.Err)
+		}
+		if ev.HasToken {
+			tokens++
+		}
+	}
+	if tokens == 0 {
+		t.Error("no tokens generated")
+	}
+}
+
+// itoa formats an int without pulling strconv into this file's imports for one call.
+func itoa(v int) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
 }

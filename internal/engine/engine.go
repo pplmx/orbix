@@ -3,8 +3,10 @@ package engine
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/otel"
 )
 
 // Event is one step of a sequence's output.
@@ -39,6 +41,16 @@ type Request struct {
 	// generate its whole token budget into a channel nobody reads.
 	Cancel <-chan struct{}
 
+	// Trace, when non-nil, records a span for this request and for each round that
+	// advances it, so a slow answer can be attributed to prefill, queueing, or decode
+	// rather than guessed at.
+	//
+	// It is per-request rather than per-engine because a caller may trace some traffic
+	// and not other traffic, and because an engine shared by an untraced caller must not
+	// pay for a tracer it never asked for. The exporter's own lifetime belongs to the
+	// caller.
+	Trace *otel.Exporter
+
 	// Priority ranks this request against others waiting for a slot: a higher value
 	// advances first. Zero is the default and means "with the rest".
 	//
@@ -69,6 +81,20 @@ type sequence struct {
 	// lastServed is the round in which this sequence last advanced, or -1 before its
 	// first turn. PriorityFair uses it to give the long-waiting sequence a slot.
 	lastServed int
+
+	// reqSpan is the request's trace span, or the zero value when tracing is off. It is
+	// finished when the sequence ends, which is why it travels with the sequence rather
+	// than being recorded at Submit: a span has to cover the whole request, not just its
+	// admission.
+	reqSpan otel.Span
+	// traceOn reports whether reqSpan is live, keeping the check a single bool load.
+	traceOn bool
+	// prefilled is when the prompt finished prefilling, so the request's span can
+	// separate the cost of reading the prompt from the cost of generating. Both phases
+	// are recorded as attributes on one span rather than as child spans, because a
+	// child span per phase would triple the trace volume for information that fits in
+	// two numbers.
+	prefilled time.Time
 }
 
 // remaining is how many tokens the sequence still has to emit.
@@ -242,6 +268,16 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	if s.sampler == nil {
 		s.sampler = llama.Greedy{}
 	}
+	if req.Trace != nil {
+		tracer := req.Trace.Tracer()
+		if span, ok := tracer.StartTrace("chat.completion", 2,
+			otel.StringAttr("gen_ai.request.model", cfg.Name),
+			otel.IntAttr("gen_ai.usage.input_tokens", int64(len(req.Prompt))),
+			otel.IntAttr("gen_ai.request.max_tokens", int64(req.MaxTokens)),
+		); ok {
+			s.reqSpan, s.traceOn = span, true
+		}
+	}
 	e.active[id] = s
 	e.requestsSubmitted++
 	e.mu.Unlock()
@@ -353,6 +389,9 @@ func (e *Engine) prefill(s *sequence) {
 		e.finish(s, Event{Err: err, FinishReason: "error"})
 		return
 	}
+	if s.traceOn {
+		s.prefilled = time.Now()
+	}
 	// Prefill returns the logits of the last position: decoding continues from
 	// exactly there.
 	copy(s.logits, out)
@@ -454,6 +493,28 @@ func (e *Engine) finish(s *sequence, last Event) {
 	delete(e.active, s.id)
 	e.requestsFinished++
 	e.mu.Unlock()
+
+	// Finish the request's span before the terminal event, so a caller that observes
+	// Done and immediately scrapes the collector finds the span rather than racing it.
+	if s.traceOn && s.req.Trace != nil {
+		span := s.reqSpan
+		span.Attributes = append(span.Attributes,
+			otel.IntAttr("gen_ai.usage.output_tokens", int64(len(s.out))),
+			otel.StringAttr("gen_ai.response.finish_reason", last.FinishReason),
+		)
+		// Finish first, so the span has an end time to measure the decode phase against.
+		span = span.Finish(last.Err)
+		if !s.prefilled.IsZero() {
+			// Milliseconds as integers: a trace viewer can plot them and a reader can
+			// compare them against the bench suite's numbers.
+			span.Attributes = append(span.Attributes,
+				otel.IntAttr("orbix.prefill_ms", s.prefilled.Sub(span.Start).Milliseconds()),
+				otel.IntAttr("orbix.decode_ms", span.End.Sub(s.prefilled).Milliseconds()),
+			)
+		}
+		s.req.Trace.Record(span)
+		s.traceOn = false
+	}
 
 	if err := s.cache.Reset(); err != nil {
 		// A cache that cannot release its blocks is a pool bug, not a request

@@ -33,6 +33,7 @@ import (
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -68,6 +69,11 @@ type Config struct {
 	// exists, and reopening the file for one metadata string would make the server
 	// responsible for a file it otherwise does not touch.
 	ChatRenderer *engine.ChatRenderer
+
+	// Trace, when non-nil, records a span per request. It is passed in rather than
+	// built here for the same reason the chat renderer is: the server does not own the
+	// process lifetime that decides where traces go.
+	Trace *otel.Exporter
 }
 
 // Server serves one loaded model over HTTP.
@@ -367,6 +373,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		Stop:      stopIDs,
 		Sampler:   sampler,
 		Cancel:    r.Context().Done(),
+		Trace:     s.cfg.Trace,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

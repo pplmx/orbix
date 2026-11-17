@@ -14,6 +14,7 @@ import (
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/server"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
@@ -30,6 +31,7 @@ func cmdServe(args []string) error {
 	blockSize := fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
 	blocks := fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
+	otlpEndpoint := fs.String("otlp-endpoint", "", "OTLP/HTTP collector for traces, e.g. http://localhost:4318; empty disables tracing")
 	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --max-active: fifo, shortest, or fair")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -75,12 +77,31 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	// Tracing is opt-in and off by default: a collector is one more thing that can be
+	// down, and a server whose traces have nowhere to go should not behave differently.
+	var traceExporter *otel.Exporter
+	if *otlpEndpoint != "" {
+		traceExporter, err = otel.NewExporter(otel.ExporterOptions{
+			Endpoint: *otlpEndpoint,
+			Resource: []otel.Attribute{
+				otel.StringAttr("service.name", "orbix"),
+				otel.StringAttr("service.version", version),
+				otel.StringAttr("gen_ai.request.model", cfg.Name),
+			},
+		})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = traceExporter.Close() }()
+	}
+
 	srv, err := server.New(eng, tok, server.Config{
 		ModelName:    cfg.Name,
 		MaxTokens:    *maxTokens,
 		ContextLen:   cfg.ContextLen,
 		Temperature:  0,
 		ChatRenderer: renderer,
+		Trace:        traceExporter,
 	})
 	if err != nil {
 		return err
@@ -108,6 +129,9 @@ func cmdServe(args []string) error {
 	// Report which chat format is in use. A fallback is not an error -- the server
 	// still answers -- but an operator who sees oddly shaped replies should be able to
 	// tell whether the model's own format was applied.
+	if traceExporter != nil {
+		fmt.Printf("traces:     %s (OTLP/HTTP)\n", *otlpEndpoint)
+	}
 	if renderer.UsesModelTemplate() {
 		fmt.Println("chat:       model template")
 	} else {

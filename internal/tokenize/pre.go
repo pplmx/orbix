@@ -56,6 +56,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.chameleon {
 		return splitChameleon(text)
 	}
+	if fam.kimiK2 {
+		return splitKimiK2(text)
+	}
 	if fam.deepseekLLM {
 		return splitDeepseekLLM(text)
 	}
@@ -91,6 +94,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	}
 	if fam.asian {
 		pieces = splitEach(pieces, splitAsianRuns)
+	}
+	if fam.han {
+		pieces = splitEach(pieces, splitHanRuns)
 	}
 	if fam.youtuScripts {
 		pieces = splitYoutuScripts(text)
@@ -242,6 +248,178 @@ func isFalconPunctAt(s string) bool {
 	return classifyAt(s, func(r rune) bool {
 		return unicode.IsPunct(r) || strings.ContainsRune("$+<=>^~|`", r)
 	})
+}
+
+// splitKimiK2 applies llama.cpp's hand-written matcher for this family.
+//
+// The comment above that matcher describes a regex -- "\p{Han}+" and two letter
+// alternatives whose halves form a case boundary -- but the matcher departs from it in three
+// ways, and the matcher is what runs:
+//
+//   - The word alternative consumes every non-Han letter in one run. There is no case
+//     boundary, so "camelCase" and "HTTPServer" are one chunk each.
+//   - A combining mark ends a word instead of joining it. The leading character may still be
+//     a mark, which is why "\u0301a" is one chunk while "a\u0301" is two.
+//   - The leading character is taken before a clitic is looked for, so a chunk that starts
+//     with an apostrophe is that apostrophe plus the word: "'scamelCase" is one chunk where
+//     a prefix-contraction rule would cut "'s" off the front. A clitic after letters is
+//     absorbed, so "don't" stays one chunk.
+//
+// Reproducing the matcher is the reason this family is a function rather than more fields on
+// preRule: three of its behaviours contradict the flags the other families share, and folding
+// them in would mean flags that exist only to be turned off again.
+func splitKimiK2(text string) []string {
+	var out []string
+	pos := 0
+	n := len(text)
+	for pos < n {
+		// \p{Han}+ -- a Han run is its own chunk and never joins a neighbour.
+		if isHanAt(text[pos:]) {
+			start := pos
+			for pos < n && isHanAt(text[pos:]) {
+				pos += runeLenAt(text[pos:])
+			}
+			out = append(out, text[start:pos])
+			continue
+		}
+
+		// The word alternative: an optional leading character that is not a newline, letter
+		// or number, then a run of non-Han letters, then an optional clitic.
+		c, ok := runeAt(text, pos)
+		if ok && (isLetter(c) && !isHan(c) ||
+			!isNewline(c) && !isLetter(c) && !isNumber(c) && restsOnLetter(text, pos)) {
+			start := pos
+			leading := false
+			if !isNewline(c) && !isLetter(c) && !isNumber(c) {
+				leading = true
+				pos += runeLenAt(text[pos:])
+			}
+			letters := false
+			for pos < n {
+				r, ok := runeAt(text, pos)
+				if !ok || !isLetter(r) || isHan(r) {
+					break
+				}
+				letters = true
+				pos += runeLenAt(text[pos:])
+			}
+			if letters {
+				pos += cliticLen(text[pos:])
+				out = append(out, text[start:pos])
+				continue
+			}
+			if leading {
+				// The leading character was consumed but no word followed, so it is gap
+				// text: put it back and let the alternatives below decide.
+				pos = start
+			}
+		}
+
+		// \p{N}{1,3}
+		if r, ok := runeAt(text, pos); ok && isNumber(r) {
+			start := pos
+			count := 0
+			for pos < n && count < 3 {
+				r, ok := runeAt(text, pos)
+				if !ok || !isNumber(r) {
+					break
+				}
+				pos += runeLenAt(text[pos:])
+				count++
+			}
+			out = append(out, text[start:pos])
+			continue
+		}
+
+		// " ?[^\s\p{L}\p{N}]+[\r\n]*"
+		start := pos
+		i := pos
+		if i < n && text[i] == ' ' {
+			i += 1
+		}
+		runStart := i
+		for i < n {
+			r, ok := runeAt(text, i)
+			if !ok || isSpace(r) || isLetter(r) || isNumber(r) {
+				break
+			}
+			i += runeLenAt(text[i:])
+		}
+		if i > runStart || i > pos && text[pos] == ' ' && i > pos+1 {
+			pos = i
+			for pos < n && isNewlineAt(text[pos:]) {
+				pos += runeLenAt(text[pos:])
+			}
+			out = append(out, text[start:pos])
+			continue
+		}
+
+		// The whitespace alternatives, in the expression's order: "\\s*[\\r\\n]+" first, then
+		// "\\s+(?!\\S)", then "\\s+".
+		//
+		// The lookahead makes the second alternative drop the last character of a run that is
+		// followed by something, so that character leads the next chunk: "a  b" is
+		// ["a", " ", " b"], not ["a", "  ", "b"]. A run that ends the text has nothing after it,
+		// so it is consumed whole.
+		if r, ok := runeAt(text, pos); ok && isSpace(r) {
+			start := pos
+			newlineEnd, spaceEnd := newlineRunEnd(text, pos)
+			switch {
+			case newlineEnd > pos:
+				pos = newlineEnd
+			case spaceEnd < len(text):
+				last, ok := prevRuneStart(text, spaceEnd)
+				if ok && last > pos {
+					pos = last
+				} else {
+					pos = spaceEnd
+				}
+			default:
+				pos = spaceEnd
+			}
+			out = append(out, text[start:pos])
+			continue
+		}
+
+		// Nothing matches: one character is gap text.
+		sz := runeLenAt(text[pos:])
+		if sz <= 0 {
+			sz = 1
+		}
+		out = append(out, text[pos:pos+sz])
+		pos += sz
+	}
+	return out
+}
+
+// newlineRunEnd returns the end of a whitespace run that ends on a newline, and separately the
+// end of the whole whitespace run, for the "\s*[\r\n]+" and "\s+" alternatives.
+func newlineRunEnd(text string, pos int) (newlineEnd, spaceEnd int) {
+	end := pos
+	for end < len(text) && isSpaceAt(text[end:]) {
+		n := runeLenAt(text[end:])
+		if isNewlineAt(text[end:]) {
+			newlineEnd = end + n
+		}
+		end += n
+	}
+	spaceEnd = end
+	return newlineEnd, spaceEnd
+}
+
+// runeAt decodes the rune at byte offset pos, reporting false past the end.
+func runeAt(text string, pos int) (rune, bool) {
+	if pos < 0 || pos >= len(text) {
+		return 0, false
+	}
+	r, _ := utf8.DecodeRuneInString(text[pos:])
+	return r, true
+}
+
+// restsOnLetter reports whether the character after the one at pos is a non-Han letter.
+func restsOnLetter(text string, pos int) bool {
+	next, ok := runeAt(text, pos+runeLenAt(text[pos:]))
+	return ok && isLetter(next) && !isHan(next)
 }
 
 // splitChameleon applies chameleon's expressions in order.
@@ -763,6 +941,12 @@ type preRule struct {
 	// expression, then groups of three digits. The middle one is the rule preGPT2 already
 	// describes, so only the two outer steps need code.
 	falcon bool
+	// kimiK2 marks a rule whose matcher is hand-written in llama.cpp rather than expressed
+	// as a regex, and whose behaviour differs from the comment above it in three ways: the
+	// word alternative does not split on case, a combining mark ends a word rather than
+	// joining it, and the leading character is taken before a clitic is looked for. The
+	// matcher is what runs, so it is what this splitter reproduces.
+	kimiK2 bool
 	// chameleon marks its six expressions, applied one after another to the pieces the
 	// previous one left. They do not compose into one expression: each is a pass over the
 	// whole text, and the punctuation and space passes cut single characters the main rule
@@ -846,6 +1030,10 @@ type preRule struct {
 	// applies the CJK expression first, so the grouping is independent of what the letter
 	// rule would have done with neighbouring text.
 	cjk bool
+	// han is whether a run of Han ideographs is its own chunk, from kimi-k2's "\p{Han}+".
+	// It is separate from cjk and asian because it names the script: the family's letter
+	// alternatives then exclude Han, so the two must not overlap.
+	han bool
 	// asian selects afmoe's wider CJK class in place of the three-range cjk one. The two are
 	// separate because the sets are different, not nested: afmoe's class has no Hiragana
 	// range beyond U+309F either, but it reaches Thai, Lao, Khmer, Myanmar, Cham, Javanese,
@@ -1059,6 +1247,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
 			punctLetterRun: true, noContractionAlt: true,
 		}, true
+	case preKimiK2:
+		return preRule{kimiK2: true}, true
 	case preK2Horizon:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}|\\p{M}|\\u200C|\\u200D)+"
 		// "|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
@@ -1685,6 +1875,42 @@ func splitAsianRuns(text string) []string {
 		}
 		runStart := i
 		for i < len(text) && isAsianAt(text[i:]) {
+			i += runeLenAt(text[i:])
+		}
+		pieces = append(pieces, text[runStart:i])
+		start = i
+	}
+	if start < len(text) {
+		pieces = append(pieces, text[start:])
+	}
+	return pieces
+}
+
+// isHan reports whether r is a Han ideograph (\p{Han}).
+//
+// kimi-k2 is the only family that names the script rather than a set of ranges: its first
+// alternative is "\p{Han}+", and its letter alternatives explicitly exclude Han. That
+// exclusion is the reason the family cannot reuse the cjk or asian classes -- those name
+// codepoint ranges, and Han covers far more of the ideograph blocks.
+func isHan(r rune) bool { return unicode.Is(unicode.Han, r) }
+
+func isHanAt(s string) bool { return classifyAt(s, isHan) }
+
+// splitHanRuns cuts each run of Han ideographs into its own chunk.
+func splitHanRuns(text string) []string {
+	var pieces []string
+	start := 0
+	i := 0
+	for i < len(text) {
+		if !isHanAt(text[i:]) {
+			i += runeLenAt(text[i:])
+			continue
+		}
+		if i > start {
+			pieces = append(pieces, text[start:i])
+		}
+		runStart := i
+		for i < len(text) && isHanAt(text[i:]) {
 			i += runeLenAt(text[i:])
 		}
 		pieces = append(pieces, text[runStart:i])

@@ -30,7 +30,7 @@
 // before merging. tokenizer.ggml.pre names the cut, and llama.cpp recognises about a hundred
 // names for it.
 //
-// Thirty-three families are implemented here, covering 99 of those names, and the list is
+// Thirty-four families are implemented here, covering all hundred names, and the list is
 // per-family work rather than aliasing: a name is either flagged implemented or the file it
 // describes is split as one chunk and says so. The first few were chosen because they cover
 // the models this project has been run against; the rest because each added a dimension the

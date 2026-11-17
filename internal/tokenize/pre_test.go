@@ -379,8 +379,13 @@ func TestPreSplitDigitsIsTwoPasses(t *testing.T) {
 // A file naming a family this package has not implemented splits as one chunk, which is
 // silent: the text still tokenizes, just not the text the model was trained on. A file with
 // a typo in the key does the same. Both look identical from the output, so the package has
-// to be asked, and the answer is only useful if the two cases are separate -- one is work
-// remaining, the other is a broken file.
+// to be asked, and the answer is only useful if the two cases are separate -- one would be
+// work remaining, the other is a broken file.
+//
+// Every name llama.cpp maps to a family is implemented, so no case below can produce
+// "known but not implemented" any more. The distinction is kept because it is what makes the
+// claim checkable: TestEveryKnownNameResolves fails the moment a name is in knownPreNames
+// without a rule, and that is the only way the middle state can come back.
 func TestPreTokenizerStates(t *testing.T) {
 	cases := []struct {
 		pre       string
@@ -954,7 +959,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 99
+		wantImplemented = 100
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -2737,5 +2742,128 @@ func TestPunctuationLetterRunHasNoContraction(t *testing.T) {
 	llama := &Tokenizer{pre: preLlama3}
 	if got, want := llama.preSplit("'ta"), []string{"'t", "a"}; !sameStrings(got, want) {
 		t.Errorf("llama-bpe preSplit(%q) = %q, want %q", "'ta", got, want)
+	}
+}
+
+// TestEveryKnownNameResolves pins the claim the README now makes: every name llama.cpp maps to
+// a family resolves to a rule here.
+//
+// The middle state -- a name in knownPreNames with no rule -- is the one that produces a
+// silent split as one chunk, so it is the one worth failing on directly. Without this test,
+// adding a name from a newer llama.cpp and forgetting the rule would only surface as
+// unexpectedly poor output.
+func TestEveryKnownNameResolves(t *testing.T) {
+	var missing []string
+	for _, name := range knownPreNames {
+		path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New(pre=%q): %v", name, err)
+		}
+		if !tok.PreImplemented() {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("%d names llama.cpp maps to a family have no rule here: %q -- a file naming "+
+			"one splits as a single chunk, which is silent", len(missing), missing)
+	}
+}
+
+// TestKimiK2Chunks pins llama.cpp's hand-written matcher for this family, which departs from
+// the regex comment above it in three ways.
+//
+// The matcher is what runs, so it is what these expectations follow:
+//
+//   - There is no case boundary. "camelCase" and "HTTPServer" are one chunk each, though the
+//     comment's two letter alternatives would cut them.
+//   - A combining mark ends a word rather than joining it: "a\u0301" is ["a", "\u0301"]. A
+//     mark may still be the word's leading character, so "\u0301a" is one chunk.
+//   - The leading character is taken before a clitic is looked for, so an apostrophe at the
+//     start of a chunk is that character plus the word -- "'scamelCase" is one chunk where a
+//     prefix-contraction rule would cut "'s" off the front. A clitic after letters is
+//     absorbed, so "don't" stays whole.
+//
+// Han is cut out first and excluded from the word alternative, which is the family's purpose:
+// a Han character never joins a neighbouring word.
+//
+// Expectations come from a line-by-line transcription of unicode_regex_split_custom_kimi_k2.
+func TestKimiK2Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preKimiK2}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Han runs are cut first and stay whole.
+		{"\u4e2d\u6587\u6d4b\u8bd5", []string{"\u4e2d\u6587\u6d4b\u8bd5"}},
+		{"\u4e00\u4e01", []string{"\u4e00\u4e01"}},
+		{"a\u4e2db", []string{"a", "\u4e2d", "b"}},
+		{"\u4e2da", []string{"\u4e2d", "a"}},
+		// No case boundary: the matcher consumes every non-Han letter in one run.
+		{"HTTPServer", []string{"HTTPServer"}},
+		{"camelCase", []string{"camelCase"}},
+		{"helloWorld", []string{"helloWorld"}},
+		{"aB", []string{"aB"}},
+		// The leading character is any non-newline, non-letter, non-number character.
+		{"a.b", []string{"a", ".b"}},
+		{".b", []string{".b"}},
+		{" x", []string{" x"}},
+		{"-y", []string{"-y"}},
+		{"(z", []string{"(z"}},
+		// A clitic after letters is absorbed; one at the start is a leading character.
+		{"don't", []string{"don't"}},
+		{"it's", []string{"it's"}},
+		{"they're", []string{"they're"}},
+		{"we'll", []string{"we'll"}},
+		{"I've", []string{"I've"}},
+		{"x's", []string{"x's"}},
+		{"'scamelCase", []string{"'scamelCase"}},
+		{"'recamelCase", []string{"'recamelCase"}},
+		// A mark ends the word, and may lead one.
+		{"a\u0301", []string{"a", "\u0301"}},
+		{"\u0301a", []string{"\u0301a"}},
+		// Digits group up to three.
+		{"1234", []string{"123", "4"}},
+		{"1234567", []string{"123", "456", "7"}},
+		{"a1234b", []string{"a", "123", "4", "b"}},
+		// Punctuation, newline and whitespace alternatives.
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"a--b", []string{"a", "--", "b"}},
+		{"a,,\n\nb", []string{"a", ",,\n\n", "b"}},
+		{"!?abc", []string{"!?", "abc"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"a\r\nb", []string{"a", "\r\n", "b"}},
+		{"a b", []string{"a", " b"}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"\n  \n", []string{"\n  \n"}},
+		{"\n\t", []string{"\n", "\t"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// The Han exclusion is what separates this family from the ones that cut a CJK *range*:
+	// a Han character must not join a neighbouring Latin word.
+	if got, want := tok.preSplit("a\u4e2db"), []string{"a", "\u4e2d", "b"}; !sameStrings(got, want) {
+		t.Errorf("preSplit(%q) = %q, want the Han character cut out", "a\u4e2db", got)
+	}
+	// The manifest reaches its rule through the file.
+	path := gguftest.Model{Pre: "kimi-k2", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("kimi-k2 is not reported as implemented")
 	}
 }

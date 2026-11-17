@@ -219,6 +219,9 @@ const (
 	// preAfMoE cuts three-at-a-time digit groups from the right, then a wide class of Asian
 	// scripts, then deepseek-v3's main expression.
 	preAfMoE
+	// preKimiK2 cuts Han runs first, then applies letter alternatives that exclude Han and
+	// split on a lower-to-upper case boundary.
+	preKimiK2
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -528,6 +531,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preK2Horizon
 		case "afmoe":
 			t.pre = preAfMoE
+		case "kimi-k2":
+			t.pre = preKimiK2
 		case "jais-2":
 			t.pre = preJais2
 		case "zonos3":

@@ -24,10 +24,10 @@ func TestInspectReportsPreTokenizer(t *testing.T) {
 		{"default", "implemented"},
 		{"deepseek-v3", "implemented"},
 		{"tekken", "implemented"},
-		// Still unimplemented: the warning path needs a family that really is missing, and
-		// kimi-k2 is one whose rule differs from every implemented family -- it cuts a CJK
-		// run first, then applies a case-splitting letter rule that excludes Han.
-		{"kimi-k2", "NOT implemented"},
+		// Every name llama.cpp maps to a family is implemented now, so the warning path is
+		// covered in the tokenize package against the branch itself rather than through a
+		// real name here. What is left to distinguish is a name that is not a family.
+		{"kimi-k2", "implemented"},
 		{"qwen-2", "NOT a name this package knows"},
 	}
 	for _, c := range cases {

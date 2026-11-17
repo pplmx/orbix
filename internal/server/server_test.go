@@ -1014,3 +1014,63 @@ func TestPoolExhaustionReturns503(t *testing.T) {
 		t.Error("a request got 5xx other than 503: pool exhaustion is capacity, not a fault")
 	}
 }
+
+// TestChatCompletionMultiTurn checks that a conversation's history reaches the prompt.
+//
+// The single-turn test above would pass whether or not history was included: the prompt
+// differs only in what it contains, and the response shape is the same either way. What
+// separates them is the token count, which grows with every message a template renders.
+//
+// A template that fails on a message it does not understand falls back to the neutral
+// transcript inside the renderer, so a broken history path would still answer -- in the
+// wrong format. The count is what notices.
+func TestChatCompletionMultiTurn(t *testing.T) {
+	// The default fixture's 64-token context is too small for a three-turn prompt.
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	one := decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions", `{
+		"messages": [{"role": "user", "content": "Once upon a time"}],
+		"max_tokens": 2
+	}`))
+	three := decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions", `{
+		"messages": [
+			{"role": "user", "content": "Once upon a time"},
+			{"role": "assistant", "content": "There was a little girl."},
+			{"role": "user", "content": "What next?"}
+		],
+		"max_tokens": 2
+	}`))
+
+	// Not merely larger: dropping the history leaves the last message plus a header, which
+	// measured 26 against 25. The extra two messages account for a few dozen tokens, so the
+	// bound has to be an amount rather than an inequality.
+	if added := three.Usage.PromptTokens - one.Usage.PromptTokens; added < 10 {
+		t.Errorf("a three-turn prompt used %d more tokens than a one-turn one (%d vs %d): "+
+			"the history was not included", added, three.Usage.PromptTokens, one.Usage.PromptTokens)
+	}
+	// The answer is still a normal completion, not an error dressed as one.
+	if three.Choices[0].Message.Role != "assistant" || three.Choices[0].Message.Content == "" {
+		t.Errorf("three-turn reply = %+v, want assistant content", three.Choices[0].Message)
+	}
+}
+
+// TestChatCompletionRejectsOverlongConversation checks the boundary the test above has to
+// stay under: a conversation that does not fit the context is a client error, not a panic or
+// a truncated prompt.
+//
+// It pins the contract rather than one implementation: the server and the engine both check
+// the length, so removing either leaves it passing. What it rules out is answering 200 with
+// a silently shortened conversation.
+func TestChatCompletionRejectsOverlongConversation(t *testing.T) {
+	// The default fixture: 64 tokens.
+	srv, _ := newTestServer(t)
+	// A message long enough that the rendered prompt cannot fit.
+	long := strings.Repeat("Once upon a time there was a little girl. ", 20)
+	resp := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages": [{"role": "user", "content": "`+long+`"}], "max_tokens": 2}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d for a conversation larger than the context, want 400",
+			resp.StatusCode)
+	}
+}

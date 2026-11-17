@@ -211,20 +211,24 @@ func TestSchedulingPolicyKeepsShortRequestResponsive(t *testing.T) {
 			for range longCh {
 			}
 		}()
-		var firstTokenRound int
-		done := make(chan struct{})
+		// The round travels on the event rather than being read from the engine here: a
+		// consumer runs on its own goroutine, so e.Round() reports when this goroutine was
+		// scheduled, not which round produced the token. Reading it was the source of this
+		// test's flakiness -- it would occasionally observe a round several steps later and
+		// report the policy as broken.
+		done := make(chan int, 1)
 		go func() {
-			defer close(done)
+			first := 0
 			for ev := range shortCh {
-				if ev.HasToken && firstTokenRound == 0 {
-					firstTokenRound = e.Round()
+				if ev.HasToken && first == 0 {
+					first = ev.Round
 				}
 			}
+			done <- first
 		}()
 		for e.Pump() > 0 {
 		}
-		<-done
-		return firstTokenRound
+		return <-done
 	}
 
 	t.Run("fifo", func(t *testing.T) {
@@ -415,7 +419,11 @@ func TestPriorityReachesTheEngine(t *testing.T) {
 					if ev.HasToken {
 						mu.Lock()
 						if _, seen := first[i]; !seen {
-							first[i] = e.Round()
+							// The event's own round, not e.Round(): a consumer runs on
+							// its own goroutine, so by the time it reads the engine's
+							// counter several rounds may have passed and it would record
+							// when the token was noticed rather than when it was made.
+							first[i] = ev.Round
 						}
 						mu.Unlock()
 					}

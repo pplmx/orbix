@@ -22,6 +22,15 @@ type Event struct {
 	Err error
 	// FinishReason says why generation stopped: "length", "stop", or "error".
 	FinishReason string
+	// Round is the engine round that produced this event.
+	//
+	// It is stamped here rather than read from Engine.Round() by the consumer because a
+	// consumer runs on its own goroutine: by the time it receives an event, the engine
+	// may have advanced several rounds, so a counter read would report when the event
+	// was noticed rather than when it was produced. A test that observes scheduling
+	// needs the latter, and so does anyone reasoning about which round generated a
+	// token.
+	Round int
 }
 
 // Request is one generation job.
@@ -81,6 +90,10 @@ type sequence struct {
 	// lastServed is the round in which this sequence last advanced, or -1 before its
 	// first turn. PriorityFair uses it to give the long-waiting sequence a slot.
 	lastServed int
+
+	// round is the round the sequence is running in, stamped on every event it emits so
+	// an event carries its own provenance instead of relying on when it was read.
+	round int
 
 	// reqSpan is the request's trace span, or the zero value when tracing is off. It is
 	// finished when the sequence ends, which is why it travels with the sequence rather
@@ -333,6 +346,9 @@ func (e *Engine) Pump() int {
 	seqs = admit(seqs, e.maxActive, e.policy)
 	for _, s := range seqs {
 		s.lastServed = round
+		// The round is recorded on the sequence so the events it emits this round can
+		// carry it without every emit site taking a lock to read the engine's counter.
+		s.round = round
 	}
 
 	eos := int32(-1)
@@ -428,7 +444,7 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 	e.mu.Lock()
 	e.tokensGenerated++
 	e.mu.Unlock()
-	s.events <- Event{Token: tok, HasToken: true}
+	s.events <- Event{Token: tok, HasToken: true, Round: s.round}
 
 	if s.pos >= cfg.ContextLen {
 		e.finish(s, Event{Done: true, FinishReason: "length"})

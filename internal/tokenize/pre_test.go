@@ -3095,3 +3095,47 @@ func TestCurlyQuantifierCountsCharacters(t *testing.T) {
 		}
 	}
 }
+
+// TestDeepseekFamiliesSplitTrailingAndRepeatedNewlines covers two rules that the run-based
+// splitter got wrong.
+//
+// deepseek-llm's fourth expression is "\s+$", anchored to the end of the *text* rather than of
+// each piece, so a trailing tab is its own chunk. Applied per piece it would cut every piece
+// that ends in whitespace, which is why the earlier code left it out entirely.
+//
+// deepseek-coder's first expression is "[\r\n]", one character, with no "+" -- so a pair of
+// carriage returns is two chunks. The step was declared without the flag that says so, and
+// both families are silent about it: the text tokenizes either way, just not to the pieces
+// the vocabulary was trained on.
+func TestDeepseekFamiliesSplitTrailingAndRepeatedNewlines(t *testing.T) {
+	llm := &Tokenizer{pre: preDeepseekLLM}
+	llmCases := []struct {
+		in   string
+		want []string
+	}{
+		{"\U0001F600\t", []string{"\U0001F600", "\t"}},
+		{"\u200c\u4e2d\u2003", []string{"\u200c\u4e2d", "\u2003"}},
+		// A space in the middle is not trailing, so the run keeps it.
+		{"a b", []string{"a", " b"}},
+	}
+	for _, c := range llmCases {
+		if got := llm.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("deepseek-llm preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	coder := &Tokenizer{pre: preDeepseekCoder}
+	coderCases := []struct {
+		in   string
+		want []string
+	}{
+		{"\r\n", []string{"\r", "\n"}},
+		{"\r\r", []string{"\r", "\r"}},
+		{"a\r\nb", []string{"a", "\r", "\n", "b"}},
+	}
+	for _, c := range coderCases {
+		if got := coder.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("deepseek-coder preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

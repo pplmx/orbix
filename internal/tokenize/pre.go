@@ -145,7 +145,7 @@ func splitDeepseekCoder(text string) []string {
 	}
 	pieces := []string{text}
 	for _, st := range []step{
-		{pred: isNewlineAt},
+		{pred: isNewlineAt, single: true},
 		{pred: isLetterAt, spacePrefix: true},
 		{pred: isPunctAt, spacePrefix: true},
 		{pred: isCoderCJKAt},
@@ -2260,6 +2260,10 @@ func splitDeepseekLLM(text string) []string {
 		{pred: isDeepseekLLMPunctAt, spacePrefix: true},
 		{pred: isDeepseekLLMCJKAt},
 		{pred: isNumberAt},
+		// "\s+$" is anchored to the end of the *text*, not of each piece, so it cannot be
+		// one of the run predicates: it splits off the trailing whitespace of the whole
+		// string and leaves everything before it alone. Applied per piece it would cut every
+		// piece that happens to end in a space.
 	} {
 		var next []string
 		for _, piece := range pieces {
@@ -2267,7 +2271,36 @@ func splitDeepseekLLM(text string) []string {
 		}
 		pieces = next
 	}
+	pieces = splitTrailingSpace(pieces)
 	return pieces
+}
+
+// splitTrailingSpace applies "\s+$" to the end of the text.
+//
+// The anchor is the end of the whole string, so this runs once after the per-piece passes and
+// only on the last piece. A run of trailing whitespace becomes its own chunk: "\U0001F600\t"
+// is ["\U0001F600", "\t"] where leaving the tab attached gives one chunk.
+func splitTrailingSpace(pieces []string) []string {
+	if len(pieces) == 0 {
+		return pieces
+	}
+	last := pieces[len(pieces)-1]
+	start := len(last)
+	for start > 0 {
+		prev, ok := prevRuneStart(last, start)
+		if !ok || !isSpaceAt(last[prev:]) {
+			break
+		}
+		start = prev
+	}
+	if start == len(last) || start == 0 {
+		// No trailing whitespace, or the piece is nothing but whitespace -- in which case it
+		// is already one chunk and splitting it would trade one chunk for one chunk.
+		return pieces
+	}
+	out := append([]string{}, pieces[:len(pieces)-1]...)
+	out = append(out, last[:start], last[start:])
+	return out
 }
 
 // splitNewlineRuns applies "[^\n]+|[\n]+": alternating runs of newlines and of everything

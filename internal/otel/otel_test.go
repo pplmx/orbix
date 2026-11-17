@@ -414,3 +414,72 @@ func TestSpanFinishSetsStatus(t *testing.T) {
 		t.Errorf("negative duration %v", failed.Duration())
 	}
 }
+
+// TestCloseFlushesQueuedSpans checks that a span recorded just before shutdown still reaches
+// the collector.
+//
+// The interval is set to an hour so nothing is sent on a tick: the only thing that can
+// deliver the span is Close. That is the path a server takes on SIGTERM, where the last
+// request's span is recorded during shutdown, and losing it would leave a trace that ends
+// one request early with nothing to say why.
+//
+// TestExporterCloseIsIdempotent covers calling Close twice; this covers Close doing its job
+// once. They were separate gaps: the earlier test would pass an implementation that dropped
+// the queue on the floor.
+func TestCloseFlushesQueuedSpans(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests int
+		spans    int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			ResourceSpans []struct {
+				ScopeSpans []struct {
+					Spans []json.RawMessage `json:"spans"`
+				} `json:"scopeSpans"`
+			} `json:"resourceSpans"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		n := 0
+		for _, rs := range payload.ResourceSpans {
+			for _, ss := range rs.ScopeSpans {
+				n += len(ss.Spans)
+			}
+		}
+		mu.Lock()
+		requests++
+		spans += n
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint: srv.URL,
+		// An hour, so the ticker cannot be what sends this.
+		Interval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	tr := exp.Tracer()
+	span, ok := tr.StartTrace("completion", 2)
+	if !ok {
+		t.Fatal("StartTrace failed")
+	}
+	exp.Record(span.Finish(nil))
+
+	if err := exp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requests == 0 {
+		t.Fatal("Close returned without posting anything: a span recorded before shutdown was lost")
+	}
+	if spans != 1 {
+		t.Errorf("posted %d spans, want 1", spans)
+	}
+}

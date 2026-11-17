@@ -24,6 +24,26 @@
 // split wrong, so the model answered a different question -- while applying the list gives
 // "to establish a new religion".
 //
+// Pre-tokenization is a separate question from the merge algorithm. A byte-level BPE model
+// was trained on chunks, not on raw text: the trainer cut the corpus first and a merge never
+// spans a boundary, so reproducing the vocabulary's expectations means applying the same cut
+// before merging. tokenizer.ggml.pre names the cut, and llama.cpp recognises about a hundred
+// names for it.
+//
+// Four of them are implemented here, chosen because they cover the models this project has
+// actually been run against: qwen2, llama-bpe, gpt-2, and starcoder. They share a shape --
+// contractions, a letter run, a digit run, a punctuation run, whitespace -- and differ in a
+// handful of choices, so the choices are data in preRule rather than a function each.
+//
+// Everything else splits as one chunk. That is the correct answer for a file naming nothing
+// and for one naming "default", because llama.cpp applies no expression in those cases
+// either. For a family that exists and is not implemented it is the wrong answer, and
+// silently so: the text still tokenizes to valid ids, just to ids the model was not trained
+// to expect, so the effect is degraded output rather than an error. PreImplemented and
+// PreKnown tell those cases apart, and "orbix model inspect" prints the answer, because a
+// reader judging a model's quality needs to know the prompt was cut wrong before they blame
+// the model.
+//
 // The two families represent a space differently, and the difference is silent when wrong.
 // SentencePiece folds a space into a U+2581 marker on the following piece, so " a" is one
 // symbol; byte-level BPE escapes it as its own symbol and lets a merge decide. Using the

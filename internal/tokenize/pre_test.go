@@ -372,3 +372,71 @@ func TestPreSplitDigitsIsTwoPasses(t *testing.T) {
 		t.Errorf("preSplit(%q) = %q, want [\"ab\" \"1\" \"cd\"]", "ab1cd", got)
 	}
 }
+
+// TestPreTokenizerStates pins the three-way distinction the accessors exist for.
+//
+// A file naming a family this package has not implemented splits as one chunk, which is
+// silent: the text still tokenizes, just not the text the model was trained on. A file with
+// a typo in the key does the same. Both look identical from the output, so the package has
+// to be asked, and the answer is only useful if the two cases are separate -- one is work
+// remaining, the other is a broken file.
+func TestPreTokenizerStates(t *testing.T) {
+	cases := []struct {
+		pre       string
+		wantImpl  bool
+		wantKnown bool
+		why       string
+	}{
+		{"", true, true, "no key: llama.cpp applies no rule to such a file either"},
+		{"default", true, true, `"default" means no rule, which not splitting matches`},
+		{"qwen2", true, true, "implemented"},
+		{"llama-bpe", true, true, "implemented"},
+		{"gpt-2", true, true, "implemented"},
+		{"starcoder", true, true, "implemented"},
+		{"deepseek-v3", false, true, "a real family, not implemented here"},
+		{"tekken", false, true, "a real family, not implemented here"},
+		{"llama4", false, true, "a real family, not implemented here"},
+		{"qwen-2", false, false, "a typo: not a family name at all"},
+		{"QWEN2", false, false, "the names are case-sensitive"},
+	}
+	for _, c := range cases {
+		path := gguftest.Model{
+			Vocab:          []string{"<unk>", "<s>", "</s>", "\u2581", "a"},
+			Merges:         []string{"a a"},
+			TokenizerModel: "gpt2",
+			NoBytes:        true,
+			Pre:            c.pre,
+			ContextLen:     64,
+		}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New(%q): %v", c.pre, err)
+		}
+		if got := tok.PreImplemented(); got != c.wantImpl {
+			t.Errorf("%q PreImplemented() = %v, want %v (%s)", c.pre, got, c.wantImpl, c.why)
+		}
+		if got := tok.PreKnown(); got != c.wantKnown {
+			t.Errorf("%q PreKnown() = %v, want %v (%s)", c.pre, got, c.wantKnown, c.why)
+		}
+	}
+}
+
+// TestKnownPreNamesHasNoDuplicates keeps the table a set: a duplicate would mean a name was
+// added twice while implementing two families, which hides that one of them is not actually
+// reachable.
+func TestKnownPreNamesHasNoDuplicates(t *testing.T) {
+	seen := make(map[string]bool, len(knownPreNames))
+	for _, name := range knownPreNames {
+		if seen[name] {
+			t.Errorf("%q appears twice in knownPreNames", name)
+		}
+		seen[name] = true
+	}
+	if len(knownPreNames) < 50 {
+		t.Errorf("knownPreNames has %d entries; llama.cpp maps about 100 names", len(knownPreNames))
+	}
+}

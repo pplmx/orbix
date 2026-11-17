@@ -177,6 +177,12 @@ type Tokenizer struct {
 	// skipping the merge loop. Some pre-tokenizers imply it; see preLlama3.
 	ignoreMerges bool
 
+	// preName is tokenizer.ggml.pre verbatim, kept so a caller can report which family the
+	// file asked for. The mapping below is a closed list, and a file naming a family this
+	// package does not implement would otherwise be indistinguishable from one that named
+	// nothing at all -- including from a typo in the key.
+	preName string
+
 	// addBOS is whether Encode prepends the beginning-of-sequence token for ordinary
 	// text.
 	//
@@ -326,6 +332,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 	}
 
 	if name, ok := f.Get[string]("tokenizer.ggml.pre"); ok {
+		t.preName = name
 		switch name {
 		case "qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "hunyuan", "solar-open":
 			t.pre = preQwen2
@@ -402,6 +409,38 @@ func (t *Tokenizer) UnknownID() int32 { return t.unknownID }
 
 // BOSID returns the beginning-of-sequence token ID, or -1 when unset.
 func (t *Tokenizer) BOSID() int32 { return t.bosID }
+
+// PreName returns tokenizer.ggml.pre verbatim, or "" when the file names no pre-tokenizer.
+func (t *Tokenizer) PreName() string { return t.preName }
+
+// PreImplemented reports whether this package reproduces the file's pre-tokenizer.
+//
+// It is false in three cases that all mean "no chunking here": the file names nothing, the
+// file names a family this package implements nothing for, or the name is not a family at
+// all. The distinction matters to a caller only in that a *known* family left unimplemented
+// silently tokenizes differently from the model's training data -- text the model never saw,
+// with nothing to report it. PreKnown separates that case from a typo.
+func (t *Tokenizer) PreImplemented() bool {
+	// "default" and an absent key both mean llama.cpp applies no regex to this file, which
+	// is exactly what this package does; both are implemented by not splitting.
+	if t.preName == "" || t.preName == "default" {
+		return true
+	}
+	_, ok := preFamilyOf(t.pre)
+	return ok
+}
+
+// PreKnown reports whether the file's pre-tokenizer name is one llama.cpp recognises, so a
+// caller can tell "this family is not implemented yet" from "this is not a family name".
+func (t *Tokenizer) PreKnown() bool {
+	if t.preName == "" {
+		return true
+	}
+	if _, ok := preFamilyOf(t.pre); ok {
+		return true
+	}
+	return slices.Contains(knownPreNames, t.preName)
+}
 
 // addsBOS reports whether Encode prepends BOS for ordinary text. An unset field means the
 // default, which is yes.

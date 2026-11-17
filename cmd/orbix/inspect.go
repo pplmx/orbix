@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // inspectOptions controls what `orbix model inspect` prints.
@@ -60,6 +61,7 @@ func writeHuman(w io.Writer, f *gguf.File, path string) error {
 	if archErr == nil {
 		printHyperparams(tw, f, arch)
 	}
+	printTokenizerLine(tw, f)
 	tw.Flush()
 	if err := ew.err; err != nil {
 		return err
@@ -100,6 +102,38 @@ func printHyperparams(tw *tabwriter.Writer, f *gguf.File, arch string) {
 			printed = true
 		}
 		fmt.Fprintf(tw, "  %s\t%s\n", k.label, formatValue(v))
+	}
+}
+
+// printTokenizerLine prints the pre-tokenizer the file names and whether this build
+// reproduces it.
+//
+// The second half is the part worth printing. A family that is not implemented tokenizes as
+// one chunk, which produces different tokens from the ones the model was trained on and
+// shows up as degraded output rather than as an error -- so a reader needs to see it before
+// judging the model's quality, not after.
+func printTokenizerLine(tw *tabwriter.Writer, f *gguf.File) {
+	tok, err := tokenize.New(f)
+	if err != nil {
+		fmt.Fprintf(tw, "\nTokenizer\t(unusable: %v)\n", err)
+		return
+	}
+	model, _ := f.String("tokenizer.ggml.model")
+	name := tok.PreName()
+	if name == "" {
+		name = "(none)"
+	}
+	fmt.Fprintf(tw, "\nTokenizer\t%s, pre-tokenizer %s\n", model, name)
+
+	switch {
+	case tok.PreImplemented():
+		fmt.Fprintf(tw, "Pre-tokenizer\timplemented\n")
+	case tok.PreKnown():
+		fmt.Fprintf(tw, "Pre-tokenizer\tNOT implemented -- text is split as one chunk, "+
+			"which differs from what this model was trained on\n")
+	default:
+		fmt.Fprintf(tw, "Pre-tokenizer\tNOT a name this package knows; check "+
+			"tokenizer.ggml.pre (splitting is disabled)\n")
 	}
 }
 

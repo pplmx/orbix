@@ -336,14 +336,14 @@ Every command below marked with a version works today. `orbix chat` runs on the
 engine with a paged cache and prefix reuse, so each turn re-attaches the previous
 turn's KV blocks instead of prefilling the whole conversation again.
 
-| Command                      | Description                                     | Status   |
-| ---------------------------- | ----------------------------------------------- | -------- |
-| `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization | v0.1     |
-| `orbix run "<prompt>"`       | One-shot inference                              | v0.1     |
-| `orbix version`              | Print version and build info                    | v0.1     |
-| `orbix chat`                 | Interactive REPL with conversation history      | v0.3     |
-| `orbix serve`                | Start the OpenAI-compatible inference server    | v0.3     |
-| `orbix bench`                | Run a built-in throughput/latency benchmark     | v0.2     |
+| Command                      | Description                                                                                                  | Status |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
+| `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization, and whether this build reproduces the model's pre-tokenizer | v0.1   |
+| `orbix run "<prompt>"`       | One-shot inference                                                                                           | v0.1   |
+| `orbix version`              | Print version and build info                                                                                 | v0.1   |
+| `orbix chat`                 | Interactive REPL with conversation history                                                                   | v0.3   |
+| `orbix serve`                | Start the OpenAI-compatible inference server                                                                 | v0.3   |
+| `orbix bench`                | Run a built-in throughput/latency benchmark                                                                  | v0.2   |
 
 ```bash
 orbix run --model ./model.gguf "Once upon a time"

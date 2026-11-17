@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 90
+		wantImplemented = 91
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1852,5 +1852,71 @@ func TestZonos3Chunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("zonos3 is not reported as implemented")
+	}
+}
+
+// TestJais2Chunks pins the jais-2 rule: llama3's expression with the whitespace tail built
+// from power-of-two tiers.
+//
+// Each tier carries the same lookahead as qwen2's tail, so a run followed by a non-space gives
+// up its last space to the following chunk and the tiers only cover the rest. Tier sizes are
+// tried largest first, which is why the pieces are the run's binary decomposition: 100 spaces
+// become 64, 32 and 4, then " b".
+func TestJais2Chunks(t *testing.T) {
+	spaces := func(n int) string {
+		out := make([]byte, n)
+		for i := range out {
+			out[i] = ' '
+		}
+		return string(out)
+	}
+	tok := &Tokenizer{pre: preJais2}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The tiering: one space always leads the next chunk, so n spaces give the tiers for
+		// n-1 followed by " b".
+		{"a" + spaces(1) + "b", []string{"a", " b"}},
+		{"a" + spaces(2) + "b", []string{"a", " ", " b"}},
+		{"a" + spaces(3) + "b", []string{"a", "  ", " b"}},
+		{"a" + spaces(4) + "b", []string{"a", "  ", " ", " b"}},
+		{"a" + spaces(5) + "b", []string{"a", "    ", " b"}},
+		{"a" + spaces(8) + "b", []string{"a", "    ", "  ", " ", " b"}},
+		{"a" + spaces(17) + "b", []string{"a", spaces(16), " b"}},
+		{"a" + spaces(100) + "b", []string{"a", spaces(64), spaces(32), spaces(2), spaces(1), " b"}},
+		// A run that ends the text consumes all of it, in the same largest-first tiers.
+		{"a" + spaces(3), []string{"a", spaces(2), spaces(1)}},
+		{"a" + spaces(4), []string{"a", spaces(4)}},
+		// The rest is llama3's shape.
+		{"a1234b", []string{"a", "123", "4", "b"}},
+		{"don't", []string{"don", "'t"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"a.b", []string{"a", ".b"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// llama3 has the single tail, so a run of four spaces is one chunk there.
+	l3 := &Tokenizer{pre: preLlama3}
+	if got := l3.preSplit("a" + spaces(4) + "b"); !sameStrings(got, []string{"a", spaces(3), " b"}) {
+		t.Errorf("llama3 preSplit with four spaces = %q, want one run", got)
+	}
+
+	path := gguftest.Model{Pre: "jais-2", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("jais-2 is not reported as implemented")
 	}
 }

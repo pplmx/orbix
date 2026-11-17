@@ -575,6 +575,11 @@ type preRule struct {
 	// zonos3 marks an expression whose alternatives cover only digits, punctuation runs of
 	// two or more, and trailing whitespace. Letters match nothing, so they stay gap text.
 	zonos3 bool
+	// spaceTiers replaces the whitespace tail with a set of power-of-two runs, tried largest
+	// first. A run of n spaces is cut into tiers until one is left, and that last space is
+	// then the leading character of whatever follows. It is jais-2's expression; every other
+	// family uses the single "\s+(?!\S)|\s+" tail.
+	spaceTiers bool
 	// leadingNewlinePass runs newlineRuns before the main rule instead of as the whole rule.
 	// Laguna pairs the newline expression with bailingmoe's, and the pass is not redundant:
 	// it separates a newline from whitespace before it, which the main rule would otherwise
@@ -705,6 +710,17 @@ func preFamilyOf(p preType) (preRule, bool) {
 		}, true
 	case preZonos3:
 		return preRule{zonos3: true}, true
+	case preJais2:
+		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*"
+		// "|\\s*[\\r\\n]+|\\s{512}(?!\\S)|...|\\s{4}(?!\\S)|\\s{1,2}(?!\\S)|\\s{1}"
+		//
+		// llama3's expression with the whitespace tail replaced by power-of-two tiers, tried
+		// largest first. A run of n spaces is cut into tiers until one remains, and that last
+		// space leads whatever follows: "a   b" gives ["a", "  ", " b"].
+		return preRule{
+			digits: 3, lead: leadAnyNonLetter,
+			newlinesAfterPunct: true, newlineChunk: true, spaceTiers: true,
+		}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
 		// "|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
@@ -827,7 +843,13 @@ func chunkLen(s string, fam preRule) int {
 	}
 	// \s+(?!\S) -- trailing whitespace that ends the text.
 	// \s+ -- any other run of whitespace.
+	//
+	// jais-2 replaces both with power-of-two tiers, which cut a run into largest-first
+	// pieces and leave the final space to the next chunk.
 	if n := runeLenAt(s); n > 0 && isSpaceAt(s) {
+		if fam.spaceTiers {
+			return spaceTierLen(s)
+		}
 		return qwen2SpaceRunLen(s)
 	}
 	return 0
@@ -1050,6 +1072,52 @@ func qwen2SpaceRunLen(s string) int {
 		}
 	}
 	return i
+}
+
+// spaceTierLen matches jais-2's whitespace tail: the alternatives \s{512}(?!\S), \s{256}(?!\S),
+// down to \s{4}(?!\S), \s{1,2}(?!\S), then \s{1}.
+//
+// The tiers are tried largest first, and each carries the same lookahead as qwen2's tail, so a
+// tier only claims its run when the character after it is not a non-space. A run followed by a
+// word therefore yields tiers summing to one less than its length -- the leftover space is the
+// next chunk's leading character -- and a run ending the text yields tiers summing to exactly
+// its length. The final \s{1} has no lookahead, so a single space always matches.
+func spaceTierLen(s string) int {
+	i := 0
+	for i < len(s) && isSpaceAt(s[i:]) {
+		i += runeLenAt(s[i:])
+	}
+	if i == 0 {
+		return 0
+	}
+	// The run's length is in characters; the tiers count characters, not bytes.
+	n := utf8.RuneCountInString(s[:i])
+	// A run followed by a non-space gives up its last space to the following chunk, so the
+	// tiers may only consume n-1. A run that ends the text consumes all of it.
+	budget := n
+	if i < len(s) {
+		budget = n - 1
+	}
+	// Largest tier that fits the budget. Tiers are powers of two from 512 down to 4, then
+	// {1,2}, then 1.
+	for _, tier := range []int{512, 256, 128, 64, 32, 16, 8, 4, 2} {
+		if budget >= tier {
+			// Byte length of that many spaces.
+			j, k := 0, 0
+			for k < tier && j < i {
+				j += runeLenAt(s[j:])
+				k++
+			}
+			return j
+		}
+	}
+	// A single space, which the final alternative matches without a lookahead.
+	if budget >= 1 {
+		j := 0
+		j += runeLenAt(s[j:])
+		return j
+	}
+	return 0
 }
 
 // Character classification, matching the Unicode categories the Qwen2 expression uses.

@@ -190,6 +190,10 @@ const (
 	// chunk, and "x=42" keeps "x=" together because a single "=" is shorter than the
 	// punctuation run's {2,}.
 	preZonos3
+	// preJais2 is llama3's expression with a whitespace tail built from power-of-two tiers
+	// instead of \s+(?!\S). A run of n spaces is cut greedily into tiers until one is left,
+	// which the following letter or punctuation chunk absorbs as its leading character.
+	preJais2
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -485,6 +489,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// laguna runs bailingmoe's expression after a newline pass. The newline pass separates
 		// runs of newlines from everything else, which cannot change what the main rule does
 		// to a chunk that already contains no newline.
+		case "jais-2":
+			t.pre = preJais2
 		case "zonos3":
 			t.pre = preZonos3
 		case "minicpm5":

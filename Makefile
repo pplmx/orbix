@@ -18,7 +18,12 @@ LDFLAGS  := -s -w \
 GOFLAGS  :=
 export CGO_ENABLED := 0
 
-.PHONY: all build test lint fmt vet bench clean check
+# CROSS_TARGETS is every platform the project claims to build for. The list is short
+# on purpose: each entry is a platform somebody runs the binary on, and a platform with
+# no user is a build that breaks without anyone noticing.
+CROSS_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
+.PHONY: all build test test-race lint fmt vet bench clean check cross
 
 all: check
 
@@ -53,12 +58,23 @@ bench:
 	go test -run '^$$' -bench . -benchmem $(PKG)
 
 ## check: the full local gate - format, vet, test, lint
-check: vet test
+check: vet test lint
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
 	fi
 	@echo "check: ok"
+
+## cross: build every supported platform with CGo disabled
+cross:
+	@set -e; for target in $(CROSS_TARGETS); do \
+		os=$${target%/*}; arch=$${target#*/}; ext=""; \
+		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+		out="bin/orbix-$$os-$$arch$$ext"; \
+		echo "building $$out"; \
+		GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags '$(LDFLAGS)' -o "$$out" ./cmd/orbix; \
+	done
+
 
 ## clean: remove build output
 clean:

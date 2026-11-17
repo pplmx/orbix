@@ -161,6 +161,11 @@ const (
 	// preTinyAya is a \d{1,3} lookahead that groups digits three at a time from the right and
 	// keeps a run touching a letter whole, followed by a case-splitting letter rule.
 	preTinyAya
+	// preLaguna is a newline pass followed by bailingmoe's expression. The pass is not
+	// redundant: it separates a newline from whitespace before it, which the main rule would
+	// otherwise take into one chunk -- " x \n y " splits as [" x", " ", "\n", " y", " "] here
+	// and [" x", " \n", " y", " "] without it.
+	preLaguna
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -449,6 +454,11 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// cohere2moe and tiny_aya are llama.cpp's TINY_AYA branch.
 		case "cohere2moe", "tiny_aya":
 			t.pre = preTinyAya
+		// laguna runs bailingmoe's expression after a newline pass. The newline pass separates
+		// runs of newlines from everything else, which cannot change what the main rule does
+		// to a chunk that already contains no newline.
+		case "laguna":
+			t.pre = preLaguna
 		case "soprano":
 			t.pre = preSoprano
 		case "superbpe":

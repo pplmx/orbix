@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 81
+		wantImplemented = 82
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1481,5 +1481,53 @@ func TestTinyAyaChunks(t *testing.T) {
 		if got := real.preSplit("1234"); !sameStrings(got, []string{"1", "234"}) {
 			t.Errorf("%q preSplit(\"1234\") = %q, want the remainder first", name, got)
 		}
+	}
+}
+
+// TestLagunaChunks pins the laguna rule: a newline pass, then bailingmoe's expression.
+//
+// The newline pass is not redundant with the main rule. The main rule's whitespace
+// alternative takes " \n" as one chunk, while the pass cuts at the newline first, so
+// " x \n y " gives [" x", " ", "\n", " y", " "]. Every other input splits the same way
+// either path, which is why a mapping to the bailingmoe rule was rejected after trying it.
+func TestLagunaChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preLaguna}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The discriminating input: whitespace before a newline.
+		{" x \n y ", []string{" x", " ", "\n", " y", " "}},
+		{"ab\ncd ef", []string{"ab", "\n", "cd", " ef"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		// Everything after the pass is bailingmoe's: single digits, contractions, CJK.
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"don't", []string{"don", "'t"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// bailingmoe has no newline pass, so it keeps the space attached to the newline.
+	bm := &Tokenizer{pre: preBailingMoE}
+	if got := bm.preSplit(" x \n y "); !sameStrings(got, []string{" x", " \n", " y", " "}) {
+		t.Errorf("bailingmoe preSplit(\" x \\n y \") = %q, want the space kept with the newline", got)
+	}
+
+	path := gguftest.Model{Pre: "laguna", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("laguna is not reported as implemented")
 	}
 }

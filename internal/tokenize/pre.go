@@ -71,6 +71,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
+	if fam.leadingNewlinePass {
+		pieces = splitNewlineRuns(text)
+	}
 	if fam.digitsFromRight {
 		pieces = splitDigitsFromRight(text, fam.digitsRightBoundary)
 	}
@@ -562,6 +565,11 @@ type preRule struct {
 	// and runs that are not, and nothing else separates a chunk. It is the only rule whose
 	// chunks can contain a space, a comma and a word at once.
 	newlineRuns bool
+	// leadingNewlinePass runs newlineRuns before the main rule instead of as the whole rule.
+	// Laguna pairs the newline expression with bailingmoe's, and the pass is not redundant:
+	// it separates a newline from whitespace before it, which the main rule would otherwise
+	// take into one chunk.
+	leadingNewlinePass bool
 	// deepseekLLM marks the five-expression rule whose letter class is spelled out as 87
 	// ranges rather than written as \p{L}. The shape matches deepseek-coder's, but none of
 	// the terms do, so it has its own splitter.
@@ -642,6 +650,15 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// consume the whole run, so nothing separates the families there.
 		return preRule{
 			digits: 1, lead: leadAnyNonLetter,
+			newlinesAfterPunct: true, newlineChunk: true,
+		}, true
+	case preLaguna:
+		// "[^\n]+|[\n]+" then bailingmoe's expression. The pass separates newlines from any
+		// whitespace before them, so " x \n y " gives [" x", " ", "\n", " y", " "] rather than
+		// [" x", " \n", " y", " "]. Everything else the main rule decides alone.
+		return preRule{
+			leadingNewlinePass: true,
+			digits:             1, lead: leadAnyNonLetter,
 			newlinesAfterPunct: true, newlineChunk: true,
 		}, true
 	case preSoprano:

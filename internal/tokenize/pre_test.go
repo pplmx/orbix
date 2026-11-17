@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 83
+		wantImplemented = 85
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1361,8 +1361,11 @@ func TestSharedRuleNamesResolveToTheirBaseFamily(t *testing.T) {
 
 	// llama.cpp's CHATGLM4 and DBRX/SMAUG cases hold llama3's expression verbatim.
 	check(t, []string{"chatglm-bpe", "glm4", "glm5", "dbrx", "smaug-bpe"}, preLlama3)
-	// GEMMA4 and DOMYN_SMALL hold mmbert's: the text is cut only at newlines.
-	check(t, []string{"gemma4", "granite-embed-multi-311m", "domyn-small"}, preMMBert)
+	// GEMMA4, DOMYN_SMALL and SARVAM_MOE hold mmbert's: the text is cut only at newlines.
+	check(t, []string{"gemma4", "granite-embed-multi-311m", "domyn-small", "sarvam-moe"}, preMMBert)
+	// grok-2 writes \s*[\r\n]+ where bailingmoe has \s*[\r\n]; both consume the whole run,
+	// so the rules agree on every newline input tried.
+	check(t, []string{"grok-2", "bailingmoe", "bailingmoe2", "llada-moe"}, preBailingMoE)
 }
 
 // TestBailingMoEChunks pins the bailingmoe rule, which is llama3's shape with a bare \p{N}.

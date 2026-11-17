@@ -452,7 +452,11 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
 		// bailingmoe, bailingmoe2 and llada-moe are llama.cpp's BAILINGMOE branch.
-		case "bailingmoe", "bailingmoe2", "llada-moe":
+		// grok-2 differs from bailingmoe only in writing \s*[\r\n]+ where bailingmoe has
+		// \s*[\r\n]. Both consume the whole run -- checked over seven newline inputs,
+		// including CRLF pairs -- so the rules are the same.
+		case "grok-2",
+			"bailingmoe", "bailingmoe2", "llada-moe":
 			t.pre = preBailingMoE
 		// cohere2moe and tiny_aya are llama.cpp's TINY_AYA branch.
 		case "cohere2moe", "tiny_aya":
@@ -474,7 +478,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// expression is "[^\n]+|[\n]+" -- the same one mmbert uses. The comment there says
 		// the model relies on BPE over the whole text and only needs newlines split because the
 		// merge lookup asserts no newline inside a token.
-		case "domyn-small", "gemma4", "granite-embed-multi-311m", "mmbert":
+		case "sarvam-moe", "domyn-small", "gemma4", "granite-embed-multi-311m", "mmbert":
 			t.pre = preMMBert
 		case "deepseek-llm":
 			t.pre = preDeepseekLLM

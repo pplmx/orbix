@@ -1,6 +1,9 @@
 package chat
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -108,5 +111,112 @@ func TestQwen2TemplateWithTools(t *testing.T) {
 	}
 	if !strings.Contains(got, `{"function"`) {
 		t.Errorf("prompt does not contain the serialized tool: %q", got)
+	}
+}
+
+// loadTestTemplate reads a chat template from testdata.
+//
+// The full Llama 3.2 template is 93 lines. Inlining it would make this file mostly template
+// text, which is harder to review than the code around it and easy to lose a line from when
+// editing. The file keeps its provenance in the name.
+func loadTestTemplate(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read testdata/%s: %v", name, err)
+	}
+	return string(raw)
+}
+
+// TestLlama32TemplateWithTools covers the tool-calling branch of the full Llama 3.2 template,
+// which the abbreviated llama3Template above does not have.
+//
+// This is the path the previous two rounds' fixes were for: before them the branch was taken
+// even with no tools, because Render bound an empty tools list and the template's own
+// "{% if not tools is defined %}" guard could never fire. With a tool supplied the branch is
+// now taken for the right reason, and what it emits has to be JSON the model can act on.
+func TestLlama32TemplateWithTools(t *testing.T) {
+	tmpl := loadTestTemplate(t, "llama32-instruct.jinja")
+	parsed, err := Parse(tmpl)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	const params = `{"type":"object","properties":{"city":{"type":"string"}}}`
+	got, err := parsed.Render(
+		[]Message{{Role: "user", Content: "What is the weather in Paris?"}},
+		Inputs{
+			BOSToken:            "<|begin_of_text|>",
+			EOSToken:            "<|eot_id|>",
+			AddGenerationPrompt: true,
+			Tools: []Tool{{
+				Name:        "get_weather",
+				Description: "Current weather for a city",
+				Parameters:  params,
+			}},
+		})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	// The tool list is a line of JSON, which is what the template's tojson produces. Finding
+	// and parsing it checks the shape rather than the presence of a substring: a missing
+	// brace or a doubled key would still contain the tool's name.
+	var found bool
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(line, `{"function":`) {
+			continue
+		}
+		found = true
+		var v struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal([]byte(line), &v); err != nil {
+			t.Fatalf("the tool line is not valid JSON: %v\n%s", err, line)
+		}
+		if v.Type != "function" || v.Function.Name != "get_weather" {
+			t.Errorf("tool JSON = %+v, want the function get_weather", v)
+		}
+		// parameters is passed through verbatim, so it must still be the caller's document
+		// and not a re-encoding that dropped a field.
+		if string(v.Function.Parameters) != params {
+			t.Errorf("parameters = %s, want %s", v.Function.Parameters, params)
+		}
+	}
+	if !found {
+		t.Errorf("no tool JSON line in the prompt:\n%s", got)
+	}
+
+	// The no-tools guidance must not appear when tools were supplied.
+	if strings.Contains(got, "Cutting Knowledge Date") && strings.Contains(got, "No tools") {
+		t.Errorf("prompt mixes tool and no-tool guidance:\n%s", got)
+	}
+}
+
+// TestLlama32TemplateWithoutTools is the other side: the same template and no tools must not
+// produce the tool-calling instructions.
+func TestLlama32TemplateWithoutTools(t *testing.T) {
+	tmpl := loadTestTemplate(t, "llama32-instruct.jinja")
+	parsed, err := Parse(tmpl)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := parsed.Render(
+		[]Message{{Role: "user", Content: "What is the capital of France?"}},
+		Inputs{BOSToken: "<|begin_of_text|>", EOSToken: "<|eot_id|>", AddGenerationPrompt: true})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, unwanted := range []string{"ipython", "respond with a JSON", `"function"`} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("a no-tools prompt contains %q:\n%s", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "What is the capital of France?") {
+		t.Errorf("the user's message is missing:\n%s", got)
 	}
 }

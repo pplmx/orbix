@@ -38,6 +38,12 @@ type Stats struct {
 	// capacity that creates it.
 	MaxActive int
 
+	// PrefixReused counts prompt positions that came from a shared prefix instead of a
+	// forward pass. It is the measure of what prefix caching bought: throughput alone
+	// cannot show it, because a scenario that submits its requests together has nothing
+	// to reuse.
+	PrefixReused uint64
+
 	// PoolBlocks and PoolFree describe the shared block pool, or zero when the engine
 	// uses the contiguous layout.
 	//
@@ -82,6 +88,7 @@ func (e *Engine) Stats() Stats {
 		Active:            len(e.active),
 		Queued:            queued,
 		MaxActive:         e.maxActive,
+		PrefixReused:      e.prefixReused,
 	}
 	if e.pool != nil {
 		st.PoolBlocks = e.pool.Blocks()

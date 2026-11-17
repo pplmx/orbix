@@ -226,3 +226,55 @@ func firstGreedyToken(t *testing.T, path string) int {
 	}
 	return best
 }
+
+// TestPrefixPairActuallyReuses pins what the prefix rows exist to show.
+//
+// The pair used to submit four requests to a MaxActive=4 engine, so all four prefilled
+// together and no request ever arrived after another had cached its prefix: both rows
+// printed the same throughput and no reader could tell whether reuse happened and did not
+// help, or never happened. The scenario is sequential now, and this asserts that the reuse
+// it claims to measure is real rather than assumed.
+//
+// A second trap sat behind the first, and it is the one the real command hit: a block is
+// only published to the prefix index when its last position is written, so a prompt shorter
+// than one block never produces anything to reuse. The command's default prompt is five
+// tokens against a sixteen-position block, so even the sequential pair measured zero until
+// the scenario extended its prompt to span two blocks.
+//
+// The test's own prompt is already long enough to span blocks, so it cannot tell the
+// concurrent and sequential shapes apart -- both reuse once the prompt is long enough. What
+// it does pin is that the reuse-on row reuses and the reuse-off row does not, which is the
+// property the pair exists to demonstrate.
+func TestPrefixPairActuallyReuses(t *testing.T) {
+	o := testSuiteOptions(t)
+	var off, on *result
+	for _, sc := range scenarioList() {
+		if sc.name != "prefix no reuse" && sc.name != "prefix reuse x4" {
+			continue
+		}
+		res, err := sc.run(o)
+		if err != nil {
+			t.Fatalf("%s: %v", sc.name, err)
+		}
+		if sc.name == "prefix no reuse" {
+			off = &res
+		} else {
+			on = &res
+		}
+	}
+	if off == nil || on == nil {
+		t.Fatal("the prefix scenarios are not both in the list")
+	}
+	if off.prefixReused != 0 {
+		t.Errorf("reuse off reported %d reused positions, want 0", off.prefixReused)
+	}
+	if on.prefixReused == 0 {
+		t.Error("reuse on reported no reused positions: the scenario does not exercise the " +
+			"path it is named after")
+	}
+	// Three of the four requests should find the prefix; the first has nothing to find.
+	if on.prefixReused%3 != 0 {
+		t.Errorf("reused %d positions, which is not a multiple of the three later requests",
+			on.prefixReused)
+	}
+}

@@ -46,6 +46,10 @@ type result struct {
 	// number the policies exist to change, since they reorder a fixed amount of work
 	// rather than reduce it.
 	firstToken time.Duration
+	// prefixReused is how many prompt positions came from a shared prefix rather than a
+	// forward pass, so a row can say whether its cache setting had anything to reuse
+	// instead of leaving the reader to infer it from throughput.
+	prefixReused uint64
 	// firstRound is the engine round in which the measured request first produced a
 	// token, for the scenarios whose property is ordering rather than speed.
 	//
@@ -109,21 +113,19 @@ func scenarioList() []scenario {
 		},
 		{
 			name: "prefix no reuse",
-			note: "four requests sharing one prompt, reuse off",
+			note: "four requests sharing one prompt, one after another, reuse off; the prompt is repeated to span two blocks, since a shorter one never fills a block to reuse",
 			run: func(o suiteOptions) (result, error) {
-				return runRequests(o, 4, 4, engine.Options{
-					MaxActive: 4, Workers: o.workers,
-					BlockSize: 16, Blocks: 4096,
+				return runSequential(o, 4, engine.Options{
+					Workers: o.workers, BlockSize: 16, Blocks: 4096,
 				})
 			},
 		},
 		{
 			name: "prefix reuse x4",
-			note: "the same four, reuse on -- the pair is the comparison",
+			note: "the same four one after another, reuse on -- the pair is the comparison",
 			run: func(o suiteOptions) (result, error) {
-				return runRequests(o, 4, 4, engine.Options{
-					MaxActive: 4, Workers: o.workers,
-					BlockSize: 16, Blocks: 4096, PrefixCache: true,
+				return runSequential(o, 4, engine.Options{
+					Workers: o.workers, BlockSize: 16, Blocks: 4096, PrefixCache: true,
 				})
 			},
 		},
@@ -197,6 +199,12 @@ func runSuite(o suiteOptions) error {
 		// two rows that should match and starts looking for a measurement bug.
 		if r.res.earlyStops > 0 {
 			note += fmt.Sprintf("; %d request(s) stopped early on EOS", r.res.earlyStops)
+		}
+		// Say what the cache setting actually bought. Without this the two prefix rows
+		// print nearly the same throughput and the reader has no way to tell whether
+		// reuse happened and did not help, or never happened at all.
+		if r.res.prefixReused > 0 {
+			note += fmt.Sprintf("; %d prompt positions reused", r.res.prefixReused)
 		}
 		first := "-"
 		if r.res.firstToken > 0 {
@@ -306,6 +314,7 @@ func runRequests(o suiteOptions, n, concurrency int, opts engine.Options) (resul
 		}
 	}
 	r := result{tokens: tokens, elapsed: time.Since(start), firstToken: firstToken, earlyStops: earlyStops}
+	r.prefixReused = eng.Stats().PrefixReused
 	// Report what the cache actually was, since that is the variable the row exists to
 	// isolate and a misconfigured flag would otherwise look like a throughput change.
 	if pool := eng.Pool(); pool != nil {
@@ -401,4 +410,76 @@ func benchLoad(path string) (*tokenize.Tokenizer, llama.Config, error) {
 		return nil, llama.Config{}, err
 	}
 	return tok, cfg, nil
+}
+
+// runSequential submits its requests one at a time, waiting for each to finish before the
+// next starts.
+//
+// This is what makes prefix caching measurable. runRequests submits everything at once, so
+// with MaxActive as large as the request count they all prefill together and no request ever
+// arrives after another has cached its prefix: the reuse path is never taken, and the two
+// rows print the same throughput with no way to tell why.
+//
+// A real deployment looks more like this than like the simultaneous case -- requests arrive
+// over time, and the second one with a popular system prompt finds it already cached.
+func runSequential(o suiteOptions, n int, opts engine.Options) (result, error) {
+	opts.MaxActive = 1
+	eng, err := newSuiteEngine(o, opts)
+	if err != nil {
+		return result{}, err
+	}
+	// The prompt has to span at least one whole block for anything to be published to the
+	// prefix index: a block is remembered only when its last position is written, so a
+	// prompt shorter than the block never produces a reusable prefix and reuse measures as
+	// zero however the cache is configured. Repeating the caller's prompt gets there without
+	// inventing text, and keeps the same prefix across the requests in the row.
+	block := opts.BlockSize
+	if block <= 0 {
+		block = 16
+	}
+	prompt := o.prompt
+	for len(prompt) < 2*block {
+		prompt = append(prompt[:len(prompt):len(prompt)], o.prompt...)
+	}
+	var tokens int
+	var firstToken time.Duration
+	start := time.Now()
+	for range n {
+		ch, err := eng.Submit(engine.Request{
+			Prompt:    prompt,
+			MaxTokens: o.maxTok,
+			Sampler:   llama.Greedy{},
+		})
+		if err != nil {
+			return result{}, fmt.Errorf("submit: %w", err)
+		}
+		// Drain and pump concurrently: the pump is what produces the events, so reading
+		// first would wait for a token that cannot arrive.
+		done := make(chan struct{})
+		go func(ch <-chan engine.Event) {
+			defer close(done)
+			for ev := range ch {
+				if !ev.HasToken {
+					continue
+				}
+				tokens++
+				if firstToken == 0 {
+					firstToken = time.Since(start)
+				}
+			}
+		}(ch)
+		for eng.Pump() > 0 {
+		}
+		<-done
+	}
+	r := result{
+		tokens:       tokens,
+		elapsed:      time.Since(start),
+		firstToken:   firstToken,
+		prefixReused: eng.Stats().PrefixReused,
+	}
+	if pool := eng.Pool(); pool != nil {
+		r.extra = fmt.Sprintf("paged %dx%d", pool.Blocks(), pool.BlockSize())
+	}
+	return r, nil
 }

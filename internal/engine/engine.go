@@ -162,6 +162,9 @@ type Engine struct {
 	requestsFinished  uint64
 	tokensGenerated   uint64
 	rounds            uint64
+	// prefixReused counts prompt positions served from a shared prefix instead of a
+	// forward pass. It stays zero for a contiguous cache, which cannot share.
+	prefixReused uint64
 }
 
 // Options configures an Engine.
@@ -438,6 +441,14 @@ func (e *Engine) prefill(s *sequence) {
 	}
 	if s.traceOn {
 		s.prefilled = time.Now()
+	}
+	// Record how much of this prompt came from a shared prefix rather than a forward
+	// pass. Only the paged cache can reuse, so the contiguous layout reports nothing --
+	// which is why the counter lives on the engine rather than on the Cache interface.
+	if paged, ok := s.cache.(*llama.PagedKVCache); ok {
+		e.mu.Lock()
+		e.prefixReused += uint64(paged.ReusedPositions())
+		e.mu.Unlock()
 	}
 	// Prefill returns the logits of the last position: decoding continues from
 	// exactly there.

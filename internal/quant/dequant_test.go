@@ -1038,3 +1038,81 @@ func TestIQ4NLDiffersFromQ4_0(t *testing.T) {
 		t.Errorf("IQ4_NL and Q4_0 decoded the same value %v; the codebook is not applied", iq[0])
 	}
 }
+
+// TestDecodeQ3_K is the case the other K-quant tests do not cover, and the one whose layout
+// is hardest to get right: its scales come from two differently-shaped grids and its codes
+// from a third. The implementation follows ggml's numpy reference expression by expression
+// because the index mappings cannot be derived from a loop order, which is exactly the
+// situation where a test that re-derives them independently earns its keep.
+//
+// The expected values here are computed from the layout in the test itself, not from the
+// decoder, so a wrong mapping in either place shows up as a mismatch rather than as two
+// copies of the same mistake.
+func TestDecodeQ3_K(t *testing.T) {
+	// Block: 32 mask bytes, 64 code bytes, 12 packed scale bytes, F16 d.
+	hm := make([]byte, 32)
+	for i := range hm {
+		// Vary the bits so a wrong mask index picks a different bit and changes the value.
+		hm[i] = byte(0xAA ^ (i * 37))
+	}
+	qs := make([]byte, 64)
+	for i := range qs {
+		qs[i] = byte(i * 53)
+	}
+	scales := make([]byte, 12)
+	for i := range 8 {
+		scales[i] = byte(i&0x0F) | byte((15-i)&0x0F)<<4
+	}
+	for i := range 4 {
+		scales[8+i] = byte((i*17)&0x03) | byte((i*29)&0x03)<<2 |
+			byte((i*11)&0x03)<<4 | byte((i*7)&0x03)<<6
+	}
+
+	src := make([]byte, 0, 110)
+	src = append(src, hm...)
+	src = append(src, qs...)
+	src = append(src, scales...)
+	src = appendF16(t, src, 0.5)
+	if len(src) != 110 {
+		t.Fatalf("block is %d bytes, want 110", len(src))
+	}
+
+	dst := make([]float32, 256)
+	if err := Decode(gguf.Q3_K, src, dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	// Recompute the scales from the packed bytes, following the documented grids.
+	var want [16]int8
+	for i := range 8 {
+		want[i] = int8(scales[i] & 0x0F)
+		want[i+8] = int8(scales[i] >> 4)
+	}
+	for f := range 16 {
+		want[f] |= int8(((scales[8+f%4] >> (2 * (f / 4))) & 0x03) << 4)
+	}
+
+	shifts := [4]uint{0, 2, 4, 6}
+	for sb := range 16 {
+		// Codes: group sb/8, shift shifts[(sb%8)/2], byte offset (sb%2)*16.
+		group := qs[(sb/8)*32:]
+		shift := shifts[(sb%8)/2]
+		offset := (sb % 2) * 16
+		// Mask: bit sb/2 of every mask byte.
+		maskBit := uint(sb / 2)
+		scale := float32(int(want[sb]) - 32)
+		for l := range 16 {
+			// The two bits of the low code plus one mask bit make the three-bit value:
+			// the low part is 0..3 and the mask bit subtracts 4 when it is clear.
+			idx := l + offset
+			ql := int32((group[idx] >> shift) & 0x03)
+			qh := (hm[idx] >> maskBit) & 0x01
+			code := ql - 4*(1-int32(qh))
+			wantV := 0.5 * scale * float32(code)
+			if got := dst[sb*16+l]; got != wantV {
+				t.Fatalf("dst[%d] = %v, want %v (sb=%d l=%d ql=%d qh=%d scaleField=%d)",
+					sb*16+l, got, wantV, sb, l, ql, qh, int(want[sb]))
+			}
+		}
+	}
+}

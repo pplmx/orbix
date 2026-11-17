@@ -459,7 +459,8 @@ test would need a Mistral GGUF that this project has not had.
 The quantization is checked at the block level rather than by comparing whole
 generations across formats: each 32-weight format has exact-value tests on constructed
 blocks, the 256-weight K-quants add a round-trip error bound, and a test reads a real
-K-quant tensor from a checkpoint when one is available. Comparing a single prompt's
+K-quant tensor from a checkpoint when one is available -- set `MODEL_KQUANT` to a
+K-quantized file to run it. Comparing a single prompt's
 continuation across quantizations would test the model more than the decoder -- a
 4-bit rounding difference is expected to change a greedy continuation eventually.
 
@@ -478,6 +479,17 @@ Set `MIXTRAL_MODEL` to run it:
 
 ```bash
 MIXTRAL_MODEL=/tmp/tinymixtral.gguf go test ./internal/llama/ -run TestMoEReachesTheExperts
+```
+
+All four gates together take the suite from thirteen skipped tests to none, so a machine
+holding the checkpoints can check every claim the project makes:
+
+```bash
+MODEL=/tmp/stories15M-q4_0.gguf \
+QWEN2_MODEL=/tmp/qwen2-f32.gguf \
+MIXTRAL_MODEL=/tmp/tinymixtral.gguf \
+MODEL_KQUANT=/tmp/tinymixtral.gguf \
+go test ./...
 ```
 
 Worth knowing before judging that run: a file whose weights were never trained produces

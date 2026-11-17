@@ -104,15 +104,26 @@ func TestStreamDecoderSkipsControlTokens(t *testing.T) {
 
 // TestStreamDecoderSingleToken covers a one-token sequence, where the leading
 // space still has to be dropped exactly once.
+//
+// The token is taken by its piece rather than by encoding a word: the fixture vocabulary
+// has no whole-word piece for "Once", so encoding it produced five tokens and this test
+// skipped on every run. What it is about is a single piece that carries a space marker, and
+// the vocabulary has those directly.
 func TestStreamDecoderSingleToken(t *testing.T) {
 	tok := fixtureTokenizer(t)
-	ids := tok.Encode("Once", false)
-	if len(ids) != 1 {
-		t.Skipf("\"Once\" encoded to %d tokens", len(ids))
+	id, ok := tok.index["\u2581the"]
+	if !ok {
+		t.Skip("the fixture has no piece for \"\u2581the\"")
 	}
+	ids := []int32{id}
+
 	dec := tok.Seq()
 	if got, want := dec.Token(ids[0]), tok.Decode(ids); got != want {
 		t.Errorf("streamed %q, Decode gives %q", got, want)
+	}
+	// The marker is dropped, and only once: the piece spells "\u2581the", not "the".
+	if got := tok.Decode(ids); got != "the" {
+		t.Errorf("Decode(%d) = %q, want %q", ids, got, "the")
 	}
 }
 

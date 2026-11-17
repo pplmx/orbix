@@ -26,14 +26,14 @@ import (
 // With no pre-tokenizer the whole text is one chunk, which is the behaviour this package
 // had before it read the key: merges run across every character boundary.
 func (t *Tokenizer) preSplit(text string) []string {
-	maxDigits := t.preDigitRun()
-	if maxDigits == 0 || text == "" {
+	fam, ok := preFamilyOf(t.pre)
+	if !ok || text == "" {
 		return []string{text}
 	}
 	var chunks []string
 	i := 0
 	for i < len(text) {
-		n := chunkLen(text[i:], maxDigits)
+		n := chunkLen(text[i:], fam)
 		if n <= 0 {
 			// A zero-length chunk would loop forever; take one byte so progress is
 			// guaranteed even if the rules below have a gap.
@@ -49,19 +49,68 @@ func (t *Tokenizer) preSplit(text string) []string {
 // at the start of the text.
 var qwen2Contractions = []string{"'s", "'t", "'re", "'ve", "'m", "'ll", "'d"}
 
-// preDigitRun is how many digits one chunk may hold under this pre-tokenizer.
+// preRule is the shape of one pre-tokenizer expression, as the handful of choices its
+// alternatives actually make.
 //
-// The Qwen2 and Llama 3 rules are the same expression except for this number, so it is a
-// property of the family rather than a second implementation: Qwen2 takes one digit at a
-// time and Llama 3 takes up to three. Zero means no pre-tokenizer applies.
-func (t *Tokenizer) preDigitRun() int {
-	switch t.pre {
+// The families differ in four places and share everything else, so the differences are
+// data rather than a function each. Reading them side by side is what makes it possible to
+// check one against llama.cpp's expression without re-deriving the other seven rules.
+type preRule struct {
+	// digits is the most digits one chunk may hold. 0 means a run of any length.
+	digits int
+	// lead is what a letter or digit run may take as a prefix.
+	//
+	// The two expressions spell it differently and the difference matters: GPT-2 writes
+	// " ?\p{L}+", an optional *space*, so a word after a space is one chunk; qwen2 writes
+	// "[^\r\n\p{L}\p{N}]?\p{L}+", an optional *any-non-letter*, so a punctuation mark
+	// joins the following word instead.
+	lead leadKind
+	// letterMarks is whether combining marks join a letter run (\p{L}\p{M} rather than
+	// \p{L}). The deepseek and stablelm families set it.
+	letterMarks bool
+	// newlinesAfterPunct is whether a punctuation run may absorb the newlines that follow
+	// it. qwen2 does; gpt-2 ends the chunk at the punctuation.
+	newlinesAfterPunct bool
+	// newlineChunk is whether the expression has a "\s*[\r\n]+" alternative: a newline
+	// with the spaces before it as one chunk. The GPT-2 expression has no such rule, so a
+	// newline there falls through to the whitespace alternative and groups differently.
+	newlineChunk bool
+}
+
+// leadKind is what a run may take as its prefix.
+type leadKind int
+
+// leadKind's zero value takes no prefix, which is a real choice a family can make; the
+// families this package implements both take one.
+const (
+	// leadSpace takes one space, which is GPT-2's " ?".
+	leadSpace leadKind = iota + 1
+	// leadAnyNonLetter takes one character that is not a letter, digit, or newline, which
+	// is qwen2's "[^\\r\\n\\p{L}\\p{N}]?".
+	leadAnyNonLetter
+)
+
+// preFamilyOf returns the rule for a pre-tokenizer, or false when this package does not
+// implement it.
+func preFamilyOf(p preType) (preRule, bool) {
+	switch p {
 	case preQwen2:
-		return 1
+		return preRule{
+			digits: 1, lead: leadAnyNonLetter,
+			newlinesAfterPunct: true, newlineChunk: true,
+		}, true
 	case preLlama3:
-		return 3
+		return preRule{
+			digits: 3, lead: leadAnyNonLetter,
+			newlinesAfterPunct: true, newlineChunk: true,
+		}, true
+	case preGPT2:
+		// "'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)"
+		// -- an optional space rather than an optional any-non-letter, digits as a run,
+		// and no newline alternative.
+		return preRule{digits: 0, lead: leadSpace}, true
 	default:
-		return 0
+		return preRule{}, false
 	}
 }
 
@@ -70,29 +119,34 @@ func (t *Tokenizer) preDigitRun() int {
 //
 // The alternatives are tried in the order the expression lists them, because that order is
 // the rule: a contraction wins over a letter run, which is why "'s" is its own chunk.
-func chunkLen(s string, maxDigits int) int {
+func chunkLen(s string, fam preRule) int {
 	if n := qwen2ContractionLen(s); n > 0 {
 		return n
 	}
 	// [^\r\n\p{L}\p{N}]?\p{L}+ -- one non-letter, non-digit, non-newline character
 	// followed by a run of letters. The leading character is optional, and that is what
 	// keeps a punctuation mark attached to the following word rather than splitting it.
-	if n := qwen2LetterRunLen(s); n > 0 {
+	// The GPT-2 rule has no such alternative, which is why a punctuation mark and the word
+	// after it are two chunks there.
+	if n := letterRunLen(s, fam); n > 0 {
 		return n
 	}
-	// \p{N}{1,3} -- at most maxDigits digits. A run of digits is not one chunk: a number
-	// is split into groups, and the group size is what the two families disagree about.
-	if n := qwen2DigitRunLen(s, maxDigits); n > 0 {
+	// \p{N} or \p{N}{1,3} or \p{N}+ -- a digit chunk. Whether a number is one chunk or
+	// several groups is per family, and it takes the same prefix a letter run does.
+	if n := digitRunLen(s, fam); n > 0 {
 		return n
 	}
 	// " ?[^\s\p{L}\p{N}]+[\r\n]* -- an optional space, then a run of punctuation,
-	// then any newlines that follow it.
-	if n := qwen2PunctRunLen(s); n > 0 {
+	// then any newlines that follow it. GPT-2's variant stops at the punctuation.
+	if n := punctRunLen(s, fam); n > 0 {
 		return n
 	}
-	// \s*[\r\n]+ -- a newline with the whitespace before it.
-	if n := qwen2NewlineRunLen(s); n > 0 {
-		return n
+	// \s*[\r\n]+ -- a newline with the whitespace before it, for the families whose
+	// expression has that alternative.
+	if fam.newlineChunk {
+		if n := qwen2NewlineRunLen(s); n > 0 {
+			return n
+		}
 	}
 	// \s+(?!\S) -- trailing whitespace that ends the text.
 	// \s+ -- any other run of whitespace.
@@ -102,12 +156,31 @@ func chunkLen(s string, maxDigits int) int {
 	return 0
 }
 
-// qwen2DigitRunLen matches \p{N}{1,max}.
-func qwen2DigitRunLen(s string, max int) int {
-	i, count := 0, 0
-	for i < len(s) && count < max && isDigitAt(s[i:]) {
+// digitRunLen matches the digit alternative: at most max digits when max is positive, or
+// any run when max is zero.
+//
+// Only the space-prefix family takes a prefix here. GPT-2 writes " ?\p{N}+", but qwen2
+// writes a bare "\p{N}" -- its optional non-letter prefix belongs to the letter
+// alternative alone, so a punctuation mark before a digit is its own chunk.
+func digitRunLen(s string, fam preRule) int {
+	i := 0
+	if fam.lead == leadSpace && strings.HasPrefix(s, " ") {
+		i = 1
+	}
+	if i > 0 && !isDigitAt(s[i:]) {
+		return 0
+	}
+	start := i
+	count := 0
+	for i < len(s) && isDigitAt(s[i:]) {
+		if fam.digits > 0 && count >= fam.digits {
+			break
+		}
 		i += runeLenAt(s[i:])
 		count++
+	}
+	if i == start {
+		return 0
 	}
 	return i
 }
@@ -125,20 +198,33 @@ func qwen2ContractionLen(s string) int {
 	return 0
 }
 
-// qwen2LetterRunLen matches [^\r\n\p{L}\p{N}]?\p{L}+.
-func qwen2LetterRunLen(s string) int {
+// letterRunLen matches the letter-run alternative for one family.
+func letterRunLen(s string, fam preRule) int {
 	i := 0
-	if !isLetterAt(s) && !isNewlineAt(s) && !isDigitAt(s) && runeLenAt(s) > 0 {
-		// The optional leading character: anything that is not a letter, digit, or
-		// newline -- punctuation, a space, or a symbol.
-		i = runeLenAt(s)
-		if !isLetterAt(s[i:]) {
-			return 0
+	switch fam.lead {
+	case leadSpace:
+		if strings.HasPrefix(s, " ") {
+			i = 1
+		}
+	case leadAnyNonLetter:
+		if !isLetterAt(s) && !isNewlineAt(s) && !isDigitAt(s) && runeLenAt(s) > 0 {
+			i = runeLenAt(s)
 		}
 	}
+	if i > 0 && !isLetterAt(s[i:]) {
+		return 0
+	}
 	start := i
-	for i < len(s) && isLetterAt(s[i:]) {
-		i += runeLenAt(s[i:])
+	for i < len(s) {
+		if isLetterAt(s[i:]) {
+			i += runeLenAt(s[i:])
+			continue
+		}
+		if fam.letterMarks && isMarkAt(s[i:]) {
+			i += runeLenAt(s[i:])
+			continue
+		}
+		break
 	}
 	if i == start {
 		return 0
@@ -146,8 +232,9 @@ func qwen2LetterRunLen(s string) int {
 	return i
 }
 
-// qwen2PunctRunLen matches " ?[^\s\p{L}\p{N}]+[\r\n]*".
-func qwen2PunctRunLen(s string) int {
+// punctRunLen matches " ?[^\s\p{L}\p{N}]+[\r\n]*", with the newline tail only when the
+// family asks for it.
+func punctRunLen(s string, fam preRule) int {
 	i := 0
 	if strings.HasPrefix(s, " ") {
 		i = 1
@@ -155,7 +242,7 @@ func qwen2PunctRunLen(s string) int {
 	start := i
 	for i < len(s) {
 		n := runeLenAt(s[i:])
-		if n == 0 || isSpaceAt(s[i:]) || isLetterAt(s[i:]) || isDigitAt(s[i:]) {
+		if n == 0 || isSpaceAt(s[i:]) || isLetterAt(s[i:]) || isDigitAt(s[i:]) || isMarkAt(s[i:]) {
 			break
 		}
 		i += n
@@ -163,8 +250,10 @@ func qwen2PunctRunLen(s string) int {
 	if i == start {
 		return 0
 	}
-	for i < len(s) && isNewlineAt(s[i:]) {
-		i += runeLenAt(s[i:])
+	if fam.newlinesAfterPunct {
+		for i < len(s) && isNewlineAt(s[i:]) {
+			i += runeLenAt(s[i:])
+		}
 	}
 	return i
 }
@@ -249,6 +338,13 @@ func isLetterAt(s string) bool  { return classifyAt(s, isLetter) }
 func isDigitAt(s string) bool   { return classifyAt(s, isDigit) }
 func isSpaceAt(s string) bool   { return classifyAt(s, isSpace) }
 func isNewlineAt(s string) bool { return classifyAt(s, isNewline) }
+
+// isMark reports whether r is a combining mark (\p{M}). A family with letterMarks lets one
+// join a letter run, which is what keeps "café" one chunk when the accent arrives as a
+// separate code point rather than as a precomposed character.
+func isMark(r rune) bool { return unicode.IsMark(r) }
+
+func isMarkAt(s string) bool { return classifyAt(s, isMark) }
 
 // classifyAt applies pred to the first rune of s.
 func classifyAt(s string, pred func(rune) bool) bool {

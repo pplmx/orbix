@@ -87,6 +87,11 @@ const (
 	// behaviours that are not part of the expression: a chunk that is itself a whole
 	// vocabulary piece skips the merges, and BOS is added by default.
 	preLlama3
+	// preGPT2 is the original GPT-2 rule: no leading-character alternative, digits
+	// grouped as a run, and a punctuation run that stops at the punctuation. A large
+	// number of vocabularies name it -- olmo, mpt, jais, trillion, granite-docling -- and
+	// most of them mean exactly this expression.
+	preGPT2
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -320,6 +325,10 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		switch name {
 		case "qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "hunyuan", "solar-open":
 			t.pre = preQwen2
+		case "gpt-2", "phi-2", "jina-es", "jina-de", "gigachat", "jina-v2-es",
+			"jina-v2-de", "a.x-4.0", "mellum", "modern-bert", "olmo", "mpt", "jais",
+			"trillion", "granite-docling":
+			t.pre = preGPT2
 		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2":
 			t.pre = preLlama3
 			// A whole chunk that the vocabulary already spells as one piece is taken as

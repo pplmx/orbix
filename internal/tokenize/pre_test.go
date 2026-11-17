@@ -226,3 +226,79 @@ func TestUnknownPreTokenizerIsInert(t *testing.T) {
 		t.Error("an unknown pre-tokenizer set ignoreMerges")
 	}
 }
+
+// The GPT-2 family is the same seven-alternative shape as qwen2 with three differences:
+// an optional *space* prefix rather than an optional any-non-letter, digits as one run,
+// and no newline alternative. Those three are what the tests below pin.
+
+// TestGPT2Chunks checks the chunk boundaries against the expression llama.cpp stores:
+// "'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)".
+func TestGPT2Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preGPT2}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The space belongs to the word after it, which is what " ?" does.
+		{"hello  world", []string{"hello", " ", " world"}},
+		{"don't stop", []string{"don", "'t", " stop"}},
+		// A number is one chunk, unlike qwen2's single digit.
+		{"123456", []string{"123456"}},
+		{"x=42", []string{"x", "=", "42"}},
+		// A punctuation mark is its own chunk, unlike qwen2 where it prefixes the word.
+		{"a.b,c", []string{"a", ".", "b", ",", "c"}},
+		{"   spaces   ", []string{"  ", " spaces", "   "}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("gpt2 preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestGPT2DiffersFromQwen2 is the other half: the two families must not produce the same
+// chunks, or the family parameter is not being read.
+func TestGPT2DiffersFromQwen2(t *testing.T) {
+	gpt := &Tokenizer{pre: preGPT2}
+	qwen := &Tokenizer{pre: preQwen2}
+	for _, in := range []string{"123456", "a.b", "x=42"} {
+		if sameStrings(gpt.preSplit(in), qwen.preSplit(in)) {
+			t.Errorf("%q splits the same under gpt-2 and qwen2; the family is ignored", in)
+		}
+	}
+}
+
+// TestPreSplitNeverLosesText pins the safety property that makes the hand-written splitter
+// acceptable: every byte of the input appears in exactly one chunk.
+//
+// This is not a formality. The expression llama.cpp stores for GPT-2 does not cover every
+// position -- "a.\nb" has no alternative that matches the newline -- so a splitter that
+// simply took the matches would drop it. llama.cpp reads the same expression through a
+// hand-written splitter whose last branch is "_add_token(++pos)", consuming one character
+// when nothing matched. Taking one byte on a gap is this package's equivalent, and it is
+// why a chunk list is always a partition rather than a subset.
+func TestPreSplitNeverLosesText(t *testing.T) {
+	// The empty string is excluded: its single chunk is the empty chunk, and joining that
+	// back gives the input like any other, which is the contract the other coverage test
+	// states too.
+	inputs := []string{
+		"a.\nb", "x!\ny", "hi. \nthere", "a\n\nb", "\n", "\n\n", "\r\n",
+		"é", "café", "日本語", "a\u0301", // a plus a combining acute
+		" ", "  \t  ", "\x00", "a\x00b", "abc123", "a.b,c", "   x   ",
+	}
+	for _, fam := range []preType{preGPT2, preQwen2, preLlama3} {
+		tok := &Tokenizer{pre: fam}
+		for _, in := range inputs {
+			var joined string
+			for _, chunk := range tok.preSplit(in) {
+				if chunk == "" {
+					t.Errorf("pre=%v preSplit(%q) produced an empty chunk", fam, in)
+				}
+				joined += chunk
+			}
+			if joined != in {
+				t.Errorf("pre=%v preSplit(%q) = %q, which does not cover the input", fam, in, joined)
+			}
+		}
+	}
+}

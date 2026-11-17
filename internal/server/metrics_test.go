@@ -453,3 +453,54 @@ func TestMetricsOmitDroppedSpansWithoutTracing(t *testing.T) {
 		t.Error("trace_spans_dropped_total is exported although tracing is off")
 	}
 }
+
+// TestPrefixReuseOnChatCompletions checks the same reuse on the chat endpoint.
+//
+// The test above drives /v1/completions, where the prompt is the caller's text. A chat
+// request's prompt comes out of the model's template, so reuse there depends on the template
+// producing the same prefix for the same conversation -- which it does, and which is what
+// makes a multi-turn session cheap. The two endpoints share the metric but not the path that
+// produces the prompt, so one passing does not mean the other does.
+func TestPrefixReuseOnChatCompletions(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512, Pre: "qwen2"}.Write(t, t.TempDir())
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 1, BlockSize: 8, Blocks: 64, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv.StartPump(ctx)
+
+	// A conversation long enough that the rendered prompt spans several blocks.
+	long := strings.Repeat("Tell me about the history of the city. ", 4)
+	body := `{"messages": [{"role": "user", "content": ` + quoteJSON(long) + `}], "max_tokens": 2}`
+
+	if got := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_prefix_positions_reused_total"); got != 0 {
+		t.Errorf("before any request: prefix_positions_reused_total = %v, want 0", got)
+	}
+	for range 3 {
+		decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions", body))
+	}
+	got := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_prefix_positions_reused_total")
+	if got <= 0 {
+		t.Fatalf("prefix_positions_reused_total = %v after three identical chat requests, "+
+			"want positive", got)
+	}
+}

@@ -3251,3 +3251,33 @@ func TestFalconGroupsOnlyASCIIRuns(t *testing.T) {
 		}
 	}
 }
+
+// TestTrailingSpaceAppliesToEveryFragment covers deepseek-llm's fourth expression, "\s+$".
+//
+// Each expression in a pre-tokenizer is applied to the fragments the previous one produced, so
+// "$" means the end of that *fragment*, not of the original string. Running the rule once on
+// the last piece instead made the split depend on where in the string the piece sat: a piece
+// ending in a no-break space was split when it came last and left whole when it did not.
+//
+// The expected values are the expression's own output on these strings.
+func TestTrailingSpaceAppliesToEveryFragment(t *testing.T) {
+	tok := &Tokenizer{pre: preDeepseekLLM}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The combining mark is gap, so it ends its own fragment and the no-break space that
+		// follows becomes a fragment of its own ending in whitespace -- which the expression
+		// then splits, even though more text follows in the original string.
+		{";]&.%\u0301\u00a0\u2003!", []string{";]&.%", "\u0301", "\u00a0", "\u2003", "!"}},
+		{"\u0301\u00a0\u2003!", []string{"\u0301", "\u00a0", "\u2003", "!"}},
+		{"\u0301\u00a0", []string{"\u0301", "\u00a0"}},
+		// A space in the middle of a letter run still belongs to the run after it.
+		{"a\u00a0b", []string{"a", "\u00a0b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

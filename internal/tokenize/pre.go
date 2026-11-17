@@ -2468,25 +2468,28 @@ func splitDeepseekLLM(text string) []string {
 // only on the last piece. A run of trailing whitespace becomes its own chunk: "\U0001F600\t"
 // is ["\U0001F600", "\t"] where leaving the tab attached gives one chunk.
 func splitTrailingSpace(pieces []string) []string {
-	if len(pieces) == 0 {
-		return pieces
-	}
-	last := pieces[len(pieces)-1]
-	start := len(last)
-	for start > 0 {
-		prev, ok := prevRuneStart(last, start)
-		if !ok || !isSpaceAt(last[prev:]) {
-			break
+	// The expression is applied to *every* fragment, not just the last one: llama.cpp's
+	// splitter runs each expression over the output of the previous pass, and "$" then means
+	// the end of that fragment. So a piece ending in a no-break space is split even when more
+	// text follows it in the original string.
+	var out []string
+	for _, piece := range pieces {
+		start := len(piece)
+		for start > 0 {
+			prev, ok := prevRuneStart(piece, start)
+			if !ok || !isSpaceAt(piece[prev:]) {
+				break
+			}
+			start = prev
 		}
-		start = prev
+		if start == len(piece) || start == 0 {
+			// No trailing whitespace, or the piece is nothing but whitespace -- already one
+			// chunk, and splitting it would trade one chunk for one.
+			out = append(out, piece)
+			continue
+		}
+		out = append(out, piece[:start], piece[start:])
 	}
-	if start == len(last) || start == 0 {
-		// No trailing whitespace, or the piece is nothing but whitespace -- in which case it
-		// is already one chunk and splitting it would trade one chunk for one chunk.
-		return pieces
-	}
-	out := append([]string{}, pieces[:len(pieces)-1]...)
-	out = append(out, last[:start], last[start:])
 	return out
 }
 

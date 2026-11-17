@@ -33,12 +33,6 @@ const (
 // " hello" is one token while "hello" may be several.
 const spacePrefix = "\u2581"
 
-// bpeSpace is how a byte-level BPE vocabulary escapes a space: the byte 0x20 is
-// rendered as the character at code point 256+offset, which for space is U+0120 'Ġ'.
-// It is spelled here rather than looked up in bpeBytes because encoding needs the
-// rune, and the table maps runes to bytes.
-const bpeSpace = "\u0120"
-
 // bpeBytes is GPT-2's byte-to-character table, the inverse of the escaping its
 // byte-level BPE applies before training: byte b is rendered as the character with
 // code points[b] so that a vocabulary can be valid UTF-8 text. Every byte outside
@@ -75,6 +69,58 @@ var bpeBytes = func() map[rune]byte {
 	return table
 }()
 
+// preType is tokenizer.ggml.pre: which pre-tokenizer the vocabulary was trained with.
+//
+// A byte-level BPE model does not merge over the whole text. Text is first cut into
+// chunks, and a merge never crosses a boundary -- which is why a vocabulary can contain a
+// rule for " "+"=" that never fires in practice. The chunking rule differs per model
+// family, so the name is read rather than guessed; an unknown name falls back to no
+// splitting, which is what this package did before it read the key at all.
+type preType int
+
+const (
+	preNone preType = iota
+	// preQwen2 is the Qwen2 family rule: contractions, then letter runs, then single
+	// digits, then the remaining punctuation runs, then whitespace runs.
+	preQwen2
+)
+
+// bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
+//
+// Both directions are needed and they are not the same map. Decoding walks a piece and
+// turns each escaped rune back into its byte; encoding walks the input bytes and turns
+// each into the rune the vocabulary spells it with. Encoding only ever spelled the space,
+// so a newline or a tab reached the merge step as itself -- a rune no piece contains --
+// and the character either vanished from the token stream or split the word around it.
+var bpeRunes = func() [256]rune {
+	var keep [256]bool
+	for b := '!'; b <= '~'; b++ {
+		keep[b] = true
+	}
+	var table [256]rune
+	next := 0
+	for b := range 256 {
+		if keep[b] {
+			table[b] = rune(b)
+		} else {
+			table[b] = rune(256 + next)
+			next++
+		}
+	}
+	return table
+}()
+
+// bpeEscape renders text as the vocabulary spells it: one rune per byte, with every
+// byte outside printable ASCII replaced by its assigned code point.
+func bpeEscape(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := range len(text) {
+		b.WriteRune(bpeRunes[text[i]])
+	}
+	return b.String()
+}
+
 // unknownSurface is how SentencePiece renders an unknown token on decode.
 const unknownSurface = " \u2047 "
 
@@ -109,6 +155,10 @@ type Tokenizer struct {
 	// as though the marker were prose, re-stating the system prompt and never
 	// emitting its end-of-turn token. Matching longest first matters because
 	// markers share prefixes.
+
+	// pre is which pre-tokenizer the vocabulary was trained with, or preNone when the
+	// model carries no pre-tokenizer name.
+	pre preType
 
 	// merges maps a pair of pieces to its rank in the vocabulary's merge list, for a
 	// byte-level BPE vocabulary that ships one. Rank order is the definition of the
@@ -236,6 +286,21 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			// SentencePiece; the default below applies.
 		default:
 			return nil, fmt.Errorf("tokenize: unsupported tokenizer.ggml.model %q (want llama or gpt2)", model)
+		}
+	}
+
+	if name, ok := f.Get[string]("tokenizer.ggml.pre"); ok {
+		switch name {
+		case "qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "hunyuan", "solar-open":
+			t.pre = preQwen2
+		case "", "default":
+			t.pre = preNone
+		default:
+			// An unknown pre-tokenizer is not a reason to refuse the file: the merge list
+			// still tokenizes, just without the chunk boundaries. Reporting it would be
+			// better than silence, but this path has no logger, so the choice is
+			// documented here and in README.
+			t.pre = preNone
 		}
 	}
 
@@ -503,11 +568,27 @@ func (t *Tokenizer) encodeText(text string) []int32 {
 	// while byte-level BPE escapes it as its own symbol and lets the merge decide
 	// whether "Ġa" exists as a piece.
 	if t.byteLevel {
-		text = strings.ReplaceAll(text, " ", bpeSpace)
+		// Every byte, not just the space. The vocabulary is UTF-8 text whose pieces are
+		// spelled with the escaped runes, so a byte left as itself is a rune no piece
+		// contains: it cannot merge, and the character is lost or the word is split
+		// around it.
+		var out []int32
+		for _, chunk := range t.preSplit(text) {
+			out = append(out, t.encodeChunk(bpeEscape(chunk))...)
+		}
+		return out
 	} else {
 		text = strings.ReplaceAll(text, " ", spacePrefix)
 	}
+	return t.encodeChunk(text)
+}
 
+// encodeChunk runs the merge loop over one already-escaped run of text.
+//
+// Pre-tokenization and escaping happen in encodeText; this is the part both families
+// share, and it must not merge across a chunk boundary, which is why the boundary is
+// drawn by the caller.
+func (t *Tokenizer) encodeChunk(text string) []int32 {
 	symbols := make([]symbol, 0, len(text))
 	for off := 0; off < len(text); {
 		_, size := utf8.DecodeRuneInString(text[off:])

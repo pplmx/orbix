@@ -34,12 +34,22 @@ build:
 	@echo "built $(BIN) ($(VERSION))"
 
 ## test: run the unit test suite with CGo disabled
+##
+## -count=1 disables the test result cache. A cached pass is a pass that did not run,
+## and the gate exists to run things: a contributor who changes a test helper and sees
+## green from a cached binary has learned nothing.
 test:
-	go test $(PKG)
+	go test -count=1 $(PKG)
 
 ## test-race: run the unit test suite under the race detector
+##
+## The race detector requires cgo, so this target overrides the CGo ban for itself only.
+## That does not weaken the build: the ban exists so no shipping binary ever links C, and
+## this target produces no binary -- it is a test instrument. Without the override the
+## target could never have succeeded, because the Makefile exports CGO_ENABLED=0 to
+## every recipe.
 test-race:
-	go test -race $(PKG)
+	CGO_ENABLED=1 go test -count=1 -race $(PKG)
 
 ## vet: run go vet
 vet:

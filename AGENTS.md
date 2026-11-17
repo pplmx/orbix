@@ -15,14 +15,17 @@
 
 ```bash
 make build   # 编译到 bin/orbix，注入版本信息
-make test    # go test ./...
+make test    # go test -count=1 ./...
+make test-race # 竞态检测（单独覆盖 CGO_ENABLED=1，仅测试用）
 make lint    # golangci-lint run
 make check   # 本地门槛：vet + test + lint + gofmt
 make bench   # 基准测试
 make cross   # 交叉编译到每个声称支持的平台（CGO_ENABLED=0）
 ```
 
-配置以单一事实源维护：Go 用 `go.mod`，lint 用 `.golangci.yml`，Markdown 用 `.rumdl.toml`。
+配置以单一事实源维护：Go 用 `go.mod`，lint 用 `.golangci.yml`，Markdown 用 `.rumdl.toml`，CI 用 `.github/workflows/ci.yml`。
+
+CI 只调用 Make 目标，不另写 `go build` / `go test` 命令：本地跑 `make check` 绿了，CI 就应该绿。五个 job 各自验证一条 README 声明——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建 + 产物自报 `cgo: false`）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`make test-race` 单独覆盖）、docs（`rumdl check`）。
 
 ## 目录
 

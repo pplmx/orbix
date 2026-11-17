@@ -1,0 +1,167 @@
+# Continuous integration.
+#
+# The point of this file is to make the README's claims checkable rather than
+# asserted: that the project builds with CGo disabled on every platform it names, that
+# its tests pass without a model checkpoint on disk, and that the module still has no
+# external dependencies. Each of those is a statement in the documentation that was
+# true when written, and nothing was verifying it stayed true.
+#
+# `make check` is the entry point rather than a list of go commands, because the local
+# gate and CI must not drift: a contributor who runs `make check` and sees green should
+# be able to predict CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A pull request that is pushed to twice should cancel the first run: its result is
+# already superseded, and the queue would otherwise be spent on it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Belt and braces with the Makefile, which exports this itself. A build that picks up
+  # CGo is the one failure this project cannot tolerate, and an environment variable
+  # inherited from somewhere else is exactly how that would happen.
+  CGO_ENABLED: "0"
+
+jobs:
+  # The gate: format, vet, test, lint. Everything else is a narrower check of something
+  # this job would also catch, kept separate so a failure names the claim that broke.
+  check:
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Pinned to the minor version in go.mod, not to "stable": go.mod declares
+          # go 1.27.0, and a newer toolchain could reject it for reasons unrelated to
+          # this commit.
+          go-version: "1.27"
+          cache: true
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # Pinned exactly. A linter that changes its mind between runs turns a green
+          # branch red without a code change, which is worse than a missed finding.
+          version: v2.15.0
+
+      - name: make check
+        run: make check
+
+      - name: report skipped tests
+        # Skipped tests are not failures, but a rising count is how coverage disappears
+        # without anything going red: before the fixture existed, a clean runner skipped
+        # 74 tests that a developer's machine ran. Printing the number puts it in every
+        # run's record instead of leaving it to be discovered.
+        run: |
+          skips="$(go test ./... -count=1 -v 2>&1 | grep -c '^--- SKIP' || true)"
+          echo "skipped tests: $skips"
+          {
+            echo "### Skipped tests: $skips"
+            echo ""
+            echo "These need a model checkpoint or a benchmark input, so they do not run here."
+            echo "The suite runs without one: see internal/gguftest."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Every platform the README claims, in one runner. The list lives in the Makefile's
+  # CROSS_TARGETS, which is the single place it is written down: a matrix here would be
+  # a second copy that drifts the first time a target changes. One job rather than one
+  # per platform because a cross-compile is seconds of work, and five jobs would add
+  # setup overhead without isolating anything -- if the tree stops compiling for arm64 it
+  # is the same failure that stops it for amd64.
+  cross:
+    name: cross-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: make cross
+        run: make cross
+
+      - name: verify no CGo
+        # The binary reports the build tag state itself, so the ban is checked against
+        # the artifact rather than against the environment that produced it. A recipe
+        # that lost the CGO_ENABLED=0 export would show up here instead of as a mystery
+        # on a user's machine.
+        run: |
+          ./bin/orbix-linux-amd64 version
+          if ./bin/orbix-linux-amd64 version | grep -q 'cgo: *true'; then
+            echo "::error::the linux/amd64 binary was built with CGo"
+            exit 1
+          fi
+
+      - name: report artifacts
+        run: ls -l bin/
+  # macOS arm64 is the platform a contributor is most likely to run this on, and it is
+  # the one whose kernel code path (no assembly anywhere, but different scheduler
+  # behaviour) a linux-only job cannot exercise.
+  test-darwin:
+    name: test (darwin/arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: go test
+        run: go test ./... -count=1
+
+  # The race detector needs CGo on some toolchains, so it runs here rather than in the
+  # gate: CGO_ENABLED=0 is the only supported build, but the race detector is a test
+  # instrument, not a build artifact.
+  race:
+    name: test -race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: make test-race
+        run: make test-race
+
+  # Documentation is code here: README is the project's front page and each package's
+  # doc.go is its authoritative description, so a broken link or a malformed table is a
+  # defect like any other.
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rumdl
+        env:
+          # Pinned to the version the project is developed against. `latest` would let a
+          # new upstream rule break a branch with no change to this repository, and the
+          # asset names in this release carry the target triple, so a floating tag would
+          # also break the URL.
+          RUMDL_VERSION: "0.3.4"
+        run: |
+          url="https://github.com/rvben/rumdl/releases/download/v${RUMDL_VERSION}/rumdl-v${RUMDL_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "$url" | tar xz -C /usr/local/bin rumdl
+          rumdl --version
+
+      - name: rumdl check
+        run: rumdl check

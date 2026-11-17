@@ -564,3 +564,90 @@ func TestIsTests(t *testing.T) {
 		}
 	})
 }
+
+// TestToolsIsAbsentWhenNotProvided covers the binding that decides which branch a tool-aware
+// template takes.
+//
+// Render used to bind "tools" unconditionally, to an empty list when the caller passed none.
+// That kept `{% if tools %}` from failing on an unbound name, but it made
+// `{% if not tools is defined %}` permanently false -- so the branch that sets tools = none
+// never ran, and Llama 3's template rendered the tool-calling prompt for every conversation:
+// "Environment: ipython", "respond with a JSON for a function call", with no tools in sight.
+//
+// The two tests now agree because an unbound name is false in a condition rather than an
+// error, and tools is bound only when there are some.
+func TestToolsIsAbsentWhenNotProvided(t *testing.T) {
+	const guard = `{%- if not tools is defined %}SET{%- else %}SKIP{%- endif %}`
+	tpl, err := Parse(guard)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, err := tpl.Render(nil, Inputs{}); err != nil {
+		t.Fatalf("Render without tools: %v", err)
+	} else if got != "SET" {
+		t.Errorf("without tools the guard rendered %q, want SET", got)
+	}
+	if got, err := tpl.Render(nil, Inputs{Tools: []Tool{{Name: "f"}}}); err != nil {
+		t.Fatalf("Render with tools: %v", err)
+	} else if got != "SKIP" {
+		t.Errorf("with a tool the guard rendered %q, want SKIP", got)
+	}
+
+	// The other form a template uses, which must reach the same conclusion.
+	bare, err := Parse(`{%- if tools %}Y{%- else %}N{%- endif %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, err := bare.Render(nil, Inputs{}); err != nil {
+		t.Fatalf("Render `if tools` without tools: %v", err)
+	} else if got != "N" {
+		t.Errorf("`if tools` without tools rendered %q, want N", got)
+	}
+}
+
+// TestUndefinedNameIsFalseOnlyInConditions checks the distinction the fix above relies on.
+//
+// A condition treats an unbound name as false, which is Jinja's rule and what lets a
+// template write `{% if tools %}` without a guard. Output does not: `{{ nope }}` is still an
+// error, because printing nothing would send a prompt with a hole in it and leave the caller
+// no way to know.
+func TestUndefinedNameIsFalseOnlyInConditions(t *testing.T) {
+	cond, err := Parse(`{%- if nope %}Y{%- else %}N{%- endif %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, err := cond.Render(nil, Inputs{}); err != nil {
+		t.Fatalf("an unbound name in a condition should not fail: %v", err)
+	} else if got != "N" {
+		t.Errorf("unbound name in a condition rendered %q, want N", got)
+	}
+
+	out, err := Parse(`{{ nope }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := out.Render(nil, Inputs{}); err == nil {
+		t.Error("an unbound name in output did not fail")
+	}
+}
+
+// TestInTestsMappingKeys covers `'tool_calls' in message`, which is how the tool-call
+// branches ask whether a message dictionary has a field.
+func TestInTestsMappingKeys(t *testing.T) {
+	// A message value is a mapping, so iterating messages gives one to test against.
+	src := `{%- for m in messages %}` +
+		`{%- if 'role' in m %}has-role{%- endif %}` +
+		`{%- if 'tool_calls' in m %}has-tools{%- endif %}` +
+		`{%- endfor %}`
+	tpl, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := tpl.Render([]Message{{Role: "user", Content: "u"}}, Inputs{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got != "has-role" {
+		t.Errorf("rendered %q, want has-role: the key present is found and the one absent is not", got)
+	}
+}

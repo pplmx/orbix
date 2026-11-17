@@ -71,16 +71,25 @@ type Tool struct {
 
 // Render evaluates the template for a conversation.
 func (t *Template) Render(msgs []Message, in Inputs) (string, error) {
-	// Every name a template may read is bound, even when empty. Templates branch on
-	// `{% if tools %}` without first testing `tools is defined`, so leaving it unbound
-	// would fail the render rather than take the no-tools branch.
-	sc := newScope(map[string]value{
+	// tools is bound only when the caller passed some. A template tests it both ways --
+	// `{% if tools %}` and `{% if not tools is defined %}` -- and those two only agree if
+	// an absent tools list is genuinely absent. Binding an empty list made the second test
+	// always false, so the branch that sets tools = none never ran and every conversation
+	// took the tool-calling path: Llama 3's template rendered a prompt asking the model to
+	// answer with a JSON function call, with no tools provided.
+	//
+	// A condition tolerates an unbound name (see evalCond), so `{% if tools %}` still takes
+	// the no-tools branch instead of failing.
+	vars := map[string]value{
 		"messages":              messagesValue(msgs),
 		"bos_token":             strValue(in.BOSToken),
 		"eos_token":             strValue(in.EOSToken),
 		"add_generation_prompt": boolValue(in.AddGenerationPrompt),
-		"tools":                 toolsValue(in.Tools),
-	})
+	}
+	if len(in.Tools) > 0 {
+		vars["tools"] = toolsValue(in.Tools)
+	}
+	sc := newScope(vars)
 	var r renderer
 	if err := r.renderNodes(t.nodes, sc); err != nil {
 		return "", fmt.Errorf("chat: render: %w", err)

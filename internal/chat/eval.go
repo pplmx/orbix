@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -105,6 +106,34 @@ func (r *renderer) renderNodes(nodes []node, sc *scope) error {
 	return nil
 }
 
+// undefinedVarError reports a name that is not bound. It is a type rather than a formatted
+// string so a condition can recognise it without matching on message text.
+type undefinedVarError struct{ name string }
+
+func (e undefinedVarError) Error() string {
+	return fmt.Sprintf("chat: undefined variable %q", e.name)
+}
+
+// evalCond evaluates a condition, where an unbound name is false rather than an error.
+//
+// Templates branch on `{% if tools %}` without first testing `tools is defined`, and Jinja
+// treats an undefined name as false in that position. The distinction is only for
+// conditions: `{{ nope }}` in output still fails, because there is nothing to print and the
+// caller can fall back to a neutral transcript instead of sending a prompt with a hole in it.
+func evalCond(e expr, sc *scope) (value, error) {
+	v, err := evalExpr(e, sc)
+	if err == nil {
+		return v, nil
+	}
+	// Only an unbound name is absorbed. Any other failure -- a non-sequence in a for, a
+	// field read from a non-mapping -- is a defect in the template and must surface.
+	var missing undefinedVarError
+	if errors.As(err, &missing) {
+		return value{}, nil
+	}
+	return value{}, err
+}
+
 // renderNode runs one node.
 func (r *renderer) renderNode(n node, sc *scope) error {
 	switch t := n.(type) {
@@ -127,7 +156,7 @@ func (r *renderer) renderNode(n node, sc *scope) error {
 		return nil
 	case ifNode:
 		for _, br := range t.branches {
-			v, err := evalExpr(br.cond, sc)
+			v, err := evalCond(br.cond, sc)
 			if err != nil {
 				return err
 			}
@@ -183,7 +212,7 @@ func evalExpr(e expr, sc *scope) (value, error) {
 	case varExpr:
 		v, ok := sc.lookup(t.name)
 		if !ok {
-			return value{}, fmt.Errorf("chat: undefined variable %q", t.name)
+			return value{}, undefinedVarError(t)
 		}
 		return v, nil
 	case callExpr:
@@ -420,6 +449,12 @@ func evalBinary(b binaryExpr, sc *scope) (value, error) {
 	case "!=":
 		return boolValue(!equalValues(left, right)), nil
 	case "in":
+		// A mapping is tested by key, which is what "'tool_calls' in message" means in the
+		// tool-call branches: does this message dict have that field at all.
+		if right.isMap {
+			_, present := right.fields[left.text]
+			return boolValue(present), nil
+		}
 		if !right.isList {
 			return value{}, fmt.Errorf("chat: 'in' needs a sequence on the right")
 		}

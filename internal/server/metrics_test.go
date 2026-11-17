@@ -284,7 +284,7 @@ func serverWithPagedEngine(t *testing.T, path string) *Server {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go srv.Run(ctx)
+	srv.StartPump(ctx)
 	return srv
 }
 

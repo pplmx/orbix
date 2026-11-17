@@ -82,7 +82,7 @@ func newTestServerConfig(t *testing.T, model gguftest.Model, extra Config) (*Ser
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go srv.Run(ctx)
+	srv.StartPump(ctx)
 	return srv, tok
 }
 
@@ -636,7 +636,7 @@ func serverWithPolicy(t *testing.T, path string, policy engine.Priority) *Server
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go srv.Run(ctx)
+	srv.StartPump(ctx)
 	return srv
 }
 
@@ -712,4 +712,84 @@ func TestPriorityIsOptional(t *testing.T) {
 			t.Fatalf("%s: %d choices", body, len(got.Choices))
 		}
 	}
+}
+
+// TestShutdownTracksThePumpGoroutine checks Shutdown actually waits for the pump it stops.
+//
+// The waitgroup was incremented after the deferred decrement, which leaves a window where
+// Wait sees a zero counter and returns while the pump goroutine is not yet tracked: the
+// server reports a clean shutdown while the goroutine is still starting up. The window is
+// narrow, which is why this runs many iterations and why the race detector is the thing
+// that sees it rather than an assertion.
+//
+// Each iteration is a subtest so it gets its own temp directory; sharing one across the
+// loop made the detector report races in the test harness rather than in the server.
+func TestShutdownTracksThePumpGoroutine(t *testing.T) {
+	for range 20 {
+		t.Run("", func(t *testing.T) {
+			path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+			gf, err := gguf.Open(path)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			tok, err := tokenize.New(gf)
+			if err != nil {
+				t.Fatalf("tokenize: %v", err)
+			}
+			eng, err := engine.New(path, engine.Options{MaxActive: 4})
+			if err != nil {
+				t.Fatalf("engine.New: %v", err)
+			}
+			cfg := eng.Model().Config()
+			srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			// StartPump accounts for the goroutine before it exists, so Shutdown is
+			// guaranteed to wait for it however soon it is called.
+			srv.StartPump(context.Background())
+			srv.Shutdown()
+		})
+	}
+}
+
+// TestShutdownIsIdempotent checks the lifecycle edges a server actually reaches: two
+// shutdown paths running at once, and a shutdown before the pump was started.
+//
+// Closing the stop channel twice panics, and a process that installs both a signal handler
+// and a deferred cleanup will close it twice on the ordinary path. A waitgroup with no Add
+// is fine, so the second case needed no fix -- it is pinned so a future change to the
+// accounting cannot quietly reintroduce the panic.
+func TestShutdownIsIdempotent(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{MaxActive: 2})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	newSrv := func() *Server {
+		srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return srv
+	}
+
+	t.Run("twice after StartPump", func(t *testing.T) {
+		srv := newSrv()
+		srv.StartPump(context.Background())
+		srv.Shutdown()
+		srv.Shutdown()
+	})
+	t.Run("before StartPump", func(t *testing.T) {
+		newSrv().Shutdown()
+	})
 }

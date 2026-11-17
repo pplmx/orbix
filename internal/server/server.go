@@ -91,12 +91,13 @@ type Config struct {
 // sequence's channel is buffered, and a client that falls too far behind is
 // cancelled by its own context.
 type Server struct {
-	eng  *engine.Engine
-	tok  *tokenize.Tokenizer
-	cfg  Config
-	mux  *http.ServeMux
-	stop chan struct{}
-	wg   sync.WaitGroup
+	eng      *engine.Engine
+	tok      *tokenize.Tokenizer
+	cfg      Config
+	mux      *http.ServeMux
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 
 	// log is cfg.Logger, kept as the concrete field so the request wrapper can check
 	// for nil cheaply.
@@ -141,14 +142,15 @@ func New(eng *engine.Engine, tok *tokenize.Tokenizer, cfg Config) (*Server, erro
 // a logger is configured.
 func (s *Server) Handler() http.Handler { return s.logRequest(s.mux) }
 
-// Run pumps the engine until the context is cancelled or Shutdown is called.
+// run pumps the engine until the context is cancelled or Shutdown is called. It is
+// unexported because calling it without accounting for it first panics: the deferred
+// Done has no matching Add. StartPump is the way in.
 //
 // The engine only advances inside Pump, so nothing generates until this runs. It
 // is a separate call from ServeHTTP because the pump must be a single goroutine:
 // ServeHTTP handlers run concurrently and each one only waits for its own tokens.
-func (s *Server) Run(ctx context.Context) {
+func (s *Server) run(ctx context.Context) {
 	defer s.wg.Done()
-	s.wg.Add(1)
 	for {
 		select {
 		case <-ctx.Done():
@@ -173,9 +175,25 @@ func (s *Server) Run(ctx context.Context) {
 	}
 }
 
+// StartPump runs the pump in a goroutine and returns once it is accounted for.
+//
+// Use this instead of `go srv.Run(ctx)`. The waitgroup has to be incremented before the
+// goroutine exists, not inside it: an Add that happens in the goroutine leaves a window
+// where Shutdown's Wait sees a zero counter, returns, and reports a clean stop while the
+// pump is still starting. Run itself cannot close that window because by the time it runs
+// the caller has already been given a goroutine handle.
+func (s *Server) StartPump(ctx context.Context) {
+	s.wg.Add(1)
+	go s.run(ctx)
+}
+
 // Shutdown stops the pump goroutine and waits for it.
+//
+// Safe to call more than once, and safe to call before StartPump. Closing the channel
+// twice panics, which a server handling two shutdown signals at once would hit: a signal
+// handler and a deferred cleanup both running is the ordinary case, not an exotic one.
 func (s *Server) Shutdown() {
-	close(s.stop)
+	s.stopOnce.Do(func() { close(s.stop) })
 	s.wg.Wait()
 }
 

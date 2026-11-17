@@ -136,7 +136,7 @@ func cmdServe(args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go srv.Run(ctx)
+	srv.StartPump(ctx)
 
 	fmt.Printf("orbix serving %s on %s\n", cfg, url)
 	fmt.Printf("scheduling: %d active, %s policy\n", *maxActive, schedPolicy)

@@ -23,7 +23,7 @@ export CGO_ENABLED := 0
 # no user is a build that breaks without anyone noticing.
 CROSS_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build test test-race lint fmt vet bench clean check cross
+.PHONY: all build test test-race lint fmt vet bench clean check cross docs
 
 all: check
 
@@ -74,6 +74,21 @@ check: vet test lint
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
 	fi
 	@echo "check: ok"
+
+## docs: lint Markdown with rumdl
+##
+## CI runs this as its own job, and the repository's convention is that Markdown is code:
+## the README is the project's front page and each package's doc.go is its authoritative
+## description, so a malformed table or a broken link is a defect like any other. It is a
+## separate target rather than part of `check` because rumdl is a Python-era tool that a
+## Go-only contributor may not have, and `check` should stay runnable with the Go
+## toolchain and golangci-lint alone.
+docs:
+	@command -v rumdl >/dev/null 2>&1 || { \
+		echo "rumdl not found: install it (https://rumdl.dev) or run CI's docs job"; \
+		exit 1; \
+	}
+	rumdl check .
 
 ## cross: build every supported platform with CGo disabled
 cross:

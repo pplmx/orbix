@@ -21,3 +21,5 @@ coverage.*
 
 # Test binaries produced by `go test -c` and profiling runs.
 *.test
+# Local scratch space for cross-validation tools.
+/.cache/

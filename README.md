@@ -474,6 +474,17 @@ uv run --with numpy python3 scripts/hf_to_gguf.py ./Qwen2.5-0.5B-Instruct /tmp/q
 QWEN2_MODEL=/tmp/qwen2-f32.gguf go test ./internal/llama/ -run Qwen2
 ```
 
+`scripts/jinja_diff.py` checks the chat-template subset the same way: it renders a corpus of
+checkpoint templates and one-construct cases through both this package and real Jinja2, and
+reports where they differ. Jinja2 is the reference implementation a template was written
+against, so a disagreement is either a bug here or a construct the package documents as
+unsupported -- the tool separates the two, and exits non-zero if any template renders
+differently rather than being refused.
+
+```bash
+uv run --with jinja2 python3 scripts/jinja_diff.py
+```
+
 The mixture-of-experts path has the same treatment, on a small public MoE checkpoint.
 Set `MIXTRAL_MODEL` to run it:
 

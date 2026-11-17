@@ -783,3 +783,26 @@ func TestPrintingAContainerIsAnError(t *testing.T) {
 		t.Errorf("role = %q, want %q", got, "user")
 	}
 }
+
+// TestInOperatorOnAString covers "'a' in 'abc'", which Jinja2 supports as a substring test.
+//
+// Real templates use it to branch on a role -- "'user' in message['role']" -- so treating
+// only sequences as membership tests made a supported template fail at render time. The
+// cases are Jinja2's own answer.
+func TestInOperatorOnAString(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{`{% if 'user' in 'username' %}T{% else %}F{% endif %}`, "T"},
+		{`{% if 'x' in 'abc' %}T{% else %}F{% endif %}`, "F"},
+		{`{% if 'a' in 'abc' %}T{% else %}F{% endif %}`, "T"},
+		{`{% if 'user' in messages[0]['role'] %}T{% else %}F{% endif %}`, "T"},
+	}
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	for _, c := range cases {
+		if got := render(t, c.src, msgs, Inputs{}); got != c.want {
+			t.Errorf("%q = %q, want %q", c.src, got, c.want)
+		}
+	}
+}

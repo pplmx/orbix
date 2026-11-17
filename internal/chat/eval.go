@@ -537,7 +537,9 @@ func evalBinary(b binaryExpr, sc *scope) (value, error) {
 			return boolValue(present), nil
 		}
 		if !right.isList {
-			return value{}, fmt.Errorf("chat: 'in' needs a sequence on the right")
+			// Jinja2 also tests a substring in a string, which is what
+			// "'user' in message['role']" means in the conditional templates write.
+			return boolValue(strings.Contains(right.print(), left.print())), nil
 		}
 		for _, item := range right.list {
 			if equalValues(left, item) {

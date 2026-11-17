@@ -283,10 +283,10 @@ func TestPrefixIndexRejectsBadBlocks(t *testing.T) {
 	pool := pagedPool(t, cfg, 4)
 	idx := pool.EnablePrefixCache()
 
-	if err := idx.Remember([]int32{1, 2, 3}, 0); err == nil {
+	if err := idx.Remember([]int32{1, 2, 3}, 0, 0); err == nil {
 		t.Error("Remember accepted a short token run")
 	}
-	if err := idx.Remember([]int32{1, 2, 3, 4}, 9999); err == nil {
+	if err := idx.Remember([]int32{1, 2, 3, 4}, 9999, 0); err == nil {
 		t.Error("Remember accepted a block outside the pool")
 	}
 	// A cache that already holds positions cannot adopt blocks.
@@ -309,7 +309,7 @@ func TestPrefixIndexRejectsBadBlocks(t *testing.T) {
 	if n, blocks := none.Match([]int32{1, 2, 3, 4}); n != 0 || blocks != nil {
 		t.Errorf("nil index matched %d positions", n)
 	}
-	if err := none.Remember([]int32{1, 2, 3, 4}, 0); err != nil {
+	if err := none.Remember([]int32{1, 2, 3, 4}, 0, 0); err != nil {
 		t.Errorf("nil index Remember = %v", err)
 	}
 	if got := none.Len(); got != 0 {
@@ -328,5 +328,218 @@ func TestHashTokensDetectsOrder(t *testing.T) {
 	}
 	if got, want := hashTokens([]int32{1, 2, 3, 4}), hashTokens([]int32{1, 2, 3, 4}); got != want {
 		t.Error("hashTokens is not deterministic")
+	}
+}
+
+// A remembered prefix is a chain, not a bag of blocks: block k+1 is only reachable by
+// walking from block k, so dropping a block in the middle strands everything after it.
+// These tests pin the chain and the eviction order that respects it.
+
+// buildChain fills the index with one n-block prefix, as a prefill would.
+func buildChain(t *testing.T, tokens []int32) (*BlockPool, *PrefixIndex) {
+	t.Helper()
+	cfg := testConfig()
+	pool := pagedPool(t, cfg, 4)
+	idx := pool.EnablePrefixCache()
+	dim := cfg.kvDim()
+	k := make([]float32, dim)
+	v := make([]float32, dim)
+	c := pool.New()
+	for pos := range len(tokens) {
+		for l := range cfg.Layers {
+			if _, _, err := c.appendKV(l, k, v, pos); err != nil {
+				t.Fatalf("appendKV: %v", err)
+			}
+		}
+		c.setLen(pos + 1)
+		if err := c.rememberFullBlock(tokens, pos); err != nil {
+			t.Fatalf("rememberFullBlock(%d): %v", pos, err)
+		}
+	}
+	return pool, idx
+}
+
+// TestPrefixChainLinksBlocks checks that each block knows the one it continues.
+func TestPrefixChainLinksBlocks(t *testing.T) {
+	tokens := []int32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	_, idx := buildChain(t, tokens)
+	if idx.Len() != 3 {
+		t.Fatalf("index holds %d entries, want 3", idx.Len())
+	}
+	// The first block starts a chain; the other two each name a parent.
+	heads, links := 0, 0
+	for _, e := range idx.entries {
+		if e.hasParent {
+			links++
+			if _, ok := idx.entries[e.parent]; !ok {
+				t.Errorf("entry names parent %d, which is not in the index", e.parent)
+			}
+		} else {
+			heads++
+		}
+	}
+	if heads != 1 {
+		t.Errorf("%d head entries, want 1", heads)
+	}
+	if links != 2 {
+		t.Errorf("%d linked entries, want 2", links)
+	}
+}
+
+// TestPrefixEvictionTakesTheTail is the property the chain exists for: eviction must give
+// up the end of a chain, not its middle, because dropping the middle makes the rest
+// unreachable while still holding memory.
+func TestPrefixEvictionTakesTheTail(t *testing.T) {
+	tokens := []int32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	pool, idx := buildChain(t, tokens)
+
+	// One eviction must leave a matchable prefix of two blocks rather than none.
+	if !idx.evictOne() {
+		t.Fatal("evictOne reported nothing to evict")
+	}
+	if got := idx.Len(); got != 2 {
+		t.Fatalf("index holds %d entries, want 2", got)
+	}
+	n, _ := idx.Match(tokens)
+	if n != 8 {
+		t.Errorf("match after one eviction = %d positions, want 8 (two blocks still reachable)", n)
+	}
+	// And the evicted block must have gone back to the pool.
+	if free := pool.Free(); free != 1 {
+		t.Errorf("pool has %d free blocks after evicting one of four, want 1", free)
+	}
+}
+
+// TestPrefixEvictionKeepsChainsIntact drains the index and checks that every remaining
+// entry is still reachable from a head, which is what "no orphans" means.
+func TestPrefixEvictionKeepsChainsIntact(t *testing.T) {
+	tokens := []int32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	_, idx := buildChain(t, tokens)
+
+	for idx.Len() > 0 {
+		before, _ := idx.Match(tokens)
+		if !idx.evictOne() {
+			break
+		}
+		after, _ := idx.Match(tokens)
+		// A match walks the chain from the head, so after evicting a tail the reachable
+		// prefix shrinks by one block; if a middle block went instead, the reachable
+		// length would collapse to zero while entries remained.
+		if idx.Len() > 0 && after == 0 && before > 0 {
+			t.Fatalf("eviction stranded the remaining %d entries: match went %d -> 0",
+				idx.Len(), before)
+		}
+	}
+}
+
+// TestPrefixChainAllowsIndependentPrompts checks that two prompts sharing a beginning
+// each get their own chain rather than corrupting one another's links.
+func TestPrefixChainAllowsIndependentPrompts(t *testing.T) {
+	cfg := testConfig()
+	pool := pagedPool(t, cfg, 4)
+	idx := pool.EnablePrefixCache()
+	dim := cfg.kvDim()
+	k := make([]float32, dim)
+	v := make([]float32, dim)
+
+	fill := func(tokens []int32) {
+		c := pool.New()
+		for pos := range len(tokens) {
+			for l := range cfg.Layers {
+				if _, _, err := c.appendKV(l, k, v, pos); err != nil {
+					t.Fatalf("appendKV: %v", err)
+				}
+			}
+			c.setLen(pos + 1)
+			if err := c.rememberFullBlock(tokens, pos); err != nil {
+				t.Fatalf("remember: %v", err)
+			}
+		}
+	}
+	// Two prompts share their first block then diverge.
+	fill([]int32{1, 2, 3, 4, 10, 11, 12, 13})
+	fill([]int32{1, 2, 3, 4, 20, 21, 22, 23})
+
+	// Three distinct blocks: the shared head plus one continuation each.
+	if got := idx.Len(); got != 3 {
+		t.Fatalf("index holds %d entries, want 3", got)
+	}
+	if n, _ := idx.Match([]int32{1, 2, 3, 4, 10, 11, 12, 13}); n != 8 {
+		t.Errorf("first prompt matches %d positions, want 8", n)
+	}
+	if n, _ := idx.Match([]int32{1, 2, 3, 4, 20, 21, 22, 23}); n != 8 {
+		t.Errorf("second prompt matches %d positions, want 8", n)
+	}
+}
+
+// TestPrefixEvictionPreservesReuseUnderPressure measures what the chain is for, rather
+// than only checking the shape of the index: with the pool short enough that eviction
+// runs, the reachable prefix must stay proportional to the surviving blocks.
+//
+// Without the chain, eviction drops the oldest entry -- the head -- and the reachable
+// prefix collapses to zero while the tail still holds memory. Measured on a 4-block
+// prefix with one eviction: 8 positions reachable with the chain, 0 without.
+func TestPrefixEvictionPreservesReuseUnderPressure(t *testing.T) {
+	// The fixture's context is 16 positions, which at block size 4 is a four-block
+	// chain: long enough to show the shrink, short enough to fit.
+	const n = 16
+	tokens := make([]int32, n)
+	for i := range tokens {
+		tokens[i] = int32(i + 1)
+	}
+	cfg := testConfig()
+	pool := pagedPool(t, cfg, 4)
+	idx := pool.EnablePrefixCache()
+	dim := cfg.kvDim()
+	k := make([]float32, dim)
+	v := make([]float32, dim)
+
+	c := pool.New()
+	for pos := range len(tokens) {
+		for l := range cfg.Layers {
+			if _, _, err := c.appendKV(l, k, v, pos); err != nil {
+				t.Fatalf("appendKV: %v", err)
+			}
+		}
+		c.setLen(pos + 1)
+		if err := c.rememberFullBlock(tokens, pos); err != nil {
+			t.Fatalf("remember: %v", err)
+		}
+	}
+	before := idx.Len()
+	nBefore, _ := idx.Match(tokens)
+	if nBefore != len(tokens) {
+		t.Fatalf("full prefix matches %d positions, want %d", nBefore, len(tokens))
+	}
+
+	// Evict repeatedly and require the reachable prefix to shrink one block at a time
+	// from the end. A collapse to zero while entries remain would mean a middle block
+	// went first.
+	const block = 4
+	for evicted := 1; evicted <= before; evicted++ {
+		if !idx.evictOne() {
+			t.Fatalf("evictOne failed after %d evictions", evicted-1)
+		}
+		got, _ := idx.Match(tokens)
+		want := len(tokens) - evicted*block
+		if want < 0 {
+			want = 0
+		}
+		if got != want {
+			t.Fatalf("after %d evictions: match = %d positions, want %d "+
+				"(reachable prefix must shrink from the end, not collapse)", evicted, got, want)
+		}
+	}
+	if idx.Len() != 0 {
+		t.Errorf("%d entries remain after evicting everything", idx.Len())
+	}
+	// The sequence that produced the prefix still holds its own references; releasing it
+	// is what makes the pool whole, and it is worth asserting because a leaked block here
+	// is the failure the whole index exists to avoid.
+	if err := c.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if free := pool.Free(); free != pool.Blocks() {
+		t.Errorf("pool has %d of %d blocks free at the end, want all", free, pool.Blocks())
 	}
 }

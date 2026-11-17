@@ -42,6 +42,21 @@ type PrefixIndex struct {
 type prefixEntry struct {
 	tokens []int32
 	block  int32
+	// parent is the key of the entry this one continues, or zero with hasParent false
+	// when it starts a chain.
+	//
+	// A prefix is a chain: block k+1 is only reachable by walking from block k, because a
+	// match starts at the prompt's beginning and stops at the first block it cannot find.
+	// Dropping a block from the middle therefore strands everything after it -- those
+	// blocks can never be matched again, yet they keep holding pool memory. Recording the
+	// link lets eviction give up the end of a chain and keep the head, which is the only
+	// part a future prompt can still reach.
+	//
+	// Remember cannot derive this from the token runs, because it records one block at a
+	// time and two independent prompts can contain the same block. The sequence being
+	// prefilled is what knows the order, so the caller passes the parent in.
+	parent    uint64
+	hasParent bool
 }
 
 // maxPrefixEntries bounds the index.
@@ -101,7 +116,12 @@ func (x *PrefixIndex) Match(tokens []int32) (n int, blocks []int32) {
 //
 // A block is only remembered once it is full: a partial block will still be
 // appended to, so its contents are not yet a reusable prefix.
-func (x *PrefixIndex) Remember(tokens []int32, block int32) error {
+// Remember records that block holds tokens, continuing parent when parent is non-zero.
+//
+// parent is the key returned by the Remember call for the preceding block of the same
+// prompt, or zero to start a chain. The caller supplies it because only the caller knows
+// which blocks belong together: the index sees one block at a time.
+func (x *PrefixIndex) Remember(tokens []int32, block int32, parent uint64) error {
 	if x == nil {
 		return nil
 	}
@@ -119,40 +139,76 @@ func (x *PrefixIndex) Remember(tokens []int32, block int32) error {
 		if err := x.pool.release(old.block); err != nil {
 			return err
 		}
-		x.entries[key] = prefixEntry{tokens: append([]int32(nil), tokens...), block: block}
+		x.entries[key] = prefixEntry{
+			tokens: append([]int32(nil), tokens...), block: block,
+			parent: parent, hasParent: parent != 0,
+		}
 		return nil
 	}
 	if len(x.entries) >= maxPrefixEntries {
-		x.evictOldest()
+		x.evictTail()
 	}
-	x.entries[key] = prefixEntry{tokens: append([]int32(nil), tokens...), block: block}
+	x.entries[key] = prefixEntry{
+		tokens: append([]int32(nil), tokens...), block: block,
+		parent: parent, hasParent: parent != 0,
+	}
 	x.order = append(x.order, key)
 	return nil
 }
 
-// evictOne gives up the oldest entry, reporting whether there was one.
-func (x *PrefixIndex) evictOne() bool {
+// Key returns the hash Remember would store for a block, so a caller can pass it as the
+// next block's parent.
+func (x *PrefixIndex) Key(tokens []int32) uint64 { return hashTokens(tokens) }
+
+// evictTail gives up one entry that nothing else continues, releasing its reference.
+//
+// Choosing a tail rather than the oldest entry is what keeps the index useful when the
+// pool is short: dropping a block with a continuation strands that continuation, which
+// costs the same memory and can never be matched again. A tail costs one block and leaves
+// every remaining chain intact.
+//
+// The oldest tail is preferred among the candidates, so eviction still follows insertion
+// order as far as the chain structure allows.
+func (x *PrefixIndex) evictTail() bool {
 	if len(x.order) == 0 {
 		return false
 	}
-	x.evictOldest()
-	return true
-}
-
-// evictOldest drops the oldest entry and releases its reference.
-func (x *PrefixIndex) evictOldest() {
-	if len(x.order) == 0 {
-		return
+	// An entry is a tail when no other entry names it as parent.
+	hasChild := make(map[uint64]bool, len(x.order))
+	for _, key := range x.order {
+		if e, ok := x.entries[key]; ok && e.hasParent {
+			hasChild[e.parent] = true
+		}
 	}
-	key := x.order[0]
-	x.order = x.order[1:]
+	pick := -1
+	for i, key := range x.order {
+		if _, ok := x.entries[key]; !ok {
+			continue
+		}
+		if hasChild[key] {
+			continue
+		}
+		pick = i
+		break
+	}
+	if pick < 0 {
+		// Every entry has a child, which a finite chain cannot satisfy; fall back to the
+		// oldest entry rather than reporting no progress.
+		pick = 0
+	}
+	key := x.order[pick]
+	x.order = append(x.order[:pick], x.order[pick+1:]...)
 	entry, ok := x.entries[key]
 	if !ok {
-		return
+		return false
 	}
 	delete(x.entries, key)
 	_ = x.pool.release(entry.block)
+	return true
 }
+
+// evictOne gives up one entry, reporting whether there was one.
+func (x *PrefixIndex) evictOne() bool { return x.evictTail() }
 
 // Len returns how many prefixes are remembered.
 func (x *PrefixIndex) Len() int {

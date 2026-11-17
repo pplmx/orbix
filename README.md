@@ -126,9 +126,10 @@ exist:
   and an index that hands back the blocks a repeated prompt prefix already produced.
   The index matches whole blocks by hash and compares the tokens, so a collision
   costs a rejected hit rather than a wrong result. A radix tree would let a prefix be
-  matched at sub-block granularity and would make evicting a subtree natural, which
-  is a real difference -- but it would not change what the cache is for, so it is not
-  claimed here.
+  matched at sub-block granularity, which buys nothing here because the cache stores
+  whole blocks; what it would also give is subtree eviction, and the index does that
+  explicitly instead: each entry records the block it continues, so eviction takes
+  the end of a chain and leaves the head reachable.
 - **Scheduler** owns admission, batching, and the prefill/decode lifecycle.
 - **Mixture of experts** is a property of the feed-forward layer, not a separate
   architecture: a model with `expert_count` set replaces its single gated FFN with one
@@ -138,7 +139,7 @@ exist:
   the decode path group rows by chosen expert so one matmul serves every row that picked
   the same one.
 - **Compute kernels** are where the pure-Go work happens, with reference
-  implementations first and assembly fast paths later.
+  implementations written to be read. There are no SIMD fast paths: see the note below.
 
 Dependencies point downward only. Kernels never import the scheduler; the scheduler never imports the server.
 
@@ -420,7 +421,14 @@ QWEN2_MODEL=/tmp/qwen2-f32.gguf go test ./internal/llama/ -run Qwen2
 Orbix is a learning project, and it is honest about where it stands:
 
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
-- **Reference kernels are not optimized per instruction.** They are written to be readable, with no SIMD and no assembly. What they do use is more than one core: the row-partitioned products run on a bounded worker set, which took decoding on stories15M from 65 to 235 tokens per second on a 128-core EPYC. Assembly fast paths on `amd64` (AVX2) and `arm64` (NEON) are planned behind the same interfaces, after the reference implementations are correct.
+- **Reference kernels are not optimized per instruction.** They are written to be
+  readable, with no SIMD and no assembly. What they do use is more than one core: the
+  row-partitioned products run on a bounded worker set, which took decoding on
+  stories15M from 65 to 235 tokens per second on a 128-core EPYC.
+- **SIMD and assembly are deliberately out of scope.** This project exists to make
+  inference legible in one language, and a kernel that cannot be read in the
+  repository's own language defeats that. Parallelism over independent rows is where
+  the speed comes from instead, and it is what the numbers above measure.
 - **Parallelism is over rows, never over a reduction.** Every output row is computed by one goroutine in the same order the serial kernel uses, so float32 addition is never reassociated and the parallel result is bit-identical. That is a deliberate constraint: a split reduction would be faster on paper and would silently change every number the project compares against llama.cpp.
 - **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 it goes 237 tok/s at one stream to 571 tok/s at sixteen. Per-stream speed still drops as streams are added, because the model is one shared resource.
 - **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a request whose prompt starts with blocks the pool has already computed attaches them instead of prefilling them again. On a 96-token shared prefix, one prefill drops from 56.7 ms to 4.1 ms (14x), and four requests with the same prompt finish in 154 ms instead of 246 ms. This is the case a chat application actually has: a system prompt and earlier turns are re-sent verbatim on every call.
@@ -435,7 +443,7 @@ The roadmap is a learning path as much as a feature list. Each version adds one 
 - [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
 - [x] `v0.2` — **Scheduling and cache**: continuous batching, a paged KV cache, Q4_0/Q4_1, Qwen2 — batched prefill and decode with an admission policy, a reference-counted paged cache with prefix reuse, every 32-weight ggml block format, Llama and Qwen2
 - [x] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — SSE streaming, client-disconnect cancellation, a per-request `priority` field, an admission policy, every 32-weight and K-quant block format, the `mistral` architecture with its sliding window, chat templates rendered from `tokenizer.chat_template`, and mixture-of-experts layers
-- [ ] `v0.4` — **Performance paths**: K-quants, prefix-aware radix cache, `amd64` AVX2 and `arm64` NEON assembly — *partial: every K-quant and IQ4_NL decode, and the paged cache with a prefix index covers the reuse case; a radix-based prefix tree and assembly are not done*
+- [x] `v0.4` — **Performance paths**: K-quants, prefix-aware cache — every K-quant and IQ4_NL decode, and a paged cache whose prefix index records which block continues which so eviction gives up a chain's end rather than its middle. Assembly is deliberately out of scope: see below
 - [ ] `v0.5` — **Measurement and observability**: `orbix bench` suite, remote HTTP backend, Prometheus and OpenTelemetry — *partial: `orbix bench --suite` prints every scenario as one table, and `/metrics` exports counters and gauges in Prometheus text format; a remote HTTP backend and OpenTelemetry traces are not done*
 - [ ] `v1.0` — **Stable API**: cross-platform CI matrix, published benchmarks, documented reading path
 

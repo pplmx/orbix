@@ -318,10 +318,18 @@ func (c *PagedKVCache) rememberFullBlock(tokens []int32, pos int) error {
 	if start+c.block > len(tokens) {
 		return fmt.Errorf("llama: block %d needs tokens up to %d, have %d", idx-1, start+c.block, len(tokens))
 	}
+	// The block continues the one before it in this same prefill, which is what the index
+	// needs to know to evict a chain from its end rather than its middle. The parent's key
+	// is the hash of the preceding block's tokens; idx-1 == 0 means this is the head.
+	var parent uint64
+	if idx-1 > 0 {
+		parentStart := start - c.block
+		parent = pool.index.Key(tokens[parentStart : parentStart+c.block])
+	}
 	// Remember takes the index's own reference. This cache already holds its
 	// reference from the allocation, so the block now has two holders and stays
 	// alive after the sequence finishes -- which is the whole point.
-	return pool.index.Remember(tokens[start:start+c.block], c.blocks[idx-1])
+	return pool.index.Remember(tokens[start:start+c.block], c.blocks[idx-1], parent)
 }
 
 // ensureBlocks makes sure the sequence holds a block covering pos.

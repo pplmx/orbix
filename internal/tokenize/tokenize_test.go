@@ -431,3 +431,52 @@ func TestMergeRankBeatsScoreOrder(t *testing.T) {
 		t.Error("the score path produced the same tokens; this fixture does not distinguish the two")
 	}
 }
+
+// TestEncodeWithSpecialsKeepsOneLeadingSpace covers the dummy space prefix around markers.
+//
+// SentencePiece models are trained on text that begins with a space, so the encoder adds one
+// before segmenting. That prefix belongs to the sequence, not to each piece of it: Encode
+// cuts the text at its special markers and encodes the gaps separately, and giving every gap
+// its own prefix turns the space in "the<|m|> garden" into a second leading space. The output
+// still tokenizes and still decodes to legible text, and says "the  garden" -- a doubled
+// space in every chat prompt with a space after a marker.
+//
+// The assertion counts the free-standing space marker rather than decoding, because Decode
+// drops a single leading space by design (llama.cpp's token_to_piece does the same). One
+// marker means one prefix, which is what the sequence should carry.
+//
+// The byte-level family is unaffected, which is why the existing marker tests did not catch
+// it: byte-level BPE adds no prefix, so the two paths never differed there.
+func TestEncodeWithSpecialsKeepsOneLeadingSpace(t *testing.T) {
+	tok := newTestTokenizer(t) // SentencePiece: addSpacePrefix is true
+	tok.specials = append(tok.specials, specialToken{text: "<|m|>", id: 1})
+
+	spaceMarkers := func(ids []int32) int {
+		n := 0
+		for _, id := range ids {
+			if int(id) < len(tok.tokens) && tok.tokens[id] == spacePrefix {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Cases where a prefix belongs: the marker is at the start, so the gap after it opens
+	// the sequence. Exactly one space marker, however many markers precede it.
+	for _, in := range []string{"<|m|> the garden", "<|m|><|m|> the"} {
+		if got := spaceMarkers(tok.EncodeWithSpecials(in, false)); got != 1 {
+			t.Errorf("EncodeWithSpecials(%q) has %d leading space markers, want 1", in, got)
+		}
+	}
+	// Cases where the sequence has already started: the text after the marker must not get
+	// a prefix of its own. Zero free-standing markers, the same as the text without a marker.
+	for _, in := range []string{"the<|m|> garden", "the<|m|>garden"} {
+		if got := spaceMarkers(tok.EncodeWithSpecials(in, false)); got != 0 {
+			t.Errorf("EncodeWithSpecials(%q) has %d leading space markers, want 0", in, got)
+		}
+	}
+	// The doubling was visible in the text, which is how a user would notice it.
+	if got, want := tok.Decode(tok.EncodeWithSpecials("the<|m|> garden", false)), "the garden"; got != want {
+		t.Errorf("EncodeWithSpecials(%q) decodes to %q, want %q", "the<|m|> garden", got, want)
+	}
+}

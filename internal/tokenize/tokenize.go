@@ -824,11 +824,17 @@ func (t *Tokenizer) EncodeWithSpecials(text string, addSpecial bool) []int32 {
 	// marker in the middle of a string does not disturb the pieces around it. The
 	// segment boundaries are what keeps SentencePiece's leading-space rule intact: an
 	// empty gap between two adjacent markers produces no tokens at all.
+	// The dummy space prefix is added once, to the piece at the start of the string. A gap
+	// after a marker is not the start of the sequence, and adding a prefix there is what
+	// turned "the<|x|> garden" into "the  garden": the space in the text became a second
+	// leading space marker.
+	first := true
 	start := 0
 	for i := 0; i < len(text); {
 		if sp, ok := t.matchSpecial(text[i:]); ok {
 			if start < i {
-				out = append(out, t.encodeText(text[start:i])...)
+				out = append(out, t.encodeTextPart(text[start:i], first)...)
+				first = false
 			}
 			out = append(out, sp.id)
 			i += len(sp.text)
@@ -842,7 +848,7 @@ func (t *Tokenizer) EncodeWithSpecials(text string, addSpecial bool) []int32 {
 		i += size
 	}
 	if start < len(text) {
-		out = append(out, t.encodeText(text[start:])...)
+		out = append(out, t.encodeTextPart(text[start:], first)...)
 	}
 	return out
 }
@@ -869,10 +875,21 @@ func (t *Tokenizer) matchSpecial(text string) (specialToken, bool) {
 // score is the piece's unigram log-probability, so a long, likely piece wins
 // over a sequence of shorter ones.
 func (t *Tokenizer) encodeText(text string) []int32 {
+	return t.encodeTextPart(text, true)
+}
+
+// encodeTextPart is encodeText with control over the dummy space prefix.
+//
+// The prefix belongs to the sequence, not to each piece of it. EncodeWithSpecials cuts a
+// string at its special markers and encodes the gaps separately, so passing first=false for
+// a gap that follows a marker is what keeps a leading space from being doubled: the prefix a
+// real tokenizer adds once has already been accounted for by the gap before, or by the
+// marker itself having consumed the start of the text.
+func (t *Tokenizer) encodeTextPart(text string, first bool) []int32 {
 	if text == "" {
 		return nil
 	}
-	if t.addSpacePrefix {
+	if t.addSpacePrefix && first {
 		text = " " + text
 	}
 	// Represent each space the way the vocabulary does before merging. The two

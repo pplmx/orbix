@@ -104,7 +104,7 @@ func cmdRun(args []string) error {
 	// Decode only the generated part: the prompt is already on screen when
 	// --echo is set, and repeating it otherwise would be confusing.
 	generated := out[promptLen:]
-	fmt.Println(tok.Decode(generated))
+	fmt.Println(tok.DecodeCompletion(generated))
 
 	if *stats {
 		n := len(generated)

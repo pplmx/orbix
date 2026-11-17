@@ -418,7 +418,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 			reason = ev.FinishReason
 		}
 	}
-	text := s.tok.Decode(out)
+	text := s.tok.DecodeCompletion(out)
 
 	usage := map[string]int{
 		"prompt_tokens":     len(promptTokens),

@@ -128,13 +128,28 @@ func TestDecodeUndoesBPEByteEscaping(t *testing.T) {
 		types:  []TokenType{Normal, Normal, Normal, Normal, Normal, Normal, Normal},
 		index:  map[string]int32{},
 	}
+	// The leading space stays: this vocabulary is byte-level, so every piece carries the
+	// caller's own spaces and both forms of a word exist. llama.cpp's detokenize trims the
+	// first piece only when the model declares a metaspace prepend scheme that asks for it
+	// (default NEVER), so a byte-level decode keeps what it was given.
 	got := tok.Decode([]int32{0, 1, 2, 4})
-	if want := "Once upon a time"; got != want {
+	if want := " Once upon a time"; got != want {
 		t.Errorf("Decode = %q, want %q", got, want)
 	}
 	// "Ġupon" carries its own space, so the newline is followed by one space.
-	if got := tok.Decode([]int32{0, 3, 1}); got != "Once\n upon" {
-		t.Errorf("Decode with a newline token = %q, want %q", got, "Once\n upon")
+	if got := tok.Decode([]int32{0, 3, 1}); got != " Once\n upon" {
+		t.Errorf("Decode with a newline token = %q, want %q", got, " Once\n upon")
+	}
+	// A SentencePiece vocabulary is the opposite case: its encoder prepends a space, so the
+	// marker on the first piece is not the caller's and decoding takes it off.
+	spm := &Tokenizer{
+		tokens:         []string{"\u2581Once", "\u2581upon", "\u2581a", "\u2581time"},
+		types:          []TokenType{Normal, Normal, Normal, Normal},
+		index:          map[string]int32{},
+		addSpacePrefix: true,
+	}
+	if got, want := spm.Decode([]int32{0, 1, 2, 3}), "Once upon a time"; got != want {
+		t.Errorf("SPM Decode = %q, want %q", got, want)
 	}
 	if got := tok.Decode([]int32{5}); got != "\ttab" {
 		t.Errorf("Decode with a tab token = %q, want %q", got, "\ttab")
@@ -155,7 +170,10 @@ func TestStreamDecoderMatchesBPEVocabulary(t *testing.T) {
 		index:  map[string]int32{},
 	}
 	ids := []int32{0, 1, 2, 4, 3}
-	want := tok.Decode(ids)
+	// The streams a caller renders are completions, so the whole-sequence reference is
+	// DecodeCompletion: it drops the leading space that a byte-level vocabulary puts on the
+	// first word of a continuation, and a stream must drop the same one.
+	want := tok.DecodeCompletion(ids)
 	dec := tok.Seq()
 	var got strings.Builder
 	for _, id := range ids {
@@ -163,5 +181,46 @@ func TestStreamDecoderMatchesBPEVocabulary(t *testing.T) {
 	}
 	if got.String() != want {
 		t.Errorf("streamed %q, Decode gives %q", got.String(), want)
+	}
+}
+
+// TestDecodeAndDecodeCompletionDifferOnTheLeadingSpace pins the split between the two
+// decoders, which is the distinction llama.cpp makes with an lstrip argument.
+//
+// Decode is the inverse of Encode, so a round-trip test can use it; it therefore keeps a
+// leading space that came from the caller's own text. DecodeCompletion is what a caller
+// renders, and for a byte-level vocabulary it takes that space off, because a generated
+// continuation that starts a word spells it "Ġword" and the space is not something the user
+// asked to see. Collapsing the two was wrong in a way neither unit test noticed: the
+// round-trip lost a space, and generation grew one.
+func TestDecodeAndDecodeCompletionDifferOnTheLeadingSpace(t *testing.T) {
+	// A byte-level vocabulary: pieces carry the caller's spaces, and both forms of a word
+	// exist, so the leading space in the pieces is real.
+	tok := &Tokenizer{
+		tokens: []string{"Ġa", "Ġb", "a"},
+		types:  []TokenType{Normal, Normal, Normal},
+		index:  map[string]int32{},
+	}
+	ids := []int32{0, 1}
+	if got, want := tok.Decode(ids), " a b"; got != want {
+		t.Errorf("Decode = %q, want %q: the round-trip must keep the caller's space", got, want)
+	}
+	if got, want := tok.DecodeCompletion(ids), "a b"; got != want {
+		t.Errorf("DecodeCompletion = %q, want %q", got, want)
+	}
+
+	// A SentencePiece vocabulary already loses its marker space inside Decode, so the two
+	// agree -- and trimming again would eat a space the caller wrote.
+	spm := &Tokenizer{
+		tokens:         []string{"\u2581a", "\u2581b"},
+		types:          []TokenType{Normal, Normal},
+		index:          map[string]int32{},
+		addSpacePrefix: true,
+	}
+	if got, want := spm.Decode([]int32{0, 1}), "a b"; got != want {
+		t.Errorf("SPM Decode = %q, want %q", got, want)
+	}
+	if got, want := spm.DecodeCompletion([]int32{0, 1}), "a b"; got != want {
+		t.Errorf("SPM DecodeCompletion = %q, want %q", got, want)
 	}
 }

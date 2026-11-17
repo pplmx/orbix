@@ -70,4 +70,13 @@
 // deciding how to render a run; a stream must decide when the run has ended, so a byte
 // sequence that never forms a character can render differently. Text a model actually
 // generates does not produce such runs.
+//
+// Decode is the exact inverse of Encode, which is what makes a round trip a usable check.
+// That means it keeps a leading space the caller wrote. Rendering a completion is a
+// different job: a byte-level vocabulary spells a word two ways ("the" and "\u0120the"), and a
+// generated continuation starts a word with the spaced form, so the space is not something
+// the user asked to see. DecodeCompletion is the wrapper for that, and the stream decoder
+// applies the same rule inline because a stream has no whole sequence left to post-process.
+// llama.cpp splits the same way, with an lstrip argument to token_to_piece rather than logic
+// inside its detokenize.
 package tokenize

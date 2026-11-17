@@ -887,9 +887,33 @@ func (t *Tokenizer) Decode(ids []int32) string {
 	}
 	flushBytes()
 
-	// Drop the single leading space that the word marker contributed.
 	out := b.String()
-	return strings.TrimPrefix(out, " ")
+	// A SentencePiece vocabulary prepends a space to the text it encodes, so the marker on
+	// the first piece stands for a space the caller never wrote and decoding takes it back
+	// off. A byte-level vocabulary does not: the pieces already carry the caller's own
+	// spaces, and both forms of a word exist ("the" and "Ġthe"), so a leading space in the
+	// output is input and trimming it loses data. The flag that decided whether to prepend
+	// is the same one that says whether to trim.
+	if t.addSpacePrefix {
+		out = strings.TrimPrefix(out, " ")
+	}
+	return out
+}
+
+// DecodeCompletion renders generated tokens as text to show a user.
+//
+// It differs from Decode in one respect: a byte-level vocabulary spells a word two ways
+// ("the" and "Ġthe"), and a generation that starts a word picks the spaced form because it
+// is the one that continues running text. Shown as-is, that space is a stray leading
+// character the user did not ask for. llama.cpp handles this with an lstrip argument to
+// token_to_piece rather than inside its detokenize, and the same split is kept here: Decode
+// stays the exact inverse of Encode so it can be used to check round trips, and this method
+// is what a caller showing a completion wants.
+//
+// A SentencePiece vocabulary needs no special case here, because Decode has already removed
+// its marker space.
+func (t *Tokenizer) DecodeCompletion(ids []int32) string {
+	return strings.TrimPrefix(t.Decode(ids), " ")
 }
 
 // parseByteToken recognizes a SentencePiece byte token of the form <0xNN>.
@@ -996,8 +1020,13 @@ func (d *StreamDecoder) Token(id int32) string {
 // emit applies the leading-space rule and records that text has been produced.
 //
 // Every path that can produce text goes through here, which is what keeps the streamed
-// output equal to Decode's: both drop exactly one space at the start, and neither can
-// forget to.
+// output equal to DecodeCompletion's: both drop exactly one space at the start, and neither
+// can forget to.
+//
+// The space is dropped here rather than in Emit's callers because a stream has no whole
+// sequence to post-process: the first token is gone by the time the last arrives. That is
+// also why Decode itself does not drop it -- a caller checking Encode/Decode round trips
+// needs the space preserved, and DecodeCompletion is the wrapper that takes it off.
 func (d *StreamDecoder) emit(out string) string {
 	if !d.started && strings.HasPrefix(out, " ") {
 		out = out[1:]

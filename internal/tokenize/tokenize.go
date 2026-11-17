@@ -878,11 +878,21 @@ func (t *Tokenizer) Decode(ids []int32) string {
 			pending = append(pending, tok)
 			continue
 		}
-		flushBytes()
 		if t.types[id] == Unknown {
+			flushBytes()
 			b.WriteString(unknownSurface)
 			continue
 		}
+		// A byte-level piece is bytes too, not text: "Ġ" is the escaped space byte, and two
+		// adjacent pieces can hold the halves of one character. Rendering each one
+		// independently would emit an incomplete sequence as-is, which is invalid UTF-8 --
+		// and a JSON body cannot carry that. Buffering them like <0xNN> pieces lets an
+		// incomplete run become U+FFFD instead.
+		if t.byteLevel {
+			pending = append(pending, bpeUnescapeBytes(t.tokens[id])...)
+			continue
+		}
+		flushBytes()
 		b.WriteString(t.renderPiece(t.tokens[id]))
 	}
 	flushBytes()
@@ -1093,6 +1103,27 @@ func (t *Tokenizer) renderPiece(piece string) string {
 		return strings.ReplaceAll(piece, spacePrefix, " ")
 	}
 	return bpeUnescape(piece)
+}
+
+// bpeUnescapeBytes renders one byte-level piece as the bytes it stands for.
+//
+// It is bpeUnescape without the string conversion, so the result can be appended to a byte
+// buffer. The two must agree: a piece that is not an escaped rune is passed through as its
+// own UTF-8 bytes, which is what the vocabulary means by it.
+func bpeUnescapeBytes(piece string) []byte {
+	out := make([]byte, 0, len(piece))
+	for _, r := range piece {
+		if r == ' ' || r == 0x2581 {
+			out = append(out, ' ')
+			continue
+		}
+		if c, ok := bpeBytes[r]; ok {
+			out = append(out, c)
+			continue
+		}
+		out = utf8.AppendRune(out, r)
+	}
+	return out
 }
 
 // bpeUnescape renders one vocabulary piece as text, undoing both space markers and

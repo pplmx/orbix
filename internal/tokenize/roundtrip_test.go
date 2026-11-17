@@ -203,3 +203,47 @@ func TestFixtureBytePiecesAreEscapedRunes(t *testing.T) {
 		t.Error("the SentencePiece fixture vocabulary has no <0xC3> piece")
 	}
 }
+
+// TestInvalidByteRunsBecomeReplacementRunes pins what happens to a byte sequence that never
+// forms a character, which is the one case where Decode is deliberately not the inverse of
+// Encode.
+//
+// A byte-fallback vocabulary can express any byte, including the start of a multi-byte
+// character without its continuation. Decoding must still produce valid UTF-8: text
+// downstream -- a JSON body, a terminal -- cannot carry the raw bytes. So the run collapses
+// into U+FFFD, and the original is not recoverable. That is the correct trade and it is
+// silent, which is why it is worth an assertion rather than a comment.
+func TestInvalidByteRunsBecomeReplacementRunes(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{TokenizerModel: "gpt2"})
+	// 0xEF starts a three-byte character; 0x4D cannot continue it.
+	lead, ok := tok.index[string(bpeRunes[0xEF])]
+	if !ok {
+		t.Skip("the fixture has no piece for byte 0xEF")
+	}
+	cont, ok := tok.index[string(bpeRunes[0x4D])]
+	if !ok {
+		t.Skip("the fixture has no piece for byte 0x4D")
+	}
+	got := tok.Decode([]int32{lead, cont})
+	want := "\uFFFD" + "M"
+	if got != want {
+		t.Errorf("Decode(0xEF, 0x4D) = %q, want %q", got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("Decode produced invalid UTF-8: % x", got)
+	}
+
+	// A valid character reassembled from its bytes is not replaced.
+	// "中" is three bytes: E4 B8 AD.
+	var ids []int32
+	for _, b := range []byte("中") {
+		id, ok := tok.index[string(bpeRunes[b])]
+		if !ok {
+			t.Skipf("the fixture has no piece for byte 0x%02X", b)
+		}
+		ids = append(ids, id)
+	}
+	if got, want := tok.Decode(ids), "中"; got != want {
+		t.Errorf("Decode(% x) = %q, want %q", ids, got, want)
+	}
+}

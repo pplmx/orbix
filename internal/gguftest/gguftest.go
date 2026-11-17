@@ -54,6 +54,12 @@ type Model struct {
 	// character: Decode joins every pending byte before deciding how to render it, while a
 	// stream has to decide when the run ends. A test comparing the two wants a model that
 	// cannot produce such a run.
+	//
+	// The cost of omitting them is that a character the vocabulary does not contain cannot
+	// be represented at all: with no byte pieces, the encoder falls back to the unknown
+	// token, so "中" becomes as many unknown ids as it has bytes and decodes to nothing.
+	// That is the point of the flag for the tests that use it, and a reason not to use it
+	// for a test about text rather than about shapes.
 	NoBytes bool
 	// ChatTemplate, when set, is written to tokenizer.chat_template.
 	ChatTemplate string

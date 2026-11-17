@@ -179,3 +179,39 @@ func TestChatUsageErrors(t *testing.T) {
 		t.Errorf("error = %v, want it to mention ORBIX_MODEL", err)
 	}
 }
+
+// TestChatAliasesEndTheSession checks the three spellings that mean "stop".
+//
+// They share one case in the switch, so the risk is not that one is implemented
+// differently but that the shared arm is only ever exercised through "/exit": if the arm were
+// narrowed to the first spelling, or a later edit made one name fall through to the model,
+// every existing test would still pass because every existing test uses "/exit".
+func TestChatAliasesEndTheSession(t *testing.T) {
+	for _, cmd := range []string{"/exit", "/quit", "/q"} {
+		t.Run(cmd, func(t *testing.T) {
+			// A second line follows the command. If the alias did not end the session, that
+			// line would be sent to the model and answered, which the absence of a second
+			// prompt shows.
+			out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40},
+				"Once upon a time\n"+cmd+"\n/help\n")
+			// "end the session" appears only in /help's own listing: the startup banner
+			// also starts with the word Commands, so that would match either way.
+			if strings.Contains(out, "end the session") {
+				t.Errorf("%q did not end the session: the line after it was processed\n%s", cmd, out)
+			}
+			if !strings.Contains(out, "> ") {
+				t.Errorf("%q produced no prompt before ending:\n%s", cmd, out)
+			}
+		})
+	}
+}
+
+// TestChatAliasesAreNotSentToTheModel is the other half: a command must not also become a
+// user message. Both would end the session here, so the check is on the transcript.
+func TestChatAliasesAreNotSentToTheModel(t *testing.T) {
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40},
+		"/quit\n")
+	if strings.Contains(out, "user: /quit") || strings.Contains(out, "user: /q") {
+		t.Errorf("a command was recorded as a user message:\n%s", out)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -317,5 +318,64 @@ func TestMetricsExportsPoolMetrics(t *testing.T) {
 	values = parseMetrics(t, scrape(t, srv.Handler()))
 	if got := num(t, values, "orbix_kv_pool_free"); got != 64 {
 		t.Errorf("kv_pool_free = %v after one request finished, want 64; blocks leaked", got)
+	}
+}
+
+// TestMetricsExportPrefixReuse covers the counter a deployment running with a prefix cache
+// needs: it is the only reading that says the cache is doing anything, since a reused prompt
+// costs no forward pass and therefore moves no other number.
+//
+// The value is checked exactly. A block is published only when its last position is written,
+// so with 8-position blocks a prompt of three whole blocks is cached by the first request and
+// each identical later request reuses all of it -- a number that a broken counter (counting
+// requests, or blocks, or nothing) cannot produce by accident.
+func TestMetricsExportPrefixReuse(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 1, BlockSize: 8, Blocks: 64, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv.StartPump(ctx)
+
+	// A prose prompt long enough to fill several 8-position blocks, so there is something
+	// for the index to publish.
+	text := strings.Repeat("Once upon a time there was a little girl. ", 4)
+	body := `{"prompt": ` + quoteJSON(text) + `, "max_tokens": 2}`
+
+	if got := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_prefix_positions_reused_total"); got != 0 {
+		t.Errorf("before any request: prefix_positions_reused_total = %v, want 0", got)
+	}
+
+	// The first request fills the cache; the next three reuse it.
+	for range 4 {
+		decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions", body))
+	}
+	got := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_prefix_positions_reused_total")
+	// Three reuses of a whole-block-aligned prefix: positive and a multiple of the block
+	// size, without pinning a block count the encoder could legitimately change.
+	if got <= 0 {
+		t.Fatalf("prefix_positions_reused_total = %v after four identical requests, want positive", got)
+	}
+	if rem := math.Mod(got, 8); rem != 0 {
+		t.Errorf("prefix_positions_reused_total = %v, not a multiple of the 8-position block", got)
 	}
 }

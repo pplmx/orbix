@@ -34,6 +34,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		"counter", st.TokensGenerated)
 	b.help("rounds_total", "Scheduling rounds that advanced at least one sequence.",
 		"counter", st.Rounds)
+	b.help("prefix_positions_reused_total",
+		"Prompt positions served from a shared KV prefix instead of a forward pass, in cumulative total.",
+		"counter", st.PrefixReused)
 
 	b.gauge("requests_active", "Sequences being advanced right now.",
 		"gauge", float64(st.Active))

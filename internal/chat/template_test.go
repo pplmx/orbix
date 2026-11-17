@@ -268,3 +268,55 @@ func TestRenderToJSONShape(t *testing.T) {
 		t.Errorf("got  %s\nwant %s", out, want)
 	}
 }
+
+// TestParseRejectsUnsupportedJinja2 checks the promise that a template using anything
+// outside the supported subset is refused at parse time rather than rendered into a
+// half-correct prompt.
+//
+// The existing rejection test covers a representative sample. This one adds the
+// constructs real chat templates actually reach for -- filter blocks, raw blocks, inline
+// conditionals, tuple unpacking in for, for-else, the cycle helper, string concatenation
+// with ~, and the is-tests other than "is defined" -- because "we report what we do not
+// support" is only true of the constructs someone thought to list.
+//
+// "is defined" itself is supported, and "x is not defined" is how Jinja spells the
+// negation; the latter is rejected here because it is not in the subset, not because the
+// parser treats "is" as an ordinary name.
+func TestParseRejectsUnsupportedJinja2(t *testing.T) {
+	cases := []string{
+		`{{ x | selectattr('role') }}`,
+		`{{ x ** 2 }}`,
+		`{% raw %}{{ x }}{% endraw %}`,
+		`{% filter upper %}x{% endfilter %}`,
+		`{% with a = 1 %}{{ a }}{% endwith %}`,
+		`{% set x = y if z else w %}`,
+		`{{ x if y else z }}`,
+		`{% for k, v in d.items() %}{{ k }}{% endfor %}`,
+		`{% for x in y %}{% else %}none{% endfor %}`,
+		`{{ loop.cycle('a', 'b') }}`,
+		`{{ 'a' ~ 'b' }}`,
+		`{{ x is string }}`,
+		`{{ x is not defined }}`,
+	}
+	for _, src := range cases {
+		if _, err := Parse(src); err == nil {
+			t.Errorf("Parse accepted unsupported Jinja2: %q", src)
+		}
+	}
+}
+
+// TestIsDefinedIsSupported pins the other side: "is defined" is in the subset, and it
+// renders the binding state rather than a parse error.
+func TestIsDefinedIsSupported(t *testing.T) {
+	tpl, err := Parse(`{% if x is defined %}bound{% else %}unbound{% endif %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := tpl.Render([]Message{{Role: "user", Content: "hi"}}, Inputs{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got != "unbound" {
+		t.Errorf("rendered %q for an unbound name, want %q", got, "unbound")
+	}
+}

@@ -344,7 +344,16 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	// position, and sharing one would let two workers interleave writes into the same
 	// slice. The buffers are rented per layer rather than allocated per position, which
 	// is the difference between a few megabytes and a few gigabytes of garbage.
-	scorers := make([][]float32, m.run.Workers())
+	// One buffer per worker the round will actually use, not per configured worker.
+	// Parallel splits n positions across min(workers, n) goroutines, so asking for more
+	// buffers than that allocates ones nothing can ever index: a deliberately large
+	// --workers on a long-context model reserved gigabytes of score buffers per layer and
+	// made a single request tens of times slower.
+	slots := min(m.run.Workers(), n)
+	if slots < 1 {
+		slots = 1
+	}
+	scorers := make([][]float32, slots)
 	for i := range scorers {
 		scorers[i] = make([]float32, cfg.ContextLen)
 	}

@@ -3,6 +3,7 @@ package llama
 import (
 	"math"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -791,5 +792,55 @@ func TestParallelAttentionIsBitIdentical(t *testing.T) {
 				t.Fatalf("workers=%d logit[%d] = %v, serial %v", workers, i, got[i], want[i])
 			}
 		}
+	}
+}
+
+// TestAttentionBuffersDoNotScaleWithWorkers pins the allocation that made a large --workers
+// setting pathological.
+//
+// Each batched attention pass rents one score buffer per worker, sized to the context. The
+// count used to follow the configured worker count rather than the number of positions the
+// round actually splits across, so asking for more workers than there are positions allocated
+// buffers nothing could index. Measured on the 128k-window checkpoint with --workers 10000: a
+// single request reserved 15GB and took 15.3s against 4.5s when configured normally.
+//
+// The comparison is a ratio rather than an absolute count because the point is the shape of
+// the curve, not its height.
+func TestAttentionBuffersDoNotScaleWithWorkers(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	allocated := func(workers int) uint64 {
+		m, err := NewWithOptions(path, Options{Workers: workers})
+		if err != nil {
+			t.Fatalf("NewWithOptions(workers=%d): %v", workers, err)
+		}
+		cfg := m.Config()
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		// A prompt of a few tokens, so the round has far fewer positions than the worker
+		// count under test -- which is the situation the bug needed.
+		tokens := fixtureTokens(cfg, 8)
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		if _, err := m.Prefill(cache, tokens, 0); err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+
+	few := allocated(1)
+	many := allocated(4096)
+	if few == 0 {
+		t.Fatal("no allocations measured, so the comparison means nothing")
+	}
+	// Before the fix this ratio was ~600 for the same pair; a bound of 4 leaves room for the
+	// per-worker slice headers while failing anything proportional to the worker count.
+	if ratio := float64(many) / float64(few); ratio > 4 {
+		t.Errorf("allocation grew %.0fx for 4096 workers against 1 (%d -> %d bytes): the score "+
+			"buffers are sized by --workers instead of by the positions being processed",
+			ratio, few, many)
 	}
 }

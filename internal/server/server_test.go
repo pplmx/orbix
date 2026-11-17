@@ -896,3 +896,52 @@ func TestPumpPicksUpWorkAfterIdle(t *testing.T) {
 		t.Errorf("a request after an idle period took %v", elapsed)
 	}
 }
+
+// TestQueueFullReturns503 checks the status a saturated engine produces.
+//
+// The request is valid and would succeed later, so 400 would tell a client to stop sending
+// it -- the opposite of what should happen. 503 with Retry-After is the answer a proxy or
+// SDK backs off on, and it is the only signal that separates "the server is at capacity"
+// from "your request was wrong".
+func TestQueueFullReturns503(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	// One active plus one queued; the engine is saturated as soon as both are filled.
+	eng, err := engine.New(path, engine.Options{MaxActive: 1, MaxQueued: 1})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Fill the engine directly rather than over HTTP: a handler blocks until its sequence
+	// produces a token, and there is no pump here to produce one.
+	ids := tok.Encode("Once upon a time", true)
+	if len(ids) == 0 {
+		t.Fatal("prompt encoded to nothing")
+	}
+	for range 2 {
+		if _, err := eng.Submit(engine.Request{Prompt: ids, MaxTokens: 4}); err != nil {
+			t.Fatalf("filling the engine: %v", err)
+		}
+	}
+
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 4}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d with a full queue, want 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got == "" {
+		t.Error("no Retry-After on a 503: a client has nothing to back off on")
+	}
+}

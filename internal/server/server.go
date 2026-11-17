@@ -424,6 +424,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		Trace:     s.cfg.Trace,
 	})
 	if err != nil {
+		// A full queue is not the client's fault and not permanent: the request is well
+		// formed and would succeed later. 503 with Retry-After is what a client or proxy
+		// knows to back off on, where 400 would tell it to stop sending this at all.
+		if errors.Is(err, engine.ErrQueueFull) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

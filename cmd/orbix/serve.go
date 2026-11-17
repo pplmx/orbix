@@ -28,6 +28,8 @@ func cmdServe(args []string) error {
 	addr := fs.String("addr", ":8080", "address to listen on")
 	maxTokens := maxTokensFlag(fs, 256)
 	maxActive := fs.Int("max-active", 8, "requests advanced per scheduling round")
+	maxQueued := fs.Int("max-queued", 0,
+		"requests accepted but not yet active before new ones are refused with 503 (0 = 8x --max-active)")
 	cache := registerCacheFlags(fs, true)
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
 	otlpEndpoint := fs.String("otlp-endpoint", "", "OTLP/HTTP collector for traces, e.g. http://localhost:4318; empty disables tracing")
@@ -60,6 +62,7 @@ func cmdServe(args []string) error {
 	}
 	eng, err := engine.New(*model, engine.Options{
 		MaxActive:   *maxActive,
+		MaxQueued:   *maxQueued,
 		Policy:      schedPolicy,
 		Workers:     *cache.workers,
 		BlockSize:   *cache.blockSize,

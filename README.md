@@ -559,14 +559,15 @@ export ORBIX_MODEL=./models/llama-3-8b-q4_0.gguf
 orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --prefix-cache
 ```
 
-| Flag                       | What it controls                                                   |
-| -------------------------- | ------------------------------------------------------------------ |
-| `--model`                  | Checkpoint path; falls back to `ORBIX_MODEL`                       |
-| `--max-active`             | Sequences advanced per round, and therefore the batch size         |
-| `--policy`                 | Which sequences fill a round: `fifo`, `shortest`, or `fair`        |
-| `--workers`                | Kernel goroutines; 0 means one per CPU                             |
-| `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context |
-| `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix            |
+| Flag                       | What it controls                                                    |
+| -------------------------- | ------------------------------------------------------------------- |
+| `--model`                  | Checkpoint path; falls back to `ORBIX_MODEL`                        |
+| `--max-active`             | Sequences advanced per round, and therefore the batch size          |
+| `--max-queued`             | Backlog accepted before new requests get 503; 0 means 8x max-active |
+| `--policy`                 | Which sequences fill a round: `fifo`, `shortest`, or `fair`         |
+| `--workers`                | Kernel goroutines; 0 means one per CPU                              |
+| `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context  |
+| `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix             |
 
 A config file is on the roadmap, not in the code: the interface block at the top of
 this file describes the target, and this table describes what exists.

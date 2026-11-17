@@ -492,8 +492,16 @@ Set `MIXTRAL_MODEL` to run it:
 MIXTRAL_MODEL=/tmp/tinymixtral.gguf go test ./internal/llama/ -run TestMoEReachesTheExperts
 ```
 
-All four gates together take the suite from thirteen skipped tests to none, so a machine
-holding the checkpoints can check every claim the project makes:
+The stories model is a 19 MB public download, and it is the one of the four that takes no
+conversion step:
+
+```bash
+curl -sSL -o /tmp/stories15M-q4_0.gguf \
+  https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf
+```
+
+The gates take the suite from twelve skipped tests to none, so a machine holding the
+checkpoints can check every claim the project makes:
 
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \

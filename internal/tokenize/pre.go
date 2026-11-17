@@ -481,6 +481,10 @@ type preRule struct {
 	// The leading-character alternative does not cover this case -- it excludes punctuation --
 	// which is why the rule has to exist separately rather than falling out of it.
 	punctLetterRun bool
+	// contractionSuffix is whether the letter alternatives may absorb a clitic, which is
+	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
+	// alternative, so a word and its "'s" stay one chunk.
+	contractionSuffix bool
 	// cjk is whether a run of CJK characters is its own chunk, from the family's
 	// "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+" expression. Without it those
 	// characters go through the letter rule, which groups them the same way -- but the family
@@ -548,6 +552,17 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preGPT4O:
+		// "[^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))*((?=[\p{L}\p{M}])([^A-Z]))+(?:'s|'t|...)?"
+		// "|...|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+		//
+		// Tekken's shape with two differences: a digit group is one to three digits rather
+		// than one, and the letter alternatives may absorb a clitic suffix.
+		return preRule{
+			digits: 3, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
+			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
+			contractionSuffix: true,
+		}, true
 	case preFalcon:
 		return preRule{falcon: true}, true
 	case preBloom:
@@ -734,7 +749,24 @@ func letterRunLen(s string, fam preRule) int {
 	if i == start {
 		return 0
 	}
+	// (?i:'s|'t|'re|'ve|'m|'ll|'d)? -- a clitic is absorbed into the word it follows, so
+	// "don't" is one piece where GPT-2 gives "don" and "'t". Only the letter alternatives
+	// carry the suffix; punctuation and digit runs have no such tail.
+	if fam.contractionSuffix {
+		i += cliticLen(s[i:])
+	}
 	return i
+}
+
+// cliticLen returns the length of a clitic at the start of s, or 0.
+//
+// The set and the case folding are the same ones the Qwen2 rule matches at the start of a
+// text, so the two share the table rather than each keeping a copy.
+func cliticLen(s string) int {
+	if s == "" {
+		return 0
+	}
+	return qwen2ContractionLen(s)
 }
 
 // punctRunLen matches " ?[^\s\p{L}\p{N}]+[\r\n]*", with the newline tail only when the

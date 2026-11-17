@@ -25,7 +25,8 @@ func TestInspectReportsPreTokenizer(t *testing.T) {
 		{"deepseek-v3", "implemented"},
 		{"tekken", "implemented"},
 		// Still unimplemented: the warning path needs a family that really is missing.
-		{"llama4", "NOT implemented"},
+		// chameleon needs sentinel and image token handling, so it is not a near-term one.
+		{"chameleon", "NOT implemented"},
 		{"qwen-2", "NOT a name this package knows"},
 	}
 	for _, c := range cases {

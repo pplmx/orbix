@@ -130,6 +130,9 @@ const (
 	// preFalcon applies a punctuation-and-symbol run, the GPT-2 expression, then groups of
 	// three digits.
 	preFalcon
+	// preGPT4O is tekken's shape with one-to-three digit groups and an optional clitic
+	// suffix on the letter alternatives.
+	preGPT4O
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -385,8 +388,10 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preStarCoder
 		case "deepseek-v3", "hunyuan-dense", "joyai-llm", "hy_v4":
 			t.pre = preDeepseek3
-		case "tekken", "gpt-4o", "nemotron-3.5-embed", "pixtral":
+		case "tekken", "nemotron-3.5-embed", "pixtral":
 			t.pre = preTekken
+		case "gpt-4o", "llama4", "inkling2", "kanana2", "talkie", "minimax-m2":
+			t.pre = preGPT4O
 		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2",
 			// jina-v5-nano is in llama.cpp's llama3 branch, ignore_merges and all.
 			"jina-v5-nano":

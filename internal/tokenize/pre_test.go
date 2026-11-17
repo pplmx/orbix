@@ -396,8 +396,8 @@ func TestPreTokenizerStates(t *testing.T) {
 		{"deepseek-v3", true, true, "implemented"},
 		{"hunyuan-dense", true, true, "same rule as deepseek-v3"},
 		{"tekken", true, true, "implemented"},
-		{"gpt-4o", true, true, "same rule as tekken"},
-		{"llama4", false, true, "a real family, not implemented here"},
+		{"gpt-4o", true, true, "the GPT4O family: tekken's shape with 1-3 digit groups and a clitic suffix"},
+		{"llama4", true, true, "same rule as gpt-4o"},
 		{"qwen-2", false, false, "a typo: not a family name at all"},
 		{"QWEN2", false, false, "the names are case-sensitive"},
 	}
@@ -789,6 +789,74 @@ func TestFamilyAliasesAreEquivalent(t *testing.T) {
 						p.alias, p.family, in, got, want)
 					break
 				}
+			}
+		}
+	}
+}
+
+// TestGPT4OPreTokenizer covers the GPT4O family, which llama.cpp shares between gpt-4o,
+// llama4, inkling2, kanana2, talkie and minimax-m2.
+//
+// Its expression is tekken's shape with two differences: \p{N}{1,3} instead of \p{N}, and
+// an optional clitic suffix on the letter alternatives. Both change visible boundaries, so
+// gpt-4o was previously mapped to tekken and chunked wrongly -- a three-digit run came out
+// as three single digits, and "don't" split into a word and a separate "'t".
+//
+// Expected values from applying the expression to each input with Python's re.
+func TestGPT4OPreTokenizer(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{Pre: "gpt-4o"})
+	if !tok.PreImplemented() {
+		t.Fatal("the GPT4O family is not implemented")
+	}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"HelloWorld", []string{"Hello", "World"}},
+		{"x1234y", []string{"x", "123", "4", "y"}},
+		{"12345", []string{"123", "45"}},
+		{"don't", []string{"don't"}},
+		{"DON'T", []string{"DON'T"}},
+		{"HelloWorld's", []string{"Hello", "World's"}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"x/y", []string{"x", "/y"}},
+		{"Hello\nWorld", []string{"Hello", "\n", "World"}},
+		{"'s test", []string{"'s", " test"}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// TestGPT4OAliasesAgree checks the five other names llama.cpp puts on the same branch.
+func TestGPT4OAliasesAgree(t *testing.T) {
+	ref := bpeFixture(t, gguftest.Model{Pre: "gpt-4o"})
+	for _, name := range []string{"llama4", "inkling2", "kanana2", "talkie", "minimax-m2"} {
+		alias := bpeFixture(t, gguftest.Model{Pre: name})
+		if !alias.PreImplemented() {
+			t.Errorf("%q is not implemented, though llama.cpp maps it to GPT4O", name)
+			continue
+		}
+		for _, in := range []string{"x1234y", "don't", "HelloWorld", "x/y", "a  b"} {
+			got, want := alias.preSplit(in), ref.preSplit(in)
+			bad := len(got) != len(want)
+			for i := 0; !bad && i < len(got); i++ {
+				if got[i] != want[i] {
+					bad = true
+				}
+			}
+			if bad {
+				t.Errorf("%q chunks differently from gpt-4o on %q: %q vs %q", name, in, got, want)
 			}
 		}
 	}

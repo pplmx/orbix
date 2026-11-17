@@ -1,8 +1,9 @@
 package llama
 
 import (
-	"os"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // A paged cache must be a storage change, not a numerical one: the same tokens
@@ -58,16 +59,13 @@ func TestPagedCacheMatchesContiguousTiny(t *testing.T) {
 }
 
 func TestPagedCacheMatchesContiguousRealModel(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Path(t)
 	m, err := New(path)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	cfg := m.Config()
-	tokens := []int32{1, 9038, 2501, 263, 931, 29871, 13}
+	tokens := fixtureTokens(cfg, 7)
 
 	for _, blockSize := range []int{3, 7, 16} {
 		contiguous, _ := NewKVCache(cfg, cfg.ContextLen)
@@ -91,16 +89,13 @@ func TestPagedCacheMatchesContiguousRealModel(t *testing.T) {
 }
 
 func TestPagedPrefillMatchesContiguous(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Path(t)
 	m, err := New(path)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	cfg := m.Config()
-	prompt := []int32{1, 9038, 2501, 263, 931, 29871}
+	prompt := fixtureTokens(cfg, 6)
 
 	contiguous, _ := NewKVCache(cfg, cfg.ContextLen)
 	want, err := m.Prefill(contiguous, prompt, 0)

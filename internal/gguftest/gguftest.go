@@ -1,0 +1,479 @@
+package gguftest
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/pplmx/orbix/internal/gguf"
+)
+
+// Model describes the tiny model a test wants.
+//
+// The defaults are chosen so a zero Config still produces a model that runs: a few
+// layers, a small hidden width, and a vocabulary of single characters. A test that cares
+// about a specific shape sets only the fields it needs.
+type Model struct {
+	// Arch is general.architecture. Empty means "llama".
+	Arch string
+	// Name is general.name, which the server exposes as the model id.
+	Name string
+
+	Layers int
+	Hidden int
+	Heads  int
+	// KVHeads is attention.head_count_kv; zero means Heads.
+	KVHeads int
+	FFN     int
+	// ContextLen is llama.context_length. Zero means 64.
+	ContextLen int
+	// Vocab is the token list. Empty means DefaultVocab.
+	Vocab []string
+	// BOSID and EOSID are the special token ids; the defaults point at the first two
+	// entries of the vocabulary.
+	BOSID, EOSID int
+	// NoEOS writes EOSID as a sentinel outside the vocabulary, so generation never stops
+	// on its own and runs to the token budget.
+	//
+	// A fixture's weights are constructed, not trained, so whether its argmax ever lands
+	// on the end-of-sequence token is an accident of the pattern. Tests that measure how a
+	// scheduler advances a long sequence need it to keep going, and "it happened to stop
+	// after six tokens this build" is not a property any assertion can rest on.
+	NoEOS bool
+	// ChatTemplate, when set, is written to tokenizer.chat_template.
+	ChatTemplate string
+	// Experts and ExpertUsed make the model a mixture of experts.
+	Experts    int
+	ExpertUsed int
+}
+
+// DefaultVocab is a vocabulary of characters and a few words, enough for round trips and
+// for generation to have somewhere to go.
+//
+// The first entry is <unk> because a model without an unknown token cannot encode a
+// character it does not know, and the tests exercise exactly that fallback.
+var DefaultVocab = []string{
+	"<unk>", "<s>", "</s>",
+	"\u2581", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+	"n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+	".", ",", "'", "\u2581the", "\u2581once", "\u2581upon", "\u2581time",
+	"\u2581a", "\u2581t", "he", "on", "ti", "me", "up",
+}
+
+// resolve fills in the defaults and returns a complete description.
+func (m Model) resolve() Model {
+	if m.Arch == "" {
+		m.Arch = "llama"
+	}
+	if m.Name == "" {
+		m.Name = "tiny"
+	}
+	if m.Layers <= 0 {
+		m.Layers = 2
+	}
+	if m.Hidden <= 0 {
+		m.Hidden = 32
+	}
+	if m.Heads <= 0 {
+		m.Heads = 2
+	}
+	if m.KVHeads <= 0 {
+		m.KVHeads = m.Heads
+	}
+	if m.FFN <= 0 {
+		m.FFN = 64
+	}
+	if m.ContextLen <= 0 {
+		m.ContextLen = 64
+	}
+	if len(m.Vocab) == 0 {
+		m.Vocab = DefaultVocab
+	}
+	if m.BOSID == 0 && m.EOSID == 0 {
+		m.BOSID, m.EOSID = 1, 2
+	}
+	return m
+}
+
+// headDim is the width of one attention head.
+func (m Model) headDim() int { return m.Hidden / m.Heads }
+
+// kvDim is the width of the combined key or value projection.
+func (m Model) kvDim() int { return m.KVHeads * m.headDim() }
+
+// kv is one metadata entry. GGUF has no exported writer, and this package is the reason
+// it does not need one: a writer exists only here, for fixtures.
+type kv struct {
+	Key   string
+	Value gguf.Value
+}
+
+// tensorSpec is one tensor's name and shape.
+type tensorSpec struct {
+	name string
+	dims []uint64
+}
+
+// tensors lists the tensors a model of this shape needs, in the order they are laid out.
+func (m Model) tensors() []tensorSpec {
+	h := uint64(m.Hidden)
+	out := []tensorSpec{
+		{"token_embd.weight", []uint64{h, uint64(len(m.Vocab))}},
+		{"output_norm.weight", []uint64{h}},
+		// A separate output projection rather than tied embeddings. With tied weights
+		// the final hidden state is projected onto the same rows the input embedding
+		// reads, and a fixture built from one deterministic pattern lands its argmax on
+		// a special token at once -- every sequence would end at its first step, which
+		// makes the fixture useless for tests that need generation to continue.
+		{"output.weight", []uint64{h, uint64(len(m.Vocab))}},
+	}
+	for i := range m.Layers {
+		p := "blk." + itoa(i) + "."
+		out = append(out,
+			tensorSpec{p + "attn_norm.weight", []uint64{h}},
+			tensorSpec{p + "attn_q.weight", []uint64{h, h}},
+			tensorSpec{p + "attn_k.weight", []uint64{h, uint64(m.kvDim())}},
+			tensorSpec{p + "attn_v.weight", []uint64{h, uint64(m.kvDim())}},
+			tensorSpec{p + "attn_output.weight", []uint64{h, h}},
+			tensorSpec{p + "ffn_norm.weight", []uint64{h}},
+		)
+		if m.Experts > 0 {
+			e := uint64(m.Experts)
+			out = append(out,
+				tensorSpec{p + "ffn_gate_inp.weight", []uint64{h, e}},
+				tensorSpec{p + "ffn_gate_exps.weight", []uint64{h, uint64(m.FFN), e}},
+				tensorSpec{p + "ffn_up_exps.weight", []uint64{h, uint64(m.FFN), e}},
+				tensorSpec{p + "ffn_down_exps.weight", []uint64{uint64(m.FFN), h, e}},
+			)
+			continue
+		}
+		out = append(out,
+			tensorSpec{p + "ffn_gate.weight", []uint64{h, uint64(m.FFN)}},
+			tensorSpec{p + "ffn_up.weight", []uint64{h, uint64(m.FFN)}},
+			tensorSpec{p + "ffn_down.weight", []uint64{uint64(m.FFN), h}},
+		)
+	}
+	return out
+}
+
+// Write builds the model and returns the path to a GGUF file in dir.
+//
+// Every weight is filled from a small deterministic pattern. Real values are not needed:
+// the assertions these fixtures serve are about wiring -- that a batched pass equals a
+// serial one, that a policy reorders without changing output -- and those hold for any
+// weights. Deterministic values make a failure reproducible, which random ones would not.
+func (m Model) Write(t *testing.T, dir string) string {
+	t.Helper()
+	raw, err := m.Bytes()
+	if err != nil {
+		t.Fatalf("gguftest: %v", err)
+	}
+	path := filepath.Join(dir, "tiny.gguf")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("gguftest: write %s: %v", path, err)
+	}
+	return path
+}
+
+// Bytes builds the model and returns the GGUF file's contents.
+//
+// It validates the shape rather than assuming it: a model whose hidden width does not
+// divide by its head count produces a file that fails much later, inside attention, with
+// a slice-bounds panic that names no hyperparameter.
+func (m Model) Bytes() ([]byte, error) {
+	m = m.resolve()
+	if m.Hidden%m.Heads != 0 {
+		return nil, fmt.Errorf("hidden %d is not divisible by heads %d", m.Hidden, m.Heads)
+	}
+	if m.Heads%m.KVHeads != 0 {
+		return nil, fmt.Errorf("heads %d is not divisible by kv heads %d", m.Heads, m.KVHeads)
+	}
+
+	specs := m.tensors()
+	var data []byte
+	infos := make([]gguf.TensorInfo, len(specs))
+	offset := 0
+	for i, spec := range specs {
+		infos[i] = gguf.TensorInfo{Name: spec.name, Dims: spec.dims, Type: gguf.F32}
+		n := int64(1)
+		for _, d := range spec.dims {
+			n *= int64(d)
+		}
+		infos[i].Offset = uint64(offset)
+		vals := make([]float32, n)
+		fillWeights(vals, spec.name)
+		data = appendFloat32s(data, vals)
+		offset += int(n) * 4
+	}
+
+	return buildFile(m.kvs(), infos, data), nil
+}
+
+// fillWeights writes deterministic values into one tensor.
+//
+// Normalization weights are 1, so the residual stream keeps its scale; a fixture whose
+// norms were also patterned would either saturate every layer or decay to zero, and
+// either way a test would be comparing infinities or denormals instead of the property
+// it meant to check.
+//
+// Everything else uses a cheap pseudo-random sequence rather than a short repeating
+// pattern. A repeating pattern makes every vocabulary row differ from its neighbour by a
+// fixed multiple, and the projection then has a stable preference that wins at every
+// position -- generation stops after one token because the same token always comes out.
+// The sequence below has a long period, so distinct rows stay distinct.
+func fillWeights(vals []float32, name string) {
+	if isNorm(name) {
+		for i := range vals {
+			vals[i] = 1
+		}
+		return
+	}
+	// xorshift32: deterministic, no allocation, and long enough that a tensor built from
+	// it does not repeat within any fixture this package produces.
+	state := uint32(0x9E3779B9)
+	for i := range vals {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		// Map to [-0.125, 0.125]: small enough to keep activations bounded over two
+		// layers, varied enough that the output projection does not collapse.
+		vals[i] = float32(int32(state)) / float32(1<<28) * 0.125
+	}
+}
+
+// isNorm reports whether a tensor is a normalization weight.
+func isNorm(name string) bool {
+	for _, suffix := range []string{"attn_norm.weight", "ffn_norm.weight", "output_norm.weight"} {
+		if len(name) >= len(suffix) && name[len(name)-len(suffix):] == suffix {
+			return true
+		}
+	}
+	return false
+}
+
+// kvs builds the metadata a loader reads.
+func (m Model) kvs() []kv {
+	a := m.Arch
+	out := []kv{
+		strKV("general.architecture", a),
+		strKV("general.name", m.Name),
+		u32KV(a+".embedding_length", m.Hidden),
+		u32KV(a+".block_count", m.Layers),
+		u32KV(a+".attention.head_count", m.Heads),
+		u32KV(a+".attention.head_count_kv", m.KVHeads),
+		u32KV(a+".feed_forward_length", m.FFN),
+		u32KV(a+".context_length", m.ContextLen),
+		u32KV(a+".rope.dimension_count", m.headDim()),
+		f32KV(a+".attention.layer_norm_rms_epsilon", 1e-5),
+	}
+	if m.Experts > 0 {
+		out = append(out,
+			u32KV(a+".expert_count", m.Experts),
+			u32KV(a+".expert_used_count", m.ExpertUsed),
+		)
+	}
+	// The tokenizer is SentencePiece-of-characters: model "llama", an explicit
+	// add_space_prefix, and a byte fallback for every byte so encoding arbitrary text
+	// cannot fail.
+	tokens := make([]gguf.Value, len(m.Vocab))
+	types := make([]gguf.Value, len(m.Vocab))
+	scores := make([]gguf.Value, len(m.Vocab))
+	for i, tok := range m.Vocab {
+		tokens[i] = gguf.Value{Type: gguf.TypeString, Str: tok}
+		typ := int64(1) // normal
+		if i < 3 {
+			typ = 3 // control
+		}
+		types[i] = gguf.Value{Type: gguf.TypeInt32, Int: typ}
+		// Descending scores make the merge prefer longer pieces, which is what a
+		// trained unigram model does.
+		scores[i] = gguf.Value{Type: gguf.TypeFloat32, Float: -float64(i) / float64(len(m.Vocab))}
+	}
+	out = append(out,
+		strKV("tokenizer.ggml.model", "llama"),
+		arrayKV("tokenizer.ggml.tokens", gguf.TypeString, tokens),
+		arrayKV("tokenizer.ggml.token_type", gguf.TypeInt32, types),
+		arrayKV("tokenizer.ggml.scores", gguf.TypeFloat32, scores),
+		u32KV("tokenizer.ggml.bos_token_id", m.BOSID),
+		u32KV("tokenizer.ggml.eos_token_id", m.EOSID),
+		u32KV("tokenizer.ggml.unknown_token_id", 0),
+		boolKV("tokenizer.ggml.add_space_prefix", true),
+	)
+	if m.ChatTemplate != "" {
+		out = append(out, strKV("tokenizer.chat_template", m.ChatTemplate))
+	}
+	if m.NoEOS {
+		// A config-side sentinel rather than an absent key: the loader requires an EOS
+		// id, and reusing a real token would make the model stop on something a test
+		// cannot predict.
+		for i, e := range out {
+			if e.Key == m.Arch+".eos_token_id" {
+				out[i] = u32KV(e.Key, NoEOSSentinel)
+				continue
+			}
+			if e.Key == "tokenizer.ggml.eos_token_id" {
+				out[i] = u32KV(e.Key, NoEOSSentinel)
+			}
+		}
+	}
+	return out
+}
+
+// NoEOSSentinel is an EOS id that no vocabulary contains, so a generated sequence never
+// reaches it.
+const NoEOSSentinel = 1 << 30
+
+// Default is the standard fixture: two layers, 32 hidden, a character vocabulary.
+func Default() Model { return Model{} }
+
+// Path builds a default model and returns its path.
+func Path(t *testing.T) string {
+	t.Helper()
+	return Default().Write(t, t.TempDir())
+}
+
+// buildFile renders a complete GGUF: magic, version, counts, metadata, directory, then
+// aligned tensor data.
+func buildFile(kvs []kv, tensors []gguf.TensorInfo, data []byte) []byte {
+	var b bytes.Buffer
+	b.WriteString(gguf.Magic)
+	u32 := func(v uint32) {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], v)
+		b.Write(tmp[:])
+	}
+	u64 := func(v uint64) {
+		var tmp [8]byte
+		binary.LittleEndian.PutUint64(tmp[:], v)
+		b.Write(tmp[:])
+	}
+	str := func(s string) {
+		u64(uint64(len(s)))
+		b.WriteString(s)
+	}
+
+	u32(gguf.Version)
+	u64(uint64(len(tensors)))
+	u64(uint64(len(kvs)))
+
+	for _, e := range kvs {
+		str(e.Key)
+		u32(uint32(e.Value.Type))
+		encodeValue(&b, e.Value)
+	}
+	for _, ti := range tensors {
+		str(ti.Name)
+		u32(uint32(len(ti.Dims)))
+		for _, d := range ti.Dims {
+			u64(d)
+		}
+		u32(uint32(ti.Type))
+		u64(ti.Offset)
+	}
+	// Tensor data starts at the next 32-byte boundary from the end of the directory.
+	for b.Len()%32 != 0 {
+		b.WriteByte(0)
+	}
+	b.Write(data)
+	return b.Bytes()
+}
+
+// encodeValue writes one metadata value.
+func encodeValue(b *bytes.Buffer, v gguf.Value) {
+	u32 := func(x uint32) {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], x)
+		b.Write(tmp[:])
+	}
+	u64 := func(x uint64) {
+		var tmp [8]byte
+		binary.LittleEndian.PutUint64(tmp[:], x)
+		b.Write(tmp[:])
+	}
+	f32 := func(x float32) {
+		u32(math.Float32bits(x))
+	}
+	switch v.Type {
+	case gguf.TypeString:
+		u64(uint64(len(v.Str)))
+		b.WriteString(v.Str)
+	case gguf.TypeBool:
+		if v.Bool {
+			b.WriteByte(1)
+			return
+		}
+		b.WriteByte(0)
+	case gguf.TypeUint8:
+		b.WriteByte(byte(v.Uint))
+	case gguf.TypeUint32:
+		u32(uint32(v.Uint))
+	case gguf.TypeUint64:
+		u64(v.Uint)
+	case gguf.TypeInt8:
+		b.WriteByte(byte(v.Int))
+	case gguf.TypeInt32:
+		u32(uint32(v.Int))
+	case gguf.TypeInt64:
+		u64(uint64(v.Int))
+	case gguf.TypeFloat32:
+		f32(float32(v.Float))
+	case gguf.TypeFloat64:
+		u64(math.Float64bits(v.Float))
+	case gguf.TypeArray:
+		u32(uint32(v.ElemType))
+		u64(uint64(len(v.Array)))
+		for _, e := range v.Array {
+			encodeValue(b, e)
+		}
+	}
+}
+
+// appendFloat32s appends floats in little-endian order.
+func appendFloat32s(dst []byte, vals []float32) []byte {
+	for _, v := range vals {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(v))
+		dst = append(dst, tmp[:]...)
+	}
+	return dst
+}
+
+// itoa formats a small non-negative int.
+func itoa(v int) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [8]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}
+
+// strKV, u32KV, f32KV, boolKV, and arrayKV build metadata entries.
+func strKV(k, v string) kv {
+	return kv{Key: k, Value: gguf.Value{Type: gguf.TypeString, Str: v}}
+}
+
+func u32KV(k string, v int) kv {
+	return kv{Key: k, Value: gguf.Value{Type: gguf.TypeUint32, Uint: uint64(v), Num: float64(v)}}
+}
+
+func f32KV(k string, v float32) kv {
+	return kv{Key: k, Value: gguf.Value{Type: gguf.TypeFloat32, Float: float64(v)}}
+}
+
+func boolKV(k string, v bool) kv {
+	return kv{Key: k, Value: gguf.Value{Type: gguf.TypeBool, Bool: v}}
+}
+
+func arrayKV(k string, elem gguf.ValueType, vals []gguf.Value) kv {
+	return kv{Key: k, Value: gguf.Value{Type: gguf.TypeArray, ElemType: elem, Array: vals}}
+}

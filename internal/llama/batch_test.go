@@ -4,21 +4,20 @@ import (
 	"math"
 	"os"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
-// These tests need a real model for the same reason the engine tests do: the
-// property under test is that restructuring the projections does not change the
-// numbers, and a synthetic model's values are too uniform to expose a reordering
-// that only breaks numerically on real weights.
-//
-// Set MODEL to a GGUF file to run them.
+// These tests check that restructuring the projections does not change the numbers, and
+// that property does not depend on the weights being trained ones: any values expose a
+// reordering, because the comparison is exact equality rather than a tolerance. They run
+// on a constructed fixture, which is what lets them run in CI; the benchmark below still
+// wants a real checkpoint, because a constructed model's speed says nothing about
+// inference on a trained one.
 
 func loadReal(t *testing.T) *Model {
 	t.Helper()
-	p := os.Getenv("MODEL")
-	if p == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	p := gguftest.Path(t)
 	m, err := New(p)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -33,7 +32,9 @@ func TestBatchMatchesSequential(t *testing.T) {
 	m := loadReal(t)
 	cfg := m.Config()
 
-	tokens := []int32{1, 9038, 2501, 263, 931}
+	// Ids inside the vocabulary, starting at BOS. Hard-coded ids from a checkpoint would
+	// index past the end of a constructed one.
+	tokens := fixtureTokens(cfg, 5)
 
 	// Sequential: one Forward per token, keeping the last row.
 	seqCache, err := NewKVCache(cfg, cfg.ContextLen)
@@ -85,7 +86,7 @@ func TestBatchMatchesSequentialTokens(t *testing.T) {
 	m := loadReal(t)
 	cfg := m.Config()
 
-	prompt := []int32{1, 9038, 2501, 263, 931}
+	prompt := fixtureTokens(cfg, 5)
 	const steps = 4
 
 	// Reference: prefill one token at a time, then decode greedily.
@@ -175,10 +176,7 @@ func TestPrefillGrowsScratch(t *testing.T) {
 	}
 	big, _ := NewKVCache(cfg, cfg.ContextLen)
 	n := min(8, cfg.ContextLen)
-	ids := make([]int32, n)
-	for i := range ids {
-		ids[i] = int32(9000 + i)
-	}
+	ids := fixtureTokens(cfg, n)
 	logits, err := m.Prefill(big, ids, 0)
 	if err != nil {
 		t.Fatalf("Prefill(%d): %v", n, err)
@@ -283,8 +281,20 @@ func benchPrompt(b *testing.B) (*Model, []int32) {
 	return m, ids
 }
 
+// fixtureTokens returns n token ids the model can embed.
+func fixtureTokens(cfg Config, n int) []int32 {
+	out := make([]int32, n)
+	out[0] = int32(cfg.BOSID)
+	for i := 1; i < n; i++ {
+		out[i] = int32((i * 3) % cfg.VocabSize)
+	}
+	return out
+}
+
 func loadRealB(b *testing.B) *Model {
 	b.Helper()
+	// Benchmarks still need a real checkpoint: a constructed model's speed says nothing
+	// about inference on a trained one, and the numbers would be meaningless.
 	p := os.Getenv("MODEL")
 	if p == "" {
 		b.Skip("set MODEL to a GGUF file")
@@ -388,7 +398,7 @@ func TestParallelMatchesSerialWeights(t *testing.T) {
 	}
 
 	c := serial.Config()
-	prompt := []int32{1, 9038, 2501, 263, 931}
+	prompt := fixtureTokens(c, 5)
 
 	seqCache, err := NewKVCache(c, c.ContextLen)
 	if err != nil {
@@ -445,8 +455,7 @@ func TestParallelMatchesSerialWeights(t *testing.T) {
 }
 
 func TestNewWithOptionsZeroWorkersUsesGOMAXPROCS(t *testing.T) {
-	loadReal(t) // skips without a model
-	m2, err := NewWithOptions(os.Getenv("MODEL"), Options{})
+	m2, err := NewWithOptions(gguftest.Path(t), Options{})
 	if err != nil {
 		t.Fatalf("NewWithOptions: %v", err)
 	}
@@ -466,13 +475,15 @@ func TestDecodeStepMatchesForward(t *testing.T) {
 	m := loadReal(t)
 	cfg := m.Config()
 
-	// Three sequences with different histories, so their cache lengths differ.
+	// Three sequences with different histories, so their cache lengths differ, and one
+	// step token per sequence.
+	ids := fixtureTokens(cfg, 7)
 	histories := [][]int32{
-		{1, 9038},
-		{1, 9038, 2501, 263},
-		{1, 29871},
+		{ids[0], ids[1]},
+		{ids[0], ids[1], ids[2], ids[3]},
+		{ids[0], ids[2]},
 	}
-	tokens := []int32{931, 3000, 13}
+	tokens := ids[4:7]
 
 	// Reference: one Forward per sequence.
 	want := make([][]float32, len(histories))
@@ -531,10 +542,11 @@ func TestDecodeStepMatchesForward(t *testing.T) {
 func TestDecodeStepContinuesLikeForward(t *testing.T) {
 	m := loadReal(t)
 	cfg := m.Config()
+	ids := fixtureTokens(cfg, 6)
 	prompts := [][]int32{
-		{1, 9038, 2501},
-		{1, 31373, 612},
-		{1, 29871, 13, 29906},
+		{ids[0], ids[1], ids[2]},
+		{ids[0], ids[3], ids[4]},
+		{ids[0], ids[2], ids[3], ids[5]},
 	}
 	const steps = 5
 
@@ -636,10 +648,11 @@ func TestDecodeStepGrowsScratch(t *testing.T) {
 	cfg := m.Config()
 
 	one, _ := NewKVCache(cfg, cfg.ContextLen)
-	if _, err := m.Prefill(one, []int32{1, 9038}, 0); err != nil {
+	pair := fixtureTokens(cfg, 3)
+	if _, err := m.Prefill(one, pair[:2], 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.DecodeStep([]Cache{one}, []int32{2501}); err != nil {
+	if _, err := m.DecodeStep([]Cache{one}, pair[2:3]); err != nil {
 		t.Fatalf("DecodeStep(1): %v", err)
 	}
 
@@ -648,10 +661,10 @@ func TestDecodeStepGrowsScratch(t *testing.T) {
 	tokens := make([]int32, n)
 	for i := range caches {
 		caches[i], _ = NewKVCache(cfg, cfg.ContextLen)
-		if _, err := m.Prefill(caches[i], []int32{1, 9038}, 0); err != nil {
+		if _, err := m.Prefill(caches[i], pair[:2], 0); err != nil {
 			t.Fatal(err)
 		}
-		tokens[i] = int32(2501 + i)
+		tokens[i] = int32(i % cfg.VocabSize)
 	}
 	out, err := m.DecodeStep(caches, tokens)
 	if err != nil {

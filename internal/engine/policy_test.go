@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
@@ -146,13 +147,21 @@ func TestPriorityNames(t *testing.T) {
 
 // --- end-to-end: the property a scheduler is judged on ---
 
-// loadEngine returns an engine and tokenizer for the model in MODEL.
+// loadEngine returns an engine and tokenizer over a fixture model.
+//
+// The scheduling properties these tests check -- that a batch equals a serial run, that a
+// policy reorders without changing output, that admission caps a round -- hold for any
+// weights, so a constructed model is enough and the tests run everywhere. A checkpoint
+// would make them faster to write and impossible to run in CI.
 func loadEngine(t *testing.T, opts Options) (*Engine, *tokenize.Tokenizer) {
 	t.Helper()
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	return loadEngineAt(t, gguftest.Path(t), opts)
+}
+
+// loadEngineAt is loadEngine over a fixture a test built itself, for shapes the default
+// does not cover.
+func loadEngineAt(t *testing.T, path string, opts Options) (*Engine, *tokenize.Tokenizer) {
+	t.Helper()
 	gf, err := gguf.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -169,16 +178,23 @@ func loadEngine(t *testing.T, opts Options) (*Engine, *tokenize.Tokenizer) {
 }
 
 func TestSchedulingPolicyKeepsShortRequestResponsive(t *testing.T) {
-	// The failure this policy exists to prevent: with MaxActive=1, a three-token
-	// request submitted behind a sixty-token one under FIFO waits for the long one to
-	// finish (measured: first token on round 62 of 64). PriorityShortest and
-	// PriorityFair both have to cut that down.
+	// The failure this policy exists to prevent: with MaxActive=1, a short request
+	// submitted behind a long one under FIFO waits for the long one to finish.
+	// PriorityShortest and PriorityFair both have to cut that down.
+	//
+	// The assertion is relative to the long request's budget rather than to a round
+	// number observed on one checkpoint: an absolute number encodes the model's
+	// context length, which is a property of the fixture and not of the policy.
 	const (
-		longTokens  = 60
+		longTokens  = 40
 		shortTokens = 3
 	)
 	bfs := func(t *testing.T, policy Priority) int {
-		e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2, Policy: policy})
+		// A model that cannot emit its end-of-sequence token, so the long request runs its
+		// whole budget: the property here is where the scheduler puts the short request
+		// relative to a long one, and a sequence that stops early stops measuring that.
+		path := gguftest.Model{NoEOS: true}.Write(t, t.TempDir())
+		e, tok := loadEngineAt(t, path, Options{MaxActive: 1, Workers: 2, Policy: policy})
 		prompt := tok.Encode("Once upon a time", true)
 
 		longCh, err := e.Submit(Request{Prompt: prompt, MaxTokens: longTokens})
@@ -214,8 +230,11 @@ func TestSchedulingPolicyKeepsShortRequestResponsive(t *testing.T) {
 	t.Run("fifo", func(t *testing.T) {
 		round := bfs(t, PriorityFIFO)
 		t.Logf("FIFO: the short request's first token arrived on round %d", round)
-		if round < longTokens/2 {
-			t.Errorf("FIFO served the short request on round %d; the baseline was 62, so the queue changed", round)
+		// Under submission order the short request waits for the long one's whole
+		// budget, so its first token cannot arrive before that many rounds have passed.
+		if round <= longTokens/2 {
+			t.Errorf("FIFO served the short request on round %d, before the long request's "+
+				"%d-token budget could finish; submission order was not honoured", round, longTokens)
 		}
 	})
 	t.Run("shortest", func(t *testing.T) {

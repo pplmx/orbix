@@ -36,6 +36,8 @@ internal/tokenize/  SentencePiece 分词，对齐 llama.cpp 的 SPM 实现
 internal/llama/     Llama 架构：超参数校验、RoPE、KV cache、前向推理、采样
 internal/engine/    调度：批量 prefill、批量 decode、每序列独立 logits 与 KV cache
 internal/server/    HTTP：OpenAI 兼容 API、SSE 流式、断连取消、Prometheus /metrics
+internal/otel/      OTLP/HTTP+JSON 追踪导出，不依赖 SDK
+internal/gguftest/  合成 GGUF fixture：几 KB 的完整可跑模型，供各包测试使用
 internal/<层>/      后续层按 README 的阅读顺序添加
 ```
 
@@ -67,9 +69,12 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 
 ## 测试
 
-- 单元测试不依赖网络和真实模型文件；GGUF 用 `builder_test.go` 里手写的字节构造器生成 fixture。
+- 单元测试不依赖网络和真实模型文件。需要能跑推理的测试用 `internal/gguftest` 构造 fixture：一个几 KB、两层的完整 GGUF，由同一个 reader 解析，`Prefill` 能跑通。
+- fixture 的两个属性按需选择，不要靠猜 token 数：`NoEOS` 让生成跑满预算（默认 EOS 在随机权重下何时命中是偶然的），`ContextLen` 决定长请求能否装下。断言写相对关系（等待多久、轮次多少），不写某个 checkpoint 上的绝对值。
+- 测试依赖执行时长时用等待时间的比值，不用「谁先返回」：短请求即使排队也必然先完成，用完成顺序会把正常调度判成失败。
+- 确实要真实权重的测试（例如与 llama.cpp 逐 token 比对 logits）保留 `MODEL` 门禁，只用于本地交叉验证。
 - 解析器的错误路径要测：截断、幻数错误、版本不符、越界张量。
-- 真实模型只用于本地交叉验证，不写进 CI。交叉验证的做法：用独立的参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。
+- 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。
 
 ## 文档
 

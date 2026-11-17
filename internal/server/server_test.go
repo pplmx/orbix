@@ -15,6 +15,7 @@ import (
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -24,10 +25,14 @@ import (
 
 func newTestServer(t *testing.T) (*Server, *tokenize.Tokenizer) {
 	t.Helper()
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	return newTestServerModel(t, gguftest.Default())
+}
+
+// newTestServerModel is newTestServer over a fixture the test describes, for tests that
+// need a property the default does not have -- generation that runs to its budget, say.
+func newTestServerModel(t *testing.T, model gguftest.Model) (*Server, *tokenize.Tokenizer) {
+	t.Helper()
+	path := model.Write(t, t.TempDir())
 	gf, err := gguf.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -409,7 +414,10 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) 
 // TestClientDisconnectStopsGeneration checks the cancellation path: a client that
 // goes away must not leave the model generating into a channel nobody reads.
 func TestClientDisconnectStopsGeneration(t *testing.T) {
-	srv, _ := newTestServer(t)
+	// Generation must outlast the cancel, so the fixture needs both a context long
+	// enough that 1000 tokens is not cut short by the position limit and no
+	// end-of-sequence token to stop on.
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 2048})
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
 		strings.NewReader(`{"prompt": "Once upon a time", "max_tokens": 1000}`)).WithContext(ctx)
@@ -509,69 +517,61 @@ func TestStopFieldAcceptsBothSpellings(t *testing.T) {
 // running -- the policy rows of `orbix bench --suite` measure the same property more
 // precisely, and this test exists to prove the wiring, not the magnitude.
 func TestPolicyAffectsShortRequestLatency(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	// The long request has to still be running when the short one is submitted, so the
+	// fixture needs a context that holds a long budget and no end-of-sequence token to
+	// stop on. A constructed model is fast enough that forty tokens finish inside one
+	// poll interval, which would make this test measure scheduling luck.
+	path := gguftest.Model{NoEOS: true, ContextLen: 4096}.Write(t, t.TempDir())
 
 	type outcome struct {
-		// shortBeforeLong reports whether the short request's response arrived before the
-		// long request's did.
-		shortBeforeLong bool
+		// shortWait is how long the short request waited for its response. Under FIFO it
+		// queues behind the long request's whole budget; under the other policies it is
+		// admitted almost immediately.
+		shortWait time.Duration
 	}
 	measure := func(t *testing.T, policy engine.Priority) outcome {
 		t.Helper()
 		srv := serverWithPolicy(t, path, policy)
 
-		var mu sync.Mutex
-		var longDone time.Time
-		var longFinished bool
-
 		var wg sync.WaitGroup
 		wg.Go(func() {
 			resp := post(t, srv.Handler(), "/v1/completions",
-				`{"prompt": "Once upon a time", "max_tokens": 40}`)
+				`{"prompt": "Once upon a time", "max_tokens": 2000}`)
 			decodeBody[completionResponse](t, resp)
-			mu.Lock()
-			longDone = time.Now()
-			longFinished = true
-			mu.Unlock()
 		})
-		// Wait until the long request is actually in the engine, so the short one is
+		// Wait until the long request occupies the only slot, so the short one is
 		// queued behind it rather than racing it.
-		waitFor(t, 5*time.Second, func() bool { return srv.eng.Active() > 0 },
-			"the long request never started")
+		waitFor(t, 5*time.Second, func() bool {
+			st := srv.eng.Stats()
+			return st.Active > 0 && st.RequestsFinished == 0
+		}, "the long request never started")
 
-		var shortDone time.Time
+		var shortWait time.Duration
 		wg.Go(func() {
+			start := time.Now()
 			resp := post(t, srv.Handler(), "/v1/completions",
 				`{"prompt": "Hi", "max_tokens": 2}`)
 			decodeBody[completionResponse](t, resp)
-			mu.Lock()
-			shortDone = time.Now()
-			mu.Unlock()
+			shortWait = time.Since(start)
 		})
 		wg.Wait()
-
-		mu.Lock()
-		defer mu.Unlock()
-		if !longFinished {
-			t.Fatal("the long request never reported completion")
-		}
-		return outcome{shortBeforeLong: shortDone.Before(longDone)}
+		return outcome{shortWait: shortWait}
 	}
 
-	// FIFO serves the long request first, so the short one must finish last.
-	if got := measure(t, engine.PriorityFIFO); got.shortBeforeLong {
-		t.Errorf("under FIFO the short request finished before the long one; " +
-			"submission order was not honoured")
-	}
-	// Both other policies let the short request through while the long one is still
-	// generating its 40 tokens.
+	// The assertion is on how long the short request waited, not on which response
+	// arrived first. A short request that waits its turn still finishes before a long
+	// one that started earlier and has thousands of tokens to go -- comparing arrival
+	// order would call that a policy failure when it is the policy working.
+	fifo := measure(t, engine.PriorityFIFO)
+	t.Logf("FIFO: the short request waited %v", fifo.shortWait)
 	for _, policy := range []engine.Priority{engine.PriorityShortest, engine.PriorityFair} {
-		if got := measure(t, policy); !got.shortBeforeLong {
-			t.Errorf("under %v the short request finished after the long one; "+
-				"the policy did not reach the HTTP layer", policy)
+		got := measure(t, policy)
+		t.Logf("%v: the short request waited %v", policy, got.shortWait)
+		// An admitted-immediately request waits for two tokens, which on this fixture is
+		// milliseconds; a queued one waits for the long request's whole budget.
+		if got.shortWait >= fifo.shortWait/2 {
+			t.Errorf("%v made the short request wait %v against FIFO's %v; the policy did "+
+				"not reach the HTTP layer", policy, got.shortWait, fifo.shortWait)
 		}
 	}
 }
@@ -611,10 +611,7 @@ func serverWithPolicy(t *testing.T, path string, policy engine.Priority) *Server
 // information -- so the test compares completion order between a low-priority request
 // holding the only slot and a high-priority one queued behind it.
 func TestPriorityFieldReachesTheEngine(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 4096}.Write(t, t.TempDir())
 	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
 
 	var mu sync.Mutex
@@ -628,7 +625,7 @@ func TestPriorityFieldReachesTheEngine(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		resp := post(t, srv.Handler(), "/v1/completions",
-			`{"prompt": "Once upon a time", "max_tokens": 40, "priority": -10}`)
+			`{"prompt": "Once upon a time", "max_tokens": 2000, "priority": -10}`)
 		decodeBody[completionResponse](t, resp)
 		record("low", time.Now())
 	})

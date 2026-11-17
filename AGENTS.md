@@ -111,5 +111,9 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 | `viper` | 不采用 | 只有 1 个环境变量、0 个配置文件，没有多来源合并的需求 |
 | `cobra` / `urfave/cli` / `kong` | 不采用（当前规模） | 6 个命令用 `flag` 加 `cmd/orbix/flags.go` 的共用注册已经够；命令数增长后重新评估 |
 | OpenTelemetry SDK | 不采用 | 只用到一个 protobuf 消息的 JSON 编码，`internal/otel` 自行实现且已被真实 collector 验证 |
+| `log/slog` | **采用（标准库）** | 服务端访问日志。要的只是分级结构化记录和可换 handler，`slog` 就是；配置见 `serve --log-format text\|json\|off` |
+| `urfave/cli` + `Koanf` | 不采用 | Koanf 的价值在多来源配置合并，本项目 0 个配置文件、1 个环境变量；CLI 规模见上 |
+| `Kong` + `cleanenv` | 不采用 | cleanenv 默认分支最近提交 2025-09，已 14 个月未动 |
+| `go-playground/validator` | 不采用 | 26 个 flag 的校验是十几行显式判断，引入反射驱动的校验器换不到等价的可读性 |
 
 新增依赖时：在 `go.mod` 之外同步本表，写明替我们承担的复杂度；**NEVER** 为了少写几十行样板而引入一个框架。

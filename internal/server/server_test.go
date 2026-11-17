@@ -32,6 +32,13 @@ func newTestServer(t *testing.T) (*Server, *tokenize.Tokenizer) {
 // need a property the default does not have -- generation that runs to its budget, say.
 func newTestServerModel(t *testing.T, model gguftest.Model) (*Server, *tokenize.Tokenizer) {
 	t.Helper()
+	return newTestServerConfig(t, model, Config{})
+}
+
+// newTestServerConfig is newTestServerModel with extra Config fields, for tests that need
+// a logger or another knob the default does not set.
+func newTestServerConfig(t *testing.T, model gguftest.Model, extra Config) (*Server, *tokenize.Tokenizer) {
+	t.Helper()
 	path := model.Write(t, t.TempDir())
 	gf, err := gguf.Open(path)
 	if err != nil {
@@ -46,7 +53,31 @@ func newTestServerModel(t *testing.T, model gguftest.Model) (*Server, *tokenize.
 		t.Fatalf("engine.New: %v", err)
 	}
 	cfg := eng.Model().Config()
-	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	// Defaults first, then the caller's fields, so a test that sets one knob does not
+	// have to restate the model name and context length.
+	conf := Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen}
+	if extra.ModelName != "" {
+		conf.ModelName = extra.ModelName
+	}
+	if extra.MaxTokens != 0 {
+		conf.MaxTokens = extra.MaxTokens
+	}
+	if extra.Temperature != 0 {
+		conf.Temperature = extra.Temperature
+	}
+	if extra.TopK != 0 {
+		conf.TopK = extra.TopK
+	}
+	if extra.ChatRenderer != nil {
+		conf.ChatRenderer = extra.ChatRenderer
+	}
+	if extra.Logger != nil {
+		conf.Logger = extra.Logger
+	}
+	if extra.Trace != nil {
+		conf.Trace = extra.Trace
+	}
+	srv, err := New(eng, tok, conf)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

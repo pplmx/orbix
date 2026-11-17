@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -70,6 +71,11 @@ type Config struct {
 	// responsible for a file it otherwise does not touch.
 	ChatRenderer *engine.ChatRenderer
 
+	// Logger receives one record per request and any server-side failure. Nil discards
+	// records, so a caller that does not configure logging pays almost nothing: the
+	// request wrapper checks for nil before measuring anything.
+	Logger *slog.Logger
+
 	// Trace, when non-nil, records a span per request. It is passed in rather than
 	// built here for the same reason the chat renderer is: the server does not own the
 	// process lifetime that decides where traces go.
@@ -91,6 +97,10 @@ type Server struct {
 	mux  *http.ServeMux
 	stop chan struct{}
 	wg   sync.WaitGroup
+
+	// log is cfg.Logger, kept as the concrete field so the request wrapper can check
+	// for nil cheaply.
+	log *slog.Logger
 
 	// requests and tokens are counters for /metrics and for tests.
 	requests atomic.Int64
@@ -115,7 +125,7 @@ func New(eng *engine.Engine, tok *tokenize.Tokenizer, cfg Config) (*Server, erro
 		cfg.ContextLen = eng.Model().Config().ContextLen
 	}
 
-	s := &Server{eng: eng, tok: tok, cfg: cfg, stop: make(chan struct{})}
+	s := &Server{eng: eng, tok: tok, cfg: cfg, log: cfg.Logger, stop: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
 	mux.HandleFunc("POST /v1/completions", s.handleCompletion)
@@ -127,7 +137,9 @@ func New(eng *engine.Engine, tok *tokenize.Tokenizer, cfg Config) (*Server, erro
 }
 
 // Handler returns the server's HTTP handler, for serving or for tests.
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler returns the server's routes, wrapped so each request produces one record when
+// a logger is configured.
+func (s *Server) Handler() http.Handler { return s.logRequest(s.mux) }
 
 // Run pumps the engine until the context is cancelled or Shutdown is called.
 //

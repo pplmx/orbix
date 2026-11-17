@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -30,6 +31,7 @@ func cmdServe(args []string) error {
 	cache := registerCacheFlags(fs, true)
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
 	otlpEndpoint := fs.String("otlp-endpoint", "", "OTLP/HTTP collector for traces, e.g. http://localhost:4318; empty disables tracing")
+	logFormat := fs.String("log-format", "text", "access log format: text, json, or off")
 	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --max-active: fifo, shortest, or fair")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -92,6 +94,20 @@ func cmdServe(args []string) error {
 		defer func() { _ = traceExporter.Close() }()
 	}
 
+	// The access log is opt-in at the format level but on by default in text: a server
+	// that says nothing about the requests it served makes a failure indistinguishable
+	// from a request that never arrived.
+	var accessLog *slog.Logger
+	switch *logFormat {
+	case "off":
+	case "text":
+		accessLog = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	case "json":
+		accessLog = slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	default:
+		return fmt.Errorf("serve: --log-format must be text, json, or off, not %q", *logFormat)
+	}
+
 	srv, err := server.New(eng, tok, server.Config{
 		ModelName:    cfg.Name,
 		MaxTokens:    *maxTokens,
@@ -99,6 +115,7 @@ func cmdServe(args []string) error {
 		Temperature:  0,
 		ChatRenderer: renderer,
 		Trace:        traceExporter,
+		Logger:       accessLog,
 	})
 	if err != nil {
 		return err
@@ -128,6 +145,9 @@ func cmdServe(args []string) error {
 	// tell whether the model's own format was applied.
 	if traceExporter != nil {
 		fmt.Printf("traces:     %s (OTLP/HTTP)\n", *otlpEndpoint)
+	}
+	if accessLog != nil {
+		fmt.Printf("access log: %s\n", *logFormat)
 	}
 	if renderer.UsesModelTemplate() {
 		fmt.Println("chat:       model template")

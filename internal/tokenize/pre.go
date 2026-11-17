@@ -69,7 +69,7 @@ func (t *Tokenizer) preSplit(text string) []string {
 		return splitZonos3(text)
 	}
 	if fam.digitsFromRight && !fam.caseSplit && !fam.letterMarks {
-		return splitDigitsFromRight(text, fam.digitsRightBoundary)
+		return splitDigitsFromRight(text, fam.digitsRightBoundary, fam.digitsRightDecimal)
 	}
 	if fam.partition {
 		// The digit cut runs first, as llama.cpp applies the expressions in order: this
@@ -84,7 +84,7 @@ func (t *Tokenizer) preSplit(text string) []string {
 		pieces = splitNewlineRuns(text)
 	}
 	if fam.digitsFromRight {
-		pieces = splitDigitsFromRight(text, fam.digitsRightBoundary)
+		pieces = splitDigitsFromRight(text, fam.digitsRightBoundary, fam.digitsRightDecimal)
 	}
 	if fam.preDigits > 0 {
 		pieces = splitDigitGroups(pieces, fam.preDigits)
@@ -995,6 +995,11 @@ type preRule struct {
 	// the remainder -- if any -- is the leftmost chunk. The superbpe lookahead asserts a
 	// multiple of three digits remain, which puts the boundary there.
 	digitsFromRight bool
+	// digitsRightDecimal restricts digitsFromRight to \d rather than \p{N}. The two differ
+	// on the superscripts and Roman numerals, which \p{N} includes and \d does not, and the
+	// family whose lookahead is written "\d" groups only the narrower set: tiny_aya leaves
+	// "\u00b2\u2163" whole where the wide class would group them.
+	digitsRightDecimal bool
 	// digitsRightBoundary restricts digitsFromRight to runs whose right neighbour is not a
 	// word character. tiny_aya's expression ends in \b, so a run touching a letter is gap
 	// text rather than a match.
@@ -1133,7 +1138,7 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// at a time from the right, but a run touching a letter is left whole, and letters
 		// are cut where a lower-case run meets an upper-case one.
 		return preRule{
-			digitsFromRight: true, digitsRightBoundary: true,
+			digitsFromRight: true, digitsRightBoundary: true, digitsRightDecimal: true,
 			digits: 3, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
 			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
 			contractionSuffix: true,
@@ -1822,6 +1827,23 @@ func isLetter(r rune) bool { return unicode.IsLetter(r) }
 // under qwen2 and would not be grouped in threes under llama-bpe.
 func isDigit(r rune) bool { return unicode.IsNumber(r) }
 
+// isDecimalDigit is the narrower class "\d": the Unicode decimal digits (Nd). It excludes the
+// superscripts, the Roman numerals and the vulgar fractions that \p{N} admits.
+func isDecimalDigit(r rune) bool { return unicode.IsDigit(r) }
+
+func isDecimalDigitAt(s string) bool { return classifyAt(s, isDecimalDigit) }
+
+// isWordRuneAt reports whether s begins with a regex word character (\w): a letter, a digit,
+// or an underscore.
+func isWordRuneAt(s string) bool {
+	if s == "" {
+		return false
+	}
+	return classifyAt(s, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_'
+	})
+}
+
 // isSpace reports whether r is whitespace (\s).
 func isSpace(r rune) bool { return unicode.IsSpace(r) }
 
@@ -2331,31 +2353,61 @@ func splitNewlineRuns(text string) []string {
 // When needWordBoundary is set the expression ends in \b, as tiny_aya's does: a run whose right
 // neighbour is a letter is not matched at all and stays gap text, so "123a" is one chunk where
 // superbpe would cut it. The left side is unconstrained -- "a123456" still groups.
-func splitDigitsFromRight(text string, needWordBoundary bool) []string {
+func splitDigitsFromRight(text string, needWordBoundary, decimalOnly bool) []string {
+	// digit reports whether s begins with a member of the family's digit class. "\d" is the
+	// Unicode decimal digits; "\p{N}" is wider, adding the superscripts and Roman numerals.
+	digit := isDigitAt
+	if decimalOnly {
+		digit = isDecimalDigitAt
+	}
 	var out []string
 	i := 0
 	for i < len(text) {
-		if !isDigitAt(text[i:]) {
+		if !digit(text[i:]) {
+			// Gap text runs to the next character the expression can match. When the class is
+			// the narrower "\d", a character that is \p{N} but not \d is still gap -- and it
+			// must not end the gap, because the expression has no match there either: a run of
+			// them is one chunk, not one chunk per character.
 			start := i
-			for i < len(text) && !isDigitAt(text[i:]) {
-				i += runeLenAt(text[i:])
+			for i < len(text) {
+				if !digit(text[i:]) {
+					i += runeLenAt(text[i:])
+					continue
+				}
+				// A \d run is a match only when the lookahead holds. When it does not, the
+				// run belongs to this gap too -- "\u2163\u0661" is one chunk because the
+				// \u0661 has no word boundary after it.
+				j := i
+				for j < len(text) && digit(text[j:]) {
+					j += runeLenAt(text[j:])
+				}
+				if needWordBoundary && j < len(text) && isWordRuneAt(text[j:]) {
+					i = j
+					continue
+				}
+				break
 			}
 			out = append(out, text[start:i])
 			continue
 		}
 		// Count the run, then walk it emitting from the right.
+		runStart := i
 		j, n := i, 0
-		for j < len(text) && isDigitAt(text[j:]) {
+		for j < len(text) && digit(text[j:]) {
 			j += runeLenAt(text[j:])
 			n++
 		}
-		if needWordBoundary && j < len(text) {
-			r, _ := utf8.DecodeRuneInString(text[j:])
-			if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_' {
-				out = append(out, text[i:j])
-				i = j
-				continue
+		if needWordBoundary && j < len(text) && isWordRuneAt(text[j:]) {
+			// "\d{1,3}(?=(?:\d{3})*\b)" matches only where what follows is a word boundary.
+			// A run touching a word character has none, so the expression does not match and
+			// the text is gap: the digit and the word character stay in one chunk. Emitting
+			// just the digits split "0\u2163" into ["0", "\u2163"] where the reference keeps
+			// it whole.
+			for i < len(text) && isWordRuneAt(text[i:]) {
+				i += runeLenAt(text[i:])
 			}
+			out = append(out, text[runStart:i])
+			continue
 		}
 		// Byte offsets of each digit so multi-byte digits are handled.
 		offs := make([]int, n+1)

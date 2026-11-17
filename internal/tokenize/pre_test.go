@@ -3139,3 +3139,35 @@ func TestDeepseekFamiliesSplitTrailingAndRepeatedNewlines(t *testing.T) {
 		}
 	}
 }
+
+// TestTinyAyaDigitClassIsNarrowerThanNumber covers where the two digit classes differ.
+//
+// tiny_aya's digit expression is "\d{1,3}(?=(?:\d{3})*\b)", which names \d -- the Unicode
+// decimal digits -- not \p{N}. The difference is the superscripts, the Roman numerals and the
+// vulgar fractions: those are numbers, and are not decimal digits. Reading the lookahead as
+// \p{N} grouped them with their neighbours, and, because the match is anchored on a word
+// boundary, a run whose right neighbour is a word character is not matched at all and has to
+// stay whole.
+//
+// These expectations are the expression's own output on the same strings.
+func TestTinyAyaDigitClassIsNarrowerThanNumber(t *testing.T) {
+	tok := &Tokenizer{pre: preTinyAya}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// No word boundary after the Roman numeral, so no match: the pair is one chunk.
+		{"0\u2163", []string{"0\u2163"}},
+		{"\u0661\u2163", []string{"\u0661\u2163"}},
+		{"\u2163\u0661\u2163", []string{"\u2163\u0661\u2163"}},
+		// A boundary exists after the decimal run, so it groups.
+		{"1234", []string{"1", "234"}},
+		{"\u0661\u0662\u0663\u0664", []string{"\u0661", "\u0662\u0663\u0664"}},
+		{"a\u2163b", []string{"a", "\u2163", "b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

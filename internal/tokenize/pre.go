@@ -689,6 +689,26 @@ func preFamilyOf(p preType) (preRule, bool) {
 			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
 			preDigits: 3, cjk: true, contractionSuffix: true,
 		}, true
+	case preSeedCoder:
+		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
+		// "|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+		//
+		// qwen2's shape with the punctuation alternative excluding newlines and carrying no
+		// newline tail. The "\\s*[\\r\\n]+" alternative still groups a run of newlines, but a
+		// punctuation run stops before them instead of absorbing them.
+		return preRule{
+			digits: 1, lead: leadAnyNonLetter, newlineChunk: true,
+		}, true
+	case preQwen35:
+		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}"
+		// "| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+		//
+		// qwen2's shape with combining marks in the letter class, so a base letter and the
+		// marks after it stay in one run.
+		return preRule{
+			digits: 1, lead: leadAnyNonLetter, letterMarks: true,
+			newlinesAfterPunct: true, newlineChunk: true,
+		}, true
 	case preUfakzeka:
 		// "[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
 		//

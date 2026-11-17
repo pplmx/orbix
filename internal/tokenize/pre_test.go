@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 86
+		wantImplemented = 88
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1634,5 +1634,107 @@ func TestUfakzekaChunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("ufakzeka is not reported as implemented")
+	}
+}
+
+// TestQwen35Chunks pins the qwen35 rule: qwen2 with combining marks in the letter class.
+//
+// The mark matters for input whose base letter is followed by a combining character: the two
+// stay in one run here, where a class of \p{L} alone would cut before the mark and leave it
+// to the punctuation alternative.
+func TestQwen35Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preQwen35}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The discriminating input: a base letter and a combining acute are one chunk.
+		{"e\u0301clair", []string{"e\u0301clair"}},
+		// The punctuation alternative still absorbs newlines, as qwen2's does.
+		{",,,\n\nx", []string{",,,\n\n", "x"}},
+		// The rest is qwen2's.
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"don't", []string{"don", "'t"}},
+		{"a.b", []string{"a", ".b"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// qwen2 has no mark in its letter class, so the same input cuts differently there.
+	q2 := &Tokenizer{pre: preQwen2}
+	if got := q2.preSplit("e\u0301clair"); !sameStrings(got, []string{"e", "\u0301clair"}) {
+		t.Errorf("qwen2 preSplit(\"e\\u0301clair\") = %q, want the mark cut off", got)
+	}
+
+	path := gguftest.Model{Pre: "qwen35", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("qwen35 is not reported as implemented")
+	}
+}
+
+// TestSeedCoderChunks pins the seed-coder rule, whose punctuation alternative excludes
+// newlines and carries no newline tail.
+//
+// Newlines still group through the "\s*[\r\n]+" alternative, so a run of them is one chunk.
+// What changes is that a punctuation run stops before a newline instead of absorbing it:
+// ",,,\n\nx" is [",,,", "\n\n", "x"] here and [",,,\n\n", "x"] under qwen2.
+func TestSeedCoderChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preSeedCoder}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The discriminating inputs: punctuation does not take the newlines after it.
+		{",,,\n\nx", []string{",,,", "\n\n", "x"}},
+		{"!?\n x", []string{"!?", "\n", " x"}},
+		// A run of newlines is still one chunk.
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"a\n\nb", []string{"a", "\n\n", "b"}},
+		// The rest is qwen2's.
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"don't", []string{"don", "'t"}},
+		{"a.b", []string{"a", ".b"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// qwen2 absorbs the newline into the punctuation run, which is what separates them.
+	q2 := &Tokenizer{pre: preQwen2}
+	if got := q2.preSplit(",,,\n\nx"); !sameStrings(got, []string{",,,\n\n", "x"}) {
+		t.Errorf("qwen2 preSplit(\",,,\\n\\nx\") = %q, want the newlines absorbed", got)
+	}
+
+	path := gguftest.Model{Pre: "seed-coder", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("seed-coder is not reported as implemented")
 	}
 }

@@ -173,6 +173,14 @@ const (
 	// apostrophe suffix stays whole: "İstanbul'da" is ["İstanbul", "'da"] where bailingmoe's
 	// contraction group matches "'d" and leaves "a" behind.
 	preUfakzeka
+	// preQwen35 is qwen2 with combining marks in the letter class, so a base letter and the
+	// marks after it stay together: "e" followed by a combining acute is one chunk.
+	preQwen35
+	// preSeedCoder is qwen2's expression with two changes to the punctuation alternative:
+	// it excludes newlines from the run, and it has no newline tail. Newlines reach the
+	// "\s*[\r\n]+" alternative instead, so a run of them is still one chunk -- but a
+	// punctuation run no longer absorbs the newlines after it.
+	preSeedCoder
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -468,6 +476,10 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// laguna runs bailingmoe's expression after a newline pass. The newline pass separates
 		// runs of newlines from everything else, which cannot change what the main rule does
 		// to a chunk that already contains no newline.
+		case "seed-coder":
+			t.pre = preSeedCoder
+		case "qwen35":
+			t.pre = preQwen35
 		case "ufakzeka":
 			t.pre = preUfakzeka
 		case "flint":

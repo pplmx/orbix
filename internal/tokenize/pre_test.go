@@ -2,6 +2,7 @@ package tokenize
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -953,7 +954,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 96
+		wantImplemented = 97
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -2135,5 +2136,173 @@ func TestSpark25Chunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("spark2_5 is not reported as implemented")
+	}
+}
+
+// TestChameleonChunks pins the chameleon rule, which is the only family in llama.cpp whose
+// expressions compose as passes rather than as alternatives.
+//
+// Four things separate it from every other family here, and each is a chunk boundary that
+// would be wrong if the expression were read as one main rule:
+//
+//   - Punctuation is cut one character at a time, and before the main rule, so "a--b" is
+//     ["a", "-", "-", "b"] and an apostrophe never forms a contraction: "don't" is
+//     ["don", "'", "t"] where llama3 gives ["don", "'t"].
+//   - Two and four spaces are alternatives matched at each position, so eight spaces are two
+//     chunks of four and three spaces are two-plus-one.
+//   - Digits are cut by the full \p{N} category rather than \p{Nd}, which is why the
+//     superscript "²" is its own chunk and not a run with its neighbour.
+//   - The image alternative matches inside ordinary text, so "IMGIMGABZX" is
+//     ["IMGIMGABZ", "X"].
+//
+// Every expectation below was produced by transcribing llama.cpp's six expressions into
+// Python's regex module and applying them in order, which shares no code with this package.
+func TestChameleonChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preChameleon}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The image alternative, which is the one pass with a multi-character match.
+		{"IMGIMGABZ", []string{"IMGIMGABZ"}},
+		{"IMGIMGABZX", []string{"IMGIMGABZ", "X"}},
+		{"xIMGIMGABZ", []string{"x", "IMGIMGABZ"}},
+		{"IMGIMGACDBZ", []string{"IMGIMGACDBZ"}},
+		{"IMGIMGAAAAAZ", []string{"IMGIMGAAAAAZ"}},
+		{"IMGIMGAB", []string{"IMGIMGAB"}},
+		// Tab and newline are single chunks; a CR is left to the main rule, so a CRLF pair
+		// is not the same shape as a pair of newlines.
+		{"a\tb", []string{"a", "\t", "b"}},
+		{"a\nb", []string{"a", "\n", "b"}},
+		{"a\rb", []string{"a", "\r", "b"}},
+		{"a\r\nb", []string{"a", "\r", "\n", "b"}},
+		// Two and four spaces are their own alternatives, tried at each position.
+		{"a b", []string{"a", " b"}},
+		{"a  b", []string{"a", "  ", "b"}},
+		{"a   b", []string{"a", "  ", " b"}},
+		{"a    b", []string{"a", "    ", "b"}},
+		{"a     b", []string{"a", "    ", " b"}},
+		{"a      b", []string{"a", "    ", "  ", "b"}},
+		{"a       b", []string{"a", "    ", "  ", " b"}},
+		{"  indented", []string{"  ", "indented"}},
+		{"a  ", []string{"a", "  "}},
+		{"a ", []string{"a", " "}},
+		{"x  y  z", []string{"x", "  ", "y", "  ", "z"}},
+		// The digit pass runs over \p{N}, not \p{Nd}.
+		{"1234", []string{"1", "2", "3", "4"}},
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"3.14", []string{"3", ".", "1", "4"}},
+		{"\u00b2\u00b3", []string{"\u00b2", "\u00b3"}},
+		{"\u0661\u0662\u0663", []string{"\u0661", "\u0662", "\u0663"}},
+		// Punctuation is one character per chunk, and no contraction survives it.
+		{"a--b", []string{"a", "-", "-", "b"}},
+		{"a--->b", []string{"a", "-", "-", "-", ">", "b"}},
+		{"a!?b", []string{"a", "!", "?", "b"}},
+		{"++", []string{"+", "+"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		{"x_y z", []string{"x", "_", "y", " z"}},
+		{"don't", []string{"don", "'", "t"}},
+		{"'s", []string{"'", "s"}},
+		{"they're", []string{"they", "'", "re"}},
+		{"x's", []string{"x", "'", "s"}},
+		// Symbols are not punctuation, so the main rule groups them.
+		{"\u20ac5", []string{"\u20ac", "5"}},
+		{"\u20ac\u20ac", []string{"\u20ac\u20ac"}},
+		{"a\u20ac\u20acb", []string{"a", "\u20ac\u20ac", "b"}},
+		{"a\U0001F600b", []string{"a", "\U0001F600", "b"}},
+		// The main rule is GPT-2's: no case split, no mark joining, and a letter run keeps
+		// the space before it.
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"HelloWorld", []string{"HelloWorld"}},
+		{"e\u0301clair", []string{"e", "\u0301", "clair"}},
+		{"\u4e2d\u6587\u6d4b\u8bd5", []string{"\u4e2d\u6587\u6d4b\u8bd5"}},
+		{"a.b", []string{"a", ".", "b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// The family reaches its rule through the file, which is how a model gets here.
+	path := gguftest.Model{Pre: "chameleon", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("chameleon is not reported as implemented")
+	}
+}
+
+// TestChameleonDiffersFromGPT2 pins why chameleon needs its own splitter rather than an
+// alias: the main rule is GPT-2's expression verbatim, so the passes are the whole family.
+//
+// Without them the punctuation, digit and space cases below would all come out as one
+// chunk each -- the failure mode where a model still answers, on text it never saw.
+func TestChameleonDiffersFromGPT2(t *testing.T) {
+	cham := &Tokenizer{pre: preChameleon}
+	gpt := &Tokenizer{pre: preGPT2}
+	for _, in := range []string{"a--b", "don't", "a1234b", "a    b", "IMGIMGABZX", "3.14"} {
+		if sameStrings(cham.preSplit(in), gpt.preSplit(in)) {
+			t.Errorf("%q splits the same under chameleon and gpt-2; the passes are not running", in)
+		}
+	}
+}
+
+// TestWhitespaceTailMeasuresTheLastSpace checks the shared whitespace tail on a run that
+// mixes character widths.
+//
+// The tail is "\s+(?!\S)|\s+", and its lookahead makes it give up the *last* character of the
+// run so the next chunk can take it as a leading space. Measuring that last character as the
+// byte length of the first one cuts the run mid-character when the widths differ: a run
+// holding an em space and a plain space would emit a lone 0xE2 and leave the rest of the
+// encoding to the next chunk, which is text no model was trained on and no error reports.
+// Every family with the shared tail is affected, which is why the cases run over three of
+// them rather than the one the bug was found on.
+//
+// The expectations come from the reference expressions in Python's regex module.
+func TestWhitespaceTailMeasuresTheLastSpace(t *testing.T) {
+	cases := []string{
+		"a \u2003b",      // plain then em
+		"a\u2003 b",      // em then plain
+		"a \u00a0b",      // plain then no-break
+		"a\u00a0\u2003b", // two wide spaces
+		"a \u2003 b",     // run surrounded by text
+		"a\r\u00a0b",     // the tail after a newline alternative
+		"x\u2003\u2003y",
+	}
+	// qwen2 and llama3 share the tail and agree on every case here.
+	for _, fam := range []preType{preQwen2, preLlama3} {
+		tok := &Tokenizer{pre: fam}
+		for _, in := range cases {
+			for _, chunk := range tok.preSplit(in) {
+				if !utf8.ValidString(chunk) {
+					t.Errorf("pre=%v preSplit(%q) = %q: chunk %q is not valid UTF-8",
+						fam, in, tok.preSplit(in), chunk)
+				}
+			}
+		}
+	}
+	// The GPT-2 tail has no run grouping, so its chunks are narrower; spelling two of them
+	// out keeps the test from passing on a splitter that simply cuts everything.
+	gpt := &Tokenizer{pre: preGPT2}
+	want := map[string][]string{
+		"a \u2003b":      {"a", " ", "\u2003", "b"},
+		"a\u2003\u2003y": {"a", "\u2003", "\u2003", "y"},
+		"a \u2003 b":     {"a", " \u2003", " b"},
+	}
+	for in, expect := range want {
+		if got := gpt.preSplit(in); !sameStrings(got, expect) {
+			t.Errorf("gpt-2 preSplit(%q) = %q, want %q", in, got, expect)
+		}
+	}
+	qwen := &Tokenizer{pre: preQwen2}
+	if got, expect := qwen.preSplit("a \u2003b"), []string{"a", " ", "\u2003b"}; !sameStrings(got, expect) {
+		t.Errorf("qwen2 preSplit(%q) = %q, want %q", "a \u2003b", got, expect)
 	}
 }

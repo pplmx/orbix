@@ -53,6 +53,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.falcon {
 		return splitFalcon(text)
 	}
+	if fam.chameleon {
+		return splitChameleon(text)
+	}
 	if fam.deepseekLLM {
 		return splitDeepseekLLM(text)
 	}
@@ -236,6 +239,174 @@ func isFalconPunctAt(s string) bool {
 	return classifyAt(s, func(r rune) bool {
 		return unicode.IsPunct(r) || strings.ContainsRune("$+<=>^~|`", r)
 	})
+}
+
+// splitChameleon applies chameleon's expressions in order.
+//
+// The family is unusual in that its expressions are not alternatives of one main rule but
+// five separate passes, each cutting what the last one left. Written as one expression they
+// would not agree with the reference, and the punctuation pass is why: it cuts *single*
+// characters and runs before the main rule, so "a--b" is ["a", "-", "-", "b"] rather than
+// ["a", "--", "b"], and a contraction's apostrophe is cut too, leaving "don't" as
+// ["don", "'", "t"] instead of ["don", "'t"]. The space pass has the same shape: two and
+// four spaces are alternatives matched at each position, so eight spaces are two chunks of
+// four and three spaces are two-plus-one.
+//
+// The first of llama.cpp's six expressions is left out. It matches "<sentinel:N>", and it
+// cannot change the output: every later pass runs over the fragments the earlier ones left,
+// so a sentinel matched whole is then cut by the punctuation and digit passes exactly as the
+// text alone would be. Checked both ways over a corpus of sentinel-bearing strings -- the
+// final partition is identical with the pass and without it, which is why implementing it
+// would add code no test could distinguish. llama.cpp's own comment makes a weaker version
+// of the same point, that its special-token partition has already split these pieces.
+func splitChameleon(text string) []string {
+	// Image pass first: "IMGIMG[A-I]{1,4}Z" is one chunk, and it is the only pass whose
+	// chunks can contain digits and punctuation the later passes would otherwise cut.
+	pieces := splitEach([]string{text}, splitChameleonImages)
+	// Space pass runs before the digit and punctuation ones, and the order is observable:
+	// the space alternatives are tried at each position, so the run they leave is cut
+	// differently depending on what has already been separated from it.
+	pieces = splitEach(pieces, splitChameleonSpaces)
+	// Digit pass: one number per chunk, over the full \p{N} category.
+	pieces = splitEach(pieces, splitChameleonNumbers)
+	// Punctuation pass: [\p{P}!-/:-@\[-`{-~], one character at a time.
+	pieces = splitEach(pieces, splitChameleonPunct)
+	// Main rule: the GPT-2 expression, on what the passes above left.
+	gpt2, _ := preFamilyOf(preGPT2)
+	return splitEach(pieces, func(s string) []string { return splitByRule(s, gpt2) })
+}
+
+// splitChameleonImages applies "(IMGIMG)((A|B|C|D|E|F|G|H|I){1,4})Z".
+//
+// The expression is not anchored to a token boundary, so it matches inside ordinary text
+// too: "IMGIMGABZX" is ["IMGIMGABZ", "X"] and "xIMGIMGABZ" is ["x", "IMGIMGABZ"]. That is
+// what the reference does, and the shape cannot be folded into a later pass because its
+// letters and the Z would otherwise run together with their neighbours.
+func splitChameleonImages(text string) []string {
+	const prefix, suffix = "IMGIMG", "Z"
+	var out []string
+	start := 0
+	for i := 0; i < len(text); {
+		if !strings.HasPrefix(text[i:], prefix) {
+			i += runeLenAt(text[i:])
+			continue
+		}
+		j := i + len(prefix)
+		n := 0
+		for j < len(text) && n < 4 && text[j] >= 'A' && text[j] <= 'I' {
+			j++
+			n++
+		}
+		if n == 0 || j >= len(text) || text[j] != suffix[0] {
+			i += runeLenAt(text[i:])
+			continue
+		}
+		if i > start {
+			out = append(out, text[start:i])
+		}
+		out = append(out, text[i:j+1])
+		i = j + 1
+		start = i
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
+}
+
+// splitChameleonNumbers applies chameleon's bare "\p{N}", one number per chunk.
+//
+// The class is the whole number category, not the decimal digits: "\p{N}" also holds
+// superscripts, vulgar fractions and Roman numerals, and the reference cuts those one by
+// one the same way. Using unicode.IsDigit would leave "\u00b2\u00b3" whole, which is the
+// behaviour of \p{Nd} rather than \p{N}.
+func splitChameleonNumbers(text string) []string {
+	return splitSingles(text, isNumber)
+}
+
+// splitEach applies one pass to every piece and flattens the result.
+func splitEach(pieces []string, pass func(string) []string) []string {
+	out := make([]string, 0, len(pieces))
+	for _, piece := range pieces {
+		out = append(out, pass(piece)...)
+	}
+	return out
+}
+
+// splitChameleonPunct applies "[\p{P}!-/:-@\[-`{-~]", which is one character per chunk.
+//
+// The class is Unicode punctuation plus four ASCII ranges. The ranges cover the ASCII
+// symbols as well -- "<", ">", "+", "$" and the rest -- which \p{P} does not, so the class
+// is not simply the category; leaving the symbols out would let them run together in the
+// main rule where the reference cuts them one by one.
+func splitChameleonPunct(text string) []string {
+	return splitSingles(text, isChameleonPunct)
+}
+
+// isChameleonPunct reports whether r is in chameleon's punctuation class: Unicode
+// punctuation, or one of the ASCII symbols the four ranges name.
+func isChameleonPunct(r rune) bool {
+	if unicode.IsPunct(r) {
+		return true
+	}
+	return r >= '!' && r <= '/' || r >= ':' && r <= '@' ||
+		r >= '[' && r <= '`' || r >= '{' && r <= '~'
+}
+
+// splitSingles cuts each character that pred accepts into a chunk of its own, leaving
+// everything else as gap text.
+func splitSingles(text string, pred func(rune) bool) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(text); {
+		n := runeLenAt(text[i:])
+		if n == 0 {
+			n = 1
+		}
+		r, _ := utf8.DecodeRuneInString(text[i:])
+		if !pred(r) {
+			i += n
+			continue
+		}
+		if i > start {
+			out = append(out, text[start:i])
+		}
+		out = append(out, text[i:i+n])
+		i += n
+		start = i
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
+}
+
+// splitChameleonSpaces applies "([\t\n]|    |  )", one match per chunk.
+//
+// The alternatives are tried at each position rather than once per run, and the four-space
+// one is written first, so eight spaces are two four-space chunks and a run of three is two
+// plus one. Carriage return is not in the class, so a CRLF pair is left to the main rule,
+// whose whitespace alternative takes the CR together with the newline.
+func splitChameleonSpaces(text string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(text); {
+		n := chameleonSpaceLen(text[i:])
+		if n == 0 {
+			i += runeLenAt(text[i:])
+			continue
+		}
+		if i > start {
+			out = append(out, text[start:i])
+		}
+		out = append(out, text[i:i+n])
+		i += n
+		start = i
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
 }
 
 // splitThreeDigitRuns cuts each run of digits into groups of three, keeping any remainder.
@@ -555,6 +726,12 @@ type preRule struct {
 	// expression, then groups of three digits. The middle one is the rule preGPT2 already
 	// describes, so only the two outer steps need code.
 	falcon bool
+	// chameleon marks its six expressions, applied one after another to the pieces the
+	// previous one left. They do not compose into one expression: each is a pass over the
+	// whole text, and the punctuation and space passes cut single characters the main rule
+	// would otherwise run together. The sentinel pass is the one left out, and the splitter
+	// explains why it cannot change the output.
+	chameleon bool
 	// punctLetterRun is whether the expression's first alternative is
 	// "[!-/:-@\\[-`{-~][A-Za-z]+": one ASCII punctuation character followed by a run of
 	// ASCII letters, as a single chunk.
@@ -791,6 +968,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 			punctIsCategory: true, newlineSingle: true,
 			preDigits: 3, cjk: true, postDigits: 1,
 		}, true
+	case preChameleon:
+		return preRule{chameleon: true}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
 		// "|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
@@ -1144,9 +1323,13 @@ func qwen2SpaceRunLen(s string) int {
 	// (?!\S): positions where what follows is not a non-space. The first such position is
 	// the last space in the run, so a run followed by a word yields all but its last
 	// character.
+	//
+	// The last character has to be measured from its own start, not taken as the length of
+	// the first one: a run may mix widths, and "a \u2003b" would otherwise be cut one byte
+	// into the em space.
 	if i < len(s) {
-		last := i - runeLenAt(s[:i])
-		if last > 0 {
+		last, ok := prevRuneStart(s, i)
+		if ok && last > 0 {
 			return last
 		}
 	}
@@ -1743,4 +1926,26 @@ func splitYoutuScripts(text string) []string {
 		out = append(out, text[start:])
 	}
 	return out
+}
+
+// chameleonSpaceLen matches chameleon's "([\t\n]|    |  )" expression.
+//
+// It is a whole pass rather than a whitespace-tail alternative, and that difference is
+// observable: the alternatives are tried at each position, eight spaces match as two
+// four-space chunks, and a run of three matches two and leaves one for the next pass's
+// "\s+(?!\S)". A run that ends the text is not this expression's business either -- the
+// space pass leaves it alone and the final GPT-2 expression takes it.
+func chameleonSpaceLen(s string) int {
+	// Four spaces before two: the alternatives are ordered longest first in the expression,
+	// and a four-space run would otherwise be cut as two twos.
+	if strings.HasPrefix(s, "    ") {
+		return 4
+	}
+	if strings.HasPrefix(s, "  ") {
+		return 2
+	}
+	if s[0] == '\t' || s[0] == '\n' {
+		return 1
+	}
+	return 0
 }

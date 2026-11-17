@@ -30,11 +30,13 @@
 // before merging. tokenizer.ggml.pre names the cut, and llama.cpp recognises about a hundred
 // names for it.
 //
-// Six are implemented here: qwen2, llama-bpe, gpt-2, starcoder, deepseek-v3, and tekken. The
-// first four were chosen because they cover the models this project has been run against;
-// the next two because each added a dimension the others did not have. Families share a
-// template -- contractions, a letter run, a digit run, a punctuation run, whitespace -- and
-// differ in choices, so the choices are data in preRule rather than a function each.
+// Thirty-one families are implemented here, covering 97 of those names, and the list is
+// per-family work rather than aliasing: a name is either flagged implemented or the file it
+// describes is split as one chunk and says so. The first few were chosen because they cover
+// the models this project has been run against; the rest because each added a dimension the
+// others did not have. Most families share a template -- contractions, a letter run, a digit
+// run, a punctuation run, whitespace -- and differ in choices, so the choices are data in
+// preRule rather than a function each.
 //
 // deepseek-v3 brought a letter class that includes combining marks, a punctuation
 // alternative naming categories instead of their complement, and a digit-group and CJK
@@ -43,6 +45,14 @@
 // chunks while "HTTPServer" -- a capital run with its trailing word -- stays one. Both added
 // fields to preRule and neither needed a second code path, which is the test the
 // parameterisation was built to pass.
+//
+// Some families need their own code path, and the reason is the same for most of them: their
+// expressions are applied in sequence over the pieces the previous one left, so they are
+// passes rather than alternatives. deepseek-coder, deepseek-llm, falcon and chameleon share
+// that shape; chameleon is the sharpest case, because its punctuation pass cuts single
+// characters ahead of the main rule and so an apostrophe never forms a contraction. Reading
+// its expression as one alternatives list would put boundaries in the wrong place on
+// ordinary text -- "don't" would keep its "'t" -- and nothing would report it.
 //
 // Everything else splits as one chunk. That is the correct answer for a file naming nothing
 // and for one naming "default", because llama.cpp applies no expression in those cases

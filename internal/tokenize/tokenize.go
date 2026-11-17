@@ -208,6 +208,11 @@ const (
 	// split on case, then a bare \p{N} that cuts every remaining digit on its own -- so a
 	// number ends up one digit per chunk despite the first pass grouping in threes.
 	preSpark25
+	// preChameleon applies six expressions in sequence rather than as alternatives of one
+	// rule. Its punctuation pass cuts single characters ahead of the main rule, so an
+	// apostrophe is a chunk of its own and no contraction forms; its space pass gives two and
+	// four spaces their own chunks; and its digit pass runs over the whole \p{N} category.
+	preChameleon
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -511,6 +516,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preYoutu
 		case "spark2_5":
 			t.pre = preSpark25
+		case "chameleon":
+			t.pre = preChameleon
 		case "jais-2":
 			t.pre = preJais2
 		case "zonos3":

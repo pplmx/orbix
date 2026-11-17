@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 76
+		wantImplemented = 79
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1363,4 +1363,58 @@ func TestSharedRuleNamesResolveToTheirBaseFamily(t *testing.T) {
 	check(t, []string{"chatglm-bpe", "glm4", "glm5", "dbrx", "smaug-bpe"}, preLlama3)
 	// GEMMA4 and DOMYN_SMALL hold mmbert's: the text is cut only at newlines.
 	check(t, []string{"gemma4", "granite-embed-multi-311m", "domyn-small"}, preMMBert)
+}
+
+// TestBailingMoEChunks pins the bailingmoe rule, which is llama3's shape with a bare \p{N}.
+//
+// The one difference that matters is digits: llama3 takes up to three at a time, this takes
+// one, so "1234" is ["1", "2", "3", "4"] here and ["123", "4"] there. The newline
+// alternatives differ on paper -- \s*[\r\n] against \s*[\r\n]+ -- but both consume the run,
+// so "line\n\ntwo" splits the same way under each.
+func TestBailingMoEChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preBailingMoE}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"12", []string{"1", "2"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		// The rest of the expression is llama3's, so these match it exactly.
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"don't", []string{"don", "'t"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// llama3 must not have gained the single-digit cut: the two rules differ by one field and
+	// a careless edit could move both.
+	llama := &Tokenizer{pre: preLlama3}
+	if got := llama.preSplit("1234"); !sameStrings(got, []string{"123", "4"}) {
+		t.Errorf("llama3 preSplit(\"1234\") = %q, want up to three digits", got)
+	}
+
+	// All three names llama.cpp puts in the BAILINGMOE branch reach this rule.
+	for _, name := range []string{"bailingmoe", "bailingmoe2", "llada-moe"} {
+		path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		real, err := New(f)
+		if err != nil {
+			t.Fatalf("New(pre=%q): %v", name, err)
+		}
+		if !real.PreImplemented() {
+			t.Errorf("%q is not reported as implemented", name)
+		}
+		if got := real.preSplit("1234"); !sameStrings(got, []string{"1", "2", "3", "4"}) {
+			t.Errorf("%q preSplit(\"1234\") = %q, want single digits", name, got)
+		}
+	}
 }

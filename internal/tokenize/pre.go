@@ -626,6 +626,17 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preBailingMoE:
+		// "'(?:[sSdDmMtT]|[lL][lL]|[vV][eE]|[rR][eE])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}"
+		// "| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+"
+		//
+		// llama3's shape, except digits are a bare \p{N}: every digit is its own chunk where
+		// llama3 takes up to three. The newline alternative lacks llma3's `+`, but both forms
+		// consume the whole run, so nothing separates the families there.
+		return preRule{
+			digits: 1, lead: leadAnyNonLetter,
+			newlinesAfterPunct: true, newlineChunk: true,
+		}, true
 	case preSoprano:
 		return preRule{partition: true, preDigits: 1}, true
 	case preSuperBPE:

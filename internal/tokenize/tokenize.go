@@ -154,6 +154,10 @@ const (
 	// everything else. It is the only family whose main expression is a partition rather than
 	// a run with a leading character.
 	preSoprano
+	// preBailingMoE is llama3's expression with a bare \p{N} where llama3 has \p{N}{1,3}, so
+	// every digit is its own chunk. The newline alternatives differ on paper -- \s*[\r\n]
+	// against \s*[\r\n]+ -- but both take the run in one chunk on real text.
+	preBailingMoE
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -436,6 +440,9 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preWhitespace
 		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
+		// bailingmoe, bailingmoe2 and llada-moe are llama.cpp's BAILINGMOE branch.
+		case "bailingmoe", "bailingmoe2", "llada-moe":
+			t.pre = preBailingMoE
 		case "soprano":
 			t.pre = preSoprano
 		case "superbpe":

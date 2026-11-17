@@ -59,6 +59,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			"gauge", st.FractionFull())
 	}
 
+	// Tracing is exported only when it is on, for the same reason the pool counts are:
+	// a zero would read as "no spans were dropped" when the truth is "nothing is being
+	// traced". A non-zero value here is the signal that a collector is down or slow, and
+	// it is otherwise invisible -- requests keep succeeding and the traces just have gaps.
+	if s.cfg.Trace != nil {
+		b.help("trace_spans_dropped_total",
+			"Spans discarded because the export queue was full or a send failed, in cumulative total.",
+			"counter", uint64(s.cfg.Trace.Dropped()))
+	}
+
 	// The model name is the one label here. It is a constant for the process lifetime,
 	// so it costs nothing and it tells a scraper which checkpoint the numbers describe --
 	// the difference between throughput on a 15M and a 7B model is the whole reading.

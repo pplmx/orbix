@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -377,5 +379,77 @@ func TestMetricsExportPrefixReuse(t *testing.T) {
 	}
 	if rem := math.Mod(got, 8); rem != 0 {
 		t.Errorf("prefix_positions_reused_total = %v, not a multiple of the 8-position block", got)
+	}
+}
+
+// TestMetricsExportDroppedSpans checks the reading that tells an operator tracing is losing
+// data.
+//
+// A dead or slow collector is otherwise invisible: requests keep succeeding, latency does not
+// move (the export runs off the request path), and the only symptom is gaps in the traces
+// that nobody is looking at because they are not arriving. The queue is bounded, so the
+// spans are dropped rather than piling up -- and until this counter was exported, the
+// exporter's own Dropped() had no caller outside its tests.
+//
+// Tracing is off by default, so the metric is absent for a server without it, in the same
+// way the pool counts are absent for a contiguous engine: a zero would be indistinguishable
+// from "nothing is being traced".
+func TestMetricsExportDroppedSpans(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{MaxActive: 1})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+
+	// A collector that cannot be reached, and a queue of one, so the second span is
+	// dropped without waiting for a tick.
+	exp, err := otel.NewExporter(otel.ExporterOptions{
+		Endpoint: "http://127.0.0.1:1/v1/traces",
+		Interval: time.Hour,
+		MaxQueue: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	t.Cleanup(func() { _ = exp.Close() })
+
+	srv, err := New(eng, tok, Config{
+		ModelName: cfg.Name, ContextLen: cfg.ContextLen, Trace: exp,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv.StartPump(ctx)
+
+	body := `{"prompt": "Once upon a time", "max_tokens": 2}`
+	// Three requests: the first queues its span, the rest have nowhere to go.
+	for range 3 {
+		decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions", body))
+	}
+
+	values := parseMetrics(t, scrape(t, srv.Handler()))
+	if got := num(t, values, "orbix_trace_spans_dropped_total"); got <= 0 {
+		t.Errorf("trace_spans_dropped_total = %v with a dead collector and a queue of one, want positive", got)
+	}
+}
+
+// TestMetricsOmitDroppedSpansWithoutTracing is the counterpart: with tracing off there is no
+// exporter, and a zero would read as a healthy collector rather than as tracing being off.
+func TestMetricsOmitDroppedSpansWithoutTracing(t *testing.T) {
+	srv, _ := newTestServer(t)
+	values := parseMetrics(t, scrape(t, srv.Handler()))
+	if _, ok := values["orbix_trace_spans_dropped_total"]; ok {
+		t.Error("trace_spans_dropped_total is exported although tracing is off")
 	}
 }

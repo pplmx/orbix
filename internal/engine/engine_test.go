@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -1018,4 +1019,67 @@ func TestEmitDistinguishesSlowFromGone(t *testing.T) {
 			t.Fatal("cancel did not unblock a full event buffer")
 		}
 	})
+}
+
+// TestQueueFullIsRefused checks that a backlog deeper than the engine will hold is refused
+// rather than accepted.
+//
+// A contiguous cache reserves its whole context at Submit, so an accepted request costs
+// about 1.7MB for a small model before a round has looked at it. There was no limit: 400
+// concurrent requests drove a running server from 146MB to 847MB of resident memory, and a
+// client that simply kept sending could exhaust the process. With the bound in place the
+// same 400 peak at 224MB.
+func TestQueueFullIsRefused(t *testing.T) {
+	const maxActive, maxQueued = 1, 2
+	e, tok, _ := loadModelPath(t, Options{MaxActive: maxActive, MaxQueued: maxQueued})
+	prompt := tok.Encode("Once upon a time", true)
+
+	var accepted, refused int
+	for range 10 {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 20})
+		if err != nil {
+			if !errors.Is(err, ErrQueueFull) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			refused++
+			continue
+		}
+		accepted++
+		_ = ch
+	}
+	if refused == 0 {
+		t.Error("every request was accepted, so the limit did nothing")
+	}
+	// One active plus the queue depth; anything beyond that would be waiting for a slot
+	// that no round is going to reach.
+	if want := maxActive + maxQueued; accepted != want {
+		t.Errorf("accepted %d requests, want %d (MaxActive + MaxQueued)", accepted, want)
+	}
+}
+
+// TestQueueFullFreesUpAgain checks the limit is not permanent: once the backlog drains,
+// new requests are accepted.
+func TestQueueFullFreesUpAgain(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{MaxActive: 1, MaxQueued: 1})
+	prompt := tok.Encode("Once upon a time", true)
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2})
+	if err != nil {
+		t.Fatalf("first Submit: %v", err)
+	}
+	if _, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2}); err != nil {
+		t.Fatalf("second Submit should fit the queue: %v", err)
+	}
+	if _, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2}); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("third Submit: %v, want ErrQueueFull", err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+	for e.Pump() > 0 {
+	}
+	// The slot is free again once everything has finished.
+	if _, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2}); err != nil {
+		t.Errorf("Submit after the queue drained: %v", err)
+	}
 }

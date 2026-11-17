@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -8,6 +9,13 @@ import (
 	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/otel"
 )
+
+// ErrQueueFull is returned by Submit when the engine already has as many waiting requests
+// as it will hold.
+//
+// It is a distinct error because the caller's reaction differs from a malformed request:
+// the request was well formed, and retrying later or shedding load is the right answer.
+var ErrQueueFull = errors.New("engine: too many requests waiting")
 
 // Event is one step of a sequence's output.
 type Event struct {
@@ -140,6 +148,7 @@ func (s *sequence) remaining() int {
 type Engine struct {
 	model     *llama.Model
 	maxActive int
+	maxQueued int
 	policy    Priority
 
 	// round counts Pump calls. It exists so PriorityFair can record when a sequence
@@ -171,6 +180,16 @@ type Engine struct {
 type Options struct {
 	// MaxActive caps how many sequences are advanced per round. Zero means 8.
 	MaxActive int
+	// MaxQueued caps how many sequences may be accepted but not yet active. Zero means
+	// 8*MaxActive.
+	//
+	// A contiguous cache reserves its whole context at Submit, so without a cap the
+	// memory a client can make the process reserve is bounded only by how fast it can
+	// open connections: every accepted request holds an arena whether or not a round
+	// will reach it. Rejecting is the honest answer once the backlog is this deep --
+	// the requests would otherwise wait behind each other for a slot that is not
+	// coming, and the caller would rather know now.
+	MaxQueued int
 	// Workers is the model's kernel fan-out; zero means one per available CPU.
 	// The engine drives one forward pass at a time, so this is the only
 	// parallelism in play and defaulting it to the CPU count is what makes a
@@ -213,9 +232,16 @@ func New(path string, opts Options) (*Engine, error) {
 	if maxActive <= 0 {
 		maxActive = 8
 	}
+	maxQueued := opts.MaxQueued
+	if maxQueued <= 0 {
+		// Enough slack that a burst is absorbed rather than refused, small enough that
+		// the reserved memory stays proportional to what the engine can actually run.
+		maxQueued = 8 * maxActive
+	}
 	e := &Engine{
 		model:     m,
 		maxActive: maxActive,
+		maxQueued: maxQueued,
 		policy:    opts.Policy,
 		active:    make(map[int]*sequence),
 	}
@@ -257,6 +283,20 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	}
 	if req.MaxTokens < 0 {
 		return nil, fmt.Errorf("engine: negative max tokens")
+	}
+
+	// Refuse before reserving anything, so a rejected request costs no memory.
+	//
+	// The limit protects the arena the contiguous layout takes here as much as it
+	// protects the queue: a paged sequence takes blocks lazily, but its turn still
+	// only comes after the slots ahead of it, so accepting it would not help either.
+	e.mu.Lock()
+	queued := len(e.active) - e.maxActive
+	maxQueued := e.maxQueued
+	e.mu.Unlock()
+	if queued >= maxQueued {
+		return nil, fmt.Errorf("engine: %d requests already waiting for %d slots: %w",
+			queued, e.maxActive, ErrQueueFull)
 	}
 
 	// Paged sequences take blocks as they generate; contiguous ones reserve the

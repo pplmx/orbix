@@ -197,6 +197,10 @@ const (
 	// preExaoneMoE is llama3's shape whose letter alternative continues past a single space:
 	// "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+", so "hi there" is one chunk and "a  b" is not.
 	preExaoneMoE
+	// preTekkenNum3 is tekken's expression with its digit alternative replaced by a lookahead
+	// that groups three at a time from the right, so "1234" is ["1", "234"] where tekken gives
+	// one digit per chunk.
+	preTekkenNum3
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -494,6 +498,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// to a chunk that already contains no newline.
 		case "exaone-moe":
 			t.pre = preExaoneMoE
+		case "tekken-num3":
+			t.pre = preTekkenNum3
 		case "jais-2":
 			t.pre = preJais2
 		case "zonos3":

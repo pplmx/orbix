@@ -736,6 +736,15 @@ func preFamilyOf(p preType) (preRule, bool) {
 			digits: 1, lead: leadAnyNonLetter, letterMarks: true, wordSpaces: true,
 			newlineChunk: true, punctSlashTail: true,
 		}, true
+	case preTekkenNum3:
+		// tekken's expression with the digit alternative replaced by
+		// "\p{N}{1,3}(?=(?:\p{N}{3})*(?!\p{N}))|\p{N}{1,2}": digits group three at a time
+		// from the right, so "1234" is ["1", "234"] where tekken gives one digit per chunk.
+		return preRule{
+			digitsFromRight: true,
+			digits:          3, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
+			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
+		}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
 		// "|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"

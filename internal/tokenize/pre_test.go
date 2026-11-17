@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 93
+		wantImplemented = 94
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1979,5 +1979,59 @@ func TestExaoneMoEChunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("exaone-moe is not reported as implemented")
+	}
+}
+
+// TestTekkenNum3Chunks pins the tekken-num3 rule: tekken's expression with its digit
+// alternative replaced by a lookahead that groups three at a time from the right.
+//
+// That is the same right-grouping tiny_aya and superbpe use, but with no word boundary in the
+// lookahead, so "a1234b" groups where tiny_aya's "1234a" would not: the difference between the
+// two is the \b, not the grouping.
+func TestTekkenNum3Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preTekkenNum3}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Grouped from the right, remainder first.
+		{"1234", []string{"1", "234"}},
+		{"123456", []string{"123", "456"}},
+		{"1234567", []string{"1", "234", "567"}},
+		{"12", []string{"12"}},
+		// No word boundary in the lookahead, so a run touching a letter still groups.
+		{"a1234b", []string{"a", "1", "234", "b"}},
+		// The rest is tekken's: case boundaries, contractions, the slash tail, newline runs.
+		{"helloWorld", []string{"hello", "World"}},
+		{"HelloWorld", []string{"Hello", "World"}},
+		{"don't", []string{"don", "'t"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"a/b", []string{"a", "/b"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// tekken gives one digit per chunk, which is what the digit alternative here replaces.
+	tk := &Tokenizer{pre: preTekken}
+	if got := tk.preSplit("1234"); !sameStrings(got, []string{"1", "2", "3", "4"}) {
+		t.Errorf("tekken preSplit(\"1234\") = %q, want single digits", got)
+	}
+
+	path := gguftest.Model{Pre: "tekken-num3", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("tekken-num3 is not reported as implemented")
 	}
 }

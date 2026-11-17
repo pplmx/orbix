@@ -213,6 +213,9 @@ const (
 	// apostrophe is a chunk of its own and no contraction forms; its space pass gives two and
 	// four spaces their own chunks; and its digit pass runs over the whole \p{N} category.
 	preChameleon
+	// preK2Horizon is qwen35's shape whose letter run also takes the joining controls
+	// U+200C and U+200D, with digits grouped up to three rather than one at a time.
+	preK2Horizon
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -518,6 +521,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preSpark25
 		case "chameleon":
 			t.pre = preChameleon
+		case "k2-horizon":
+			t.pre = preK2Horizon
 		case "jais-2":
 			t.pre = preJais2
 		case "zonos3":

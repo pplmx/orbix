@@ -665,6 +665,10 @@ type preRule struct {
 	// letterMarks is whether combining marks join a letter run (\p{L}\p{M} rather than
 	// \p{L}). The deepseek and stablelm families set it.
 	letterMarks bool
+	// joiners is whether U+200C and U+200D also join a letter run, which is k2-horizon's
+	// "(?:\p{L}|\p{M}|\u200C|\u200D)+". Neither character is a letter or a mark, so
+	// without the flag they fall to the punctuation alternative and split the word.
+	joiners bool
 	// newlinesAfterPunct is whether a punctuation run may absorb the newlines that follow
 	// it. qwen2 does; gpt-2 ends the chunk at the punctuation.
 	newlinesAfterPunct bool
@@ -990,6 +994,18 @@ func preFamilyOf(p preType) (preRule, bool) {
 			digits: 1, lead: leadAnyNonLetter, letterMarks: true,
 			newlinesAfterPunct: true, newlineChunk: true,
 		}, true
+	case preK2Horizon:
+		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}|\\p{M}|\\u200C|\\u200D)+"
+		// "|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+		//
+		// qwen35's shape with two changes to the letter alternative: the joining controls
+		// U+200C and U+200D join the run, and digits group up to three rather than one at a
+		// time. The controls matter for scripts that spell with a zero-width joiner -- a word
+		// split at one is two chunks the vocabulary never saw.
+		return preRule{
+			digits: 3, lead: leadAnyNonLetter, letterMarks: true, joiners: true,
+			newlinesAfterPunct: true, newlineChunk: true,
+		}, true
 	case preUfakzeka:
 		// "[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
 		//
@@ -1179,7 +1195,12 @@ func letterRunLen(s string, fam preRule) int {
 			i = 1
 		}
 	case leadAnyNonLetter:
-		if !isLetterAt(s) && !isNewlineAt(s) && !isDigitAt(s) && runeLenAt(s) > 0 {
+		// The leading character is "one that is not a letter, digit, or newline". A mark or
+		// joiner is none of those, so it would be taken as a *prefix* -- but the families
+		// that admit them admit them as members of the run, and taking one as the prefix
+		// leaves a run of zero letters. The expression is "[^...]?[\p{L}\p{M}]+" there, so a
+		// leading mark belongs to the run rather than to the prefix.
+		if !startsLetterRun(s, fam) && !isNewlineAt(s) && !isDigitAt(s) && runeLenAt(s) > 0 {
 			i = runeLenAt(s)
 		}
 	case leadNotLetterPunctSymbol:
@@ -1187,7 +1208,7 @@ func letterRunLen(s string, fam preRule) int {
 			i = runeLenAt(s)
 		}
 	}
-	if i > 0 && !isLetterAt(s[i:]) {
+	if i > 0 && !startsLetterRun(s[i:], fam) {
 		return 0
 	}
 	start := i
@@ -1195,6 +1216,12 @@ func letterRunLen(s string, fam preRule) int {
 	// boundary test needs.
 	prevLower := false
 	for i < len(s) {
+		if fam.joiners && isJoinerAt(s[i:]) {
+			// U+200C and U+200D are members of the class rather than a suffix on it, so
+			// they neither end the run nor reset its case state.
+			i += runeLenAt(s[i:])
+			continue
+		}
 		if isLetterAt(s[i:]) {
 			r, _ := utf8.DecodeRuneInString(s[i:])
 			// The boundary is a lower-to-upper transition. A capital after a capital does
@@ -1232,6 +1259,33 @@ func letterRunLen(s string, fam preRule) int {
 		i += cliticLen(s[i:])
 	}
 	return i
+}
+
+// startsLetterRun reports whether s begins with a character the family's letter class
+// accepts: a letter, and for the families that open the class, a combining mark or a
+// joining control.
+//
+// The distinction matters at the *start* of a run. "\p{L}\p{M}*" would need a letter first,
+// but the expression is "[\p{L}\p{M}]+", so a mark can begin a run: "\u0301a" is one chunk
+// where a stricter reading gives the mark its own.
+func startsLetterRun(s string, fam preRule) bool {
+	if isLetterAt(s) {
+		return true
+	}
+	if fam.letterMarks && isMarkAt(s) {
+		return true
+	}
+	return fam.joiners && isJoinerAt(s)
+}
+
+// isJoinerAt reports whether s begins with the zero-width non-joiner or joiner, the two
+// controls k2-horizon includes in its letter class.
+func isJoinerAt(s string) bool {
+	if s == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(s)
+	return r == '\u200c' || r == '\u200d'
 }
 
 // cliticLen returns the length of a clitic at the start of s, or 0.
@@ -1392,11 +1446,14 @@ func spaceTierLen(s string) int {
 // isLetter reports whether r is a letter (\p{L}).
 func isLetter(r rune) bool { return unicode.IsLetter(r) }
 
-// isDigit reports whether r is a decimal digit, which is the subset of \p{N} the Qwen2
-// rule means by "\p{N}" -- the reference expression uses the full category, but a single
-// non-decimal number rune in a prompt is rare enough that treating it as one chunk is the
-// same behaviour for text a model is asked about.
-func isDigit(r rune) bool { return unicode.IsDigit(r) }
+// isDigit reports whether r is a number (\p{N}): a decimal digit, a letter number such as
+// a Roman numeral, or another numeric character such as a superscript or a vulgar fraction.
+//
+// The class is the whole category rather than \p{Nd}, because that is what the expressions
+// write. The distinction is not academic: "\u00b2\u00b3" is two chunks under qwen2 and one
+// under llama-bpe, and a decimal-digit reading gets both wrong -- the run would stay whole
+// under qwen2 and would not be grouped in threes under llama-bpe.
+func isDigit(r rune) bool { return unicode.IsNumber(r) }
 
 // isSpace reports whether r is whitespace (\s).
 func isSpace(r rune) bool { return unicode.IsSpace(r) }

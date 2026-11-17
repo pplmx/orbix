@@ -954,7 +954,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 97
+		wantImplemented = 98
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -2304,5 +2304,176 @@ func TestWhitespaceTailMeasuresTheLastSpace(t *testing.T) {
 	qwen := &Tokenizer{pre: preQwen2}
 	if got, expect := qwen.preSplit("a \u2003b"), []string{"a", " ", "\u2003b"}; !sameStrings(got, expect) {
 		t.Errorf("qwen2 preSplit(%q) = %q, want %q", "a \u2003b", got, expect)
+	}
+}
+
+// TestK2HorizonChunks pins the k2-horizon rule, which is qwen35's shape with two changes to
+// the letter alternative.
+//
+// The first is that the run takes the joining controls U+200C and U+200D. Neither is a letter
+// or a mark, so without the flag they fall to the punctuation alternative and split the word --
+// and a word split inside a zero-width joiner is text the vocabulary never saw. The second is
+// digit grouping of up to three, where qwen35 cuts every digit on its own.
+//
+// The expectations come from a transcription of the expression into Python's regex module,
+// which shares no code with this package.
+func TestK2HorizonChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preK2Horizon}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The joining controls are class members, so they neither end a run nor start one.
+		{"a\u200cb", []string{"a\u200cb"}},
+		{"a\u200db", []string{"a\u200db"}},
+		{"ab\u200c\u200dcd", []string{"ab\u200c\u200dcd"}},
+		{"\u200ca", []string{"\u200ca"}},
+		{"a\u200c", []string{"a\u200c"}},
+		// A space before a joiner-led run stays with the run, as the leading-character
+		// alternative allows for any non-letter.
+		{"x \u200cy", []string{"x", " \u200cy"}},
+		// Combining marks join the run, and a mark may open one.
+		{"e\u0301clair", []string{"e\u0301clair"}},
+		{"cafe\u0301", []string{"cafe\u0301"}},
+		{"a\u0301\u0302b", []string{"a\u0301\u0302b"}},
+		{"\u0301a", []string{"\u0301a"}},
+		{"\u0301\u0302a", []string{"\u0301\u0302a"}},
+		{"a\u0301 b", []string{"a\u0301", " b"}},
+		// Digits group up to three, where qwen35 cuts each one.
+		{"1234", []string{"123", "4"}},
+		{"1234567", []string{"123", "456", "7"}},
+		{"a1234b", []string{"a", "123", "4", "b"}},
+		{"12", []string{"12"}},
+		// \p{N} is the whole number category, so a superscript groups with what follows.
+		{"\u00b2\u00b3", []string{"\u00b2\u00b3"}},
+		// The rest is qwen35's expression: clitics, punctuation runs, newlines, whitespace.
+		{"don't", []string{"don", "'t"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"a--b", []string{"a", "--", "b"}},
+		{"a,,\n\nb", []string{"a", ",,\n\n", "b"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"a\r\nb", []string{"a", "\r\n", "b"}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"a \u2003b", []string{"a", " ", "\u2003b"}},
+		{"HelloWorld", []string{"HelloWorld"}},
+		{"\u4e2d\u6587\u6d4b\u8bd5", []string{"\u4e2d\u6587\u6d4b\u8bd5"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// qwen35 must not have gained either change: the two rules are one field apart, and a
+	// careless edit could move both.
+	qwen := &Tokenizer{pre: preQwen35}
+	if got, want := qwen.preSplit("a\u200cb"), []string{"a", "\u200cb"}; !sameStrings(got, want) {
+		t.Errorf("qwen35 preSplit(\"a\\u200cb\") = %q, want the joiner cut off", got)
+	}
+	if got, want := qwen.preSplit("1234"), []string{"1", "2", "3", "4"}; !sameStrings(got, want) {
+		t.Errorf("qwen35 preSplit(\"1234\") = %q, want one digit per chunk", got)
+	}
+
+	path := gguftest.Model{Pre: "k2-horizon", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("k2-horizon is not reported as implemented")
+	}
+}
+
+// TestLetterRunOpensOnAMark covers the families whose letter class admits more than letters.
+//
+// The expression is "[\p{L}\p{M}]+", not "\p{L}\p{M}*", so a combining mark can *open* a run:
+// "\u0301a" is one chunk. Reading the mark as the leading-character alternative instead yields
+// ["\u0301", "a"], which is a boundary the vocabulary never saw. The same applies to
+// k2-horizon's joining controls, which are class members rather than a suffix on the run.
+func TestLetterRunOpensOnAMark(t *testing.T) {
+	cases := []struct {
+		fam  preType
+		in   string
+		want []string
+	}{
+		{preQwen35, "\u0301a", []string{"\u0301a"}},
+		{preQwen35, "\u0301\u0302a", []string{"\u0301\u0302a"}},
+		{preQwen35, "a\u0301\u0302b", []string{"a\u0301\u0302b"}},
+		{preDeepseek3, "\u0301a", []string{"\u0301a"}},
+		{preK2Horizon, "\u200ca", []string{"\u200ca"}},
+		{preK2Horizon, "\u200c\u200da", []string{"\u200c\u200da"}},
+		// The distinguishing shape: a leading character *then* a mark. Taking the mark as
+		// a prefix as well leaves an empty run, so the run cannot start and the mark is
+		// emitted as its own chunk -- ["\u0301", "a"]-style output where the reference has
+		// [" \u0301a"].
+		{preQwen35, " \u0301a", []string{" \u0301a"}},
+		{preQwen35, ".\u0301a", []string{".\u0301a"}},
+		{preQwen35, "x \u0301y", []string{"x", " \u0301y"}},
+		{preK2Horizon, " \u0301a", []string{" \u0301a"}},
+		{preK2Horizon, "x \u0301y", []string{"x", " \u0301y"}},
+	}
+	for _, c := range cases {
+		tok := &Tokenizer{pre: c.fam}
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("pre=%v preSplit(%q) = %q, want %q", c.fam, c.in, got, c.want)
+		}
+	}
+	// A family without marks in its class reaches the same chunks by a different route, and
+	// the difference still shows on text where the mark is between two words: qwen2's leading
+	// character takes the mark as a prefix, so "a\u0301b" is ["a", "\u0301b"] there and
+	// ["a\u0301b"] under qwen35. Both are what the reference does.
+	qwen := &Tokenizer{pre: preQwen2}
+	if got, want := qwen.preSplit("a\u0301b"), []string{"a", "\u0301b"}; !sameStrings(got, want) {
+		t.Errorf("qwen2 preSplit(%q) = %q, want the mark taken as a prefix", "a\u0301b", got)
+	}
+	q35 := &Tokenizer{pre: preQwen35}
+	if got, want := q35.preSplit("a\u0301b"), []string{"a\u0301b"}; !sameStrings(got, want) {
+		t.Errorf("qwen35 preSplit(%q) = %q, want one run", "a\u0301b", got)
+	}
+}
+
+// TestNumberClassIsWholeCategory pins "\p{N}" as the whole number category rather than
+// \p{Nd}.
+//
+// The expressions write \p{N}, which also holds letter numbers (Roman numerals), superscripts,
+// and vulgar fractions. A decimal-digit reading changes boundaries silently on text that does
+// contain them: under qwen2 "²³" must be two chunks and under llama-bpe one, and the two
+// families disambiguate the class from opposite directions.
+//
+// Expected chunks come from the reference expressions in Python's regex module.
+func TestNumberClassIsWholeCategory(t *testing.T) {
+	qwen2 := &Tokenizer{pre: preQwen2}
+	llama3 := &Tokenizer{pre: preLlama3}
+
+	// qwen2's bare \p{N} cuts each number character on its own.
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"\u00b2\u00b3", []string{"\u00b2", "\u00b3"}},
+		{"1\u00b22", []string{"1", "\u00b2", "2"}},
+		{"\u00bd\u00bcn", []string{"\u00bd", "\u00bc", "n"}},
+		{"a\u2163b", []string{"a", "\u2163", "b"}},
+	} {
+		if got := qwen2.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("qwen2 preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// llama-bpe's \p{N}{1,3} groups them up to three.
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"\u00b2\u00b3", []string{"\u00b2\u00b3"}},
+		{"1\u00b22", []string{"1\u00b22"}},
+		{"\u00bd\u00bcn", []string{"\u00bd\u00bc", "n"}},
+	} {
+		if got := llama3.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("llama-bpe preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

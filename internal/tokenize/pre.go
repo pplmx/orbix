@@ -43,6 +43,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.stopSet != "" {
 		return splitAtStopSet(text, fam.stopSet)
 	}
+	if fam.coder {
+		return splitDeepseekCoder(text)
+	}
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
@@ -58,6 +61,103 @@ func (t *Tokenizer) preSplit(text string) []string {
 	var out []string
 	for _, piece := range pieces {
 		out = append(out, splitByRule(piece, fam)...)
+	}
+	return out
+}
+
+// splitDeepseekCoder applies deepseek-coder's five expressions in order.
+//
+// Each expression is matched over the pieces the previous one produced, and text a match
+// does not cover stays attached to its neighbour rather than becoming a piece of its own:
+//
+//	[\r\n]
+//	\s?\p{L}+
+//	\s?\p{P}+
+//	[\u4e00-\u9fa5 ...]+
+//	\p{N}
+//
+// The effect is one chunk per run of letters, punctuation or CJK characters, and one chunk
+// per digit, with a preceding whitespace character attached to whichever run follows it.
+func splitDeepseekCoder(text string) []string {
+	// Only two of the five expressions carry an optional \s? prefix -- the letter and
+	// punctuation runs. A newline, a CJK run and a digit do not, so a space before them
+	// stays a chunk of its own.
+	type step struct {
+		pred func(string) bool
+		// spacePrefix reports whether the expression says \s? before the run.
+		spacePrefix bool
+		// single makes each matching character its own chunk, which is what an expression
+		// without a + quantifier means: \p{N} takes one digit, where \p{L}+ takes a run.
+		single bool
+	}
+	pieces := []string{text}
+	for _, st := range []step{
+		{pred: isNewlineAt},
+		{pred: isLetterAt, spacePrefix: true},
+		{pred: isPunctAt, spacePrefix: true},
+		{pred: isCJKAt},
+		{pred: isDigitAt, single: true},
+	} {
+		var next []string
+		for _, piece := range pieces {
+			next = append(next, splitRunsOf(piece, st.pred, st.spacePrefix, st.single)...)
+		}
+		pieces = next
+	}
+	return pieces
+}
+
+// splitRunsOf cuts one piece at the runs where pred is true, keeping the text between them.
+//
+// spacePrefix says whether a whitespace character immediately before a run joins that run,
+// which is what an optional \s? in the expression means: " x" is one chunk where "x" is
+// another. The character has to be taken from the gap, which is why the run start is decided
+// before the gap is emitted.
+// prevRuneStart returns the byte offset where the character ending at end begins.
+func prevRuneStart(text string, end int) (int, bool) {
+	if end <= 0 {
+		return 0, false
+	}
+	p := end - 1
+	for p > 0 && text[p]&0xC0 == 0x80 {
+		p--
+	}
+	return p, true
+}
+
+func splitRunsOf(text string, pred func(string) bool, spacePrefix, single bool) []string {
+	var out []string
+	start := 0
+	i := 0
+	for i < len(text) {
+		if !pred(text[i:]) {
+			i += runeLenAt(text[i:])
+			continue
+		}
+		runStart := i
+		// Take the single character that ends at i when it is whitespace, which is what an
+		// optional \s? before the run means. It must not cross into text already emitted.
+		if spacePrefix && runStart > start {
+			if prev, ok := prevRuneStart(text, runStart); ok && prev >= start && isSpaceAt(text[prev:]) {
+				runStart = prev
+			}
+		}
+		if runStart > start {
+			out = append(out, text[start:runStart])
+		}
+		runEnd := i
+		for runEnd < len(text) && pred(text[runEnd:]) {
+			runEnd += runeLenAt(text[runEnd:])
+			if single {
+				break
+			}
+		}
+		out = append(out, text[runStart:runEnd])
+		start = runEnd
+		i = runEnd
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
 	}
 	return out
 }
@@ -303,6 +403,11 @@ type preRule struct {
 	// literal rather than a category because BLOOM's expression lists the punctuation it
 	// stops at, and a category would stop at more.
 	stopSet string
+	// coder marks deepseek-coder, whose five expressions are applied one after another to
+	// the pieces the previous one left, rather than the earlier-ones-then-main-rule shape
+	// preDigits and cjk describe. Keeping it separate avoids a rule type whose fields are
+	// only meaningful together.
+	coder bool
 	// punctLetterRun is whether the expression's first alternative is
 	// "[!-/:-@\\[-`{-~][A-Za-z]+": one ASCII punctuation character followed by a run of
 	// ASCII letters, as a single chunk.
@@ -376,6 +481,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 		}, true
 	case preWhitespace:
 		return preRule{whitespaceOnly: true}, true
+	case preDeepseekCoder:
+		return preRule{coder: true}, true
 	case preBloom:
 		// " ?[^(\s|.,!?…。，、।۔،)]+" -- the parentheses and inner pipes are literal in
 		// llama.cpp's expression, so the stop set is those characters, the pipe itself,
@@ -709,6 +816,11 @@ func isCJKAt(s string) bool { return classifyAt(s, isCJK) }
 
 // isPunctOrSymbol reports whether r is punctuation (\p{P}) or a symbol (\p{S}).
 func isPunctOrSymbol(r rune) bool { return unicode.IsPunct(r) || unicode.IsSymbol(r) }
+
+// isPunct is the stricter class deepseek-coder's \p{P}+ uses: punctuation only, no symbols.
+func isPunct(r rune) bool { return unicode.IsPunct(r) }
+
+func isPunctAt(s string) bool { return classifyAt(s, isPunct) }
 
 func isPunctOrSymbolAt(s string) bool { return classifyAt(s, isPunctOrSymbol) }
 

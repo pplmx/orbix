@@ -124,6 +124,9 @@ const (
 	// preBloom is " ?[^(\s|.,!?…。，、।۔،)]+": an optional space, then a run that stops at
 	// those characters.
 	preBloom
+	// preDeepseekCoder applies five expressions in order: newline, \s?letters,
+	// \s?punctuation, a CJK run, then a single digit.
+	preDeepseekCoder
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -386,6 +389,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preWhitespace
 		case "bloom", "gpt3-finnish":
 			t.pre = preBloom
+		case "deepseek-coder":
+			t.pre = preDeepseekCoder
 
 		case "", "default":
 			t.pre = preNone

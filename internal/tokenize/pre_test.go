@@ -657,3 +657,47 @@ func TestStableLM2SharesQwen2Rule(t *testing.T) {
 		}
 	}
 }
+
+// TestDeepseekCoderPreTokenizer covers the one family whose expressions are applied in
+// sequence rather than as alternatives within a single match: newline, then letters, then
+// punctuation, then CJK, then one digit at a time.
+//
+// Two details are easy to get wrong and both were, in the first attempt. Only the letter and
+// punctuation expressions carry the optional \s?, so a space before a digit or a CJK run
+// stays its own chunk; and \p{N} has no +, so digits come out one per chunk rather than as a
+// run. The expected values were produced by applying the five expressions to these inputs
+// with Python's re, not by reading the Go code.
+func TestDeepseekCoderPreTokenizer(t *testing.T) {
+	tok := bpeFixture(t, gguftest.Model{Pre: "deepseek-coder"})
+	if !tok.PreImplemented() {
+		t.Fatal("the deepseek-coder pre-tokenizer is not implemented")
+	}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"Hello world", []string{"Hello", " world"}},
+		{"a,b.c", []string{"a", ",", "b", ".", "c"}},
+		{"x1y22", []string{"x", "1", "y", "2", "2"}},
+		{"code_here", []string{"code", "_", "here"}},
+		{"a\nb", []string{"a", "\n", "b"}},
+		{"中文 test", []string{"中文", " test"}},
+		{" x", []string{" x"}},
+		{"x 1", []string{"x", " ", "1"}},
+		{"x 中", []string{"x", " ", "中"}},
+		{"a  b", []string{"a", " ", " b"}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}

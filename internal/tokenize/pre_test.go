@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 72
+		wantImplemented = 76
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1320,4 +1320,47 @@ func TestChatGLMNamesShareTheLlama3Rule(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSharedRuleNamesResolveToTheirBaseFamily covers the names that llama.cpp puts in another
+// family's branch verbatim.
+//
+// These are mapping-only changes, so the failure they can have is a name resolving to the
+// wrong rule rather than the rule being wrong. The check is therefore a comparison against the
+// base family's own splitter over inputs that separate the families from each other, instead
+// of a table of expected chunks that would have to be maintained per name.
+func TestSharedRuleNamesResolveToTheirBaseFamily(t *testing.T) {
+	// Inputs that distinguish the families: digit grouping, punctuation prefix, contractions,
+	// newlines, and CJK.
+	inputs := []string{"a1234b", "Hello, world!", "don't", "line\n\ntwo", "中文测试", "x_y z"}
+
+	check := func(t *testing.T, names []string, base preType) {
+		t.Helper()
+		want := (&Tokenizer{pre: base})
+		for _, name := range names {
+			path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+			f, err := gguf.Open(path)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			tok, err := New(f)
+			if err != nil {
+				t.Fatalf("New(pre=%q): %v", name, err)
+			}
+			if !tok.PreImplemented() {
+				t.Errorf("%q is not reported as implemented", name)
+				continue
+			}
+			for _, in := range inputs {
+				if got, wantSplit := tok.preSplit(in), want.preSplit(in); !sameStrings(got, wantSplit) {
+					t.Errorf("%q preSplit(%q) = %q, want the base family's %q", name, in, got, wantSplit)
+				}
+			}
+		}
+	}
+
+	// llama.cpp's CHATGLM4 and DBRX/SMAUG cases hold llama3's expression verbatim.
+	check(t, []string{"chatglm-bpe", "glm4", "glm5", "dbrx", "smaug-bpe"}, preLlama3)
+	// GEMMA4 and DOMYN_SMALL hold mmbert's: the text is cut only at newlines.
+	check(t, []string{"gemma4", "granite-embed-multi-311m", "domyn-small"}, preMMBert)
 }

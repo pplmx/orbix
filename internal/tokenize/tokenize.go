@@ -420,7 +420,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// chatglm-bpe and glm5 are in llama.cpp's CHATGLM4 branch, whose expression is
 		// llama3's verbatim. The branch differs only in settings this package does not model
 		// -- a null BOS id, ignore_merges, and clean_up_tokenization_spaces.
-		case "chatglm-bpe", "glm5",
+		case "chatglm-bpe", "glm4", "glm5",
 			"dbrx", "smaug-bpe",
 			"llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2",
 			// jina-v5-nano is in llama.cpp's llama3 branch, ignore_merges and all.
@@ -442,7 +442,11 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preSuperBPE
 		case "viking":
 			t.pre = preViking
-		case "mmbert":
+		// gemma4 and granite-embed-multi-311m are in llama.cpp's GEMMA4 branch, whose
+		// expression is "[^\n]+|[\n]+" -- the same one mmbert uses. The comment there says
+		// the model relies on BPE over the whole text and only needs newlines split because the
+		// merge lookup asserts no newline inside a token.
+		case "domyn-small", "gemma4", "granite-embed-multi-311m", "mmbert":
 			t.pre = preMMBert
 		case "deepseek-llm":
 			t.pre = preDeepseekLLM

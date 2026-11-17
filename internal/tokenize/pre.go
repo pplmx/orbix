@@ -59,8 +59,8 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.newlineRuns {
 		return splitNewlineRuns(text)
 	}
-	if fam.digitsFromRight {
-		return splitDigitsFromRight(text)
+	if fam.digitsFromRight && !fam.caseSplit && !fam.letterMarks {
+		return splitDigitsFromRight(text, fam.digitsRightBoundary)
 	}
 	if fam.partition {
 		// The digit cut runs first, as llama.cpp applies the expressions in order: this
@@ -71,6 +71,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
+	if fam.digitsFromRight {
+		pieces = splitDigitsFromRight(text, fam.digitsRightBoundary)
+	}
 	if fam.preDigits > 0 {
 		pieces = splitDigitGroups(pieces, fam.preDigits)
 	}
@@ -547,6 +550,10 @@ type preRule struct {
 	// the remainder -- if any -- is the leftmost chunk. The superbpe lookahead asserts a
 	// multiple of three digits remain, which puts the boundary there.
 	digitsFromRight bool
+	// digitsRightBoundary restricts digitsFromRight to runs whose right neighbour is not a
+	// word character. tiny_aya's expression ends in \b, so a run touching a letter is gap
+	// text rather than a match.
+	digitsRightBoundary bool
 	// stopSetDigits is BLOOM's expression followed by a single-digit cut. Both steps are
 	// needed in that order, which is why the stop-set dispatch cannot return early for this
 	// family the way it does for the others.
@@ -641,6 +648,16 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{partition: true, preDigits: 1}, true
 	case preSuperBPE:
 		return preRule{digitsFromRight: true}, true
+	case preTinyAya:
+		// "\d{1,3}(?=(?:\d{3})*\b)" then a case-splitting letter rule: digits group three
+		// at a time from the right, but a run touching a letter is left whole, and letters
+		// are cut where a lower-case run meets an upper-case one.
+		return preRule{
+			digitsFromRight: true, digitsRightBoundary: true,
+			digits: 3, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
+			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
+			contractionSuffix: true,
+		}, true
 	case preViking:
 		// The first expression is BLOOM's verbatim, so the stop set is the same string; the
 		// second cuts every digit out on its own.
@@ -1275,7 +1292,11 @@ func splitNewlineRuns(text string) []string {
 // This is superbpe's lookahead: the expression asserts that a multiple of three digits follow,
 // which places the first boundary where the leftover digits end. Grouping from the left, as
 // the other digit-taking families do, would put the remainder on the right instead.
-func splitDigitsFromRight(text string) []string {
+//
+// When needWordBoundary is set the expression ends in \b, as tiny_aya's does: a run whose right
+// neighbour is a letter is not matched at all and stays gap text, so "123a" is one chunk where
+// superbpe would cut it. The left side is unconstrained -- "a123456" still groups.
+func splitDigitsFromRight(text string, needWordBoundary bool) []string {
 	var out []string
 	i := 0
 	for i < len(text) {
@@ -1292,6 +1313,14 @@ func splitDigitsFromRight(text string) []string {
 		for j < len(text) && isDigitAt(text[j:]) {
 			j += runeLenAt(text[j:])
 			n++
+		}
+		if needWordBoundary && j < len(text) {
+			r, _ := utf8.DecodeRuneInString(text[j:])
+			if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_' {
+				out = append(out, text[i:j])
+				i = j
+				continue
+			}
 		}
 		// Byte offsets of each digit so multi-byte digits are handled.
 		offs := make([]int, n+1)

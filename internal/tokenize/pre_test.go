@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 79
+		wantImplemented = 81
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1415,6 +1415,71 @@ func TestBailingMoEChunks(t *testing.T) {
 		}
 		if got := real.preSplit("1234"); !sameStrings(got, []string{"1", "2", "3", "4"}) {
 			t.Errorf("%q preSplit(\"1234\") = %q, want single digits", name, got)
+		}
+	}
+}
+
+// TestTinyAyaChunks pins the tiny_aya rule: a digit lookahead that groups from the right and
+// stops at a word boundary, then a case-splitting letter rule.
+//
+// Two things separate it from the other right-grouping family, superbpe. First, the lookahead
+// ends in \b, so a digit run whose right neighbour is a word character is not matched at all
+// and stays gap text -- "a1b2" has no group boundary because "1" touches letters on both
+// sides, and the letter rule then cuts it. Second, a main rule runs after the digit pass, so
+// the pieces it leaves are split further by case.
+func TestTinyAyaChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preTinyAya}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Grouped from the right, remainder first: the same shape as superbpe.
+		{"1234", []string{"1", "234"}},
+		{"123456", []string{"123", "456"}},
+		// The boundary rule: "1234a" ends on a letter, so the digit pass matches nothing and
+		// the letter rule then cuts from the left. Without the rule this would be
+		// ["1", "234", "a"], which is the only input found where the two differ.
+		{"1234a", []string{"123", "4", "a"}},
+		// A run touching a letter is whole for the digit pass, then cut by the letter rule.
+		{"a1b2", []string{"a", "1", "b", "2"}},
+		// A run between punctuation reaches a word boundary and groups.
+		{"x=42", []string{"x", "=", "42"}},
+		// Case boundaries split a letter run.
+		{"helloWorld", []string{"hello", "World"}},
+		{"HelloWorld", []string{"Hello", "World"}},
+		{"HELLO", []string{"HELLO"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"don't", []string{"don't"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// superbpe has no boundary rule: the same run groups there.
+	super := &Tokenizer{pre: preSuperBPE}
+	if got := super.preSplit("a1b2"); !sameStrings(got, []string{"a", "1", "b", "2"}) {
+		t.Errorf("superbpe preSplit(\"a1b2\") = %q, want the digits cut", got)
+	}
+
+	// Both names in llama.cpp's TINY_AYA branch reach this rule.
+	for _, name := range []string{"cohere2moe", "tiny_aya"} {
+		path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		real, err := New(f)
+		if err != nil {
+			t.Fatalf("New(pre=%q): %v", name, err)
+		}
+		if !real.PreImplemented() {
+			t.Errorf("%q is not reported as implemented", name)
+		}
+		if got := real.preSplit("1234"); !sameStrings(got, []string{"1", "234"}) {
+			t.Errorf("%q preSplit(\"1234\") = %q, want the remainder first", name, got)
 		}
 	}
 }

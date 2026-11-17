@@ -158,6 +158,9 @@ const (
 	// every digit is its own chunk. The newline alternatives differ on paper -- \s*[\r\n]
 	// against \s*[\r\n]+ -- but both take the run in one chunk on real text.
 	preBailingMoE
+	// preTinyAya is a \d{1,3} lookahead that groups digits three at a time from the right and
+	// keeps a run touching a letter whole, followed by a case-splitting letter rule.
+	preTinyAya
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -443,6 +446,9 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// bailingmoe, bailingmoe2 and llada-moe are llama.cpp's BAILINGMOE branch.
 		case "bailingmoe", "bailingmoe2", "llada-moe":
 			t.pre = preBailingMoE
+		// cohere2moe and tiny_aya are llama.cpp's TINY_AYA branch.
+		case "cohere2moe", "tiny_aya":
+			t.pre = preTinyAya
 		case "soprano":
 			t.pre = preSoprano
 		case "superbpe":

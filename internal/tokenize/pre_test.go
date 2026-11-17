@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 89
+		wantImplemented = 90
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1788,5 +1788,69 @@ func TestMiniCPM5Chunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("minicpm5 is not reported as implemented")
+	}
+}
+
+// TestZonos3Chunks pins the zonos3 rule, which is the only family here whose alternatives do
+// not cover letters at all.
+//
+// Three alternatives: digit groups of up to three, runs of two or more non-space non-letter
+// non-digit characters, and a space run that reaches the end of the text. Letters are gap
+// text, so a letter run stays whole -- "Hello, world!" is one chunk, and the comma is not long
+// enough for the {2,} run. Everything about the rule follows from that gap: "x=42" keeps "x="
+// because a single "=" is too short to match, and a newline matches nothing because the
+// whitespace alternative is a literal space, not \s.
+func TestZonos3Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preZonos3}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Letters are gap text, so a sentence with one punctuation mark stays whole.
+		{"Hello, world!", []string{"Hello, world!"}},
+		{"don't", []string{"don't"}},
+		{"a.b", []string{"a.b"}},
+		{"a, b", []string{"a, b"}},
+		{"hi there", []string{"hi there"}},
+		{"中文测试", []string{"中文测试"}},
+		// A newline is not a space, so these are gap text too.
+		{"line\n\ntwo", []string{"line\n\ntwo"}},
+		{"a\n\nb", []string{"a\n\nb"}},
+		// Digits group in threes; the remainder stays with the following gap.
+		{"a1234b", []string{"a", "123", "4", "b"}},
+		{"x=42", []string{"x=", "42"}},
+		// Two or more punctuation marks match, with any newlines or slashes after them.
+		{"!?!", []string{"!?!"}},
+		{"a!!b", []string{"a", "!!", "b"}},
+		{"!?/\n", []string{"!?/\n"}},
+		{"..x", []string{"..", "x"}},
+		// A space run that ends the text matches; in front of a non-space it gives back the
+		// last space, which then leads the following chunk.
+		{"a   ", []string{"a", "   "}},
+		{"  ", []string{"  "}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"a   b", []string{"a", "  ", " b"}},
+		{"a b", []string{"a b"}},
+		{"ab  cd", []string{"ab", " ", " cd"}},
+		{"  \n  ", []string{"  ", "\n", "  "}},
+		{"a \n b", []string{"a", " ", "\n b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	path := gguftest.Model{Pre: "zonos3", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("zonos3 is not reported as implemented")
 	}
 }

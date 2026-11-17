@@ -59,6 +59,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.newlineRuns {
 		return splitNewlineRuns(text)
 	}
+	if fam.zonos3 {
+		return splitZonos3(text)
+	}
 	if fam.digitsFromRight && !fam.caseSplit && !fam.letterMarks {
 		return splitDigitsFromRight(text, fam.digitsRightBoundary)
 	}
@@ -569,6 +572,9 @@ type preRule struct {
 	// and runs that are not, and nothing else separates a chunk. It is the only rule whose
 	// chunks can contain a space, a comma and a word at once.
 	newlineRuns bool
+	// zonos3 marks an expression whose alternatives cover only digits, punctuation runs of
+	// two or more, and trailing whitespace. Letters match nothing, so they stay gap text.
+	zonos3 bool
 	// leadingNewlinePass runs newlineRuns before the main rule instead of as the whole rule.
 	// Laguna pairs the newline expression with bailingmoe's, and the pass is not redundant:
 	// it separates a newline from whitespace before it, which the main rule would otherwise
@@ -697,6 +703,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 			digits: 0, lead: leadAnyNonLetter,
 			newlinesAfterPunct: true, newlineChunk: true, preDigits: 3,
 		}, true
+	case preZonos3:
+		return preRule{zonos3: true}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
 		// "|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
@@ -1448,4 +1456,91 @@ func splitPartition(text string) []string {
 		out = append(out, text[start:i])
 	}
 	return out
+}
+
+// splitZonos3 applies "\p{N}{1,3}| ?[^\s\p{L}\p{N}]{2,}[\r\n/]*| +(?!\S)".
+//
+// The alternatives cover digits, punctuation runs of two or more, and whitespace that ends the
+// text. Letters are in none of them, so a letter run is gap text and stays whole: "Hello,
+// world!" is one chunk. A single punctuation mark is also too short for the {2,} run, so
+// "x=42" keeps "x=" together.
+func splitZonos3(text string) []string {
+	var out []string
+	i := 0
+	gap := 0
+	for i < len(text) {
+		n := zonos3Len(text[i:])
+		if n <= 0 {
+			// Gap text: a letter. Consume one rune and keep looking, so the gap is flushed
+			// as one chunk when the next alternative matches.
+			i += runeLenAt(text[i:])
+			continue
+		}
+		if i > gap {
+			out = append(out, text[gap:i])
+		}
+		out = append(out, text[i:i+n])
+		i += n
+		gap = i
+	}
+	if gap < len(text) {
+		out = append(out, text[gap:])
+	}
+	return out
+}
+
+// zonos3Len returns the length of the longest zonos3 alternative at the start of s, or 0.
+func zonos3Len(s string) int {
+	// \p{N}{1,3}
+	if isDigitAt(s) {
+		i, n := 0, 0
+		for i < len(s) && n < 3 && isDigitAt(s[i:]) {
+			i += runeLenAt(s[i:])
+			n++
+		}
+		return i
+	}
+	// ?[^\s\p{L}\p{N}]{2,}[\r\n/]* -- an optional space, two or more characters that are
+	// not space, letter, or digit, then any newlines or slashes.
+	i := 0
+	if strings.HasPrefix(s, " ") {
+		i = 1
+	}
+	start := i
+	for i < len(s) {
+		if isSpaceAt(s[i:]) || isLetterAt(s[i:]) || isDigitAt(s[i:]) {
+			break
+		}
+		i += runeLenAt(s[i:])
+	}
+	if i-start >= 2 {
+		for i < len(s) && (isNewlineAt(s[i:]) || s[i] == '/') {
+			i += runeLenAt(s[i:])
+		}
+		return i
+	}
+	// +(?!\S) -- a greedy run of plain spaces (the class is a literal space, not \s) that
+	// backtracks until the next character is whitespace or the text ends. It takes all but
+	// the last space of a run followed by a non-space: "a   b" matches the first two spaces
+	// and leaves the third, which becomes the next chunk's leading character. A newline is
+	// not a space here, so a run of newlines matches nothing.
+	if s[0] == ' ' {
+		j, prev := 0, 0
+		for j < len(s) && s[j] == ' ' {
+			prev = j
+			j++
+		}
+		if j == len(s) {
+			return j
+		}
+		// The run is followed by a non-space. If that neighbour is whitespace the assertion
+		// already holds; otherwise give the last space back. A single space leaves nothing.
+		if r, _ := utf8.DecodeRuneInString(s[j:]); unicode.IsSpace(r) {
+			return j
+		}
+		if prev > 0 {
+			return prev
+		}
+	}
+	return 0
 }

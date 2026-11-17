@@ -59,6 +59,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.newlineRuns {
 		return splitNewlineRuns(text)
 	}
+	if fam.digitsFromRight {
+		return splitDigitsFromRight(text)
+	}
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
@@ -530,6 +533,10 @@ type preRule struct {
 	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
 	// alternative, so a word and its "'s" stay one chunk.
 	contractionSuffix bool
+	// digitsFromRight is whether a digit run is cut into threes counting from its end, so
+	// the remainder -- if any -- is the leftmost chunk. The superbpe lookahead asserts a
+	// multiple of three digits remain, which puts the boundary there.
+	digitsFromRight bool
 	// stopSetDigits is BLOOM's expression followed by a single-digit cut. Both steps are
 	// needed in that order, which is why the stop-set dispatch cannot return early for this
 	// family the way it does for the others.
@@ -609,6 +616,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preSuperBPE:
+		return preRule{digitsFromRight: true}, true
 	case preViking:
 		// The first expression is BLOOM's verbatim, so the stop set is the same string; the
 		// second cuts every digit out on its own.
@@ -1233,6 +1242,50 @@ func splitNewlineRuns(text string) []string {
 			i++
 		}
 		out = append(out, text[start:i])
+	}
+	return out
+}
+
+// splitDigitsFromRight cuts each digit run into groups of three counted from the end, leaving
+// any remainder as the leftmost chunk. Everything that is not a digit is kept in place.
+//
+// This is superbpe's lookahead: the expression asserts that a multiple of three digits follow,
+// which places the first boundary where the leftover digits end. Grouping from the left, as
+// the other digit-taking families do, would put the remainder on the right instead.
+func splitDigitsFromRight(text string) []string {
+	var out []string
+	i := 0
+	for i < len(text) {
+		if !isDigitAt(text[i:]) {
+			start := i
+			for i < len(text) && !isDigitAt(text[i:]) {
+				i += runeLenAt(text[i:])
+			}
+			out = append(out, text[start:i])
+			continue
+		}
+		// Count the run, then walk it emitting from the right.
+		j, n := i, 0
+		for j < len(text) && isDigitAt(text[j:]) {
+			j += runeLenAt(text[j:])
+			n++
+		}
+		// Byte offsets of each digit so multi-byte digits are handled.
+		offs := make([]int, n+1)
+		offs[0] = i
+		for k := 0; k < n; k++ {
+			offs[k+1] = offs[k] + runeLenAt(text[offs[k]:])
+		}
+		// The remainder leads: n mod 3, or three if it divides evenly.
+		lead := n % 3
+		if lead == 0 {
+			lead = 3
+		}
+		out = append(out, text[offs[0]:offs[lead]])
+		for k := lead; k < n; k += 3 {
+			out = append(out, text[offs[k]:offs[k+3]])
+		}
+		i = j
 	}
 	return out
 }

@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 68
+		wantImplemented = 69
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1186,5 +1186,56 @@ func TestVikingChunks(t *testing.T) {
 	}
 	if got := real.preSplit("a1b2"); !sameStrings(got, []string{"a", "1", "b", "2"}) {
 		t.Errorf("viking preSplit(\"a1b2\") = %q, want the digits cut", got)
+	}
+}
+
+// TestSuperBPEChunks pins the superbpe rule, whose digit groups are counted from the right.
+//
+// Every other digit-taking family groups from the left, so a remainder lands at the end; this
+// one's lookahead asserts a multiple of three digits remain, which puts the remainder at the
+// start instead. "1234" is ["1", "234"] here and ["123", "4"] under llama3.
+func TestSuperBPEChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preSuperBPE}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"123456789", []string{"123", "456", "789"}},
+		{"123", []string{"123"}},
+		// The remainder leads.
+		{"1234", []string{"1", "234"}},
+		{"12345", []string{"12", "345"}},
+		// Fewer than three digits is one chunk.
+		{"12", []string{"12"}},
+		// Non-digits are kept where they are.
+		{"abc123456", []string{"abc", "123", "456"}},
+		{"a1b2", []string{"a", "1", "b", "2"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// The other digit families must not have gained the right-to-left cut.
+	llama := &Tokenizer{pre: preLlama3}
+	if got := llama.preSplit("1234"); !sameStrings(got, []string{"123", "4"}) {
+		t.Errorf("llama3 preSplit(\"1234\") = %q, want the remainder last", got)
+	}
+
+	path := gguftest.Model{Pre: "superbpe", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("superbpe is not reported as implemented")
+	}
+	if got := real.preSplit("1234"); !sameStrings(got, []string{"1", "234"}) {
+		t.Errorf("superbpe preSplit(\"1234\") = %q, want the remainder first", got)
 	}
 }

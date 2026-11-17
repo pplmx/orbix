@@ -145,6 +145,10 @@ const (
 	// preViking is BLOOM's stop-set run followed by a single-digit cut: the same first
 	// expression, then every digit becomes a chunk of its own.
 	preViking
+	// preSuperBPE is "\p{N}+" then a zero-width (?=(\d{3})+(?!\d)): digit runs are cut from
+	// the right into threes, so a remainder stays at the left. "1234" is ["1", "234"], not
+	// ["123", "4"].
+	preSuperBPE
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -423,6 +427,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preWhitespace
 		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
+		case "superbpe":
+			t.pre = preSuperBPE
 		case "viking":
 			t.pre = preViking
 		case "mmbert":

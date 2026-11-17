@@ -71,6 +71,12 @@
 // sequence that never forms a character can render differently. Text a model actually
 // generates does not produce such runs.
 //
+// Decoding keeps the two vocabulary families apart for the same reason encoding does. A
+// SentencePiece piece is plain text plus the space marker; a byte-level piece is a rune per
+// byte. Rendering a SentencePiece piece through the byte table is not a no-op: once the
+// table covered the whole range, a Spanish "¡" in a SentencePiece vocabulary decoded to a
+// lone byte, because the piece's own character looked like an escape.
+//
 // Decode is the exact inverse of Encode, which is what makes a round trip a usable check.
 // That means it keeps a leading space the caller wrote. Rendering a completion is a
 // different job: a byte-level vocabulary spells a word two ways ("the" and "\u0120the"), and a

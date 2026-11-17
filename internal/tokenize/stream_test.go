@@ -124,9 +124,10 @@ func TestDecodeUndoesBPEByteEscaping(t *testing.T) {
 	// The escaping is a property of the vocabulary, not of a checkpoint, so a
 	// synthetic tokenizer is enough and this test needs no model file.
 	tok := &Tokenizer{
-		tokens: []string{"ĠOnce", "Ġupon", "Ġa", "Ċ", "Ġtime", "ĉtab", "hello"},
-		types:  []TokenType{Normal, Normal, Normal, Normal, Normal, Normal, Normal},
-		index:  map[string]int32{},
+		tokens:    []string{"ĠOnce", "Ġupon", "Ġa", "Ċ", "Ġtime", "ĉtab", "hello"},
+		types:     []TokenType{Normal, Normal, Normal, Normal, Normal, Normal, Normal},
+		index:     map[string]int32{},
+		byteLevel: true,
 	}
 	// The leading space stays: this vocabulary is byte-level, so every piece carries the
 	// caller's own spaces and both forms of a word exist. llama.cpp's detokenize trims the
@@ -165,9 +166,10 @@ func TestDecodeUndoesBPEByteEscaping(t *testing.T) {
 // artifact in the middle of a response.
 func TestStreamDecoderMatchesBPEVocabulary(t *testing.T) {
 	tok := &Tokenizer{
-		tokens: []string{"ĠOnce", "Ġupon", "Ġa", "Ċ", "Ġtime"},
-		types:  []TokenType{Normal, Normal, Normal, Normal, Normal},
-		index:  map[string]int32{},
+		tokens:    []string{"ĠOnce", "Ġupon", "Ġa", "Ċ", "Ġtime"},
+		types:     []TokenType{Normal, Normal, Normal, Normal, Normal},
+		index:     map[string]int32{},
+		byteLevel: true,
 	}
 	ids := []int32{0, 1, 2, 4, 3}
 	// The streams a caller renders are completions, so the whole-sequence reference is
@@ -197,9 +199,10 @@ func TestDecodeAndDecodeCompletionDifferOnTheLeadingSpace(t *testing.T) {
 	// A byte-level vocabulary: pieces carry the caller's spaces, and both forms of a word
 	// exist, so the leading space in the pieces is real.
 	tok := &Tokenizer{
-		tokens: []string{"Ġa", "Ġb", "a"},
-		types:  []TokenType{Normal, Normal, Normal},
-		index:  map[string]int32{},
+		tokens:    []string{"Ġa", "Ġb", "a"},
+		types:     []TokenType{Normal, Normal, Normal},
+		index:     map[string]int32{},
+		byteLevel: true,
 	}
 	ids := []int32{0, 1}
 	if got, want := tok.Decode(ids), " a b"; got != want {

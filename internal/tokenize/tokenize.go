@@ -883,7 +883,7 @@ func (t *Tokenizer) Decode(ids []int32) string {
 			b.WriteString(unknownSurface)
 			continue
 		}
-		b.WriteString(bpeUnescape(t.tokens[id]))
+		b.WriteString(t.renderPiece(t.tokens[id]))
 	}
 	flushBytes()
 
@@ -1012,7 +1012,7 @@ func (d *StreamDecoder) Token(id int32) string {
 	if d.tok.types[id] == Unknown {
 		b.WriteString(unknownSurface)
 	} else {
-		b.WriteString(bpeUnescape(d.tok.tokens[id]))
+		b.WriteString(d.tok.renderPiece(d.tok.tokens[id]))
 	}
 	return d.emit(b.String())
 }
@@ -1073,6 +1073,26 @@ func (d *StreamDecoder) drainPending(force bool) string {
 	out := strings.ToValidUTF8(string(d.pending), "\uFFFD")
 	d.pending = d.pending[:0]
 	return out
+}
+
+// renderPiece renders one vocabulary piece as text.
+//
+// The two vocabulary families spell their pieces differently and must not share a decoder.
+// A SentencePiece piece is plain text plus U+2581 for a space; only the marker needs undoing,
+// and a character that happens to be one of GPT-2's escaped runes is still just that
+// character. A byte-level piece is the opposite: every rune in it stands for a byte, so
+// "Ġ¡" is two bytes, not a space marker and an exclamation.
+//
+// Applying the byte table to a SentencePiece piece is not a harmless no-op. Once the table
+// covered the whole byte range, a Spanish "¡" in a SentencePiece vocabulary decoded as the
+// single byte 0xA1, because the piece's own character looked like an escape. That is what a
+// shared decode path costs, and the fix is to keep the two apart rather than to make the
+// table narrower.
+func (t *Tokenizer) renderPiece(piece string) string {
+	if !t.byteLevel {
+		return strings.ReplaceAll(piece, spacePrefix, " ")
+	}
+	return bpeUnescape(piece)
 }
 
 // bpeUnescape renders one vocabulary piece as text, undoing both space markers and

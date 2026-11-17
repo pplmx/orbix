@@ -867,3 +867,32 @@ func TestResponseObjectAndIDFollowOpenAI(t *testing.T) {
 		})
 	}
 }
+
+// TestPumpPicksUpWorkAfterIdle checks that the idle backoff does not delay a request.
+//
+// The pump sleeps longer and longer while the engine is empty, to keep an idle server from
+// costing 2.4% of a core just to notice it has nothing to do. The risk is the first request
+// after a quiet period: it waits for the next poll, where before the backoff the wait was
+// at most a millisecond.
+//
+// The bound is the maximum backoff and little else. A slower pump is caught by the request
+// not being served at all; the point of this test is that the sleep after an idle spell is
+// a poll interval, not a stall.
+func TestPumpPicksUpWorkAfterIdle(t *testing.T) {
+	srv, _ := newTestServer(t)
+	// Longer than the deepest backoff, so the pump is certainly in its slow state.
+	time.Sleep(60 * time.Millisecond)
+
+	start := time.Now()
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 2}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	decodeBody[completionResponse](t, resp)
+	// Wide enough for a loaded machine, narrow enough that a pump asleep for anything other
+	// than a poll interval fails it.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("a request after an idle period took %v", elapsed)
+	}
+}

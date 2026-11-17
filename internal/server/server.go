@@ -149,8 +149,17 @@ func (s *Server) Handler() http.Handler { return s.logRequest(s.mux) }
 // The engine only advances inside Pump, so nothing generates until this runs. It
 // is a separate call from ServeHTTP because the pump must be a single goroutine:
 // ServeHTTP handlers run concurrently and each one only waits for its own tokens.
+// idlePollShift bounds the idle backoff: the pump sleeps 1ms << idlePollShift (about 8ms)
+// between polls once the engine has been empty for that many rounds.
+//
+// The backoff resets the moment a round has work, so a busy server polls as fast as before
+// and only a genuinely idle one pays the longer interval.
+const idlePollShift = 3
+
 func (s *Server) run(ctx context.Context) {
 	defer s.wg.Done()
+	// idle counts consecutive rounds with no active sequences; it selects the backoff.
+	idle := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -160,17 +169,26 @@ func (s *Server) run(ctx context.Context) {
 		default:
 		}
 		// Pump reports how many sequences are still active; when there are none
-		// there is nothing to do, and a short sleep keeps an idle server from
-		// spinning a core. The sleep is the cost of a poll loop, and it is the
-		// price of keeping the engine free of a server-facing wakeup channel.
-		if s.eng.Pump() == 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-s.stop:
-				return
-			case <-time.After(time.Millisecond):
-			}
+		// there is nothing to do, and a sleep keeps an idle server from spinning a core.
+		// The sleep is the cost of a poll loop, and it is the price of keeping the engine
+		// free of a server-facing wakeup channel.
+		if n := s.eng.Pump(); n > 0 {
+			// Work is in flight: poll fast, so the next token is not delayed by the
+			// idle backoff.
+			idle = 0
+			continue
+		}
+		// Nothing is running. A 1ms poll costs about 2.4% of a core continuously, which
+		// is a lot to pay for a server that is usually idle, so the interval backs off
+		// while there is nothing to do. The first token after a quiet period waits at
+		// most this long, so the ceiling is the latency floor a new request can see.
+		idle = min(idle+1, idlePollShift)
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stop:
+			return
+		case <-time.After(time.Millisecond << idle):
 		}
 	}
 }

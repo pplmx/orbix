@@ -392,7 +392,12 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preTekken
 		case "gpt-4o", "llama4", "inkling2", "kanana2", "talkie", "minimax-m2":
 			t.pre = preGPT4O
-		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2",
+		// dbrx and smaug-bpe share llama3's expression verbatim: llama.cpp's DBRX and SMAUG
+		// cases fall through to the same regex, and the source says so in a comment. What
+		// differs in llama.cpp is "clean_up_tokenization_spaces", a decoding-side setting
+		// this package does not model, so the split is the same.
+		case "dbrx", "smaug-bpe",
+			"llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2",
 			// jina-v5-nano is in llama.cpp's llama3 branch, ignore_merges and all.
 			"jina-v5-nano":
 			t.pre = preLlama3

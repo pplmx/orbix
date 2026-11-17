@@ -943,7 +943,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 63
+		wantImplemented = 65
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -951,5 +951,57 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 	if implemented != wantImplemented {
 		t.Errorf("%d names are implemented, README says %d: update the README count in the "+
 			"same commit as the family", implemented, wantImplemented)
+	}
+}
+
+// TestDbrxAndSmaugShareTheLlama3Rule checks the two names llama.cpp maps to llama3's
+// expression verbatim.
+//
+// Its DBRX and SMAUG cases fall through to one regex and the source says so; the only thing
+// that differs is clean_up_tokenization_spaces, a decoding-side setting. Mapping the names is
+// therefore the whole change, and the risk is not that the rule is wrong but that a name is
+// accepted and resolves to something else.
+//
+// The expected chunks come from transcribing that regex into Python's regex module and
+// running it over the same strings -- an implementation that shares no code with this one,
+// which is what the repository asks for when a result is being cross-checked.
+func TestDbrxAndSmaugShareTheLlama3Rule(t *testing.T) {
+	llama := &Tokenizer{pre: preLlama3}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"a1234b", []string{"a", "123", "4", "b"}},
+		{"Hello world", []string{"Hello", " world"}},
+		{"don't", []string{"don", "'t"}},
+		{"x=42", []string{"x", "=", "42"}},
+		{"  indented", []string{" ", " indented"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"999", []string{"999"}},
+		{"a.b", []string{"a", ".b"}},
+	}
+	for _, c := range cases {
+		if got := llama.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// The names have to reach that rule through the file, which is how a model gets here.
+	for _, name := range []string{"dbrx", "smaug-bpe"} {
+		path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New(pre=%q): %v", name, err)
+		}
+		if !tok.PreImplemented() {
+			t.Errorf("%q is not reported as implemented", name)
+		}
+		if got := tok.preSplit("a1234b"); !sameStrings(got, []string{"a", "123", "4", "b"}) {
+			t.Errorf("%q preSplit(\"a1234b\") = %q, want the llama3 split", name, got)
+		}
 	}
 }

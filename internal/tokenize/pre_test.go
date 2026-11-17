@@ -2477,3 +2477,92 @@ func TestNumberClassIsWholeCategory(t *testing.T) {
 		}
 	}
 }
+
+// TestSplitByRuleKeepsGapTextTogether covers what happens when no alternative matches at a
+// position: the character is gap text, and llama.cpp's splitter emits the gap before a match
+// as *one* fragment.
+//
+// deepseek-v3's punctuation alternative takes "\p{P}\p{S}", which excludes the zero-width
+// joiner, so "\u200c\u200c" matches nothing and is one chunk. Emitting gap characters one at a
+// time would put a boundary between two identical controls, which is a split the vocabulary
+// never saw -- and an earlier version went further and emitted one *byte* at a time, cutting
+// a multi-byte rune in half.
+func TestSplitByRuleKeepsGapTextTogether(t *testing.T) {
+	d3 := &Tokenizer{pre: preDeepseek3}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"A\u200d\u200d", []string{"A", "\u200d\u200d"}},
+		{"0\t#\u00b2\t`+:\u200c\u200c", []string{"0", "\t", "#", "\u00b2", "\t", "`+:", "\u200c\u200c"}},
+		{"x\u200c", []string{"x", "\u200c"}},
+	}
+	for _, c := range cases {
+		if got := d3.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("deepseek-v3 preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+		for _, chunk := range d3.preSplit(c.in) {
+			if !utf8.ValidString(chunk) {
+				t.Errorf("deepseek-v3 preSplit(%q) chunk %q is not valid UTF-8", c.in, chunk)
+			}
+		}
+	}
+}
+
+// TestPunctuationTailTakesOneCharacter covers exaone-moe's "[\\r\\n/]?" tail, which takes at
+// most one character.
+//
+// The neighbouring families write "[\\r\\n]*" (tekken) or "\\s*[\\r\\n]+", and both consume the
+// whole run. Copying that shape here would merge ",\r\n" into one chunk, where the reference
+// gives [",\r", "\n"].
+func TestPunctuationTailTakesOneCharacter(t *testing.T) {
+	exa := &Tokenizer{pre: preExaoneMoE}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"#,\n\u3042", []string{"#,\n", "\u3042"}},
+		{"\r{a\u2163'\n'0^$", []string{"\r", "{a", "\u2163", "'\n", "'", "0", "^$"}},
+		{"a,\r\nb", []string{"a", ",\r", "\n", "b"}},
+	}
+	for _, c := range cases {
+		if got := exa.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("exaone-moe preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// tekken's "*" must still consume the whole run: the two tails are not interchangeable.
+	tekken := &Tokenizer{pre: preTekken}
+	if got, want := tekken.preSplit("a,\r\nb"), []string{"a", ",\r\n", "b"}; !sameStrings(got, want) {
+		t.Errorf("tekken preSplit(%q) = %q, want %q", "a,\r\nb", got, want)
+	}
+}
+
+// TestPunctuationClassExcludesMarksOnlyForQwen35 covers the one family whose punctuation
+// complement names \p{M}.
+//
+// qwen35 writes "[^\\s\\p{L}\\p{M}\\p{N}]", so a combining mark ends a punctuation run and the
+// letter alternative takes it: "#\u0301" is ["#", "\u0301"]. The other families write
+// "[^\\s\\p{L}\\p{N}]", where a mark is neither a letter nor a number and so joins the run.
+func TestPunctuationClassExcludesMarksOnlyForQwen35(t *testing.T) {
+	q35 := &Tokenizer{pre: preQwen35}
+	// The mark ends the punctuation *run*, but the leading-character alternative then takes
+	// it as a prefix on the letter run that follows, so a mark with a letter after it still
+	// joins: "#\u0301a" is one chunk. A mark with no letter after it is its own chunk.
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"#,#\u0301", []string{"#,#", "\u0301"}},
+		{"*)\u0301", []string{"*)", "\u0301"}},
+		{"#\u0301a", []string{"#\u0301a"}},
+	} {
+		if got := q35.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("qwen35 preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// llama-bpe's complement does not name \p{M}, so the mark stays with the punctuation.
+	llama := &Tokenizer{pre: preLlama3}
+	if got, want := llama.preSplit("#\u0301"), []string{"#\u0301"}; !sameStrings(got, want) {
+		t.Errorf("llama-bpe preSplit(%q) = %q, want %q", "#\u0301", got, want)
+	}
+}

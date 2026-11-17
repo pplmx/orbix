@@ -632,9 +632,28 @@ func splitByRule(text string, fam preRule) []string {
 	for i < len(text) {
 		n := chunkLen(text[i:], fam)
 		if n <= 0 {
-			// A zero-length chunk would loop forever; take one byte so progress is
-			// guaranteed even if the rules below have a gap.
-			n = 1
+			// No alternative matches here, so this is gap text: characters the expression
+			// does not cover. llama.cpp's splitter emits the gap before each match as *one*
+			// fragment, so a run of unmatchable characters is one chunk rather than one
+			// chunk per character -- deepseek-v3's "\u200c\u200c" is one chunk, and
+			// splitting it per character would be a boundary the vocabulary never saw.
+			//
+			// The gap is measured in characters, not bytes: a byte here would cut a
+			// multi-byte rune in two.
+			j := i
+			for j < len(text) {
+				n = runeLenAt(text[j:])
+				if n <= 0 {
+					n = 1
+				}
+				j += n
+				if chunkLen(text[j:], fam) > 0 {
+					break
+				}
+			}
+			chunks = append(chunks, text[i:j])
+			i = j
+			continue
 		}
 		chunks = append(chunks, text[i:i+n])
 		i += n
@@ -665,6 +684,11 @@ type preRule struct {
 	// letterMarks is whether combining marks join a letter run (\p{L}\p{M} rather than
 	// \p{L}). The deepseek and stablelm families set it.
 	letterMarks bool
+	// punctExcludesMarks is whether the punctuation complement also excludes combining marks,
+	// which is qwen35's "[^\s\p{L}\p{M}\p{N}]". The other families write
+	// "[^\s\p{L}\p{N}]", where a mark is neither a letter nor a number and so joins the
+	// punctuation run -- a difference that shows on a mark after punctuation.
+	punctExcludesMarks bool
 	// joiners is whether U+200C and U+200D also join a letter run, which is k2-horizon's
 	// "(?:\p{L}|\p{M}|\u200C|\u200D)+". Neither character is a letter or a mark, so
 	// without the flag they fall to the punctuation alternative and split the word.
@@ -673,8 +697,14 @@ type preRule struct {
 	// it. qwen2 does; gpt-2 ends the chunk at the punctuation.
 	newlinesAfterPunct bool
 	// punctSlashTail is whether the punctuation run also absorbs following slashes, which is
-	// tekken's "[\r\n/]*" tail. It only applies together with newlinesAfterPunct.
+	// tekken's "[\r\n/]*" tail. It only applies together with newlinesAfterPunct, or with
+	// singleTail for the family whose tail is "[\r\n/]?".
 	punctSlashTail bool
+	// singleTail makes the punctuation tail "[\r\n/]?" rather than a run: at most one
+	// character, taken only when it is a newline or a slash. It is exaone-moe's spelling, and
+	// it differs from tekken's "*" on a pair: ",\r\n" is [",\r", "\n"] here and [",\r\n"]
+	// there.
+	singleTail bool
 	// newlineChunk is whether the expression has a "\s*[\r\n]+" alternative: a newline
 	// with the spaces before it as one chunk. The GPT-2 expression has no such rule, so a
 	// newline there falls through to the whitespace alternative and groups differently.
@@ -938,7 +968,7 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// punctuation tail takes one newline or slash rather than any run.
 		return preRule{
 			digits: 1, lead: leadAnyNonLetter, letterMarks: true, wordSpaces: true,
-			newlineChunk: true, punctSlashTail: true,
+			newlineChunk: true, punctSlashTail: true, singleTail: true,
 		}, true
 	case preTekkenNum3:
 		// tekken's expression with the digit alternative replaced by
@@ -991,7 +1021,7 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// qwen2's shape with combining marks in the letter class, so a base letter and the
 		// marks after it stay in one run.
 		return preRule{
-			digits: 1, lead: leadAnyNonLetter, letterMarks: true,
+			digits: 1, lead: leadAnyNonLetter, letterMarks: true, punctExcludesMarks: true,
 			newlinesAfterPunct: true, newlineChunk: true,
 		}, true
 	case preK2Horizon:
@@ -1066,6 +1096,9 @@ func preFamilyOf(p preType) (preRule, bool) {
 // The alternatives are tried in the order the expression lists them, because that order is
 // the rule: a contraction wins over a letter run, which is why "'s" is its own chunk.
 func chunkLen(s string, fam preRule) int {
+	if s == "" {
+		return 0
+	}
 	// The contraction alternative is the expression's first, so it is tried first -- but only
 	// for families that have it. ufakzeka is qwen2 with that alternative removed precisely so
 	// an apostrophe suffix stays whole.
@@ -1151,7 +1184,7 @@ func digitRunLen(s string, fam preRule) int {
 
 // qwen2ContractionLen matches a clitic at the start of s.
 func qwen2ContractionLen(s string) int {
-	if s[0] != '\'' || len(s) < 2 {
+	if len(s) < 2 || s[0] != '\'' {
 		return 0
 	}
 	for _, c := range qwen2Contractions {
@@ -1188,30 +1221,59 @@ func punctLetterRunLen(s string) int {
 
 // letterRunLen matches the letter-run alternative for one family.
 func letterRunLen(s string, fam preRule) int {
-	i := 0
+	n, ok := letterRunFrom(s, fam, 0)
+	if ok {
+		return n
+	}
+	// The optional prefix is greedy in the expression, but a match that needs it and then
+	// finds no run does not happen: the engine backtracks to the empty prefix and tries
+	// again. That case is real -- "\u0301\u200d" under deepseek-v3 matches the mark as the
+	// run and leaves the joiner to the next alternative, where taking the mark as a prefix
+	// would have consumed it and then failed.
+	if i := leadLen(s, fam); i > 0 {
+		if n, ok := letterRunFrom(s, fam, i); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+// leadLen returns the byte length of the family's optional leading character at the start of
+// s, or 0 when the character is absent or may not be taken as a prefix.
+func leadLen(s string, fam preRule) int {
 	switch fam.lead {
 	case leadSpace:
 		if strings.HasPrefix(s, " ") {
-			i = 1
+			return 1
 		}
 	case leadAnyNonLetter:
-		// The leading character is "one that is not a letter, digit, or newline". A mark or
-		// joiner is none of those, so it would be taken as a *prefix* -- but the families
-		// that admit them admit them as members of the run, and taking one as the prefix
-		// leaves a run of zero letters. The expression is "[^...]?[\p{L}\p{M}]+" there, so a
-		// leading mark belongs to the run rather than to the prefix.
+		// "[^\r\n\p{L}\p{N}]?" -- any one character that is not a letter, digit, or
+		// newline. A mark or joiner is none of those, but the families that admit them admit
+		// them as members of the run, and a prefix leaves the run empty; those families are
+		// handled by trying the empty prefix first.
+		//
+		// The families whose run requires a letter from the start also require the character
+		// after the prefix to be a letter, so a run of spaces followed by a tab cannot have
+		// the tab taken as a prefix and then stop: "\t " with nothing after it is a chunk of
+		// its own under the whitespace alternative, not a one-character prefix.
 		if !startsLetterRun(s, fam) && !isNewlineAt(s) && !isDigitAt(s) && runeLenAt(s) > 0 {
-			i = runeLenAt(s)
+			rest := s[runeLenAt(s):]
+			if !fam.wordSpaces || letterRunStartsAt(rest) {
+				return runeLenAt(s)
+			}
 		}
 	case leadNotLetterPunctSymbol:
 		if !isLetterAt(s) && !isNewlineAt(s) && !isPunctOrSymbolAt(s) && runeLenAt(s) > 0 {
-			i = runeLenAt(s)
+			return runeLenAt(s)
 		}
 	}
-	if i > 0 && !startsLetterRun(s[i:], fam) {
-		return 0
-	}
-	start := i
+	return 0
+}
+
+// letterRunFrom matches "\p{L}..." starting at offset start of s, returning the length of
+// the whole chunk (prefix included) or false when no run begins there.
+func letterRunFrom(s string, fam preRule, start int) (int, bool) {
+	i := start
 	// prevLower records whether the previous letter was lower case, which is what the
 	// boundary test needs.
 	prevLower := false
@@ -1250,7 +1312,7 @@ func letterRunLen(s string, fam preRule) int {
 		break
 	}
 	if i == start {
-		return 0
+		return 0, false
 	}
 	// (?i:'s|'t|'re|'ve|'m|'ll|'d)? -- a clitic is absorbed into the word it follows, so
 	// "don't" is one piece where GPT-2 gives "don" and "'t". Only the letter alternatives
@@ -1258,7 +1320,7 @@ func letterRunLen(s string, fam preRule) int {
 	if fam.contractionSuffix {
 		i += cliticLen(s[i:])
 	}
-	return i
+	return i, true
 }
 
 // startsLetterRun reports whether s begins with a character the family's letter class
@@ -1272,11 +1334,22 @@ func startsLetterRun(s string, fam preRule) bool {
 	if isLetterAt(s) {
 		return true
 	}
+	// The families that spell the run "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+" need a letter
+	// first: there the marks are a suffix on each word rather than members of one class, so
+	// a mark on its own is not a run.
+	if fam.wordSpaces {
+		return false
+	}
 	if fam.letterMarks && isMarkAt(s) {
 		return true
 	}
 	return fam.joiners && isJoinerAt(s)
 }
+
+// letterRunStartsAt reports whether a letter-run can begin at the start of s for the
+// families whose run is "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+". Those must begin with a letter;
+// the marks come after one.
+func letterRunStartsAt(s string) bool { return isLetterAt(s) }
 
 // isJoinerAt reports whether s begins with the zero-width non-joiner or joiner, the two
 // controls k2-horizon includes in its letter class.
@@ -1324,11 +1397,24 @@ func punctRunLen(s string, fam preRule) int {
 			if isLetterAt(s[i:]) || isDigitAt(s[i:]) {
 				break
 			}
+			// qwen35 spells the class "[^\s\p{L}\p{M}\p{N}]", so a combining mark ends the
+			// run and the letter alternative can take it. Without the exclusion "#\u0301" is
+			// one chunk where the reference gives ["#", "\u0301"].
+			if fam.punctExcludesMarks && isMarkAt(s[i:]) {
+				break
+			}
 		}
 		i += n
 	}
 	if i == start {
 		return 0
+	}
+	if fam.singleTail {
+		// "[\r\n/]?" -- one character at most, and only when it is a newline or a slash.
+		if i < len(s) && (isNewlineAt(s[i:]) || s[i] == '/') {
+			i += runeLenAt(s[i:])
+		}
+		return i
 	}
 	if fam.newlinesAfterPunct {
 		for i < len(s) && isNewlineAt(s[i:]) {

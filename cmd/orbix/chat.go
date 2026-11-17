@@ -51,6 +51,12 @@ func cmdChat(args []string) error {
 	if *topK < 0 {
 		return fmt.Errorf("chat: --top-k must not be negative (0 disables it)")
 	}
+	// The engine refuses this too, but only when a turn is submitted -- so the user typed a
+	// question, waited for the model to load, and then read an error about the flag. Checking
+	// it here reports it before the session starts.
+	if *maxTokens < 0 {
+		return fmt.Errorf("chat: --max-tokens must not be negative")
+	}
 
 	return chatSession(os.Stdin, os.Stdout, chatOptions{
 		model:       *model,

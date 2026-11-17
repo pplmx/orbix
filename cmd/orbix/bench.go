@@ -46,6 +46,14 @@ func cmdBench(args []string) error {
 	if *maxTokens < 1 {
 		return fmt.Errorf("bench: --max-tokens must be at least 1")
 	}
+	// Zero has a documented meaning here -- one request per concurrency slot -- and the code
+	// reaches it with "total <= 0", so a negative value was silently the same as zero. The
+	// difference matters in a benchmark: the number of requests is the sample size, and a
+	// mistyped one is not a smaller measurement but a different one.
+	if *requests < 0 {
+		return fmt.Errorf("bench: --requests must not be negative (0 means one per " +
+			"concurrency slot)")
+	}
 	if err := cache.validate("bench"); err != nil {
 		return err
 	}

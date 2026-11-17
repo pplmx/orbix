@@ -292,3 +292,77 @@ func TestGenerateRejectsNegativeMaxTokens(t *testing.T) {
 		t.Errorf("error %q does not say the count was negative", err)
 	}
 }
+
+// TestEveryNumericFlagRefusesNegatives is a sweep rather than a list of cases chosen by
+// reading the code.
+//
+// Eight flags on these commands turned a negative value into the default by comparing with
+// "<= 0" or "> 0", so the server or the sampler carried on with something other than what was
+// asked for. Each was found one at a time, by passing a wrong value and noticing nothing
+// happened. Driving every numeric flag through the same wrong value is what turns that into a
+// check: the next flag added to any of these commands either rejects negatives or fails here.
+//
+// The assertion is deliberately on the message naming the flag, because an error from opening
+// the model would also be non-nil and would say nothing about the flag.
+func TestEveryNumericFlagRefusesNegatives(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func() error
+		flag string
+	}{
+		{"run --max-tokens", func() error {
+			return cmdRun([]string{"--model", "unused.gguf", "--max-tokens", "-1", "hi"})
+		}, "--max-tokens"},
+		{"run --temp", func() error {
+			return cmdRun([]string{"--model", "unused.gguf", "--temp", "-1", "hi"})
+		}, "--temp"},
+		{"run --top-k", func() error {
+			return cmdRun([]string{"--model", "unused.gguf", "--top-k", "-1", "hi"})
+		}, "--top-k"},
+		{"run --ctx", func() error {
+			return cmdRun([]string{"--model", "unused.gguf", "--ctx", "-1", "hi"})
+		}, "--ctx"},
+		{"chat --max-tokens", func() error {
+			return cmdChat([]string{"--model", "unused.gguf", "--max-tokens", "-1"})
+		}, "--max-tokens"},
+		{"chat --temp", func() error {
+			return cmdChat([]string{"--model", "unused.gguf", "--temp", "-1"})
+		}, "--temp"},
+		{"chat --top-k", func() error {
+			return cmdChat([]string{"--model", "unused.gguf", "--top-k", "-1"})
+		}, "--top-k"},
+		{"chat --workers", func() error {
+			return cmdChat([]string{"--model", "unused.gguf", "--workers", "-1"})
+		}, "--workers"},
+		{"serve --max-queued", func() error {
+			return cmdServe([]string{"--model", "unused.gguf", "--max-queued", "-1"})
+		}, "--max-queued"},
+		{"serve --workers", func() error {
+			return cmdServe([]string{"--model", "unused.gguf", "--workers", "-1"})
+		}, "--workers"},
+		{"bench --concurrency", func() error {
+			return cmdBench([]string{"--model", "unused.gguf", "--concurrency", "-1"})
+		}, "--concurrency"},
+		{"bench --requests", func() error {
+			return cmdBench([]string{"--model", "unused.gguf", "--requests", "-1"})
+		}, "--requests"},
+		{"bench --max-tokens", func() error {
+			return cmdBench([]string{"--model", "unused.gguf", "--max-tokens", "-1"})
+		}, "--max-tokens"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.run()
+			if err == nil {
+				t.Fatalf("%s accepted a negative value", c.name)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, c.flag) {
+				t.Errorf("error %q does not name %s", msg, c.flag)
+			}
+			if strings.Contains(msg, "unused.gguf") {
+				t.Errorf("error %q came from opening the model, so the flag was not validated", msg)
+			}
+		})
+	}
+}

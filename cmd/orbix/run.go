@@ -50,6 +50,12 @@ func cmdRun(args []string) error {
 	if *maxTokens < 0 {
 		return fmt.Errorf("run: --max-tokens must not be negative")
 	}
+	// Zero means "use the model's trained context", and the code reaches it with "<= 0", so
+	// a negative length asked for the default and got it without comment. A context length
+	// is the size of the arena being allocated, which is the last place to guess.
+	if *contextLen < 0 {
+		return fmt.Errorf("run: --ctx must not be negative (0 uses the model's trained amount)")
+	}
 
 	// Open the file twice: once for metadata and the tokenizer, once for the
 	// weights. The directory parse is cheap and keeps the two concerns from

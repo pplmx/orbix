@@ -619,6 +619,11 @@ make bench     # run kernel and engine benchmarks
 
 CI enforces `CGO_ENABLED=0` on every platform. A build that requires CGo is a build that fails.
 
+Renovate keeps the workflow's pinned actions current: `.github/renovate.json` extends
+`config:recommended`, so a new `actions/checkout`, `actions/setup-go`, or lint action release
+arrives as a pull request rather than as a stale pin nobody notices. Nothing in the build
+depends on it — the versions in `ci.yml` are the ones used.
+
 If you are contributing with an AI coding agent, read [`AGENTS.md`](AGENTS.md) first. It records the no-CGo constraint, layering rules, interface contracts, and naming conventions.
 
 ## Contributing

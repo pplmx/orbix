@@ -48,6 +48,14 @@ func cmdServe(args []string) error {
 	if *maxActive < 1 {
 		return fmt.Errorf("serve: --max-active must be at least 1")
 	}
+	// Prefix reuse lives in the paged cache: a contiguous arena has no block index to
+	// attach a previous request's KV to. Accepting the flag without --blocks silently ran a
+	// contiguous server with no reuse, and the startup log said "kv cache: contiguous" with
+	// no mention of the flag at all -- so an operator who passed it believed reuse was on.
+	if *prefixCache && *cache.blocks == 0 {
+		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
+			"optionally --block-size), or drop --prefix-cache")
+	}
 
 	gf, err := gguf.Open(*model)
 	if err != nil {

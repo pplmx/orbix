@@ -129,3 +129,28 @@ func TestPoolReservationWarning(t *testing.T) {
 		t.Errorf("warning does not explain why resident memory will be lower: %q", got)
 	}
 }
+
+// TestPrefixCacheNeedsABlockPool checks that the combination which cannot work is refused at
+// startup rather than ignored.
+//
+// Prefix reuse lives in the paged cache: attaching a previous request's KV blocks needs a
+// block index, and a contiguous arena has none. Passing --prefix-cache without --blocks used
+// to start a contiguous server that silently did no reuse, and the startup log said "kv
+// cache: contiguous" with no mention of the flag, so the operator who passed it had nothing
+// to notice it by.
+//
+// The check runs before the model is opened, so this needs no checkpoint: the flag
+// combination is rejected on its own terms.
+func TestPrefixCacheNeedsABlockPool(t *testing.T) {
+	err := cmdServe([]string{"--model", "unused.gguf", "--prefix-cache"})
+	if err == nil {
+		t.Fatal("cmdServe accepted --prefix-cache without --blocks")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "prefix-cache") {
+		t.Errorf("error %q does not name the flag that was passed", msg)
+	}
+	if !strings.Contains(msg, "blocks") {
+		t.Errorf("error %q does not say what the flag needs", msg)
+	}
+}

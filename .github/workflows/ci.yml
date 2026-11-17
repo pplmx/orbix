@@ -39,9 +39,9 @@ jobs:
     name: gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Pinned to the minor version in go.mod, not to "stable": go.mod declares
           # go 1.27.0, and a newer toolchain could reject it for reasons unrelated to
@@ -50,7 +50,10 @@ jobs:
           cache: true
 
       - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v9 is the action line that pairs with golangci-lint v2: v7 made v2 support the
+        # only mode, and v6 predates it. The version below has to stay on v2 for the same
+        # reason.
+        uses: golangci/golangci-lint-action@v9
         with:
           # Pinned exactly. A linter that changes its mind between runs turns a green
           # branch red without a code change, which is worse than a missed finding.
@@ -84,9 +87,9 @@ jobs:
     name: cross-build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache: true
@@ -115,9 +118,9 @@ jobs:
     name: test (darwin/arm64)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache: true
@@ -132,9 +135,9 @@ jobs:
     name: test -race
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache: true
@@ -149,7 +152,7 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The project ships its own action, so the download is not reimplemented here. The
       # earlier hand-rolled curl fetched a release asset by a name guessed from

@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 91
+		wantImplemented = 92
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1918,5 +1918,62 @@ func TestJais2Chunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("jais-2 is not reported as implemented")
+	}
+}
+
+// TestExaoneMoEChunks pins the exaone-moe rule, the only family here whose letter run can
+// cross a space.
+//
+// The alternative is "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+": a single space followed by a
+// letter continues the run, so "hi there" is one chunk. Two spaces end it, because the inner
+// group consumes exactly one, which is why "a  b" splits as ["a", " ", " b"] -- the same way
+// every other family treats a space -- and why the difference only shows on single spaces.
+func TestExaoneMoEChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preExaoneMoE}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The discriminating inputs: one space continues the run, two do not.
+		{"hi there", []string{"hi there"}},
+		{"a b c", []string{"a b c"}},
+		{"one two three", []string{"one two three"}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"a  b  c", []string{"a", " ", " b", " ", " c"}},
+		// Punctuation still ends the run, so the space after it leads the next chunk.
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"a.b", []string{"a", ".b"}},
+		// Marks join the run.
+		{"e\u0301clair", []string{"e\u0301clair"}},
+		// The rest is llama3's shape with a single-digit alternative.
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		{"don't", []string{"don", "'t"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+		{"中文测试", []string{"中文测试"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// bailingmoe has no such alternative, so the same phrase splits at every space there.
+	bm := &Tokenizer{pre: preBailingMoE}
+	if got := bm.preSplit("hi there"); !sameStrings(got, []string{"hi", " there"}) {
+		t.Errorf("bailingmoe preSplit(\"hi there\") = %q, want the space kept as a prefix", got)
+	}
+
+	path := gguftest.Model{Pre: "exaone-moe", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("exaone-moe is not reported as implemented")
 	}
 }

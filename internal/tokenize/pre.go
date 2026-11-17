@@ -580,6 +580,10 @@ type preRule struct {
 	// then the leading character of whatever follows. It is jais-2's expression; every other
 	// family uses the single "\s+(?!\S)|\s+" tail.
 	spaceTiers bool
+	// wordSpaces is whether a letter run may continue past a *single* space into the letters
+	// after it. exaone-moe's expression is "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+", so "hi there"
+	// is one chunk while "a  b" is not -- two spaces fall outside that alternative.
+	wordSpaces bool
 	// leadingNewlinePass runs newlineRuns before the main rule instead of as the whole rule.
 	// Laguna pairs the newline expression with bailingmoe's, and the pass is not redundant:
 	// it separates a newline from whitespace before it, which the main rule would otherwise
@@ -720,6 +724,17 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{
 			digits: 3, lead: leadAnyNonLetter,
 			newlinesAfterPunct: true, newlineChunk: true, spaceTiers: true,
+		}, true
+	case preExaoneMoE:
+		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}\\p{M}*(?: \\p{L}\\p{M}*)*)+|\\p{N}"
+		// "| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]?|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+"
+		//
+		// llama3's shape with two changes to the letter alternative: marks join the run, and
+		// a single space may continue it, so "hi there" is one chunk while "a  b" is not. The
+		// punctuation tail takes one newline or slash rather than any run.
+		return preRule{
+			digits: 1, lead: leadAnyNonLetter, letterMarks: true, wordSpaces: true,
+			newlineChunk: true, punctSlashTail: true,
 		}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
@@ -961,6 +976,15 @@ func letterRunLen(s string, fam preRule) int {
 			// A mark does not reset the case state: it belongs to the letter before it.
 			i += runeLenAt(s[i:])
 			continue
+		}
+		if fam.wordSpaces && s[i] == ' ' {
+			// "(?: \p{L}\p{M}*)*": a single space followed by a letter continues the run.
+			// Two spaces do not, because the alternative consumes exactly one.
+			rest := s[i+1:]
+			if isLetterAt(rest) {
+				i++
+				continue
+			}
 		}
 		break
 	}

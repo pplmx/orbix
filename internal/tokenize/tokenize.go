@@ -194,6 +194,9 @@ const (
 	// instead of \s+(?!\S). A run of n spaces is cut greedily into tiers until one is left,
 	// which the following letter or punctuation chunk absorbs as its leading character.
 	preJais2
+	// preExaoneMoE is llama3's shape whose letter alternative continues past a single space:
+	// "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+", so "hi there" is one chunk and "a  b" is not.
+	preExaoneMoE
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -489,6 +492,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		// laguna runs bailingmoe's expression after a newline pass. The newline pass separates
 		// runs of newlines from everything else, which cannot change what the main rule does
 		// to a chunk that already contains no newline.
+		case "exaone-moe":
+			t.pre = preExaoneMoE
 		case "jais-2":
 			t.pre = preJais2
 		case "zonos3":

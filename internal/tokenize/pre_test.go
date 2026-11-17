@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 67
+		wantImplemented = 68
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1135,5 +1135,56 @@ func TestMMBertChunks(t *testing.T) {
 	}
 	if got := real.preSplit("Hello, world!"); !sameStrings(got, []string{"Hello, world!"}) {
 		t.Errorf("mmbert preSplit(\"Hello, world!\") = %q, want one chunk", got)
+	}
+}
+
+// TestVikingChunks pins the viking family, which is BLOOM's expression with a single-digit
+// cut after it.
+//
+// The two steps have to run in that order: the stop-set pass leaves "a1b2" whole, and the
+// digit pass then takes each digit out. Doing it the other way would cut the digits first and
+// then let the stop-set pass see runs it would have grouped differently.
+func TestVikingChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preViking}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		// Each digit is its own chunk, not a run: this is what separates viking from bloom.
+		{"a1b2", []string{"a", "1", "b", "2"}},
+		{"123456", []string{"1", "2", "3", "4", "5", "6"}},
+		{"x y", []string{"x", " y"}},
+		{" hi 5. ", []string{" hi", " ", "5", ". "}},
+		{"中文测试", []string{"中文测试"}},
+		{"he said…", []string{"he", " said", "…"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// bloom must not have gained the digit pass: the two families share an expression but
+	// not a rule.
+	bloom := &Tokenizer{pre: preBloom}
+	if got := bloom.preSplit("a1b2"); !sameStrings(got, []string{"a1b2"}) {
+		t.Errorf("bloom preSplit(\"a1b2\") = %q, want it whole", got)
+	}
+
+	path := gguftest.Model{Pre: "viking", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("viking is not reported as implemented")
+	}
+	if got := real.preSplit("a1b2"); !sameStrings(got, []string{"a", "1", "b", "2"}) {
+		t.Errorf("viking preSplit(\"a1b2\") = %q, want the digits cut", got)
 	}
 }

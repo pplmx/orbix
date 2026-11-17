@@ -142,6 +142,9 @@ const (
 	// run is newlines or not. Everything else -- spaces, punctuation, words -- stays in one
 	// chunk, which is why this family splits so much less than the others.
 	preMMBert
+	// preViking is BLOOM's stop-set run followed by a single-digit cut: the same first
+	// expression, then every digit becomes a chunk of its own.
+	preViking
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -420,6 +423,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preWhitespace
 		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
+		case "viking":
+			t.pre = preViking
 		case "mmbert":
 			t.pre = preMMBert
 		case "deepseek-llm":

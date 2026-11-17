@@ -41,7 +41,11 @@ func (t *Tokenizer) preSplit(text string) []string {
 	// characters outside a fixed stop set. The set contains no letter or digit, so it is
 	// the punctuation-and-space complement rather than a category.
 	if fam.stopSet != "" {
-		return splitAtStopSet(text, fam.stopSet)
+		pieces := splitAtStopSet(text, fam.stopSet)
+		if fam.stopSetDigits {
+			return splitDigitGroups(pieces, 1)
+		}
+		return pieces
 	}
 	if fam.coder {
 		return splitDeepseekCoder(text)
@@ -526,6 +530,10 @@ type preRule struct {
 	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
 	// alternative, so a word and its "'s" stay one chunk.
 	contractionSuffix bool
+	// stopSetDigits is BLOOM's expression followed by a single-digit cut. Both steps are
+	// needed in that order, which is why the stop-set dispatch cannot return early for this
+	// family the way it does for the others.
+	stopSetDigits bool
 	// newlineRuns marks "[^\n]+|[\n]+": the text alternates between runs that are newlines
 	// and runs that are not, and nothing else separates a chunk. It is the only rule whose
 	// chunks can contain a space, a comma and a word at once.
@@ -601,6 +609,10 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preViking:
+		// The first expression is BLOOM's verbatim, so the stop set is the same string; the
+		// second cuts every digit out on its own.
+		return preRule{stopSet: " \t\r\n|()" + ".,!?…。，、।۔،", stopSetDigits: true}, true
 	case preMMBert:
 		return preRule{newlineRuns: true}, true
 	case preDeepseekLLM:

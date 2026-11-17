@@ -151,17 +151,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install rumdl
-        env:
-          # Pinned to the version the project is developed against. `latest` would let a
-          # new upstream rule break a branch with no change to this repository, and the
-          # asset names in this release carry the target triple, so a floating tag would
-          # also break the URL.
-          RUMDL_VERSION: "0.3.4"
-        run: |
-          url="https://github.com/rvben/rumdl/releases/download/v${RUMDL_VERSION}/rumdl-v${RUMDL_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL "$url" | tar xz -C /usr/local/bin rumdl
-          rumdl --version
-
-      - name: rumdl check
-        run: rumdl check
+      # The project ships its own action, so the download is not reimplemented here. The
+      # earlier hand-rolled curl fetched a release asset by a name guessed from
+      # convention and was a 404: rumdl names its assets with the target triple
+      # (rumdl-v0.3.4-x86_64-unknown-linux-gnu.tar.gz), and pinning a floating tag would
+      # not have fixed it. The action also keeps the asset naming out of this repository
+      # entirely, which is the part that should not need maintaining.
+      #
+      # The version is pinned rather than left at `latest`: a new upstream rule must not
+      # turn a green branch red without a change here, and bumping it should be a commit
+      # someone can review.
+      - uses: rvben/rumdl@v0
+        with:
+          version: "0.3.4"
+          report-type: annotations

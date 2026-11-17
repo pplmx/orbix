@@ -86,6 +86,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.cjk {
 		pieces = splitCJK(pieces)
 	}
+	if fam.youtuScripts {
+		pieces = splitYoutuScripts(text)
+	}
 	if len(pieces) == 1 && pieces[0] == text {
 		return splitByRule(text, fam)
 	}
@@ -575,6 +578,10 @@ type preRule struct {
 	// zonos3 marks an expression whose alternatives cover only digits, punctuation runs of
 	// two or more, and trailing whitespace. Letters match nothing, so they stay gap text.
 	zonos3 bool
+	// youtuScripts marks a leading pass that cuts four scripts out of the text before the main
+	// rule runs: Hangul, CJK punctuation, bopomofo, and CJK. Each is its own run; nothing else
+	// is touched by the pass.
+	youtuScripts bool
 	// spaceTiers replaces the whitespace tail with a set of power-of-two runs, tried largest
 	// first. A run of n spaces is cut into tiers until one is left, and that last space is
 	// then the leading character of whatever follows. It is jais-2's expression; every other
@@ -744,6 +751,16 @@ func preFamilyOf(p preType) (preRule, bool) {
 			digitsFromRight: true,
 			digits:          3, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
 			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
+		}, true
+	case preYoutu:
+		// A leading pass cuts four scripts out -- Hangul, CJK punctuation, bopomofo, and CJK --
+		// then the main rule runs. That main rule is tiny_aya's: case-split letter runs with
+		// marks and a clitic suffix.
+		return preRule{
+			youtuScripts: true,
+			digits:       1, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
+			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
+			contractionSuffix: true,
 		}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"
@@ -1644,4 +1661,57 @@ func zonos3Len(s string) int {
 		}
 	}
 	return 0
+}
+
+// youtuScript reports which of the four leading alternatives a rune belongs to: 1 Hangul,
+// 2 CJK punctuation, 3 bopomofo, 4 CJK, 0 none. Each is a separate alternative, so a change
+// of class ends a run even though every class is a script.
+func youtuScript(r rune) int {
+	switch {
+	case r >= 0xAC00 && r <= 0xD7A3, r >= 0x3131 && r <= 0x318E:
+		return 1
+	case r == 0xFF01, r == 0x2026, r >= 0x201C && r <= 0x201D, r >= 0x2018 && r <= 0x2019,
+		r == 0x2014, r >= 0xFF1A && r <= 0xFF1B, r == 0xFF0C, r >= 0x3001 && r <= 0x303F,
+		r >= 0xFE30 && r <= 0xFE4F:
+		return 2
+	case r >= 0x3105 && r <= 0x312F:
+		return 3
+	case r >= 0x4E00 && r <= 0x9FA5, r >= 0x3040 && r <= 0x309F, r >= 0x30A0 && r <= 0x30FF:
+		return 4
+	}
+	return 0
+}
+
+// splitYoutuScripts applies youtu's first expression: four script alternatives, each matching
+// a run of its own class. Everything else is left where it is for the main rule to cut.
+func splitYoutuScripts(text string) []string {
+	var out []string
+	start := 0
+	i := 0
+	for i < len(text) {
+		r, n := utf8.DecodeRuneInString(text[i:])
+		k := youtuScript(r)
+		if k == 0 {
+			i += n
+			continue
+		}
+		// Flush the text before this run.
+		if i > start {
+			out = append(out, text[start:i])
+		}
+		runStart := i
+		for i < len(text) {
+			r2, n2 := utf8.DecodeRuneInString(text[i:])
+			if youtuScript(r2) != k {
+				break
+			}
+			i += n2
+		}
+		out = append(out, text[runStart:i])
+		start = i
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
 }

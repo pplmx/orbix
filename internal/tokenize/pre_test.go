@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 94
+		wantImplemented = 95
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -2033,5 +2033,53 @@ func TestTekkenNum3Chunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("tekken-num3 is not reported as implemented")
+	}
+}
+
+// TestYoutuChunks pins the youtu rule: four scripts cut out first, then a case-splitting letter
+// rule on what is left.
+//
+// The leading pass matters even where the main rule would reach a similar answer, because the
+// two stages differ in what they group. Hangul, CJK punctuation, bopomofo and CJK are four
+// separate alternatives, so a change of class ends a run -- and a punctuation run reaches the
+// main rule whole, which then splits it.
+func TestYoutuChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preYoutu}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Each script is its own run, and a Latin word after Hangul starts a new chunk.
+		{"\uc548\ub155\ud558\uc138\uc694", []string{"\uc548\ub155\ud558\uc138\uc694"}},
+		{"\ud55c\uad6d\uc5b4test", []string{"\ud55c\uad6d\uc5b4", "test"}},
+		{"\u3105\u3106\u3107", []string{"\u3105\u3106\u3107"}},
+		{"\u4e2d\u6587\u6d4b\u8bd5", []string{"\u4e2d\u6587\u6d4b\u8bd5"}},
+		{"\u4e2d\u6587 test", []string{"\u4e2d\u6587", " test"}},
+		// A punctuation run arrives whole and the main rule then cuts it.
+		{"\uff01\uff1f", []string{"\uff01", "\uff1f"}},
+		// The main rule is tiny_aya's: single digits, case boundaries, a clitic suffix.
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		{"helloWorld", []string{"hello", "World"}},
+		{"don't", []string{"don't"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"line\n\ntwo", []string{"line", "\n\n", "two"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	path := gguftest.Model{Pre: "youtu", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("youtu is not reported as implemented")
 	}
 }

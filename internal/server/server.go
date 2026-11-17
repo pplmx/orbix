@@ -458,6 +458,15 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 	reason := "stop"
 	for ev := range ch {
 		if ev.Err != nil {
+			// A pool that ran out is capacity, not a fault in the request or the server:
+			// the same request succeeds once another sequence releases its blocks. 503
+			// with Retry-After is what a client backs off on, and 500 would have it
+			// treat a temporary condition as a permanent one.
+			if errors.Is(ev.Err, llama.ErrPoolExhausted) {
+				w.Header().Set("Retry-After", "1")
+				writeError(w, http.StatusServiceUnavailable, ev.Err.Error())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, ev.Err.Error())
 			return
 		}

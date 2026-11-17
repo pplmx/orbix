@@ -1,6 +1,17 @@
 package llama
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrPoolExhausted is returned when a sequence needs a block and the pool has none left,
+// even after giving up every cached prefix it was holding on speculation.
+//
+// It is a sentinel so callers can tell capacity from corruption: the request is well
+// formed and the engine is working, there is simply no room right now. A server answering
+// with 500 tells the client its request broke something; 503 says to come back later.
+var ErrPoolExhausted = errors.New("llama: block pool exhausted")
 
 // PagedKVCache stores one sequence's keys and values in fixed-size blocks taken
 // from a shared pool.
@@ -168,7 +179,7 @@ func (p *BlockPool) Bytes() int64 {
 func (p *BlockPool) acquire() (int32, error) {
 	for len(p.free) == 0 {
 		if p.index == nil || !p.index.evictOne() {
-			return 0, fmt.Errorf("llama: block pool exhausted (%d blocks of %d positions)", p.total, p.block)
+			return 0, fmt.Errorf("%w (%d blocks of %d positions)", ErrPoolExhausted, p.total, p.block)
 		}
 	}
 	id := p.free[len(p.free)-1]

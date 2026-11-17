@@ -945,3 +945,72 @@ func TestQueueFullReturns503(t *testing.T) {
 		t.Error("no Retry-After on a 503: a client has nothing to back off on")
 	}
 }
+
+// TestPoolExhaustionReturns503 checks the status when the paged cache runs out of blocks.
+//
+// Like a full queue, this is capacity and not a fault: the request is well formed, the
+// engine is working, and the same request succeeds as soon as another sequence releases
+// its blocks. Answering 500 tells a client something is broken; 503 with Retry-After tells
+// it to come back, which is what the situation calls for.
+//
+// The pool is small enough that a couple of sequences exhaust it, and the prompt is long
+// enough that one sequence needs more than a block.
+func TestPoolExhaustionReturns503(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 8, MaxQueued: 64, Blocks: 96, BlockSize: 4,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv.StartPump(ctx)
+
+	// Enough concurrent requests that some cannot get a block, with a prompt that spans
+	// more than one block so one sequence alone can strain a two-block pool.
+	prompt := strings.Repeat("Once upon a time there was ", 4)
+	body := `{"prompt": ` + quoteJSON(prompt) + `, "max_tokens": 4}`
+
+	codes := make(chan int, 16)
+	for range 16 {
+		go func() {
+			resp := post(t, srv.Handler(), "/v1/completions", body)
+			codes <- resp.StatusCode
+			_ = resp.Body.Close()
+		}()
+	}
+	var sawOK, sawUnavailable, sawServerError bool
+	for range 16 {
+		switch code := <-codes; {
+		case code == http.StatusOK:
+			sawOK = true
+		case code == http.StatusServiceUnavailable:
+			sawUnavailable = true
+		case code >= 500:
+			sawServerError = true
+		}
+	}
+	if !sawOK {
+		t.Error("no request succeeded; the pool was too small to test anything")
+	}
+	if !sawUnavailable {
+		t.Error("no request got 503 although the pool cannot hold them all")
+	}
+	if sawServerError {
+		t.Error("a request got 5xx other than 503: pool exhaustion is capacity, not a fault")
+	}
+}

@@ -204,6 +204,10 @@ const (
 	// preYoutu cuts four scripts out first -- Hangul, CJK punctuation, bopomofo, and CJK --
 	// then applies a case-splitting letter rule to what remains.
 	preYoutu
+	// preSpark25 cuts digit groups and the CJK block first, then a letter rule that does not
+	// split on case, then a bare \p{N} that cuts every remaining digit on its own -- so a
+	// number ends up one digit per chunk despite the first pass grouping in threes.
+	preSpark25
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -505,6 +509,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preTekkenNum3
 		case "youtu":
 			t.pre = preYoutu
+		case "spark2_5":
+			t.pre = preSpark25
 		case "jais-2":
 			t.pre = preJais2
 		case "zonos3":

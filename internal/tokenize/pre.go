@@ -90,11 +90,20 @@ func (t *Tokenizer) preSplit(text string) []string {
 		pieces = splitYoutuScripts(text)
 	}
 	if len(pieces) == 1 && pieces[0] == text {
-		return splitByRule(text, fam)
+		out := splitByRule(text, fam)
+		if fam.postDigits > 0 {
+			return splitDigitGroups(out, fam.postDigits)
+		}
+		return out
 	}
 	var out []string
 	for _, piece := range pieces {
 		out = append(out, splitByRule(piece, fam)...)
+	}
+	if fam.postDigits > 0 {
+		// A trailing \p{N} runs after the main rule, so digits the first pass grouped are cut
+		// again. Only spark2_5 has one.
+		out = splitDigitGroups(out, fam.postDigits)
 	}
 	return out
 }
@@ -495,6 +504,9 @@ type preRule struct {
 	// with the spaces before it as one chunk. The GPT-2 expression has no such rule, so a
 	// newline there falls through to the whitespace alternative and groups differently.
 	newlineChunk bool
+	// newlineSingle is whether the newline alternative is a bare "[\r\n]" rather than a run,
+	// so a CRLF pair is two chunks. Only spark2_5 has that form.
+	newlineSingle bool
 	// preDigits is the length of each digit group the family cuts out *before* the main
 	// expression, or 0 for none.
 	//
@@ -504,6 +516,10 @@ type preRule struct {
 	// "\p{N}" gives one chunk per digit while deepseek's "\p{N}{1,3}" gives groups of up to
 	// three, and neither is the same as setting the main rule's digit count.
 	preDigits int
+	// postDigits is the length of each digit group cut out *after* the main rule, or 0 for
+	// none. Only spark2_5 uses it: a trailing bare \p{N} runs after the letter rule, so a
+	// number the first pass grouped in threes is cut again into single digits.
+	postDigits int
 	// punctIsCategory is whether the punctuation alternative names the categories
 	// (\p{P}\p{S}) rather than taking everything that is not a letter, digit, or space.
 	//
@@ -761,6 +777,19 @@ func preFamilyOf(p preType) (preRule, bool) {
 			digits:       1, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
 			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
 			contractionSuffix: true,
+		}, true
+	case preSpark25:
+		// Four expressions: \p{N}{1,3}, the CJK block, a letter rule, then a bare \p{N}.
+		//
+		// The letter rule's leading character is any non-letter, so a step attaches to the
+		// word after it: "a.b" is ["a", ".b"]. The punctuation alternative names the two
+		// categories and has no newline tail, and the newline alternative is a single
+		// [\r\n], so a pair of newlines is two chunks. The trailing \p{N} cuts every digit
+		// the first pass left grouped, so a number ends up one digit per chunk.
+		return preRule{
+			digits: 0, lead: leadAnyNonLetter, letterMarks: true,
+			punctIsCategory: true, newlineSingle: true,
+			preDigits: 3, cjk: true, postDigits: 1,
 		}, true
 	case preSeedCoder:
 		// "(?:'[sS]|...)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+"

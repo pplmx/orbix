@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 95
+		wantImplemented = 96
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -2081,5 +2081,59 @@ func TestYoutuChunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("youtu is not reported as implemented")
+	}
+}
+
+// TestSpark25Chunks pins the spark2_5 rule, whose four expressions put a bare \p{N} *after*
+// the main rule rather than before it.
+//
+// Three details separate it from the families it resembles. The leading digit pass groups in
+// threes, but the trailing \p{N} then cuts every group apart, so a number ends one digit per
+// chunk -- the outcome matches starcoder's, by a longer route. The letter rule does not split
+// on case and takes any non-letter as its leading character, so a period attaches: "a.b" is
+// ["a", ".b"]. And the newline alternative is a single [\r\n], so a pair is two chunks where
+// most families would keep them together.
+func TestSpark25Chunks(t *testing.T) {
+	tok := &Tokenizer{pre: preSpark25}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Grouped first, cut again: the trailing \p{N} wins.
+		{"1234", []string{"1", "2", "3", "4"}},
+		{"1234567", []string{"1", "2", "3", "4", "5", "6", "7"}},
+		{"a1234b", []string{"a", "1", "2", "3", "4", "b"}},
+		// No case split.
+		{"helloWorld", []string{"helloWorld"}},
+		// The leading character takes a step.
+		{"a.b", []string{"a", ".b"}},
+		// A newline pair is two chunks.
+		{"line\n\ntwo", []string{"line", "\n", "\n", "two"}},
+		// The punct run names the categories and has no newline tail.
+		{"!?abc", []string{"!?", "abc"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"x=42", []string{"x", "=", "4", "2"}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"don't", []string{"don", "'t"}},
+		{"e\u0301clair", []string{"e\u0301clair"}},
+		{"\u4e2d\u6587\u6d4b\u8bd5", []string{"\u4e2d\u6587\u6d4b\u8bd5"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	path := gguftest.Model{Pre: "spark2_5", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("spark2_5 is not reported as implemented")
 	}
 }

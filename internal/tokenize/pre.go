@@ -62,6 +62,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.deepseekLLM {
 		return splitDeepseekLLM(text)
 	}
+	if fam.tinyAya {
+		return splitTinyAya(text)
+	}
 	if fam.newlineRuns {
 		return splitNewlineRuns(text)
 	}
@@ -940,6 +943,9 @@ type preRule struct {
 	// literal rather than a category because BLOOM's expression lists the punctuation it
 	// stops at, and a category would stop at more.
 	stopSet string
+	// tinyAya marks the family whose two expressions apply two different digit classes at
+	// different times, which no single pass reproduces.
+	tinyAya bool
 	// coder marks deepseek-coder, whose five expressions are applied one after another to
 	// the pieces the previous one left, rather than the earlier-ones-then-main-rule shape
 	// preDigits and cjk describe. Keeping it separate avoids a rule type whose fields are
@@ -1134,15 +1140,22 @@ func preFamilyOf(p preType) (preRule, bool) {
 	case preSuperBPE:
 		return preRule{digitsFromRight: true}, true
 	case preTinyAya:
-		// "\d{1,3}(?=(?:\d{3})*\b)" then a case-splitting letter rule: digits group three
-		// at a time from the right, but a run touching a letter is left whole, and letters
-		// are cut where a lower-case run meets an upper-case one.
-		return preRule{
-			digitsFromRight: true, digitsRightBoundary: true, digitsRightDecimal: true,
-			digits: 3, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
-			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
-			contractionSuffix: true,
-		}, true
+		// Two expressions, applied in order:
+		//
+		//   \d{1,3}(?=(?:\d{3})*\b)
+		//   the case-splitting letter rule, whose own digit alternative is \p{N}{1,3}
+		//
+		// The first pass cuts a *decimal* run into groups of three counted from the right,
+		// but only where a word boundary follows. The second pass then handles what is left
+		// with the wider \p{N}{1,3}, so a superscript or Roman numeral that the first pass
+		// did not touch is grouped by the second.
+		//
+		// The two passes are the reason this family is a function rather than flags on
+		// preRule: the digit rules are different classes applied at different times, and
+		// folding them into one pass gives the wrong chunks for "1\u00b2" -- the first pass
+		// cuts after the 1 because \u00b2 is not \d and a boundary follows, giving
+		// ["1", "\u00b2"].
+		return preRule{tinyAya: true}, true
 	case preFlint:
 		// Four expressions: \p{N}{1,3}, the CJK block, a case-splitting letter rule with no
 		// digit alternative, then a punctuation run that names the categories rather than a
@@ -1833,15 +1846,41 @@ func isDecimalDigit(r rune) bool { return unicode.IsDigit(r) }
 
 func isDecimalDigitAt(s string) bool { return classifyAt(s, isDecimalDigit) }
 
-// isWordRuneAt reports whether s begins with a regex word character (\w): a letter, a digit,
-// or an underscore.
+// isWordRuneAt reports whether s begins with a regex word character (\w): a letter, a decimal
+// digit, or an underscore.
+//
+// The digit part is Nd, not \p{N}. That distinction decides where "\b" holds, and it is
+// observable: a superscript is a number but not a word character, so there is a boundary
+// between "1" and "\u00b2", while a Roman numeral is a word character and there is none
+// between "0" and "\u2163".
 func isWordRuneAt(s string) bool {
 	if s == "" {
 		return false
 	}
-	return classifyAt(s, func(r rune) bool {
-		return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_'
-	})
+	return classifyAt(s, isWordRune)
+}
+
+// isWordRune reports whether r is a regex word character.
+//
+// The class is wider than "letter or digit": it also takes the marks, the letter-numbers
+// (\p{Nl}, which is where the Roman numerals sit), the connector punctuation, and a handful of
+// format characters. Getting it wrong changes where "\b" falls, and that is observable -- a
+// cut the expression does not make produces a chunk the vocabulary never saw.
+func isWordRune(r rune) bool {
+	switch {
+	case unicode.IsLetter(r), unicode.IsMark(r), r == '_':
+		return true
+	case unicode.IsNumber(r):
+		// \w takes Nd and Nl but not No: "\u2163" (Nl) is a word character while
+		// "\u00b2" (No) is not.
+		return unicode.In(r, unicode.Nd, unicode.Nl)
+	case r == '\u200c' || r == '\u200d':
+		// The two joiners are format characters and still word characters, which is what puts
+		// a word boundary on the far side of them: "0\u200d" has none, so the decimal
+		// lookahead does not match there.
+		return true
+	}
+	return false
 }
 
 // isSpace reports whether r is whitespace (\s).
@@ -2260,6 +2299,117 @@ func isDeepseekLLMLetterAt(s string) bool { return classifyAt(s, isDeepseekLLMLe
 func isDeepseekLLMPunctAt(s string) bool  { return classifyAt(s, isDeepseekLLMPunct) }
 func isDeepseekLLMCJKAt(s string) bool    { return classifyAt(s, isDeepseekLLMCJK) }
 func isNumberAt(s string) bool            { return classifyAt(s, isNumber) }
+
+// splitTinyAya applies the family's two expressions in order.
+//
+// The first is "\d{1,3}(?=(?:\d{3})*\b)": a run of decimal digits is cut into groups of three
+// counted from the right, but only where a word boundary follows the match. The second is the
+// case-splitting letter rule, whose own digit alternative is "\p{N}{1,3}".
+//
+// Applying them in order is what distinguishes the family. A character that is a number but
+// not a decimal digit -- a superscript, a Roman numeral -- is invisible to the first pass, so
+// the first pass can cut right before it; the second pass then groups it with whatever follows
+// under the wider class. One combined digit pass cannot express that, because it would have to
+// decide the class before knowing which pass was running.
+func splitTinyAya(text string) []string {
+	// The second expression's alternatives, as a rule with no digit pass of its own: the
+	// first expression has already cut the decimal runs, and the letter rule's own
+	// "\p{N}{1,3}" handles what remains.
+	main := preRule{
+		digits: 3, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
+		newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
+		contractionSuffix: true,
+	}
+	var out []string
+	for _, piece := range splitDecimalLookahead(text) {
+		out = append(out, splitByRule(piece, main)...)
+	}
+	return out
+}
+
+// splitDecimalLookahead applies "\d{1,3}(?=(?:\d{3})*\b)" over the whole text.
+//
+// The match is one to three decimal digits whose right neighbour is a word boundary once any
+// following three-digit groups are counted. That is what makes a long run group from the
+// right: in "1234567" the first match is "1", because "234" and "567" follow in threes and
+// then the text ends.
+//
+// Text the expression does not match is gap, and llama.cpp's splitter emits the gap before a
+// match as one fragment. So a run with no word boundary after it -- "0\u2163", where the Roman
+// numeral is a word character -- is not cut at all.
+func splitDecimalLookahead(text string) []string {
+	var out []string
+	gap, i := 0, 0
+	for i < len(text) {
+		n := decimalLookaheadLen(text[i:])
+		if n <= 0 {
+			i += runeLenAt(text[i:])
+			continue
+		}
+		if i > gap {
+			out = append(out, text[gap:i])
+		}
+		out = append(out, text[i:i+n])
+		i += n
+		gap = i
+	}
+	if gap < len(text) {
+		out = append(out, text[gap:])
+	}
+	return out
+}
+
+// decimalLookaheadLen returns the length of a "\d{1,3}(?=(?:\d{3})*\b)" match at the start of
+// s, or 0 when there is none.
+func decimalLookaheadLen(s string) int {
+	// "\d{1,3}" is greedy with backtracking, so three digits are tried first.
+	for width := 3; width >= 1; width-- {
+		end, count := 0, 0
+		for count < width && end < len(s) && isDecimalDigitAt(s[end:]) {
+			end += runeLenAt(s[end:])
+			count++
+		}
+		if count < width {
+			continue
+		}
+		if restHasWordBoundary(s, end) {
+			return end
+		}
+	}
+	return 0
+}
+
+// restHasWordBoundary reports whether "(?:\\d{3})*\\b" matches in s at byte offset pos.
+//
+// The whole string is passed rather than the tail, because the boundary test needs the
+// character before pos: in "1234" the cut after the first digit is only valid if a word
+// boundary falls there, and a boundary means exactly one side is a word character.
+func restHasWordBoundary(s string, pos int) bool {
+	i := pos
+	for i < len(s) && isDecimalDigitAt(s[i:]) {
+		j, n := i, 0
+		for n < 3 && j < len(s) && isDecimalDigitAt(s[j:]) {
+			j += runeLenAt(s[j:])
+			n++
+		}
+		if n < 3 {
+			break
+		}
+		i = j
+	}
+	return atWordBoundary(s, i)
+}
+
+// atWordBoundary reports whether byte offset i in s is a regex word boundary.
+func atWordBoundary(s string, i int) bool {
+	before := false
+	if i > 0 {
+		p, ok := prevRuneStart(s, i)
+		before = ok && isWordRuneAt(s[p:])
+	}
+	after := i < len(s) && isWordRuneAt(s[i:])
+	return before != after
+}
 
 // splitDeepseekLLM applies the family's five expressions in order: a newline on its own, then
 // letter runs, punctuation runs, CJK runs, and number runs. The first two take one preceding

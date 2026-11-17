@@ -3171,3 +3171,46 @@ func TestTinyAyaDigitClassIsNarrowerThanNumber(t *testing.T) {
 		}
 	}
 }
+
+// TestTinyAyaRunsTwoDigitPasses covers the family's two ordered expressions.
+//
+// The first is "\d{1,3}(?=(?:\d{3})*\b)": a *decimal* digit run cut into groups of three from
+// the right, but only where a word boundary follows. The second is the case-splitting letter
+// rule, whose own digit alternative is "\p{N}{1,3}".
+//
+// The order matters because the two name different classes. A superscript is "\p{N}" but not
+// "\d", and not a word character either, so the first pass sees a boundary after the digit
+// before it and cuts there -- "1\u00b2" is ["1", "\u00b2"] even though the second pass would have
+// grouped them. A Roman numeral is both "\p{N}" and a word character, so the first pass sees no
+// boundary and leaves the pair alone: "0\u2163" is one chunk.
+//
+// A single combined digit pass cannot produce both, which is why the family is a function.
+func TestTinyAyaRunsTwoDigitPasses(t *testing.T) {
+	tok := &Tokenizer{pre: preTinyAya}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Boundary after the digit: cut, and the number the first pass ignored stays with
+		// the second.
+		{"1\u00b2", []string{"1", "\u00b2"}},
+		{"0\u00b2", []string{"0", "\u00b2"}},
+		// No boundary: the words stay together however the classes differ.
+		{"0\u2163", []string{"0\u2163"}},
+		{"\u2163\u0661\u2163", []string{"\u2163\u0661\u2163"}},
+		// A join is a word character, so the first pass finds no boundary and does not cut.
+		// The second pass then leaves the join on its own: "\\p{M}" does not admit it, and
+		// it is neither a number nor punctuation, so it is gap text.
+		{"0\u200d", []string{"0", "\u200d"}},
+		// Grouping from the right, three at a time.
+		{"1234", []string{"1", "234"}},
+		{"1234567", []string{"1", "234", "567"}},
+		{"123", []string{"123"}},
+		{"a1234b", []string{"a", "123", "4", "b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

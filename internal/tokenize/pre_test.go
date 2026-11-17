@@ -3281,3 +3281,33 @@ func TestTrailingSpaceAppliesToEveryFragment(t *testing.T) {
 		}
 	}
 }
+
+// TestPreReferenceCases checks the rules against llama.cpp's expressions on the inputs that
+// have been wrong here before.
+//
+// The table in pre_reference_cases.go holds one representative per defect class rather than a
+// random sample, because that is what makes it cheap to keep: 126 strings that between them
+// cover every mistake the port has made -- a digit class that was too wide, a boundary test
+// that looked at the wrong side, a run split by count instead of offset, a rule applied to the
+// sequence instead of to each fragment.
+//
+// Every expectation comes from applying llama.cpp's own expressions as sequential passes. A
+// failure means a rule has drifted from the reference, which is the only thing this package
+// promises about a family.
+func TestPreReferenceCases(t *testing.T) {
+	if len(preReferenceCases) == 0 {
+		t.Fatal("the reference table is empty")
+	}
+	for _, fc := range preReferenceCases {
+		tok := &Tokenizer{pre: fc.pre}
+		if len(fc.cases) == 0 {
+			t.Errorf("%s: no cases", fc.name)
+			continue
+		}
+		for text, want := range fc.cases {
+			if got := tok.preSplit(text); !sameStrings(got, want) {
+				t.Errorf("%s: preSplit(%q) = %q, want %q", fc.name, text, got, want)
+			}
+		}
+	}
+}

@@ -305,3 +305,79 @@ func logSoftmaxOf(logits []float32, i int) float64 {
 	}
 	return (float64(logits[i]) - max) - math.Log(sum)
 }
+
+// TestRopeFrequencyFactors checks the tensor that extends a model's context without
+// changing freq_base. Each dimension pair's rate is divided by its entry, so a model can
+// keep the low dimensions at the frequency it was trained on and slow only the high ones.
+//
+// Ignoring the tensor leaves the low dimensions correct, which is why it produces fluent
+// text and looks like it works: the error is confined to the dimensions that carry the
+// long-range position signal.
+func TestRopeFrequencyFactors(t *testing.T) {
+	cfg := testConfig()
+	cfg.RopeDim = 8
+	cfg.RopeBase = 10000
+	cfg.RopeFreqs = []float32{1, 1, 4, 16}
+
+	const pos = 500
+	with, err := newRope(cfg, 1024)
+	if err != nil {
+		t.Fatalf("newRope: %v", err)
+	}
+	bare := cfg
+	bare.RopeFreqs = nil
+	without, err := newRope(bare, 1024)
+	if err != nil {
+		t.Fatalf("newRope: %v", err)
+	}
+
+	// A dimension whose factor is 1 is unchanged, which is what makes the error hard to
+	// notice: most dimensions agree.
+	if with.cos[pos][0] != without.cos[pos][0] {
+		t.Errorf("dimension 0 has factor 1 but changed: %v vs %v",
+			with.cos[pos][0], without.cos[pos][0])
+	}
+	// A scaled dimension must differ, and by more the larger its factor.
+	for _, k := range []int{2, 3} {
+		if with.cos[pos][k] == without.cos[pos][k] {
+			t.Errorf("dimension %d has factor %v but did not change",
+				k, cfg.RopeFreqs[k])
+		}
+	}
+	d2 := math.Abs(float64(with.cos[pos][2] - without.cos[pos][2]))
+	d3 := math.Abs(float64(with.cos[pos][3] - without.cos[pos][3]))
+	if d3 <= d2 {
+		t.Errorf("a factor of 16 moved dimension 3 by %v and a factor of 4 moved "+
+			"dimension 2 by %v; the larger factor should move it more", d3, d2)
+	}
+}
+
+// TestRopeFactorsAreNotCarriedForward checks that a dimension's factor applies to that
+// dimension only. Dividing a running product would compound every later dimension by the
+// earlier factor, which slows the whole head instead of part of it.
+func TestRopeFactorsAreNotCarriedForward(t *testing.T) {
+	cfg := testConfig()
+	cfg.RopeDim = 8
+	cfg.RopeBase = 10000
+	// Only dimension 1 is scaled.
+	cfg.RopeFreqs = []float32{1, 8, 1, 1}
+
+	onlySecond, err := newRope(cfg, 256)
+	if err != nil {
+		t.Fatalf("newRope: %v", err)
+	}
+	// The same model with dimension 1 at factor 1: dimensions past it must match, which
+	// they would not if the factor had been carried forward.
+	cfg.RopeFreqs = []float32{1, 1, 1, 1}
+	none, err := newRope(cfg, 256)
+	if err != nil {
+		t.Fatalf("newRope: %v", err)
+	}
+	const pos = 100
+	for _, k := range []int{2, 3} {
+		if onlySecond.cos[pos][k] != none.cos[pos][k] {
+			t.Errorf("dimension %d changed although only dimension 1 has a factor; "+
+				"the factor is being carried forward", k)
+		}
+	}
+}

@@ -78,6 +78,16 @@ type Config struct {
 	// RopeBase is llama.rope.freq_base, the theta of the rotation.
 	RopeBase float32
 
+	// RopeFreqs is the rope_freqs.weight tensor: one frequency divisor per dimension
+	// pair, or nil when the model has none.
+	//
+	// It is how a model extends its context without changing freq_base. Each pair's
+	// frequency is divided by its entry, so an entry of 32 makes that dimension rotate 32
+	// times slower -- a 4096-position model becomes a 131072-position one. Ignoring the
+	// tensor leaves the low dimensions right and the high ones rotating far too fast,
+	// which reads as fluent text with positions confused past the original context.
+	RopeFreqs []float32
+
 	// RopeScale scales the rotation frequency. Some fine-tunes set it below 1
 	// to extend the usable context; the default is 1.
 	RopeScale float32

@@ -89,6 +89,21 @@ func LoadWeights(path string) (*Weights, error) {
 		return nil, err
 	}
 
+	// The frequency factors are a tensor, not metadata, so they cannot be read by
+	// LoadConfig. A model without one leaves the field nil, which the rope treats as "no
+	// scaling" and is what every model before Llama 3.2 relies on.
+	if _, ok := l.File().Tensor("rope_freqs.weight"); ok {
+		freqs, err := l.Tensor("rope_freqs.weight")
+		if err != nil {
+			return nil, fmt.Errorf("llama: read rope_freqs: %w", err)
+		}
+		if want := cfg.RopeDim / 2; len(freqs) != want {
+			return nil, fmt.Errorf("llama: rope_freqs has %d values, want %d for rope dim %d",
+				len(freqs), want, cfg.RopeDim)
+		}
+		cfg.RopeFreqs = freqs
+	}
+
 	names := []string{"token_embd.weight", "output_norm.weight"}
 	if !cfg.TiedEmbeddings {
 		names = append(names, "output.weight")

@@ -69,11 +69,19 @@ func newRope(cfg Config, nCtx int) (*rope, error) {
 		// rather than recomputing a power per index.
 		theta := float64(pos)
 		for k := range nPairs {
-			// rope_yarn with ext_factor == 0 reduces to freq_scale * theta.
-			// YaRN's interpolation and magnitude correction are not modelled
-			// here; a model that needs them would set rope.scaling.type, which
-			// LoadConfig rejects rather than silently ignoring.
-			t := float64(cfg.RopeScale) * theta
+			// rope_yarn with ext_factor == 0 reduces to freq_scale * theta, where theta
+			// is the position stepped down by thetaScale once per dimension.
+			//
+			// A withFactor model divides this dimension's theta by its frequency factor.
+			// The division applies to the current dimension only: the running theta is
+			// left alone, so a slow dimension does not slow every later one too. Keeping
+			// the running form rather than recomputing a power is also what keeps the
+			// float rounding identical for models with no factors at all.
+			dimTheta := theta
+			if len(cfg.RopeFreqs) > k {
+				dimTheta /= float64(cfg.RopeFreqs[k])
+			}
+			t := float64(cfg.RopeScale) * dimTheta
 			r.cos[pos][k] = float32(math.Cos(t))
 			r.sin[pos][k] = float32(math.Sin(t))
 			theta *= thetaScale

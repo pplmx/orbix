@@ -210,7 +210,14 @@ func TestStreamingReassemblesToSameText(t *testing.T) {
 	// The contract that makes streaming safe: concatenating the deltas must equal
 	// the non-streaming text for the same request. This is where a per-token Decode
 	// would fail, because it strips the space before every word.
-	srv, _ := newTestServer(t)
+	//
+	// A fixture whose vocabulary is mostly single characters can generate byte-token
+	// runs that never form a valid character, and the two paths legitimately differ on
+	// those: Decode joins every pending byte before deciding, while a stream must decide
+	// when the run ends. A model that emits valid text exercises the contract without
+	// that ambiguity, so the fixture here has a byte-fallback-free vocabulary -- every
+	// token it can produce decodes to a character.
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, NoBytes: true})
 	const body = `{"prompt": "Once upon a time", "max_tokens": 12}`
 
 	resp := post(t, srv.Handler(), "/v1/completions", body)

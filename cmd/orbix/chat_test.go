@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 
 	"github.com/pplmx/orbix/internal/engine"
 )
@@ -16,11 +17,10 @@ import (
 
 func chatModel(t *testing.T) string {
 	t.Helper()
-	p := os.Getenv("MODEL")
-	if p == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
-	return p
+	// A constructed model: these tests check the REPL's structure -- prompts appear, a
+	// reply is non-empty, /exit ends the session -- not the quality of the text. A
+	// checkpoint would skip them wherever one is not on disk.
+	return gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 }
 
 // runChat drives a session with the given input lines and returns its output.

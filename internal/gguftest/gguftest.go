@@ -44,8 +44,20 @@ type Model struct {
 	// scheduler advances a long sequence need it to keep going, and "it happened to stop
 	// after six tokens this build" is not a property any assertion can rest on.
 	NoEOS bool
+	// NoBytes omits the 256 byte-fallback pieces, so every token in the vocabulary is a
+	// character and no token run can be an invalid byte sequence.
+	//
+	// The stream decoder and Decode legitimately differ on a byte run that never forms a
+	// character: Decode joins every pending byte before deciding how to render it, while a
+	// stream has to decide when the run ends. A test comparing the two wants a model that
+	// cannot produce such a run.
+	NoBytes bool
 	// ChatTemplate, when set, is written to tokenizer.chat_template.
 	ChatTemplate string
+
+	// vocabBase is where the byte-fallback pieces start, recorded during resolve so the
+	// writer knows which pieces are bytes without searching the list again.
+	vocabBase int
 	// Experts and ExpertUsed make the model a mixture of experts.
 	Experts    int
 	ExpertUsed int
@@ -92,6 +104,14 @@ func (m Model) resolve() Model {
 	}
 	if len(m.Vocab) == 0 {
 		m.Vocab = DefaultVocab
+	}
+	// The 256 byte-fallback pieces are part of the vocabulary, not an addition to it at
+	// write time: the embedding and output tensors are shaped from the declared
+	// vocabulary, and a file whose metadata lists more tokens than its tensors have rows
+	// fails the loader's shape check.
+	m.vocabBase = len(m.Vocab)
+	if !m.NoBytes {
+		m.Vocab = append(append([]string(nil), m.Vocab...), bytePieces()...)
 	}
 	if m.BOSID == 0 && m.EOSID == 0 {
 		m.BOSID, m.EOSID = 1, 2
@@ -277,22 +297,33 @@ func (m Model) kvs() []kv {
 		)
 	}
 	// The tokenizer is SentencePiece-of-characters: model "llama", an explicit
-	// add_space_prefix, and a byte fallback for every byte so encoding arbitrary text
-	// cannot fail.
-	tokens := make([]gguf.Value, len(m.Vocab))
-	types := make([]gguf.Value, len(m.Vocab))
-	scores := make([]gguf.Value, len(m.Vocab))
-	for i, tok := range m.Vocab {
+	// add_space_prefix, and the 256 byte-fallback pieces a SentencePiece model always
+	// carries.
+	//
+	// The byte pieces are not decoration. Without them a character outside the vocabulary
+	// encodes to <unk>, and the stream decoder has nothing to reassemble -- so a test of
+	// the byte-token path would find no split tokens to check and quietly skip. They are
+	// written as SentencePiece names them, <0xNN>, with type 6, which is what the
+	// tokenizer recognizes as a raw byte.
+	vocab := m.Vocab
+	tokens := make([]gguf.Value, len(vocab))
+	types := make([]gguf.Value, len(vocab))
+	scores := make([]gguf.Value, len(vocab))
+	for i, tok := range vocab {
 		tokens[i] = gguf.Value{Type: gguf.TypeString, Str: tok}
 		typ := int64(1) // normal
-		if i < 3 {
+		switch {
+		case i < 3:
 			typ = 3 // control
+		case i >= m.vocabBase:
+			typ = 6 // byte
 		}
 		types[i] = gguf.Value{Type: gguf.TypeInt32, Int: typ}
 		// Descending scores make the merge prefer longer pieces, which is what a
 		// trained unigram model does.
-		scores[i] = gguf.Value{Type: gguf.TypeFloat32, Float: -float64(i) / float64(len(m.Vocab))}
+		scores[i] = gguf.Value{Type: gguf.TypeFloat32, Float: -float64(i) / float64(len(vocab))}
 	}
+
 	out = append(out,
 		strKV("tokenizer.ggml.model", "llama"),
 		arrayKV("tokenizer.ggml.tokens", gguf.TypeString, tokens),
@@ -326,6 +357,15 @@ func (m Model) kvs() []kv {
 // NoEOSSentinel is an EOS id that no vocabulary contains, so a generated sequence never
 // reaches it.
 const NoEOSSentinel = 1 << 30
+
+// bytePieces returns the 256 fallback pieces, named as SentencePiece names them.
+func bytePieces() []string {
+	out := make([]string, 256)
+	for i := range out {
+		out[i] = fmt.Sprintf("<0x%02X>", i)
+	}
+	return out
+}
 
 // Default is the standard fixture: two layers, 32 hidden, a character vocabulary.
 func Default() Model { return Model{} }

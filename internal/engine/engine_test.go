@@ -1,27 +1,38 @@
 package engine
 
 import (
-	"os"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
-// These tests need a real model, because the property under test is that two
-// sequences interleaved on one model produce the same tokens they would alone.
-// A synthetic model cannot show that: the failure mode is the shared scratch
-// buffer, which only exists with real weights.
-//
-// Set MODEL to a GGUF file to run them.
+// These tests check that two sequences interleaved on one model produce the same tokens
+// they would alone. That failure mode is a shared scratch buffer, and a model has one
+// whatever its weights are -- a constructed fixture has exactly as many buffers as a
+// checkpoint does, so it exposes the same pollution. They run on a fixture, which is what
+// lets them run everywhere.
 
 func loadModel(t *testing.T) (*Engine, *tokenize.Tokenizer) {
 	t.Helper()
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	e, tok, _ := loadModelPath(t, Options{})
+	return e, tok
+}
+
+// loadModelPath also returns the fixture's path, for a test that needs to build a second
+// engine over the same weights.
+func loadModelPath(t *testing.T, opts Options) (*Engine, *tokenize.Tokenizer, string) {
+	t.Helper()
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	e, tok := loadModelAt(t, path, opts)
+	return e, tok, path
+}
+
+// loadModelAt is loadModel over a fixture and options a test chooses.
+func loadModelAt(t *testing.T, path string, opts Options) (*Engine, *tokenize.Tokenizer) {
+	t.Helper()
 	gf, err := gguf.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -30,7 +41,7 @@ func loadModel(t *testing.T) (*Engine, *tokenize.Tokenizer) {
 	if err != nil {
 		t.Fatalf("tokenize: %v", err)
 	}
-	e, err := New(path, Options{})
+	e, err := New(path, opts)
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}
@@ -93,10 +104,7 @@ func TestInterleavingMatchesSequentialResults(t *testing.T) {
 	// The core correctness property: a sequence's tokens must not depend on what
 	// else is in flight. Running two requests together and alone must give the
 	// same output for each.
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	gf, _ := gguf.Open(path)
 	tok, _ := tokenize.New(gf)
 
@@ -158,7 +166,10 @@ func TestInterleavingMatchesSequentialResults(t *testing.T) {
 }
 
 func TestStopToken(t *testing.T) {
-	e, tok := loadModel(t)
+	// One fixture, two engines: the first learns the greedy continuation, the second
+	// checks that stopping on it ends the request. Sharing the path is what makes the
+	// second engine's tokens comparable to the first's.
+	e, tok, path := loadModelPath(t, Options{})
 	prompt := tok.Encode("Once upon a time", true)
 	// First learn what the greedy continuation is, then stop on its second token.
 	ch, _ := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
@@ -170,7 +181,7 @@ func TestStopToken(t *testing.T) {
 	}
 	stopAt := full[1]
 
-	e2, _ := New(os.Getenv("MODEL"), Options{})
+	e2, _ := loadModelAt(t, path, Options{})
 	ch2, err := e2.Submit(Request{Prompt: prompt, MaxTokens: 10, Stop: []int32{stopAt}})
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -216,7 +227,7 @@ func TestPumpReportsActiveCount(t *testing.T) {
 func TestGreedySamplerDefault(t *testing.T) {
 	// A nil sampler must behave like Greedy, so callers do not have to know the
 	// default.
-	e, tok := loadModel(t)
+	e, tok, path := loadModelPath(t, Options{})
 	ch, err := e.Submit(Request{Prompt: tok.Encode("Once upon a time", true), MaxTokens: 4})
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -225,7 +236,9 @@ func TestGreedySamplerDefault(t *testing.T) {
 	}
 	got, _ := collect(t, ch)
 
-	e2, _ := New(os.Getenv("MODEL"), Options{})
+	// A second engine over the same weights, to hold the explicit sampler against the
+	// implicit one.
+	e2, _ := loadModelAt(t, path, Options{})
 	ch2, err := e2.Submit(Request{
 		Prompt:    tok.Encode("Once upon a time", true),
 		MaxTokens: 4,
@@ -253,7 +266,9 @@ func TestGreedySamplerDefault(t *testing.T) {
 // They share the model but not the loop, so agreement means the engine's
 // batched prefill and per-round decode reproduce the straightforward path.
 func TestEngineMatchesGenerate(t *testing.T) {
-	e, tok := loadModel(t)
+	// The comparison is against llama.Generate over the same weights, so the path has to
+	// travel with the engine.
+	e, tok, path := loadModelPath(t, Options{})
 	cfg := e.Model().Config()
 	prompt := tok.Encode("Once upon a time there was a little girl named Lily who lived near the river.", cfg.BOSID >= 0)
 	if len(prompt) < 8 {
@@ -269,7 +284,7 @@ func TestEngineMatchesGenerate(t *testing.T) {
 	}
 	got, _ := collect(t, ch)
 
-	m, err := llama.New(os.Getenv("MODEL"))
+	m, err := llama.New(path)
 	if err != nil {
 		t.Fatalf("llama.New: %v", err)
 	}
@@ -298,10 +313,7 @@ func TestEngineMatchesGenerate(t *testing.T) {
 // option must configure the model's kernels, or a caller tuning concurrency
 // would silently get the default instead.
 func TestWorkersOptionReachesTheModel(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	e, err := New(path, Options{Workers: 1})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -343,10 +355,7 @@ func TestWorkersOptionReachesTheModel(t *testing.T) {
 // batched decode existed MaxActive was stored but never consulted, so a caller
 // could set it to 2 and still have all eight requests advance in one round.
 func TestMaxActiveQueuesExcessRequests(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	gf, _ := gguf.Open(path)
 	tok, _ := tokenize.New(gf)
 	prompt := tok.Encode("Once upon a time", true)
@@ -408,10 +417,7 @@ func TestMaxActiveZeroDefaultsToEight(t *testing.T) {
 // deployment to paged caches: the tokens must not change. It runs the same
 // requests through both layouts and requires identical output.
 func TestPagedEngineMatchesContiguous(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	gf, _ := gguf.Open(path)
 	tok, _ := tokenize.New(gf)
 	prompts := []string{"Once upon a time", "The little girl was"}
@@ -460,10 +466,7 @@ func TestPagedEngineMatchesContiguous(t *testing.T) {
 // must not reserve a whole context: the pool is a fixed budget, and the sequences
 // draw from it as they generate.
 func TestPagedEngineReservesLessMemory(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	gf, _ := gguf.Open(path)
 	tok, _ := tokenize.New(gf)
 
@@ -530,10 +533,7 @@ func TestPagedEngineReservesLessMemory(t *testing.T) {
 // TestBlockPoolDefaultIsClamped checks the engine keeps working when a caller asks
 // for paging but leaves the block size at its zero value.
 func TestBlockPoolDefaultIsClamped(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	e, err := New(path, Options{Blocks: 8})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -637,10 +637,7 @@ func TestNilCancelNeverFires(t *testing.T) {
 // engine with prefix reuse and one without, several times over, so the second round
 // is served from a warm index.
 func TestPrefixCacheMatchesNoCache(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	gf, _ := gguf.Open(path)
 	tok, _ := tokenize.New(gf)
 	prompts := []string{
@@ -705,10 +702,7 @@ func TestPrefixCacheMatchesNoCache(t *testing.T) {
 // TestPrefixCacheReusesAcrossRequests checks reuse actually happens at the engine
 // level, by observing that the index filled up.
 func TestPrefixCacheReusesAcrossRequests(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	gf, _ := gguf.Open(path)
 	tok, _ := tokenize.New(gf)
 	e, err := New(path, Options{BlockSize: 4, Blocks: 256, PrefixCache: true})
@@ -738,10 +732,7 @@ func TestPrefixCacheReusesAcrossRequests(t *testing.T) {
 // TestPrefixCacheOffByDefault pins that the optimization is opt-in: a plain paged
 // engine must not allocate an index or retain blocks it cannot use.
 func TestPrefixCacheOffByDefault(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file to run engine tests")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	e, err := New(path, Options{BlockSize: 4, Blocks: 32})
 	if err != nil {
 		t.Fatalf("New: %v", err)

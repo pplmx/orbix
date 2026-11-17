@@ -153,8 +153,10 @@ func TestSuiteRejectsUnknownPolicyFlag(t *testing.T) {
 // eventually reaches it; a request that stops early must be counted rather than silently
 // producing fewer tokens than its row's neighbours.
 func TestEarlyStopsAreCounted(t *testing.T) {
-	// A model that can stop, unlike the NoEOS fixture the other suite tests use.
-	path := gguftest.Model{ContextLen: 256}.Write(t, t.TempDir())
+	// A model that can stop, unlike the NoEOS fixture the other suite tests use. NoBytes
+	// keeps the vocabulary to characters, so the greedy path reaches the end-of-sequence
+	// token in a couple of steps instead of wandering through byte pieces.
+	path := gguftest.Model{ContextLen: 256, NoBytes: true}.Write(t, t.TempDir())
 	o := suiteOptions{
 		model:   path,
 		prompt:  []int32{1, 4, 5},

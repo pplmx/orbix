@@ -6,13 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -141,10 +141,7 @@ func num(t *testing.T, values map[string]string, name string) float64 {
 }
 
 func TestMetricsExpositionIsParseable(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
 	values := parseMetrics(t, scrape(t, srv.Handler()))
 
@@ -169,10 +166,7 @@ func TestMetricsExpositionIsParseable(t *testing.T) {
 }
 
 func TestMetricsCountARequest(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
 
 	// One request whose token count is known, so the counter can be checked exactly
@@ -204,10 +198,7 @@ func TestMetricsCountARequest(t *testing.T) {
 func TestMetricsOmitsPoolMetricsWithoutAPool(t *testing.T) {
 	// A contiguous engine has no pool. Exporting zeros would make "no pool" and "empty
 	// pool" the same reading, and an alert on free blocks would fire forever.
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
 	values := parseMetrics(t, scrape(t, srv.Handler()))
 	for _, name := range []string{
@@ -222,10 +213,7 @@ func TestMetricsOmitsPoolMetricsWithoutAPool(t *testing.T) {
 }
 
 func TestMetricsModelLabel(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
 	values := parseMetrics(t, scrape(t, srv.Handler()))
 
@@ -244,10 +232,7 @@ func TestMetricsModelLabel(t *testing.T) {
 }
 
 func TestMetricsRejectsNonGet(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
 	// The route is registered for GET only, so another method must not reach the handler.
 	resp := post(t, srv.Handler(), "/metrics", "{}")
@@ -306,10 +291,7 @@ func serverWithPagedEngine(t *testing.T, path string) *Server {
 // TestMetricsExportsPoolMetrics is the counterpart to the contiguous case: with a pool,
 // the block counts must appear and must describe the pool that was configured.
 func TestMetricsExportsPoolMetrics(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 	srv := serverWithPagedEngine(t, path)
 	values := parseMetrics(t, scrape(t, srv.Handler()))
 

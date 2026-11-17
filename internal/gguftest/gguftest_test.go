@@ -38,8 +38,11 @@ func TestFixtureParses(t *testing.T) {
 		t.Errorf("config = layers %d hidden %d heads %d, want 2/32/2",
 			cfg.Layers, cfg.Hidden, cfg.Heads)
 	}
-	if cfg.VocabSize != len(DefaultVocab) {
-		t.Errorf("VocabSize = %d, want %d", cfg.VocabSize, len(DefaultVocab))
+	// The vocabulary includes the 256 byte-fallback pieces, because a SentencePiece model
+	// always carries them and the embedding rows have to match the declared count.
+	if want := len(DefaultVocab) + 256; cfg.VocabSize != want {
+		t.Errorf("VocabSize = %d, want %d (default pieces plus 256 byte fallbacks)",
+			cfg.VocabSize, want)
 	}
 	// The special ids must point into the vocabulary, or generation has no valid stop.
 	if cfg.EOSID < 0 || cfg.EOSID >= cfg.VocabSize {

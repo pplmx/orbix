@@ -1,21 +1,19 @@
 package tokenize
 
 import (
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
-// loadReal tokenizer from MODEL, skipping when unset.
-func loadReal(t *testing.T) *Tokenizer {
+// fixtureTokenizer is a tokenizer over a constructed vocab: these tests check how a
+// stream of tokens decodes, which depends on the byte-level pieces and the special-token
+// types, not on the vocabulary being a trained one.
+func fixtureTokenizer(t *testing.T) *Tokenizer {
 	t.Helper()
-	p := os.Getenv("MODEL")
-	if p == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
-	f, err := gguf.Open(p)
+	f, err := gguf.Open(gguftest.Path(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -32,7 +30,7 @@ func loadReal(t *testing.T) *Tokenizer {
 // and it is where the naive per-token approach fails -- it strips the space before
 // every word.
 func TestStreamDecoderMatchesDecode(t *testing.T) {
-	tok := loadReal(t)
+	tok := fixtureTokenizer(t)
 	texts := []string{
 		"Once upon a time, there was a little girl named Lily.",
 		"Hello world",
@@ -62,7 +60,7 @@ func TestStreamDecoderMatchesDecode(t *testing.T) {
 // character whose UTF-8 bytes span several tokens must not be rendered as a
 // replacement character in the middle of a stream.
 func TestStreamDecoderReassemblesSplitCharacters(t *testing.T) {
-	tok := loadReal(t)
+	tok := fixtureTokenizer(t)
 	// A CJK character is three UTF-8 bytes; a vocabulary without it as a single
 	// piece encodes it as three byte tokens.
 	const text = "中文"
@@ -88,7 +86,7 @@ func TestStreamDecoderReassemblesSplitCharacters(t *testing.T) {
 // TestStreamDecoderSkipsControlTokens pins that control tokens contribute nothing,
 // since a chat template's markers must not appear as text.
 func TestStreamDecoderSkipsControlTokens(t *testing.T) {
-	tok := loadReal(t)
+	tok := fixtureTokenizer(t)
 	ids := tok.Encode("hello", true) // with BOS, if the model defines one
 	dec := tok.Seq()
 	var got strings.Builder
@@ -107,7 +105,7 @@ func TestStreamDecoderSkipsControlTokens(t *testing.T) {
 // TestStreamDecoderSingleToken covers a one-token sequence, where the leading
 // space still has to be dropped exactly once.
 func TestStreamDecoderSingleToken(t *testing.T) {
-	tok := loadReal(t)
+	tok := fixtureTokenizer(t)
 	ids := tok.Encode("Once", false)
 	if len(ids) != 1 {
 		t.Skipf("\"Once\" encoded to %d tokens", len(ids))

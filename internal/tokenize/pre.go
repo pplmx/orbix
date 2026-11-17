@@ -675,6 +675,16 @@ func preFamilyOf(p preType) (preRule, bool) {
 			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
 			contractionSuffix: true,
 		}, true
+	case preFlint:
+		// Four expressions: \p{N}{1,3}, the CJK block, a case-splitting letter rule with no
+		// digit alternative, then a punctuation run that names the categories rather than a
+		// range. Digits and CJK are cut before the main rule, which is why it has no digit
+		// alternative of its own.
+		return preRule{
+			digits: 0, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
+			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
+			preDigits: 3, cjk: true, contractionSuffix: true,
+		}, true
 	case preViking:
 		// The first expression is BLOOM's verbatim, so the stop set is the same string; the
 		// second cuts every digit out on its own.

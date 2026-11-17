@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 82
+		wantImplemented = 83
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1529,5 +1529,51 @@ func TestLagunaChunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("laguna is not reported as implemented")
+	}
+}
+
+// TestFlintChunks pins the flint rule: digit groups and the CJK block first, then a
+// case-splitting letter rule, then a punctuation run named by category.
+//
+// The digit pass comes first, so the letter rule has no digit alternative of its own -- a
+// difference from tiny_aya, whose main rule includes one. The punctuation alternative names
+// \p{P}\p{S} rather than a range, and the leading character is any non-letter, so a period
+// attaches to the word after it: "a.b" is ["a", ".b"].
+func TestFlintChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preFlint}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Digits group from the left in threes, remainder last.
+		{"1234", []string{"123", "4"}},
+		{"a1234b", []string{"a", "123", "4", "b"}},
+		// The leading character absorbs a period; the letter rule then splits on case.
+		{"a.b", []string{"a", ".b"}},
+		{"helloWorld", []string{"hello", "World"}},
+		{"HelloWorld", []string{"Hello", "World"}},
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"don't", []string{"don't"}},
+		{"x=42", []string{"x", "=", "42"}},
+		{"中文测试", []string{"中文测试"}},
+		{" x \n y ", []string{" x", " \n", " y", " "}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	path := gguftest.Model{Pre: "flint", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	real, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !real.PreImplemented() {
+		t.Error("flint is not reported as implemented")
 	}
 }

@@ -460,6 +460,20 @@ uv run --with numpy python3 scripts/hf_to_gguf.py ./Qwen2.5-0.5B-Instruct /tmp/q
 QWEN2_MODEL=/tmp/qwen2-f32.gguf go test ./internal/llama/ -run Qwen2
 ```
 
+The mixture-of-experts path has the same treatment, on a small public MoE checkpoint.
+Set `MIXTRAL_MODEL` to run it:
+
+```bash
+MIXTRAL_MODEL=/tmp/tinymixtral.gguf go test ./internal/llama/ -run TestMoEReachesTheExperts
+```
+
+Worth knowing before judging that run: a file whose weights were never trained produces
+a flat next-token distribution -- one measured at p(argmax) = 0.0003 against 0.26 for a
+trained checkpoint -- so its output is gibberish whatever the implementation does. The
+test therefore asserts that zeroing the experts changes the logits, which is a statement
+about the code, rather than that the text reads well, which would be a statement about
+the file.
+
 ## Performance Expectations
 
 Orbix is a learning project, and it is honest about where it stands:

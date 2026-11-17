@@ -331,3 +331,69 @@ func TestMoEPrefillProducesFiniteLogits(t *testing.T) {
 		}
 	}
 }
+
+// TestMoEReachesTheExpertsOnARealModel runs the grouped-expert path on an actual checkpoint
+// rather than a constructed one.
+//
+// The fixture tests above check the router's arithmetic and that a constructed MoE model
+// produces finite logits, but a constructed model's tensors are all the same shape and its
+// routing may land on one expert everywhere. This one loads a real mixture-of-experts file, so
+// the shapes, the stacked expert tensors, and the per-expert split all come from something
+// that was written by a converter rather than by hand.
+//
+// Gated on MIXTRAL_MODEL because the file is not in the repository. It is the only check
+// here that the MoE path runs end to end on weights nobody on this project produced.
+func TestMoEReachesTheExpertsOnARealModel(t *testing.T) {
+	path := os.Getenv("MIXTRAL_MODEL")
+	if path == "" {
+		t.Skip("set MIXTRAL_MODEL to a mixture-of-experts GGUF file")
+	}
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New(%s): %v", path, err)
+	}
+	cfg := m.Config()
+	if cfg.Experts <= 0 {
+		t.Fatalf("%s loaded with %d experts; it is not a mixture-of-experts file", path, cfg.Experts)
+	}
+	if m.W.Layers[0].router == nil {
+		t.Fatal("an expert model loaded without a router")
+	}
+	for l := range m.W.Layers {
+		layer := &m.W.Layers[l]
+		if got, want := len(layer.expertGate), cfg.Experts; got != want {
+			t.Fatalf("layer %d has %d expert gate tensors, want %d", l, got, want)
+		}
+	}
+
+	run := func() []float32 {
+		cache, err := NewKVCache(cfg, min(cfg.ContextLen, 256))
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		logits, err := m.Prefill(cache, fixtureTokens(cfg, 4), 0)
+		if err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		return append([]float32(nil), logits...)
+	}
+
+	before := run()
+	for l := range m.W.Layers {
+		layer := &m.W.Layers[l]
+		for e := range layer.expertGate {
+			clear(layer.expertGate[e])
+			clear(layer.expertUp[e])
+			clear(layer.expertDown[e])
+		}
+	}
+	after := run()
+
+	for i := range before {
+		if before[i] != after[i] {
+			return // the experts are consulted, which is what this asserts
+		}
+	}
+	t.Error("zeroing every expert left the logits unchanged, so this file's experts are " +
+		"not being run")
+}

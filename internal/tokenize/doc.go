@@ -30,15 +30,19 @@
 // before merging. tokenizer.ggml.pre names the cut, and llama.cpp recognises about a hundred
 // names for it.
 //
-// Five are implemented here: qwen2, llama-bpe, gpt-2, starcoder, and deepseek-v3. The first
-// four were chosen because they cover the models this project has been run against; the
-// fifth was taken next because it is the first that does not fit their shape. Families share
-// a template -- contractions, a letter run, a digit run, a punctuation run, whitespace -- and
-// differ in a handful of choices, so the choices are data in preRule rather than a function
-// each. deepseek-v3 stays within that: its letter class includes combining marks, its
-// punctuation alternative names the categories instead of their complement, its leading
-// character excludes punctuation, and it runs a digit-group and a CJK expression before the
-// main rule. What it added to preRule was fields, not a second code path.
+// Six are implemented here: qwen2, llama-bpe, gpt-2, starcoder, deepseek-v3, and tekken. The
+// first four were chosen because they cover the models this project has been run against;
+// the next two because each added a dimension the others did not have. Families share a
+// template -- contractions, a letter run, a digit run, a punctuation run, whitespace -- and
+// differ in choices, so the choices are data in preRule rather than a function each.
+//
+// deepseek-v3 brought a letter class that includes combining marks, a punctuation
+// alternative naming categories instead of their complement, and a digit-group and CJK
+// expression ahead of the main rule. tekken brought structure *inside* the letter run: a run
+// is cut where a lower-case letter is followed by an upper-case one, so "camelCase" is two
+// chunks while "HTTPServer" -- a capital run with its trailing word -- stays one. Both added
+// fields to preRule and neither needed a second code path, which is the test the
+// parameterisation was built to pass.
 //
 // Everything else splits as one chunk. That is the correct answer for a file naming nothing
 // and for one naming "default", because llama.cpp applies no expression in those cases

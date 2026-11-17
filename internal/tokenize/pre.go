@@ -174,6 +174,9 @@ type preRule struct {
 	// newlinesAfterPunct is whether a punctuation run may absorb the newlines that follow
 	// it. qwen2 does; gpt-2 ends the chunk at the punctuation.
 	newlinesAfterPunct bool
+	// punctSlashTail is whether the punctuation run also absorbs following slashes, which is
+	// tekken's "[\r\n/]*" tail. It only applies together with newlinesAfterPunct.
+	punctSlashTail bool
 	// newlineChunk is whether the expression has a "\s*[\r\n]+" alternative: a newline
 	// with the spaces before it as one chunk. The GPT-2 expression has no such rule, so a
 	// newline there falls through to the whitespace alternative and groups differently.
@@ -194,6 +197,15 @@ type preRule struct {
 	// so it belongs to the run under either spelling; a combining mark is neither, so the
 	// complement form swallows it and the category form does not.
 	punctIsCategory bool
+	// caseSplit is whether a letter run is cut where a lower-case letter is followed by an
+	// upper-case one, which is the tekken (GPT-4o) rule.
+	//
+	// The expression spells it as two lookahead-guarded alternatives, but the effect is a
+	// boundary rule: a run of capitals may take one trailing lower-case stretch
+	// ("HTTPServer" stays whole), and a lower-case run ends where a capital begins
+	// ("camelCase" splits). Writing it as a boundary is what makes it one check inside the
+	// letter loop instead of a second copy of the letter rule.
+	caseSplit bool
 	// punctLetterRun is whether the expression's first alternative is
 	// "[!-/:-@\\[-`{-~][A-Za-z]+": one ASCII punctuation character followed by a run of
 	// ASCII letters, as a single chunk.
@@ -254,6 +266,17 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// chunk before the main rule runs. starcoder, refact, command-r, smollm, and the
 		// others llama.cpp groups with them all mean exactly this.
 		return preRule{digits: 0, lead: leadSpace, preDigits: 1}, true
+	case preTekken:
+		// "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+"
+		// "|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*"
+		// "|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+		//
+		// The letter alternatives cut at a lower-to-upper boundary; the punctuation tail takes
+		// slashes as well as newlines.
+		return preRule{
+			digits: 1, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
+			newlinesAfterPunct: true, punctSlashTail: true, newlineChunk: true,
+		}, true
 	case preDeepseek3:
 		// Three expressions in sequence:
 		//   \p{N}{1,3}
@@ -408,12 +431,23 @@ func letterRunLen(s string, fam preRule) int {
 		return 0
 	}
 	start := i
+	// prevLower records whether the previous letter was lower case, which is what the
+	// boundary test needs.
+	prevLower := false
 	for i < len(s) {
 		if isLetterAt(s[i:]) {
+			r, _ := utf8.DecodeRuneInString(s[i:])
+			// The boundary is a lower-to-upper transition. A capital after a capital does
+			// not split, which is why a run of capitals keeps its trailing word.
+			if fam.caseSplit && prevLower && unicode.IsUpper(r) {
+				break
+			}
+			prevLower = unicode.IsLower(r)
 			i += runeLenAt(s[i:])
 			continue
 		}
 		if fam.letterMarks && isMarkAt(s[i:]) {
+			// A mark does not reset the case state: it belongs to the letter before it.
 			i += runeLenAt(s[i:])
 			continue
 		}
@@ -459,6 +493,11 @@ func punctRunLen(s string, fam preRule) int {
 	if fam.newlinesAfterPunct {
 		for i < len(s) && isNewlineAt(s[i:]) {
 			i += runeLenAt(s[i:])
+		}
+	}
+	if fam.punctSlashTail {
+		for i < len(s) && s[i] == '/' {
+			i++
 		}
 	}
 	return i

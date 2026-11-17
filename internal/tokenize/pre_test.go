@@ -395,7 +395,8 @@ func TestPreTokenizerStates(t *testing.T) {
 		{"starcoder", true, true, "implemented"},
 		{"deepseek-v3", true, true, "implemented"},
 		{"hunyuan-dense", true, true, "same rule as deepseek-v3"},
-		{"tekken", false, true, "a real family, not implemented here"},
+		{"tekken", true, true, "implemented"},
+		{"gpt-4o", true, true, "same rule as tekken"},
 		{"llama4", false, true, "a real family, not implemented here"},
 		{"qwen-2", false, false, "a typo: not a family name at all"},
 		{"QWEN2", false, false, "the names are case-sensitive"},
@@ -491,5 +492,67 @@ func TestDeepseek3DiffersFromQwen2InPunctuation(t *testing.T) {
 	}
 	if got, want := qw.preSplit("x=42"), []string{"x", "=", "4", "2"}; !sameStrings(got, want) {
 		t.Errorf("qwen2 preSplit(\"x=42\") = %q, want %q", got, want)
+	}
+}
+
+// The tekken family is GPT-4o's, and it is the first whose letter rule has internal
+// structure: a run is cut at a lower-to-upper case boundary.
+//
+// The subtlety is which side takes the trailing lower-case stretch. A run of capitals keeps
+// one ("HTTPServer" is one chunk), so the rule is not "split camel case" -- it is a boundary
+// that only fires when a lower-case letter is followed by an upper-case one.
+func TestTekkenChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preTekken}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"HelloWorld", []string{"Hello", "World"}},
+		{"camelCase", []string{"camel", "Case"}},
+		{"abcDEFghi", []string{"abc", "DEFghi"}},
+		// A run of capitals keeps its trailing word, so these do not split.
+		{"HTTPServer", []string{"HTTPServer"}},
+		{"ABCdef", []string{"ABCdef"}},
+		{"HELLO", []string{"HELLO"}},
+		// But a capital after a lower-case letter does.
+		{"HTTPServerX", []string{"HTTPServer", "X"}},
+		{"aB", []string{"a", "B"}},
+		// Single digits, and the punctuation tail that takes slashes.
+		{"123456", []string{"1", "2", "3", "4", "5", "6"}},
+		{"a/b", []string{"a", "/b"}},
+		{"a//b", []string{"a", "//", "b"}},
+		{"x!\n/", []string{"x", "!\n/"}},
+		// The ordinary prefix behaviour still applies to punctuation.
+		{"a.b", []string{"a", ".b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("tekken preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestTekkenCaseSplitNeedsLowerBeforeUpper is the boundary rule stated as a property: a
+// capital preceded by a capital must not start a new chunk, and a capital preceded by a
+// lower-case letter must.
+func TestTekkenCaseSplitNeedsLowerBeforeUpper(t *testing.T) {
+	tok := &Tokenizer{pre: preTekken}
+	for _, c := range []struct {
+		in   string
+		want int
+		why  string
+	}{
+		{"ABCD", 1, "all capitals"},
+		{"ABCDef", 1, "capitals then a word"},
+		{"aBCD", 2, "a lower-case letter then capitals"},
+		// "Bc" is the capital run with its trailing word; the following "D" starts a new
+		// chunk because "c" is lower case. Verified against a reference implementation of
+		// the expression rather than reasoned out -- the first expectation here was 2.
+		{"aBcD", 3, "a, the capital run Bc, then D"},
+	} {
+		if got := len(tok.preSplit(c.in)); got != c.want {
+			t.Errorf("tekken preSplit(%q) gave %d chunks, want %d (%s)",
+				c.in, got, c.want, c.why)
+		}
 	}
 }

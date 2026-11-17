@@ -100,6 +100,9 @@ const (
 	// three, a CJK run, then a main rule whose letter class includes combining marks and
 	// whose punctuation alternative names the categories rather than their complement.
 	preDeepseek3
+	// preTekken is the GPT-4o rule: a letter run cut at a lower-to-upper case boundary, single
+	// digits, and a punctuation tail that absorbs slashes as well as newlines.
+	preTekken
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -349,6 +352,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preStarCoder
 		case "deepseek-v3", "hunyuan-dense", "joyai-llm", "hy_v4":
 			t.pre = preDeepseek3
+		case "tekken", "gpt-4o", "nemotron-3.5-embed":
+			t.pre = preTekken
 		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2":
 			t.pre = preLlama3
 			// A whole chunk that the vocabulary already spells as one piece is taken as

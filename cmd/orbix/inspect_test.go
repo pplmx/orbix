@@ -23,8 +23,9 @@ func TestInspectReportsPreTokenizer(t *testing.T) {
 		{"qwen2", "implemented"},
 		{"default", "implemented"},
 		{"deepseek-v3", "implemented"},
+		{"tekken", "implemented"},
 		// Still unimplemented: the warning path needs a family that really is missing.
-		{"tekken", "NOT implemented"},
+		{"llama4", "NOT implemented"},
 		{"qwen-2", "NOT a name this package knows"},
 	}
 	for _, c := range cases {

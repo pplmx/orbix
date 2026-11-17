@@ -95,6 +95,11 @@ type sequence struct {
 	// an event carries its own provenance instead of relying on when it was read.
 	round int
 
+	// abandoned is set when an event could not be delivered because the caller is no
+	// longer reading. The engine stops advancing the sequence and releases its blocks
+	// instead of blocking on a channel nobody drains.
+	abandoned bool
+
 	// reqSpan is the request's trace span, or the zero value when tracing is off. It is
 	// finished when the sequence ends, which is why it travels with the sequence rather
 	// than being recorded at Submit: a span has to cover the whole request, not just its
@@ -380,10 +385,36 @@ func (e *Engine) Pump() int {
 		e.decode(batch)
 	}
 
+	// Phase 3: retire anything abandoned during the round. A sequence whose caller stopped
+	// reading was skipped above, and finishing it here is what releases its blocks and
+	// drops it from active -- without this it would stay counted forever and the caller's
+	// loop would never see Pump reach zero.
+	e.reapAbandoned()
+
 	e.mu.Lock()
 	n := len(e.active)
 	e.mu.Unlock()
 	return n
+}
+
+// reapAbandoned finishes every sequence whose events could not be delivered.
+//
+// The finish is marked with an error rather than a normal completion: the caller is gone,
+// so nobody reads it, but a trace still records why the request ended and a test that
+// inspects the channel sees a definite outcome instead of a truncated stream.
+func (e *Engine) reapAbandoned() {
+	e.mu.Lock()
+	var gone []*sequence
+	for _, s := range e.active {
+		if s.abandoned {
+			gone = append(gone, s)
+		}
+	}
+	e.mu.Unlock()
+	for _, s := range gone {
+		e.finish(s, Event{Done: true, FinishReason: "abandoned",
+			Err: fmt.Errorf("engine: caller stopped reading events")})
+	}
 }
 
 // pending is one sequence's participation in a batched decode.
@@ -444,7 +475,9 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 	e.mu.Lock()
 	e.tokensGenerated++
 	e.mu.Unlock()
-	s.events <- Event{Token: tok, HasToken: true, Round: s.round}
+	if !s.emit(Event{Token: tok, HasToken: true, Round: s.round}) {
+		return 0, false
+	}
 
 	if s.pos >= cfg.ContextLen {
 		e.finish(s, Event{Done: true, FinishReason: "length"})
@@ -481,6 +514,26 @@ func (e *Engine) decode(batch []pending) {
 		if len(p.s.out) >= p.s.req.MaxTokens {
 			e.finish(p.s, Event{Done: true, FinishReason: "length"})
 		}
+	}
+}
+
+// emit delivers one event without blocking.
+//
+// A blocking send looks correct in a test that always drains the channel and stalls the
+// whole engine in production, where a caller can stop reading: the HTTP handler returns as
+// soon as the response fails to write, and a disconnected client means nothing drains the
+// rest. The buffer absorbs a burst, and once it is full the sequence is abandoned rather
+// than waited on. Pump is a shared loop -- one stalled sequence stops every other request
+// from advancing -- so it must never block on a per-request channel.
+//
+// Returning false means the events were not delivered and the sequence is finished with.
+func (s *sequence) emit(ev Event) bool {
+	select {
+	case s.events <- ev:
+		return true
+	default:
+		s.abandoned = true
+		return false
 	}
 }
 
@@ -541,7 +594,9 @@ func (e *Engine) finish(s *sequence, last Event) {
 		}
 	}
 	if last.Err != nil || last.Done {
-		s.events <- last
+		// Best effort, like every other event: the caller may have stopped reading, and
+		// this call must not be the thing that stalls the shared pump.
+		s.emit(last)
 	}
 	close(s.events)
 }

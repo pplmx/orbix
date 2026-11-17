@@ -2,6 +2,7 @@ package engine
 
 import (
 	"testing"
+	"time"
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -760,5 +761,73 @@ func TestRenderChatPrompt(t *testing.T) {
 	// prompt-only request needs.
 	if got, want := RenderChatPrompt(nil), "Assistant:"; got != want {
 		t.Errorf("RenderChatPrompt(nil) = %q, want %q", got, want)
+	}
+}
+
+// TestUnreadEventsDoNotStallPump checks the engine survives a caller that stops reading.
+//
+// The event sends used to block. A test that drains the channel never notices, but the HTTP
+// handlers return as soon as the response cannot be written -- a disconnected client, or an
+// error path that reports and stops -- and nothing drains the rest. Pump is a loop shared by
+// every request in the server, so one stalled sequence stops all of them: the whole process
+// keeps accepting connections and generating nothing.
+//
+// The buffer absorbs 64 events, so this asks for more than that and never reads.
+func TestUnreadEventsDoNotStallPump(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{MaxActive: 1})
+	if _, err := e.Submit(Request{
+		Prompt:    tok.Encode("Once upon a time", true),
+		MaxTokens: 200,
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e.Pump() > 0 {
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Pump blocked on a channel nobody reads")
+	}
+	// The abandoned sequence must also be retired, or Active never reaches zero and the
+	// server's pump loop never idles.
+	if n := e.Active(); n != 0 {
+		t.Errorf("Active() = %d after the pump drained, want 0", n)
+	}
+}
+
+// TestReadingConsumerReceivesEveryToken is the other half: abandoning is for callers that
+// have gone, and a caller that is merely slower than the pump must still get everything.
+func TestReadingConsumerReceivesEveryToken(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{MaxActive: 1})
+	const want = 100
+	ch, err := e.Submit(Request{
+		Prompt:    tok.Encode("Once upon a time", true),
+		MaxTokens: want,
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	var got int
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for ev := range ch {
+			if ev.HasToken {
+				got++
+			}
+		}
+	}()
+	for e.Active() > 0 {
+		e.Pump()
+	}
+	<-finished
+	if got != want {
+		t.Errorf("read %d tokens, want %d", got, want)
 	}
 }

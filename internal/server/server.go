@@ -446,7 +446,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 	id := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
 	if p.stream {
-		s.streamResponse(w, r, ch, id, p.chat)
+		s.streamResponse(w, r, ch, id, p.chat, p.stop)
 		return
 	}
 	s.blockingResponse(w, r, ch, id, p, promptTokens)
@@ -479,6 +479,16 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 		}
 	}
 	text := s.tok.DecodeCompletion(out)
+	// A stop string is text, and generation halts where it would appear. OpenAI's API takes
+	// strings, and a string need not be one token: " Paris" encodes as a space token
+	// followed by the word's own. stopTokenIDs can only hand the engine a single token, so
+	// the engine-side check cannot express this -- and taking the first token of a
+	// multi-token string is actively wrong, since the space token then stops every sequence
+	// at its first space and the response comes back empty.
+	if cut, found := cutAtStop(text, p.stop); found {
+		text = cut
+		reason = "stop"
+	}
 
 	usage := map[string]int{
 		"prompt_tokens":     len(promptTokens),
@@ -520,7 +530,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 }
 
 // streamResponse writes server-sent events, one per token.
-func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, chat bool) {
+func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, chat bool, stop []string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this connection")
@@ -558,6 +568,9 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 
 	dec := s.tok.Seq()
 	reason := "stop"
+	// seen is the text already handed to the client, kept only when a stop string has to
+	// be matched against it.
+	seen := ""
 	for ev := range ch {
 		if ev.Err != nil {
 			// The response has already started, so a status code is no longer
@@ -572,6 +585,29 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 			text := dec.Token(ev.Token)
 			if text == "" {
 				continue
+			}
+			// A stop string has to be applied to the stream as well as to the whole body.
+			// The engine only knows about single tokens, so the check is on the text
+			// accumulated so far: it can only be recognised once the rune that completes it
+			// arrives, which is exactly when the client should stop seeing output.
+			if len(stop) > 0 {
+				before := seen
+				seen += text
+				if kept, found := cutAtStop(seen, stop); found {
+					// Output up to the stop string is still the client's; the stop and
+					// anything after it are not. Only the part that arrived with this chunk
+					// is unsent, so it is what may still need sending.
+					if tail := kept[min(len(kept), len(before)):]; tail != "" {
+						if !send(chunkPayload(chat, tail)) {
+							return
+						}
+					}
+					// The sequence is still running; its context drives it to completion
+					// unread, which is what the engine does for a client that stopped
+					// reading. What changes here is only what this response reports.
+					reason = "stop"
+					break
+				}
 			}
 			if !send(chunkPayload(chat, text)) {
 				// The client went away. Its context is cancelled, so the engine
@@ -642,13 +678,41 @@ func (s *Server) sampler(temp *float64, topK int) (llama.Sampler, error) {
 	return temperatureSampler{temp: float32(t), topK: topK, src: r}, nil
 }
 
-// stopTokenIDs maps stop strings onto token ids.
+// stopTokenIDs maps stop strings onto token ids for the engine's early-out.
 //
-// The engine stops on token ids, not strings, so a stop string is encoded and only
-// its first token is used: a multi-token stop string would need prefix matching on
-// the decoded text, which is the server's job and not the engine's. Encoding to one
-// token covers the common cases ("\n", "###", a newline-terminated marker) and the
-// limitation is documented rather than hidden.
+// Only a string that encodes to exactly one token is passed on. The engine stops on a
+// token id, so a multi-token string cannot be expressed there, and using its first token
+// is worse than not passing it at all: " Paris" encodes as a space token followed by the
+// word, so the space token fires at the first space of the reply and the response comes
+// back empty. Every stop string is handled correctly regardless, by cutting the decoded
+// text in cutAtStop.
+//
+// The engine-side check is an optimisation: it ends generation a round earlier for the
+// single-token cases ("\n", "###") and costs nothing when it does not apply.
+// cutAtStop returns text up to the first stop string, and whether one was found.
+//
+// The earliest match wins: a client passing several stop strings expects generation to end
+// at whichever appears first in the output, not at whichever was listed first.
+func cutAtStop(text string, stop []string) (string, bool) {
+	cut := -1
+	for _, s := range stop {
+		if s == "" {
+			continue
+		}
+		i := strings.Index(text, s)
+		if i < 0 {
+			continue
+		}
+		if cut < 0 || i < cut {
+			cut = i
+		}
+	}
+	if cut < 0 {
+		return text, false
+	}
+	return text[:cut], true
+}
+
 func (s *Server) stopTokenIDs(stop []string) []int32 {
 	var ids []int32
 	for _, text := range stop {
@@ -656,7 +720,8 @@ func (s *Server) stopTokenIDs(stop []string) []int32 {
 			continue
 		}
 		enc := s.tok.Encode(text, false)
-		if len(enc) == 0 {
+		// Exactly one token, not at least one: the engine can only match that.
+		if len(enc) != 1 {
 			continue
 		}
 		ids = append(ids, enc[0])

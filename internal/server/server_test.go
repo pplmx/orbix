@@ -402,27 +402,23 @@ func TestModelsAndHealth(t *testing.T) {
 }
 
 func TestStopStringStops(t *testing.T) {
-	srv, tok := newTestServer(t)
-	// Learn the greedy continuation, then stop on a token it contains.
-	resp := post(t, srv.Handler(), "/v1/completions", `{"prompt": "Once upon a time", "max_tokens": 8}`)
-	plain := decodeBody[completionResponse](t, resp)
-	full := plain.Choices[0].Text
-	if len(full) < 4 {
-		t.Skipf("continuation %q is too short to pick a stop from", full)
+	srv, _ := newTestServer(t)
+
+	// Learn what the fixture generates, then stop on a piece of it. The fixture's weights
+	// are random, so the text is arbitrary -- but it is deterministic, which is all this
+	// needs: the assertions are about where generation ends, not about what it says.
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 8}`)
+	full := decodeBody[completionResponse](t, resp).Choices[0].Text
+	if len([]rune(full)) < 2 {
+		t.Skipf("continuation %q is too short to cut", full)
 	}
-	// Pick a single-token stop string from the middle of the continuation.
-	var stopText string
-	for _, tokText := range strings.SplitAfter(full, " ") {
-		if tokText == "" {
-			continue
-		}
-		if ids := tok.Encode(tokText, false); len(ids) == 1 {
-			stopText = tokText
-			break
-		}
-	}
-	if stopText == "" {
-		t.Skip("could not find a single-token stop string in the continuation")
+
+	// A stop string of one rune, which may or may not be one token. Either way cutAtStop
+	// has to find it in the decoded text, and the token-id path is irrelevant.
+	stopText := string([]rune(full)[1])
+	if strings.ContainsRune(full[:strings.Index(full, stopText)], '\x00') {
+		t.Skipf("continuation %q has a NUL before the cut point", full)
 	}
 
 	body := `{"prompt": "Once upon a time", "max_tokens": 30, "stop": ` + quoteJSON(stopText) + `}`
@@ -433,6 +429,48 @@ func TestStopStringStops(t *testing.T) {
 	}
 	if strings.Contains(stopped.Choices[0].Text, stopText) {
 		t.Errorf("output %q contains the stop string %q", stopped.Choices[0].Text, stopText)
+	}
+	if want := strings.TrimSuffix(full[:strings.Index(full, stopText)+len(stopText)], stopText); stopped.Choices[0].Text != want {
+		t.Errorf("output = %q, want %q: generation should stop where the string would start",
+			stopped.Choices[0].Text, want)
+	}
+}
+
+// TestMultiTokenStopString covers a stop string that is not one token, which the engine
+// cannot match and used to be reduced to its first token.
+//
+// " Paris" encodes as a space token followed by the word's own, so taking the first token
+// meant stopping at the first space of any reply: the request returned an empty string with
+// finish_reason "stop", which looks like a successful truncation and is the opposite.
+func TestMultiTokenStopString(t *testing.T) {
+	srv, tok := newTestServer(t)
+	// Confirm the premise, so this fails loudly if the fixture's tokenizer changes and the
+	// string stops being multi-token -- the test would otherwise pass for the wrong reason.
+	if enc := tok.Encode(" the", false); len(enc) < 2 {
+		t.Skipf("\" the\" encodes to %v, so there is no multi-token case to test", enc)
+	}
+
+	// Generate once to learn the text, then ask for the same prompt with a stop string
+	// built from it that spans more than one token.
+	first := decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time there was", "max_tokens": 10}`)).Choices[0].Text
+	if len([]rune(first)) < 3 {
+		t.Skipf("continuation %q is too short", first)
+	}
+	// Take a run of several runes from the start; whatever it is, it must cut the text.
+	stopText := string([]rune(first)[:3])
+
+	stopped := decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time there was", "max_tokens": 20, "stop": `+quoteJSON(stopText)+`}`))
+	if stopped.Choices[0].FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", stopped.Choices[0].FinishReason)
+	}
+	if strings.Contains(stopped.Choices[0].Text, stopText) {
+		t.Errorf("output %q still contains the stop string %q", stopped.Choices[0].Text, stopText)
+	}
+	if stopped.Choices[0].Text != "" && !strings.HasPrefix(first, stopped.Choices[0].Text+stopText) {
+		t.Errorf("output %q is not the prefix of %q that precedes %q",
+			stopped.Choices[0].Text, first, stopText)
 	}
 }
 
@@ -1072,5 +1110,59 @@ func TestChatCompletionRejectsOverlongConversation(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d for a conversation larger than the context, want 400",
 			resp.StatusCode)
+	}
+}
+
+// TestStreamingRespectsStopStrings checks that a stop string truncates a stream too.
+//
+// Only the blocking path applied stop strings; the streaming one did not look at them at
+// all. A client that asked to stop at a phrase got the phrase and everything after it, so
+// the two endpoints disagreed about what the same request means.
+//
+// The check is on accumulated text rather than a token id because the engine only knows
+// single tokens: the rune that completes a stop string can be the second token of it, so the
+// decision is made once the text is complete and only the part before the match is sent.
+func TestStreamingRespectsStopStrings(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// The fixture's output is deterministic but arbitrary, and it contains NUL bytes, which
+	// cannot travel through a stop string. Find a run of two printable runes to stop on and
+	// confirm with the blocking endpoint that it occurs -- that endpoint had the behaviour
+	// first, so it is the reference the stream has to match.
+	full := decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 8}`)).Choices[0].Text
+	runes := []rune(full)
+	start := -1
+	for i := 0; i+2 <= len(runes); i++ {
+		if runes[i] != 0 && runes[i+1] != 0 && i > 0 {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Skipf("continuation %q has no run of two printable runes after the first", full)
+	}
+	stopText := string(runes[start : start+2])
+
+	blocking := decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 20, "stop": `+quoteJSON(stopText)+`}`))
+	if blocking.Choices[0].FinishReason != "stop" {
+		t.Fatalf("the blocking endpoint did not stop on %q either, so it is not a usable "+
+			"reference: %+v", stopText, blocking.Choices[0])
+	}
+	if strings.Contains(blocking.Choices[0].Text, stopText) {
+		t.Fatalf("the blocking endpoint kept the stop string in %q", blocking.Choices[0].Text)
+	}
+
+	streamed := collectStream(t, post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 20, "stream": true, "stop": `+
+			quoteJSON(stopText)+`}`).Body)
+
+	if strings.Contains(streamed, stopText) {
+		t.Errorf("the streamed text %q contains the stop string %q", streamed, stopText)
+	}
+	if streamed != blocking.Choices[0].Text {
+		t.Errorf("the stream produced %q and the blocking endpoint %q for the same request",
+			streamed, blocking.Choices[0].Text)
 	}
 }

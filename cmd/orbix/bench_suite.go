@@ -46,6 +46,13 @@ type result struct {
 	// number the policies exist to change, since they reorder a fixed amount of work
 	// rather than reduce it.
 	firstToken time.Duration
+	// firstRound is the engine round in which the measured request first produced a
+	// token, for the scenarios whose property is ordering rather than speed.
+	//
+	// The wall time is printed too, but it is the wrong thing to assert on: on a fast
+	// model two policies differ by a few milliseconds and the comparison comes down to
+	// which goroutine woke first. A round is a property of the schedule.
+	firstRound int
 	// earlyStops counts requests that ended before their token budget because the model
 	// emitted an end-of-sequence token. Without it a row can print fewer tokens than its
 	// neighbours for a reason the table does not explain, which reads like a bug in the
@@ -373,6 +380,7 @@ func runPolicy(o suiteOptions, policy engine.Priority) (result, error) {
 		// time is dominated by the long request, which every policy must also serve, so
 		// it says nothing about the policy.
 		firstToken: st.latency,
+		firstRound: st.round,
 		extra:      fmt.Sprintf("short request's first token on round %d", st.round),
 	}, nil
 }

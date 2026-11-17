@@ -130,10 +130,14 @@ func TestSuitePolicyPairsDiffer(t *testing.T) {
 			fifo = res
 		}
 	}
-	t.Logf("shortest first token %v, fifo %v", shortest.firstToken, fifo.firstToken)
-	if shortest.firstToken >= fifo.firstToken {
-		t.Errorf("shortest served the short request in %v and fifo in %v; shortest must be faster",
-			shortest.firstToken, fifo.firstToken)
+	// Compare the round the short request first ran, not the wall time. Two policies
+	// reordering the same work differ by a few milliseconds on a small model, and a
+	// millisecond comparison then measures which goroutine woke first -- this assertion
+	// failed one run in six before the round was used instead.
+	t.Logf("shortest first round %d, fifo %d", shortest.firstRound, fifo.firstRound)
+	if shortest.firstRound >= fifo.firstRound {
+		t.Errorf("shortest served the short request on round %d and fifo on round %d; "+
+			"shortest must reach it sooner", shortest.firstRound, fifo.firstRound)
 	}
 }
 

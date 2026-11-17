@@ -203,26 +203,52 @@ func isFalconPunctAt(s string) bool {
 
 // splitThreeDigitRuns cuts each run of digits into groups of three, keeping any remainder.
 func splitThreeDigitRuns(text string) []string {
+	// The expression is [0-9][0-9][0-9]: only a run of at least three digits matches. Text
+	// with fewer -- a lone "5", or "45" -- is gap text, and gap text joins the piece before
+	// it rather than standing alone, which is why " 5" stays whole where " 1234" gives
+	// [" ", "123", "4"] and "1234" gives ["123", "4"].
 	var out []string
+	// gap is text carried forward to attach to the next thing emitted.
+	gap := ""
 	i := 0
 	for i < len(text) {
 		if !isDigitAt(text[i:]) {
-			// Everything up to the next digit stays together: the expression only matches
-			// digit triples, so text it does not match is left as one piece.
 			start := i
 			for i < len(text) && !isDigitAt(text[i:]) {
 				i += runeLenAt(text[i:])
 			}
-			out = append(out, text[start:i])
+			gap += text[start:i]
 			continue
 		}
-		start := i
-		count := 0
-		for i < len(text) && isDigitAt(text[i:]) && count < 3 {
-			i += runeLenAt(text[i:])
-			count++
+		j, n := i, 0
+		for j < len(text) && isDigitAt(text[j:]) {
+			j += runeLenAt(text[j:])
+			n++
 		}
-		out = append(out, text[start:i])
+		if n < 3 {
+			gap += text[i:j]
+			i = j
+			continue
+		}
+		// A leading gap that is only whitespace stays separate: the reference emits " " on
+		// its own before "123" for " 1234". Anything else joins the first triple.
+		if gap != "" && strings.TrimSpace(gap) == "" {
+			out = append(out, gap)
+			gap = ""
+		}
+		for k := 0; k < n; k += 3 {
+			next := min(k+3, n)
+			chunk := text[i+k : i+next]
+			if gap != "" {
+				chunk = gap + chunk
+				gap = ""
+			}
+			out = append(out, chunk)
+		}
+		i = j
+	}
+	if gap != "" {
+		out = append(out, gap)
 	}
 	return out
 }

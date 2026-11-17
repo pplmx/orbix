@@ -154,3 +154,79 @@ func TestPrefixCacheNeedsABlockPool(t *testing.T) {
 		t.Errorf("error %q does not say what the flag needs", msg)
 	}
 }
+
+// TestServeRejectsFlagCombinationsThatCannotWork covers three settings that used to be
+// accepted and then quietly ignored.
+//
+// All three share a shape: a flag that only makes sense with another, or a value the code
+// treats as "unset". Nothing failed, the server started, and the startup log described
+// something other than what was asked for -- so the operator had no way to tell that the
+// flag had done nothing.
+func TestServeRejectsFlagCombinationsThatCannotWork(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+		why  string
+	}{
+		{
+			name: "block size without a pool",
+			args: []string{"--block-size", "32"},
+			want: "--blocks",
+			why:  "the contiguous cache stayed in place, reserving 8 GB per request on a 128k-context model",
+		},
+		{
+			name: "negative backlog",
+			args: []string{"--max-queued", "-1"},
+			want: "negative",
+			why:  "anything <= 0 falls back to 8x --max-active, so -1 became 64 and looked configured",
+		},
+		{
+			name: "otlp endpoint that is not a URL",
+			args: []string{"--otlp-endpoint", "not-a-url"},
+			want: "http",
+			why:  "the exporter is built and every send fails, dropping every span into the counter",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args := append([]string{"--model", "unused.gguf"}, c.args...)
+			err := cmdServe(args)
+			if err == nil {
+				t.Fatalf("cmdServe accepted %v; %s", c.args, c.why)
+			}
+			// The message has to name the problem, not merely report that opening the model
+			// failed -- which is what a validation running too late would produce, and what a
+			// test looking only for a non-nil error would accept.
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not mention %q", err, c.want)
+			}
+			if strings.Contains(err.Error(), "unused.gguf") {
+				t.Errorf("error %q came from opening the model, so the flag was not validated",
+					err)
+			}
+		})
+	}
+}
+
+// TestServeAcceptsTheFlagCombinationsThatDoWork checks the other side, so the validation
+// above cannot pass by rejecting everything.
+func TestServeAcceptsTheFlagCombinationsThatDoWork(t *testing.T) {
+	// No checkpoint is available here, so a combination that passes validation fails on the
+	// model file. That failure is the signal that the flags were fine: it names the file.
+	cases := [][]string{
+		{"--blocks", "64", "--block-size", "32"},
+		{"--blocks", "64", "--prefix-cache"},
+		{"--max-queued", "0"},
+		{"--otlp-endpoint", "http://localhost:4318"},
+	}
+	for _, args := range cases {
+		err := cmdServe(append([]string{"--model", "unused.gguf"}, args...))
+		if err == nil {
+			continue // would only happen if a model file really were named unused.gguf
+		}
+		if !strings.Contains(err.Error(), "unused.gguf") {
+			t.Errorf("cmdServe(%v) was rejected by validation: %v", args, err)
+		}
+	}
+}

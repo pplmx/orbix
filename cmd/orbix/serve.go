@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -52,6 +53,32 @@ func cmdServe(args []string) error {
 	// attach a previous request's KV to. Accepting the flag without --blocks silently ran a
 	// contiguous server with no reuse, and the startup log said "kv cache: contiguous" with
 	// no mention of the flag at all -- so an operator who passed it believed reuse was on.
+	// A malformed endpoint does not fail the exporter: it is built, every send fails, and the
+	// spans are dropped into the counter. That is the right behaviour for a collector that is
+	// down -- the server must keep serving -- but not for a typo, which would silently disable
+	// the tracing the operator just asked for. Checked here with the other flags, before the
+	// model is opened, so a bad value is reported without loading 8 GB first.
+	if *otlpEndpoint != "" {
+		if u, uerr := url.Parse(*otlpEndpoint); uerr != nil || u.Host == "" ||
+			(u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("serve: --otlp-endpoint %q is not an http(s) URL with a host",
+				*otlpEndpoint)
+		}
+	}
+	// A negative backlog is not a smaller backlog: the reporting below treats anything <= 0
+	// as "unset" and falls back to 8x --max-active, so -1 silently became 64 here. A typo
+	// that produces a valid-looking server is worse than one that stops at the flag.
+	if *maxQueued < 0 {
+		return fmt.Errorf("serve: --max-queued must not be negative (0 means 8x --max-active)")
+	}
+	// --block-size only sets how the pool's blocks are divided; without --blocks there is no
+	// pool to divide. Accepting it alone left the contiguous cache in place, which on a
+	// 128k-context model reserves 8 GB per accepted request -- and the operator who passed a
+	// block size read the resulting "kv cache: contiguous" line as the size they asked for.
+	if *cache.blockSize > 0 && *cache.blocks == 0 {
+		return fmt.Errorf("serve: --block-size needs --blocks; without a pool there are no " +
+			"blocks to size, and each request still reserves a whole context")
+	}
 	if *prefixCache && *cache.blocks == 0 {
 		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
 			"optionally --block-size), or drop --prefix-cache")

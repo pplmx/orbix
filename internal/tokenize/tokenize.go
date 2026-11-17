@@ -384,7 +384,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			"roberta-bpe", "jina-v1-en", "jina-v2-code", "exaone4":
 			t.pre = preGPT2
 		case "starcoder", "refact", "command-r", "smollm", "codeshell", "exaone",
-			"minerva", "mellum2", "minerva-7b":
+			"minerva-7b", "mellum2":
 			t.pre = preStarCoder
 		case "deepseek-v3", "hunyuan-dense", "joyai-llm", "hy_v4":
 			t.pre = preDeepseek3

@@ -861,3 +861,52 @@ func TestGPT4OAliasesAgree(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryHandledNameIsAKnownName checks the switch against the list it is supposed to be
+// a subset of.
+//
+// The two are maintained separately -- knownPreNames is transcribed from llama.cpp's name
+// switch, and the case groups are written by hand -- so a name can appear in one and not the
+// other. That happened: the starcoder group listed "minerva", which llama.cpp does not have,
+// next to the real "minerva-7b". It cost nothing at runtime, because the bogus entry matched
+// nothing and the real name was in the same group, which is exactly why it went unnoticed for
+// several rounds: a dead entry looks like a working one.
+func TestEveryHandledNameIsAKnownName(t *testing.T) {
+	// Every name the tokenizer recognises, discovered the way a user would: by asking what
+	// each known name resolves to.
+	known := make(map[string]bool, len(knownPreNames))
+	for _, n := range knownPreNames {
+		known[n] = true
+	}
+	// The switch's own contents are not exported, so this drives them through New and
+	// checks the names it accepts are ones the list contains.
+	for _, name := range knownPreNames {
+		path := gguftest.Model{Pre: name, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if _, err := New(f); err != nil {
+			t.Fatalf("New(pre=%q): %v", name, err)
+		}
+	}
+	// A name that is not in the list must not be accepted as a family by the switch. The
+	// bogus entry above was an alias, so this catches the shape of the mistake rather than
+	// the exact string: a pre value that resolves to an implemented family has to be one
+	// llama.cpp could actually emit.
+	for _, bogus := range []string{"minerva", "qwen-2", "QWEN2"} {
+		path := gguftest.Model{Pre: bogus, NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New(pre=%q): %v", bogus, err)
+		}
+		if tok.PreImplemented() && !known[bogus] {
+			t.Errorf("%q is treated as an implemented family, but it is not a name llama.cpp "+
+				"maps to one -- it is dead code in the switch", bogus)
+		}
+	}
+}

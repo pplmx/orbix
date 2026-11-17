@@ -283,6 +283,27 @@ func (f *stopField) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// checkModel rejects a request naming a model this server does not serve.
+//
+// An empty name is accepted: the OpenAI clients omit it when built without one, and there is
+// only one model here to mean. A name that does not match is refused rather than ignored,
+// because ignoring it is the failure this check exists for -- a client pointed at the wrong
+// server gets answers from a model it did not ask for, and every response echoes the server's
+// own name back, so nothing in the output reveals the mix-up.
+func (s *Server) checkModel(w http.ResponseWriter, name string) bool {
+	if name == "" || name == s.cfg.ModelName {
+		return true
+	}
+	var body errorBody
+	body.Error.Message = fmt.Sprintf("The model %q does not exist; this server serves %q",
+		name, s.cfg.ModelName)
+	body.Error.Type = "invalid_request_error"
+	body.Error.Param = "model"
+	body.Error.Code = "model_not_found"
+	writeJSON(w, http.StatusNotFound, body)
+	return false
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "model": s.cfg.ModelName})
 }
@@ -306,6 +327,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !s.checkModel(w, req.Model) {
+		return
+	}
 	if len(req.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "messages is required")
 		return
@@ -327,6 +351,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	var req completionRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.checkModel(w, req.Model) {
 		return
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
@@ -750,6 +777,11 @@ type errorBody struct {
 	Error struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
+		// Param names the request field at fault, when one is.
+		Param string `json:"param,omitempty"`
+		// Code is the machine-readable reason, which is what a client branches on. The
+		// OpenAI libraries surface it as e.code and a 404 as a model-not-found error.
+		Code string `json:"code,omitempty"`
 	} `json:"error"`
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -150,11 +151,14 @@ func decodeBody[T any](t *testing.T, resp *http.Response) T {
 
 func TestChatCompletion(t *testing.T) {
 	srv, _ := newTestServer(t)
-	resp := post(t, srv.Handler(), "/v1/chat/completions", `{
-		"model": "orbix",
+	// The model id has to be the one this server serves: a request naming another is
+	// refused, which is what makes a client pointed at the wrong server fail loudly.
+	reqBody := fmt.Sprintf(`{
+		"model": %q,
 		"messages": [{"role": "user", "content": "Once upon a time"}],
 		"max_tokens": 8
-	}`)
+	}`, srv.cfg.ModelName)
+	resp := post(t, srv.Handler(), "/v1/chat/completions", reqBody)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -1164,5 +1168,64 @@ func TestStreamingRespectsStopStrings(t *testing.T) {
 	if streamed != blocking.Choices[0].Text {
 		t.Errorf("the stream produced %q and the blocking endpoint %q for the same request",
 			streamed, blocking.Choices[0].Text)
+	}
+}
+
+// TestUnknownModelIsRefused covers the model field on both endpoints.
+//
+// The field is what an OpenAI client uses to check it is talking to the server it meant to.
+// Ignoring it means a client pointed at the wrong server gets fluent answers from a model it
+// did not ask for, and nothing in the response reveals the mistake -- every field echoes the
+// server's own name, so the output looks exactly like a correct one.
+//
+// An empty name stays acceptable, because the client libraries omit it when they were built
+// without one and there is a single model here to mean.
+func TestUnknownModelIsRefused(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	for _, path := range []string{"/v1/chat/completions", "/v1/completions"} {
+		t.Run(path, func(t *testing.T) {
+			// A name this server does not serve is a 404 with the code the OpenAI clients
+			// branch on.
+			resp := post(t, h, path, `{"model": "not-this-one", "prompt": "hi",
+				"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}`)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", resp.StatusCode)
+			}
+			var out struct {
+				Error struct {
+					Type  string `json:"type"`
+					Param string `json:"param"`
+					Code  string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if out.Error.Code != "model_not_found" {
+				t.Errorf("code = %q, want model_not_found", out.Error.Code)
+			}
+			if out.Error.Param != "model" {
+				t.Errorf("param = %q, want model", out.Error.Param)
+			}
+			if out.Error.Type != "invalid_request_error" {
+				t.Errorf("type = %q, want invalid_request_error", out.Error.Type)
+			}
+
+			// The server's own name and an omitted name both go through. The prompt is
+			// supplied for the completion endpoint and the messages for the chat one, so
+			// both bodies carry the field each handler requires.
+			for _, body := range []string{
+				fmt.Sprintf(`{"model": %q, "prompt": "hi", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}`, srv.cfg.ModelName),
+				`{"prompt": "hi", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}`,
+			} {
+				resp := post(t, h, path, body)
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("body %s: status = %d, want 200", body, resp.StatusCode)
+				}
+				_ = resp.Body.Close()
+			}
+		})
 	}
 }

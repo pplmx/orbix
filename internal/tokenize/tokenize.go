@@ -374,13 +374,15 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			"trillion", "granite-docling":
 			t.pre = preGPT2
 		case "starcoder", "refact", "command-r", "smollm", "codeshell", "exaone",
-			"minerva", "mellum2":
+			"minerva", "mellum2", "minerva-7b":
 			t.pre = preStarCoder
 		case "deepseek-v3", "hunyuan-dense", "joyai-llm", "hy_v4":
 			t.pre = preDeepseek3
 		case "tekken", "gpt-4o", "nemotron-3.5-embed":
 			t.pre = preTekken
-		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2":
+		case "llama-bpe", "llama3", "llama-v3", "falcon3", "falcon-h1", "midm-2.0", "lfm2",
+			// jina-v5-nano is in llama.cpp's llama3 branch, ignore_merges and all.
+			"jina-v5-nano":
 			t.pre = preLlama3
 			// A whole chunk that the vocabulary already spells as one piece is taken as
 			// that piece without merging. Without it a word the vocabulary contains can
@@ -390,7 +392,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 
 		case "whitespace":
 			t.pre = preWhitespace
-		case "bloom", "gpt3-finnish":
+		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
 		case "deepseek-coder":
 			t.pre = preDeepseekCoder

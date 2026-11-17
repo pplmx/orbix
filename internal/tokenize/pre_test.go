@@ -744,3 +744,42 @@ func TestFalconPreTokenizer(t *testing.T) {
 		}
 	}
 }
+
+// TestFamilyAliasesAreEquivalent pins the names llama.cpp groups with a family this package
+// implements but that were missing from the switch.
+//
+// They cost no new logic: jina-v5-nano is in llama.cpp's llama3 branch, minerva-7b is in the
+// branch that applies \p{N} before the GPT-2 expression (starcoder's shape), and poro-chat
+// shares BLOOM's expression exactly. What they need is to be recognised, because a name that
+// falls through to preNone tokenizes as one chunk and says nothing.
+func TestFamilyAliasesAreEquivalent(t *testing.T) {
+	pairs := []struct{ alias, family string }{
+		{"jina-v5-nano", "llama-bpe"},
+		{"minerva-7b", "starcoder"},
+		{"poro-chat", "bloom"},
+	}
+	inputs := []string{"Hello world", "a,b.c", "x1234y", "don't stop", "a  b"}
+	for _, p := range pairs {
+		alias := bpeFixture(t, gguftest.Model{Pre: p.alias})
+		family := bpeFixture(t, gguftest.Model{Pre: p.family})
+		if !alias.PreImplemented() {
+			t.Errorf("%q is not implemented, though llama.cpp maps it to %q", p.alias, p.family)
+			continue
+		}
+		for _, in := range inputs {
+			got, want := alias.preSplit(in), family.preSplit(in)
+			if len(got) != len(want) {
+				t.Errorf("%q chunks differently from %q on %q: %q vs %q",
+					p.alias, p.family, in, got, want)
+				continue
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					t.Errorf("%q chunks differently from %q on %q: %q vs %q",
+						p.alias, p.family, in, got, want)
+					break
+				}
+			}
+		}
+	}
+}

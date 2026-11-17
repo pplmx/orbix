@@ -565,6 +565,9 @@ func TestTekkenCaseSplitNeedsLowerBeforeUpper(t *testing.T) {
 
 // TestWhitespacePreTokenizer covers jina-embeddings-v2-base-zh's rule, which is just \S+.
 func TestWhitespacePreTokenizer(t *testing.T) {
+	// The expected splits were checked against llama.cpp's expression with the text between
+	// matches kept: \S+ matches the runs, and a splitter that deletes the gaps it skipped
+	// loses the spaces outright. The earlier expectations here listed only the runs.
 	tok := bpeFixture(t, gguftest.Model{Pre: "whitespace"})
 	if !tok.PreImplemented() {
 		t.Fatal("the whitespace pre-tokenizer is not implemented")
@@ -573,10 +576,12 @@ func TestWhitespacePreTokenizer(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"Hello world  123", []string{"Hello", "world", "123"}},
-		{" a b ", []string{"a", "b"}},
-		{"a\tb\nc", []string{"a", "b", "c"}},
-		{"中文 测试", []string{"中文", "测试"}},
+		// The spaces are chunks too: \S+ matches the runs, and the text between matches is
+		// carried through rather than deleted. Consecutive spaces are one chunk.
+		{"Hello world  123", []string{"Hello", " ", "world", "  ", "123"}},
+		{" a b ", []string{" ", "a", " ", "b", " "}},
+		{"a\tb\nc", []string{"a", "\t", "b", "\n", "c"}},
+		{"中文 测试", []string{"中文", " ", "测试"}},
 	}
 	for _, c := range cases {
 		got := tok.preSplit(c.in)

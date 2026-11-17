@@ -233,21 +233,26 @@ func splitThreeDigitRuns(text string) []string {
 // (jina-embeddings-v2-base-zh) produces only the runs, and the vocabulary has no separate
 // space piece to give them.
 func splitWhitespaceRuns(text string) []string {
+	// The expression is \S+: runs of non-space characters. The spaces between them are not
+	// deleted from the text -- llama.cpp's splitter emits the gap before each match and the
+	// tail after the last as pieces of their own -- so they come out as chunks here too.
+	// Dropping them put text into the vocabulary's hands that the model never saw in
+	// training: "a  b" became ["a", "b"], losing the two spaces and the word boundary they
+	// encode.
 	var out []string
-	start := -1
+	start := 0
+	inSpace := false
 	for i, r := range text {
-		if unicode.IsSpace(r) {
-			if start >= 0 {
-				out = append(out, text[start:i])
-				start = -1
-			}
-			continue
-		}
-		if start < 0 {
+		space := unicode.IsSpace(r)
+		// A change of class ends the current run; consecutive spaces stay together, so a
+		// double space is one chunk, as it is in the reference.
+		if i > 0 && space != inSpace {
+			out = append(out, text[start:i])
 			start = i
 		}
+		inSpace = space
 	}
-	if start >= 0 {
+	if start < len(text) {
 		out = append(out, text[start:])
 	}
 	return out

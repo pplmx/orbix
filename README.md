@@ -361,7 +361,10 @@ which mechanisms pay for themselves. It pairs each mechanism with a control row 
 against contiguous caches, prefix reuse against none, shortest against FIFO -- so a
 difference is attributable to that mechanism rather than to the scenario changing.
 
-Measured on stories15M q4_0 with a 41-token prompt, 8 workers:
+One measurement, stated with everything needed to judge it: stories15M q4_0 (19 MB), a
+41-token prompt, 8 generated tokens per request, 8 kernel workers, on a 128-core AMD EPYC
+7742, Go 1.27.3, linux/amd64. `orbix bench --suite` prints these conditions itself, so a
+table you produce can be compared against this one instead of taken on faith:
 
 ```text
 SCENARIO         TOKENS  ELAPSED  TOK/S  FIRST  NOTE
@@ -385,6 +388,11 @@ reason:
 - **The policy rows have the same total time on purpose.** A policy reorders a fixed
   amount of work; it cannot reduce it. What it changes is the short request's first-token
   latency, 381 ms under FIFO against 41 ms under shortest, and that is the `FIRST` column.
+
+A row can also show fewer tokens than its budget. That is not a measurement failure: the
+model emitted its end-of-sequence token, and the suite says so in the `NOTE` column
+("N request(s) stopped early on EOS") rather than leaving you to work out why two rows
+that should match do not.
 
 `orbix serve` also exports the same numbers over `/metrics` in Prometheus text format,
 so the suite's baseline and a live deployment's behaviour are the same measurements

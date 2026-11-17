@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -44,6 +46,11 @@ type result struct {
 	// number the policies exist to change, since they reorder a fixed amount of work
 	// rather than reduce it.
 	firstToken time.Duration
+	// earlyStops counts requests that ended before their token budget because the model
+	// emitted an end-of-sequence token. Without it a row can print fewer tokens than its
+	// neighbours for a reason the table does not explain, which reads like a bug in the
+	// measurement rather than like the model having nothing more to say.
+	earlyStops int
 	extra      string
 }
 
@@ -134,7 +141,18 @@ func scenarioList() []scenario {
 func runSuite(o suiteOptions) error {
 	fmt.Printf("model:       %s\n", o.model)
 	fmt.Printf("prompt:      %d tokens\n", len(o.prompt))
-	fmt.Printf("generating:  %d tokens per request\n\n", o.maxTok)
+	fmt.Printf("generating:  %d tokens per request\n", o.maxTok)
+	// The machine and the worker count belong with the numbers, not left to whoever
+	// copies the table into a document: a throughput figure without them cannot be
+	// compared against anything, and a reader has no way to tell whether two runs
+	// differed because of the code or because of the hardware.
+	workers := o.workers
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	fmt.Printf("machine:     %s/%s, %d CPUs, %d kernel workers\n",
+		runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), workers)
+	fmt.Printf("go:          %s\n\n", runtime.Version())
 
 	type row struct {
 		scenario scenario
@@ -166,6 +184,12 @@ func runSuite(o suiteOptions) error {
 		note := r.scenario.note
 		if r.res.extra != "" {
 			note += "; " + r.res.extra
+		}
+		// Explain a token total that differs from the row above it. The number is real --
+		// a request emitted its end-of-sequence token -- but without this a reader sees
+		// two rows that should match and starts looking for a measurement bug.
+		if r.res.earlyStops > 0 {
+			note += fmt.Sprintf("; %d request(s) stopped early on EOS", r.res.earlyStops)
 		}
 		first := "-"
 		if r.res.firstToken > 0 {
@@ -227,20 +251,38 @@ func runRequests(o suiteOptions, n, concurrency int, opts engine.Options) (resul
 		}
 		chans[i] = ch
 	}
+	// Each drain runs on its own goroutine, one per request, so the counters it updates
+	// are guarded: two goroutines writing tokens++ without a lock is a data race that
+	// usually produces the right total and occasionally does not.
+	var mu sync.Mutex
 	var tokens int
 	var firstToken time.Duration
+	var earlyStops int
 	drain := func(ch <-chan engine.Event) error {
+		var mine int
 		for ev := range ch {
 			if ev.Err != nil {
+				// The lock is not held here, so take it only around the state updates.
 				return ev.Err
 			}
 			if ev.HasToken {
+				mu.Lock()
 				if firstToken == 0 {
 					firstToken = time.Since(start)
 				}
-				tokens++
+				mu.Unlock()
+				mine++
 			}
 		}
+		mu.Lock()
+		tokens += mine
+		// A request that stopped before its budget did so on an end-of-sequence token.
+		// Counting those makes "this row has fewer tokens than its neighbour" an
+		// explained number rather than an apparent measurement bug.
+		if mine < o.maxTok {
+			earlyStops++
+		}
+		mu.Unlock()
 		return nil
 	}
 	// Drain concurrently with pumping: the buffers are bounded, so a scenario with a
@@ -256,7 +298,7 @@ func runRequests(o suiteOptions, n, concurrency int, opts engine.Options) (resul
 			return result{}, err
 		}
 	}
-	r := result{tokens: tokens, elapsed: time.Since(start), firstToken: firstToken}
+	r := result{tokens: tokens, elapsed: time.Since(start), firstToken: firstToken, earlyStops: earlyStops}
 	// Report what the cache actually was, since that is the variable the row exists to
 	// isolate and a misconfigured flag would otherwise look like a throughput change.
 	if pool := eng.Pool(); pool != nil {

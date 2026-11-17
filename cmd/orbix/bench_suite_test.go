@@ -1,11 +1,11 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/engine"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // The suite is a measurement tool, so its tests check the things that make its numbers
@@ -15,11 +15,10 @@ import (
 
 func suiteModel(t *testing.T) string {
 	t.Helper()
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
-	return path
+	// A constructed model rather than a checkpoint: these tests check that every
+	// scenario runs and that the pairs meant to isolate a mechanism differ, and neither
+	// depends on the weights. A checkpoint would skip them wherever one is not on disk.
+	return gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
 }
 
 func testSuiteOptions(t *testing.T) suiteOptions {
@@ -146,5 +145,35 @@ func TestSuiteRejectsUnknownPolicyFlag(t *testing.T) {
 	// which is what a reader of the flag table would expect.
 	if _, err := engine.ParsePriority("nonsense"); err == nil {
 		t.Fatal("ParsePriority accepted an unknown policy")
+	}
+}
+
+// TestEarlyStopsAreCounted checks the field that explains a token total shorter than the
+// budget. The fixture here has a real end-of-sequence token, so a long enough budget
+// eventually reaches it; a request that stops early must be counted rather than silently
+// producing fewer tokens than its row's neighbours.
+func TestEarlyStopsAreCounted(t *testing.T) {
+	// A model that can stop, unlike the NoEOS fixture the other suite tests use.
+	path := gguftest.Model{ContextLen: 256}.Write(t, t.TempDir())
+	o := suiteOptions{
+		model:   path,
+		prompt:  []int32{1, 4, 5},
+		maxTok:  64,
+		workers: 2,
+	}
+	res, err := runRequests(o, 2, 2, engine.Options{})
+	if err != nil {
+		t.Fatalf("runRequests: %v", err)
+	}
+	// On this fixture the greedy argmax walks to the end-of-sequence token within a few
+	// steps, so both requests stop early. That is asserted rather than tolerated: a test
+	// whose shortfall branch is never taken has not checked the accounting.
+	if res.earlyStops != 2 {
+		t.Fatalf("earlyStops = %d with a budget of %d and %d tokens produced; "+
+			"both requests should have stopped on EOS", res.earlyStops, o.maxTok, res.tokens)
+	}
+	if res.tokens >= 2*o.maxTok {
+		t.Errorf("tokens = %d reached the full budget despite %d early stops",
+			res.tokens, res.earlyStops)
 	}
 }

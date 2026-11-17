@@ -2978,25 +2978,27 @@ func TestSpark25PunctuationIsNotAPrefix(t *testing.T) {
 	}
 }
 
-// TestMultiByteDigitsAreNotCutInHalf covers the digit runs the falcon family groups in
-// threes.
+// TestFalconGroupsOnlyASCIIDigits covers falcon's third expression, "[0-9][0-9][0-9]".
 //
-// "\\p{N}" is not ASCII: superscripts, Roman numerals and the vulgar fractions are all number
-// characters, and they are two or three bytes each. The grouping loop cut the run by *count*
-// and then indexed the string by that count, so a run containing one was sliced mid-character:
-// "99\u00b2" came back as ["99\xc2"], which is not valid UTF-8 and cannot be encoded at all.
-func TestMultiByteDigitsAreNotCutInHalf(t *testing.T) {
+// It is narrower than both \d and \p{N}: no other script's digits match it and neither does a
+// Roman numeral or a superscript. Reading it as \p{N} made a superscript part of a group and,
+// worse, grouped runs the expression leaves alone -- "99\u00b2" is one chunk because only "99"
+// is in the class and two digits do not fill a group.
+//
+// The grouping also reads byte offsets rather than a count, so a run containing a multi-byte
+// character cannot be sliced mid-character.
+func TestFalconGroupsOnlyASCIIDigits(t *testing.T) {
 	tok := &Tokenizer{pre: preFalcon}
 	cases := []struct {
 		in   string
 		want []string
 	}{
-		// Three number characters, so one group -- and the superscript is two bytes.
+		// Only the two ASCII digits are in the class, so no group forms.
 		{"99\u00b2", []string{"99\u00b2"}},
-		{"\u2160\u2161\u2162", []string{"\u2160\u2161\u2162"}},
-		// A fourth character starts the next group.
+		{"\u2163\u2163\u2163", []string{"\u2163\u2163\u2163"}},
+		// Three ASCII digits do form a group.
 		{"1234", []string{"123", "4"}},
-		{"99\u00b21", []string{"99\u00b2", "1"}},
+		{"12345678", []string{"123", "456", "78"}},
 		{"1234567\u00b2", []string{"123", "456", "7\u00b2"}},
 	}
 	for _, c := range cases {
@@ -3211,6 +3213,41 @@ func TestTinyAyaRunsTwoDigitPasses(t *testing.T) {
 	for _, c := range cases {
 		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
 			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestFalconGroupsOnlyASCIIRuns covers the third expression, "[0-9][0-9][0-9]", and the gap
+// rule around it.
+//
+// The class is ASCII: no other script's digits match, and neither does a Roman numeral or a
+// superscript. Reading it as \p{N} grouped runs the expression leaves alone -- "99\u00b2" is
+// one chunk because only "99" is in the class and two digits do not fill a group.
+//
+// Text the expression does not match is gap, and llama.cpp emits the text after the last match
+// as one fragment attached to what precedes it. So a trailing superscript rides with the digit
+// before it: "1234567\u00b2" is ["123", "456", "7\u00b2"], not ["123", "456", "7", "\u00b2"].
+func TestFalconGroupsOnlyASCIIRuns(t *testing.T) {
+	tok := &Tokenizer{pre: preFalcon}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"99\u00b2", []string{"99\u00b2"}},
+		{"\u2163\u2163\u2163", []string{"\u2163\u2163\u2163"}},
+		{"1234", []string{"123", "4"}},
+		{"12345678", []string{"123", "456", "78"}},
+		{"1234567\u00b2", []string{"123", "456", "7\u00b2"}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+		for _, piece := range got {
+			if !utf8.ValidString(piece) {
+				t.Errorf("preSplit(%q) produced invalid UTF-8 %q", c.in, piece)
+			}
 		}
 	}
 }

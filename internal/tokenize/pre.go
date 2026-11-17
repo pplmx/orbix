@@ -601,9 +601,9 @@ func splitThreeDigitRuns(text string) []string {
 	gap := ""
 	i := 0
 	for i < len(text) {
-		if !isDigitAt(text[i:]) {
+		if !isASCIIDigitAt(text[i:]) {
 			start := i
-			for i < len(text) && !isDigitAt(text[i:]) {
+			for i < len(text) && !isASCIIDigitAt(text[i:]) {
 				i += runeLenAt(text[i:])
 			}
 			gap += text[start:i]
@@ -614,7 +614,7 @@ func splitThreeDigitRuns(text string) []string {
 		// are two and three bytes in UTF-8 -- so indexing a count into the string cuts a
 		// character in half. "99\u00b2" is a run of three digits and one chunk here.
 		j, bounds := i, []int{i}
-		for j < len(text) && isDigitAt(text[j:]) {
+		for j < len(text) && isASCIIDigitAt(text[j:]) {
 			j += runeLenAt(text[j:])
 			bounds = append(bounds, j)
 		}
@@ -642,6 +642,14 @@ func splitThreeDigitRuns(text string) []string {
 		i = j
 	}
 	if gap != "" {
+		// A trailing gap joins the last chunk unless it is only whitespace. llama.cpp's
+		// splitter emits the text after the final match as one fragment attached to what
+		// precedes it, so "1234567\u00b2" is ["123", "456", "7\u00b2"] -- the superscript is
+		// not in the class, and it rides with the "7" rather than standing alone.
+		if strings.TrimSpace(gap) != "" && len(out) > 0 {
+			out[len(out)-1] += gap
+			return out
+		}
 		out = append(out, gap)
 	}
 	return out
@@ -1845,6 +1853,13 @@ func isDigit(r rune) bool { return unicode.IsNumber(r) }
 func isDecimalDigit(r rune) bool { return unicode.IsDigit(r) }
 
 func isDecimalDigitAt(s string) bool { return classifyAt(s, isDecimalDigit) }
+
+// isASCIIDigitAt reports whether s begins with one of '0'..'9'. falcon's third expression is
+// written "[0-9][0-9][0-9]", which is narrower than both \d and \p{N}: no other script's
+// digits match it, and neither does a Roman numeral.
+func isASCIIDigitAt(s string) bool {
+	return s != "" && s[0] >= '0' && s[0] <= '9'
+}
 
 // isWordRuneAt reports whether s begins with a regex word character (\w): a letter, a decimal
 // digit, or an underscore.

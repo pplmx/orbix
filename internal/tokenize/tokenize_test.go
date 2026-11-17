@@ -372,3 +372,62 @@ func TestMalformedMergeIsReported(t *testing.T) {
 		t.Fatal("New accepted a merge entry with no separator")
 	}
 }
+
+// TestMergeRankBeatsScoreOrder checks the merge path against the score path on inputs
+// where they disagree, using expected token ids from applying the merge list by hand.
+//
+// This is the test that would have caught the original bug. A scoring heuristic over the
+// pieces produces valid ids and fluent text on ordinary prose, so nothing looked wrong;
+// on the words below it produces a different token sequence, which is a prompt the model
+// was never trained on.
+//
+// The vocabulary is constructed so the two orderings must differ: rank order folds
+// "anti"+"dis" first, while the descending piece score prefers the longer "dis"+"est".
+func TestMergeRankBeatsScoreOrder(t *testing.T) {
+	// Pieces have descending scores with position, so a score-ordered merge prefers the
+	// pair whose right piece is later in the vocabulary.
+	path := gguftest.Model{
+		Vocab: []string{
+			"<unk>", "<s>", "</s>", "\u0120",
+			"a", "b", "c", "d", "e", "f",
+			"ab", "bc", "cd", "de", "ef",
+			"abcd", "cdef",
+		},
+		// "a b" outranks "b c": with the list, "abc" must form as ab+c. By score the
+		// longer "abcd" piece would dominate and split differently.
+		Merges:         []string{"a b", "c d"},
+		TokenizerModel: "gpt2",
+		NoBytes:        true,
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	withMerges, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := withMerges.Encode("abcd", false)
+
+	// The list says "a b" then "c d", so the result is ab+cd, not the abcd piece.
+	want := []int32{withMerges.index["ab"], withMerges.index["cd"]}
+	if len(got) != len(want) {
+		t.Fatalf("Encode(abcd) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Encode(abcd) = %v, want %v from the merge list, not the abcd piece", got, want)
+		}
+	}
+
+	// The same tokenizer with the list dropped must reach a different answer, which is
+	// what makes the assertion above about the list rather than about the pieces.
+	scored, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	scored.merges = nil
+	if byScore := scored.Encode("abcd", false); len(byScore) == 2 && byScore[0] == want[0] && byScore[1] == want[1] {
+		t.Error("the score path produced the same tokens; this fixture does not distinguish the two")
+	}
+}

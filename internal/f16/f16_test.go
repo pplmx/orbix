@@ -178,3 +178,52 @@ func BenchmarkFromFloat32(b *testing.B) {
 	}
 	_ = sum
 }
+
+// TestToFloat32Exhaustive checks all 65,536 bit patterns against an independently written
+// decoder, which is the claim the README makes.
+//
+// Rounding is the part of the conversion that is easy to get subtly wrong and hard to see:
+// a subnormal normalised with the wrong power of two, or a mantissa shifted into the wrong
+// place, still produces a plausible number. The reference below reconstructs the value from
+// the field layout with math.Ldexp rather than reusing the implementation's bit
+// manipulation, so the two agreeing means the arithmetic, not just the shift, is right.
+//
+// Verified once against numpy's float16 as a third opinion; this version is the one that
+// runs in the suite.
+func TestToFloat32Exhaustive(t *testing.T) {
+	ref := func(h uint16) float32 {
+		sign := 1.0
+		if h&0x8000 != 0 {
+			sign = -1.0
+		}
+		exp := int(h>>10) & 0x1f
+		mant := int(h & 0x3ff)
+		switch exp {
+		case 0:
+			// Subnormal: mant * 2^-24, and zero when the mantissa is zero.
+			return float32(sign * float64(mant) * math.Ldexp(1, -24))
+		case 0x1f:
+			if mant == 0 {
+				return float32(sign * math.Inf(1))
+			}
+			return float32(math.NaN())
+		default:
+			// Normal: (1 + mant/1024) * 2^(exp-15).
+			return float32(sign * (1 + float64(mant)/1024) * math.Ldexp(1, exp-15))
+		}
+	}
+	for h := range 0x10000 {
+		v := uint16(h)
+		got := ToFloat32(v)
+		want := ref(v)
+		if math.IsNaN(float64(want)) {
+			if !math.IsNaN(float64(got)) {
+				t.Errorf("ToFloat32(%#04x) = %v, want NaN", v, got)
+			}
+			continue
+		}
+		if got != want || math.Signbit(float64(got)) != math.Signbit(float64(want)) {
+			t.Fatalf("ToFloat32(%#04x) = %v, want %v", v, got, want)
+		}
+	}
+}

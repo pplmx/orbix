@@ -2977,3 +2977,121 @@ func TestSpark25PunctuationIsNotAPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestMultiByteDigitsAreNotCutInHalf covers the digit runs the falcon family groups in
+// threes.
+//
+// "\\p{N}" is not ASCII: superscripts, Roman numerals and the vulgar fractions are all number
+// characters, and they are two or three bytes each. The grouping loop cut the run by *count*
+// and then indexed the string by that count, so a run containing one was sliced mid-character:
+// "99\u00b2" came back as ["99\xc2"], which is not valid UTF-8 and cannot be encoded at all.
+func TestMultiByteDigitsAreNotCutInHalf(t *testing.T) {
+	tok := &Tokenizer{pre: preFalcon}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Three number characters, so one group -- and the superscript is two bytes.
+		{"99\u00b2", []string{"99\u00b2"}},
+		{"\u2160\u2161\u2162", []string{"\u2160\u2161\u2162"}},
+		// A fourth character starts the next group.
+		{"1234", []string{"123", "4"}},
+		{"99\u00b21", []string{"99\u00b2", "1"}},
+		{"1234567\u00b2", []string{"123", "456", "7\u00b2"}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+		for _, piece := range got {
+			if !utf8.ValidString(piece) {
+				t.Errorf("preSplit(%q) produced invalid UTF-8 %q", c.in, piece)
+			}
+		}
+	}
+}
+
+// TestCaseSplitUsesTheExpressionsOwnClasses covers the two-alternative letter rule.
+//
+// The case-splitting families write the run as "upper* lower+|upper+ lower*" with
+// upper = [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}] and lower = [\p{Ll}\p{Lm}\p{Lo}\p{M}]. Those classes
+// overlap, and the alternatives are ordered, so the split is not a lower-to-upper transition:
+//
+//   - "\u6587A" is ["\u6587", "A"]: the ideograph is both classes, so the first alternative's
+//     upper* backtracks and lets lower+ take it, and the A starts a new run.
+//   - "b\u0e01" is one chunk: the Thai letter is in both classes, so lower+ takes both.
+//   - "aB" is ["a", "B"]: the first alternative's lower+ stops at the capital.
+//
+// A single greedy scan testing unicode.IsUpper gets all three wrong.
+func TestCaseSplitUsesTheExpressionsOwnClasses(t *testing.T) {
+	tok := &Tokenizer{pre: preTinyAya}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"\u6587A", []string{"\u6587", "A"}},
+		{"&\u6587A", []string{"&\u6587", "A"}},
+		{"b\u0e01", []string{"b\u0e01"}},
+		{"\u4e2d\u4e2da1", []string{"\u4e2d\u4e2da", "1"}},
+		{"aB", []string{"a", "B"}},
+		{"ABc", []string{"ABc"}},
+		{"A\u6587", []string{"A\u6587"}},
+		{"helloWorld", []string{"hello", "World"}},
+		{"HTTPServer", []string{"HTTPServer"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestStopSetTreatsAllWhitespaceAsStopping covers the " ?[^(\\s|...)]+" expression.
+//
+// The class excludes "\\s" -- every Unicode whitespace -- but the stop set listed only the
+// ASCII four. A no-break space or an em space is neither in that list nor a letter or digit,
+// so it rode along inside a run instead of ending it: ";=*{\u4e2d\u00a0" came back as one
+// chunk where the reference gives [";=*{\u4e2d", "\u00a0"].
+func TestStopSetTreatsAllWhitespaceAsStopping(t *testing.T) {
+	tok := &Tokenizer{pre: preViking}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{";=*{\u4e2d\u00a0", []string{";=*{\u4e2d", "\u00a0"}},
+		{"a\u00a0b", []string{"a", "\u00a0", "b"}},
+		{"a\u2003b", []string{"a", "\u2003", "b"}},
+		// An ordinary space still attaches to the run that follows it.
+		{"abc def", []string{"abc", " def"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestCurlyQuantifierCountsCharacters covers zonos3's " ?[^\\s\\p{L}\\p{N}]{2,}".
+//
+// "{2,}" counts characters; the check compared byte offsets, so a single three-byte U+200C
+// satisfied it and became a run of its own where the reference leaves it as gap text attached
+// to its neighbour.
+func TestCurlyQuantifierCountsCharacters(t *testing.T) {
+	tok := &Tokenizer{pre: preZonos3}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// One non-ASCII character: not a run, so it stays with the gap around it.
+		{";\r\n\u200c9*", []string{";\r\n\u200c", "9", "*"}},
+		{"\u200c", []string{"\u200c"}},
+		// Two ASCII characters do satisfy the quantifier.
+		{";;", []string{";;"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

@@ -148,7 +148,7 @@ func splitDeepseekCoder(text string) []string {
 		{pred: isNewlineAt},
 		{pred: isLetterAt, spacePrefix: true},
 		{pred: isPunctAt, spacePrefix: true},
-		{pred: isCJKAt},
+		{pred: isCoderCJKAt},
 		{pred: isDigitAt, single: true},
 	} {
 		var next []string
@@ -606,11 +606,16 @@ func splitThreeDigitRuns(text string) []string {
 			gap += text[start:i]
 			continue
 		}
-		j, n := i, 0
+		// The digit run's boundaries are recorded as byte offsets, not counted. A digit is
+		// not always one byte -- "\p{N}" includes the superscripts and Roman numerals, which
+		// are two and three bytes in UTF-8 -- so indexing a count into the string cuts a
+		// character in half. "99\u00b2" is a run of three digits and one chunk here.
+		j, bounds := i, []int{i}
 		for j < len(text) && isDigitAt(text[j:]) {
 			j += runeLenAt(text[j:])
-			n++
+			bounds = append(bounds, j)
 		}
+		n := len(bounds) - 1
 		if n < 3 {
 			gap += text[i:j]
 			i = j
@@ -624,7 +629,7 @@ func splitThreeDigitRuns(text string) []string {
 		}
 		for k := 0; k < n; k += 3 {
 			next := min(k+3, n)
-			chunk := text[i+k : i+next]
+			chunk := text[bounds[k]:bounds[next]]
 			if gap != "" {
 				chunk = gap + chunk
 				gap = ""
@@ -682,6 +687,12 @@ func splitAtStopSet(text, stop string) []string {
 	// alternates between matches and the gaps between them.
 	matchAt := func(s string) int {
 		// Returns the byte length of a match starting at s, or 0.
+		//
+		// The optional leading character is " ?" -- a literal ASCII space -- but the class's
+		// own exclusion is "\s", which is every Unicode whitespace. So a no-break space or an
+		// em space does not begin a match and does not continue one: the run stops before it,
+		// and the whitespace becomes a chunk of its own. Listing only " \t\r\n" in the stop
+		// set instead let those characters ride along inside a run.
 		i := 0
 		if s[0] == ' ' && len(s) > 1 {
 			i = 1
@@ -689,7 +700,7 @@ func splitAtStopSet(text, stop string) []string {
 		start := i
 		for i < len(s) {
 			r, n := utf8.DecodeRuneInString(s[i:])
-			if r == utf8.RuneError || strings.ContainsRune(stop, r) {
+			if r == utf8.RuneError || unicode.IsSpace(r) || strings.ContainsRune(stop, r) {
 				break
 			}
 			i += n
@@ -1135,7 +1146,7 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{
 			digits: 0, lead: leadAnyNonLetter, letterMarks: true, caseSplit: true,
 			punctIsCategory: true, newlinesAfterPunct: true, newlineChunk: true,
-			preDigits: 3, cjk: true, contractionSuffix: true,
+			preDigits: 3, cjk: true, contractionSuffix: true, noContractionAlt: true,
 		}, true
 	case preMiniCPM5:
 		// "\\p{N}{1,3}" then a llama3-shaped rule with "\\p{N}+" where llama3 has
@@ -1520,10 +1531,39 @@ func letterRunFrom(s string, fam preRule, start int) (int, bool) {
 	if fam.wordSpaces && !isLetterAt(s[start:]) {
 		return 0, false
 	}
+	if fam.caseSplit {
+		// The case-splitting families write the letter run as two alternatives rather than
+		// one class:
+		//
+		//   upper* lower+        (a lower-case word, optionally led by capitals)
+		//   upper+ lower*        (a capital run, optionally followed by a lower-case rest)
+		//
+		// where upper = [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}] and
+		// lower = [\p{Ll}\p{Lm}\p{Lo}\p{M}]. The two classes overlap on \p{Lo}, \p{Lm}
+		// and the marks, so a "boundary" is not simply a lower-to-upper transition: an
+		// ideograph counts as upper for the first alternative and as lower for the second,
+		// and which one applies is decided by which alternative matches first.
+		//
+		// Taking the first alternative when it can match is what the expression does, and it
+		// is why these differ:
+		//
+		//   "\u6587A" -> ["\u6587", "A"]   upper* is "\u6587", lower+ fails, so the second
+		//                                   alternative matches "\u6587A" ... except the
+		//                                   first alternative matched "\u6587" already.
+		//   "b\u0e01" -> ["b\u0e01"]         upper* is empty, lower+ takes both.
+		//
+		// Implemented by trying the lower-first alternative, and only if it cannot reach a
+		// lower character, the capital-led one.
+		if n, ok := caseSplitRun(s, start); ok {
+			i := n
+			if fam.contractionSuffix {
+				i += cliticLen(s[i:])
+			}
+			return i, true
+		}
+		return 0, false
+	}
 	i := start
-	// prevLower records whether the previous letter was lower case, which is what the
-	// boundary test needs.
-	prevLower := false
 	for i < len(s) {
 		if fam.joiners && isJoinerAt(s[i:]) {
 			// U+200C and U+200D are members of the class rather than a suffix on it, so
@@ -1532,13 +1572,6 @@ func letterRunFrom(s string, fam preRule, start int) (int, bool) {
 			continue
 		}
 		if isLetterAt(s[i:]) {
-			r, _ := utf8.DecodeRuneInString(s[i:])
-			// The boundary is a lower-to-upper transition. A capital after a capital does
-			// not split, which is why a run of capitals keeps its trailing word.
-			if fam.caseSplit && prevLower && unicode.IsUpper(r) {
-				break
-			}
-			prevLower = unicode.IsLower(r)
 			i += runeLenAt(s[i:])
 			continue
 		}
@@ -1830,6 +1863,21 @@ func isCJK(r rune) bool {
 
 func isCJKAt(s string) bool { return classifyAt(s, isCJK) }
 
+// isCoderCJKAt reports whether s begins with a character deepseek-coder's fourth expression
+// takes. It is *not* the three-range class the other families use: the expression is
+//
+//	[\u4e00-\u9fa5\u0800-\u4e00\uac00-\ud7ff]+
+//
+// which reaches from Samaritan down through CJK unified ideographs and on to Hangul
+// syllables. The middle range is the surprising one -- it covers everything from U+0800 to
+// U+4E00, so a character as ordinary as an em space (U+2003) is in it and becomes a run of
+// its own rather than staying with the punctuation that follows.
+func isCoderCJKAt(s string) bool {
+	return classifyAt(s, func(r rune) bool {
+		return (r >= 0x4E00 && r <= 0x9FA5) || (r >= 0x0800 && r <= 0x4E00) || (r >= 0xAC00 && r <= 0xD7FF)
+	})
+}
+
 // isAsianAt reports whether s begins with a character in afmoe's much wider class.
 //
 // The family lists fifteen ranges rather than the three the other families name: CJK
@@ -1911,6 +1959,75 @@ func splitAsianRuns(text string) []string {
 func isHan(r rune) bool { return unicode.Is(unicode.Han, r) }
 
 func isHanAt(s string) bool { return classifyAt(s, isHan) }
+
+// caseSplitRun matches the case-splitting letter rule at byte offset start, returning the
+// end offset. The two alternatives are tried in the order the expression lists them.
+//
+// Marks and joiners belong to whichever class the family's own classes put them in, so they
+// are handled by the class predicates rather than as a special case here.
+func caseSplitRun(s string, start int) (int, bool) {
+	// Alternative 1: upper* lower+. The upper stretch is greedy, but lower+ needs at least
+	// one character, so the match backtracks: the last character the upper stretch took is
+	// given back when it is also a lower character. That is what makes "\u6587A" split as
+	// ["\u6587", "A"] -- the ideograph is in both classes, so it can be the lower part of
+	// this alternative, and the A after it starts a new run.
+	//
+	// Candidates are tried from the greedy end backwards, which is the order a backtracking
+	// engine uses.
+	for cut := greedyUpperEnd(s, start); ; {
+		j := cut
+		for j < len(s) && isCaseLowerAt(s[j:]) {
+			j += runeLenAt(s[j:])
+		}
+		if j > cut {
+			return j, true
+		}
+		if cut == start {
+			break
+		}
+		prev, ok := prevRuneStart(s, cut)
+		if !ok {
+			break
+		}
+		cut = prev
+	}
+
+	// Alternative 2: upper+ lower*. Reached when the first alternative found no lower
+	// character, so the run is at least one upper character.
+	i := greedyUpperEnd(s, start)
+	if i == start {
+		return 0, false
+	}
+	for i < len(s) && isCaseLowerAt(s[i:]) {
+		i += runeLenAt(s[i:])
+	}
+	return i, true
+}
+
+// greedyUpperEnd returns the offset after the longest run of "upper" characters at start.
+func greedyUpperEnd(s string, start int) int {
+	i := start
+	for i < len(s) && isCaseUpperAt(s[i:]) {
+		i += runeLenAt(s[i:])
+	}
+	return i
+}
+
+// isCaseUpperAt reports whether s begins with a character of the case-split "upper" class:
+// [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}].
+func isCaseUpperAt(s string) bool {
+	return classifyAt(s, func(r rune) bool {
+		return unicode.IsUpper(r) || unicode.IsTitle(r) || unicode.In(r, unicode.Lm, unicode.Lo, unicode.M)
+	})
+}
+
+// isCaseLowerAt reports whether s begins with a character of the case-split "lower" class:
+// [\p{Ll}\p{Lm}\p{Lo}\p{M}].
+func isCaseLowerAt(s string) bool {
+	return classifyAt(s, func(r rune) bool {
+		return unicode.IsLower(r) || unicode.In(r, unicode.Lm, unicode.Lo, unicode.M)
+	})
+}
 
 // isPunctOrSymbol reports whether r is punctuation (\p{P}) or a symbol (\p{S}).
 func isPunctOrSymbol(r rune) bool { return unicode.IsPunct(r) || unicode.IsSymbol(r) }
@@ -2309,14 +2426,18 @@ func zonos3Len(s string) int {
 	if strings.HasPrefix(s, " ") {
 		i = 1
 	}
-	start := i
+	// The quantifier counts characters, not bytes: "{2,}" means two characters, and a
+	// non-ASCII one is several bytes. Comparing byte lengths let a single U+200C satisfy it,
+	// so a joiner became a run of its own instead of gap text.
+	count := 0
 	for i < len(s) {
 		if isSpaceAt(s[i:]) || isLetterAt(s[i:]) || isDigitAt(s[i:]) {
 			break
 		}
 		i += runeLenAt(s[i:])
+		count++
 	}
-	if i-start >= 2 {
+	if count >= 2 {
 		for i < len(s) && (isNewlineAt(s[i:]) || s[i] == '/') {
 			i += runeLenAt(s[i:])
 		}

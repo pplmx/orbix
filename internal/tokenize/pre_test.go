@@ -2122,6 +2122,19 @@ func TestSpark25Chunks(t *testing.T) {
 		{"a  b", []string{"a", " ", " b"}},
 		{"don't", []string{"don", "'t"}},
 		{"e\u0301clair", []string{"e\u0301clair"}},
+		// The punctuation-letter alternative claims an apostrophe that starts a chunk before
+		// the contraction rule reads a clitic from it, so "'sa" is one chunk while the clitic
+		// inside "don't" above still separates.
+		{"'sa", []string{"'sa"}},
+		{"'t", []string{"'t"}},
+		// The newline alternative is a bare [\r\n], so a CRLF pair is two chunks.
+		{"\r\n", []string{"\r", "\n"}},
+		{"a\r\nb", []string{"a", "\r", "\n", "b"}},
+		{"\n\n", []string{"\n", "\n"}},
+		// The leading character excludes punctuation and symbols, so a mark after a
+		// punctuation character is not taken as that character's prefix.
+		{",\u0301", []string{",", "\u0301"}},
+		{".\u0301", []string{".", "\u0301"}},
 		{"\u4e2d\u6587\u6d4b\u8bd5", []string{"\u4e2d\u6587\u6d4b\u8bd5"}},
 	}
 	for _, c := range cases {
@@ -2865,5 +2878,102 @@ func TestKimiK2Chunks(t *testing.T) {
 	}
 	if !real.PreImplemented() {
 		t.Error("kimi-k2 is not reported as implemented")
+	}
+}
+
+// TestSpark25NewlineIsOneCharacter covers spark2_5's "[\\r\\n]", which is a single newline
+// character rather than the "\\s*[\\r\\n]+" run most families use.
+//
+// The two differ on a CRLF pair and on a doubled newline: the run form keeps either together
+// as one chunk, while the single-character form cuts them apart. The field that selects this
+// existed and was set but was never read, so the rule silently behaved like the run families
+// -- a boundary the vocabulary was not trained to see.
+func TestSpark25NewlineIsOneCharacter(t *testing.T) {
+	tok := &Tokenizer{pre: preSpark25}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"\r\n", []string{"\r", "\n"}},
+		{"\n\n", []string{"\n", "\n"}},
+		{"a\r\nb", []string{"a", "\r", "\n", "b"}},
+		// The whitespace before a newline still travels with it, which is what the
+		// "\\s+(?!\\S)" alternative does for the run that ends the text.
+		{"  \r\n", []string{"  \r\n"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// A family with the run form keeps a pair together, which is what makes this a
+	// per-family rule rather than a global one.
+	llama := &Tokenizer{pre: preLlama3}
+	if got, want := llama.preSplit("a\n\nb"), []string{"a", "\n\n", "b"}; !sameStrings(got, want) {
+		t.Errorf("llama-bpe preSplit(%q) = %q, want %q", "a\n\nb", got, want)
+	}
+}
+
+// TestSpark25HasNoContractionAlternative covers the apostrophe at the start of a word.
+//
+// spark2_5's letter rule has no contraction branch: it is the punctuation-letter run, then
+// the letter run, then the punctuation run. An apostrophe that opens a word is therefore the
+// punctuation character of the first branch and the letters after it follow, so "'sa" is one
+// chunk. The shared engine applies a contraction rule whenever a family does not opt out, and
+// with it "'s" is cut off the front of a word that has no clitic -- a boundary the vocabulary
+// never saw.
+//
+// The clitic *inside* a word is unaffected and must stay split, which is why the fix is
+// per-family rather than a change to the contraction rule.
+func TestSpark25HasNoContractionAlternative(t *testing.T) {
+	tok := &Tokenizer{pre: preSpark25}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"'sa", []string{"'sa"}},
+		{"'s", []string{"'s"}},
+		{"'t", []string{"'t"}},
+		// A clitic after a letter is the punctuation-letter branch, not a contraction rule.
+		{"don't", []string{"don", "'t"}},
+		{"it's", []string{"it", "'s"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// A family that does have the alternative keeps the clitic reading, which is what makes
+	// this a per-family decision.
+	llama := &Tokenizer{pre: preLlama3}
+	if got, want := llama.preSplit("'sa"), []string{"'s", "a"}; !sameStrings(got, want) {
+		t.Errorf("llama-bpe preSplit(%q) = %q, want %q", "'sa", got, want)
+	}
+}
+
+// TestSpark25PunctuationIsNotAPrefix covers the leading character of the letter alternative.
+//
+// spark2_5 writes "[^\\r\\n\\p{L}\\p{P}\\p{S}]?", which excludes punctuation and symbols.
+// Reading it as qwen2's "[^\\r\\n\\p{L}\\p{N}]?" lets a punctuation mark take a combining
+// mark as its own tail: ",<combining acute>" became one chunk instead of the comma and the
+// mark. The two forms agree on a plain word, which is why the difference needs a mark to
+// show up.
+func TestSpark25PunctuationIsNotAPrefix(t *testing.T) {
+	tok := &Tokenizer{pre: preSpark25}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{",\u0301", []string{",", "\u0301"}},
+		{".\u0301", []string{".", "\u0301"}},
+		{"-\u0301", []string{"-", "\u0301"}},
+		// A mark is not punctuation, so it may still lead a letter run.
+		{"\u0301a", []string{"\u0301a"}},
+		{"e\u0301clair", []string{"e\u0301clair"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

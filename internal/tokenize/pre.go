@@ -95,9 +95,6 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.asian {
 		pieces = splitEach(pieces, splitAsianRuns)
 	}
-	if fam.han {
-		pieces = splitEach(pieces, splitHanRuns)
-	}
 	if fam.youtuScripts {
 		pieces = splitYoutuScripts(text)
 	}
@@ -1030,10 +1027,6 @@ type preRule struct {
 	// applies the CJK expression first, so the grouping is independent of what the letter
 	// rule would have done with neighbouring text.
 	cjk bool
-	// han is whether a run of Han ideographs is its own chunk, from kimi-k2's "\p{Han}+".
-	// It is separate from cjk and asian because it names the script: the family's letter
-	// alternatives then exclude Han, so the two must not overlap.
-	han bool
 	// asian selects afmoe's wider CJK class in place of the three-range cjk one. The two are
 	// separate because the sets are different, not nested: afmoe's class has no Hiragana
 	// range beyond U+309F either, but it reaches Thai, Lao, Khmer, Myanmar, Cham, Javanese,
@@ -1196,17 +1189,30 @@ func preFamilyOf(p preType) (preRule, bool) {
 			contractionSuffix: true,
 		}, true
 	case preSpark25:
-		// Four expressions: \p{N}{1,3}, the CJK block, a letter rule, then a bare \p{N}.
+		// "\p{N}{1,3}", the CJK block, then
+		// "[!\"#$%&'()*+,\\-./:;<=>?@\[\\\\\]^_`{|}~][A-Za-z]+"
+		// "|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+|[\r\n]|\s+(?!\S)|\s+",
+		// then a bare "\p{N}".
 		//
-		// The letter rule's leading character is any non-letter, so a step attaches to the
-		// word after it: "a.b" is ["a", ".b"]. The punctuation alternative names the two
-		// categories and has no newline tail, and the newline alternative is a single
-		// [\r\n], so a pair of newlines is two chunks. The trailing \p{N} cuts every digit
-		// the first pass left grouped, so a number ends up one digit per chunk.
+		// The letter rule's first alternative is the punctuation-letter run, so a step
+		// attaches to the word after it and "'sa" is one chunk. Its second alternative's
+		// leading character excludes punctuation and symbols, not merely letters and digits:
+		// a punctuation mark is therefore never a prefix, and ",<combining mark>" is the
+		// mark's own chunk rather than a punctuation run. The punctuation alternative names
+		// the two categories and has no newline tail, and the newline alternative is a
+		// single [\r\n], so a pair of newlines is two chunks. The trailing \p{N} cuts every
+		// digit the first pass left grouped, so a number ends up one digit per chunk.
+		//
+		// There is no contraction alternative in the expression, so none is applied: "don't"
+		// is the letter run "don" then the punctuation-letter branch "'t", not a clitic rule,
+		// and "'sa" is a single chunk because that branch takes the apostrophe and the letters
+		// after it. Disabling the alternative is what makes "'sa" one chunk; without it the
+		// contraction rule would cut "'s" off the front of a word that has no clitic.
 		return preRule{
-			digits: 0, lead: leadAnyNonLetter, letterMarks: true,
-			punctIsCategory: true, newlineSingle: true,
-			preDigits: 3, cjk: true, postDigits: 1,
+			digits: 0, lead: leadNotLetterPunctSymbol, letterMarks: true,
+			punctIsCategory: true, newlineSingle: true, punctLetterRun: true,
+			noContractionAlt: true,
+			preDigits:        3, cjk: true, postDigits: 1,
 		}, true
 	case preChameleon:
 		return preRule{chameleon: true}, true
@@ -1324,16 +1330,19 @@ func chunkLen(s string, fam preRule) int {
 	if s == "" {
 		return 0
 	}
-	// The contraction alternative is the expression's first, so it is tried first -- but only
-	// for families that have it. ufakzeka is qwen2 with that alternative removed precisely so
-	// an apostrophe suffix stays whole.
+	// The contraction alternative is the expression's first, so it is tried before the letter
+	// alternative -- but only for families that have it. ufakzeka is qwen2 with that
+	// alternative removed precisely so an apostrophe suffix stays whole.
 	if !fam.noContraction && !fam.noContractionAlt {
 		if n := qwen2ContractionLen(s); n > 0 {
 			return n
 		}
 	}
 	// [!-/:-@\\[-`{-~][A-Za-z]+ -- one ASCII punctuation character followed by ASCII
-	// letters. It comes first, so it wins over the letter alternative's own prefix handling.
+	// letters. It is a branch of the same alternative as the letter run, so it is tried
+	// before it: an apostrophe that opens a chunk is the punctuation character and the
+	// letters after it, so spark2_5 gives "'sa" as one chunk. A clitic inside a word never
+	// reaches this branch, because the chunk there starts at a letter.
 	if fam.punctLetterRun {
 		if n := punctLetterRunLen(s); n > 0 {
 			return n
@@ -1361,6 +1370,13 @@ func chunkLen(s string, fam preRule) int {
 	// expression has that alternative.
 	if fam.newlineChunk {
 		if n := qwen2NewlineRunLen(s); n > 0 {
+			return n
+		}
+	}
+	// "[\r\n]" -- one newline character, which is spark2_5's form. A CRLF pair is two
+	// chunks here, and unlike "\s*[\r\n]+" the alternative takes no whitespace with it.
+	if fam.newlineSingle {
+		if n := runeLenAt(s); n > 0 && isNewlineAt(s) {
 			return n
 		}
 	}
@@ -1895,32 +1911,6 @@ func splitAsianRuns(text string) []string {
 func isHan(r rune) bool { return unicode.Is(unicode.Han, r) }
 
 func isHanAt(s string) bool { return classifyAt(s, isHan) }
-
-// splitHanRuns cuts each run of Han ideographs into its own chunk.
-func splitHanRuns(text string) []string {
-	var pieces []string
-	start := 0
-	i := 0
-	for i < len(text) {
-		if !isHanAt(text[i:]) {
-			i += runeLenAt(text[i:])
-			continue
-		}
-		if i > start {
-			pieces = append(pieces, text[start:i])
-		}
-		runStart := i
-		for i < len(text) && isHanAt(text[i:]) {
-			i += runeLenAt(text[i:])
-		}
-		pieces = append(pieces, text[runStart:i])
-		start = i
-	}
-	if start < len(text) {
-		pieces = append(pieces, text[start:])
-	}
-	return pieces
-}
 
 // isPunctOrSymbol reports whether r is punctuation (\p{P}) or a symbol (\p{S}).
 func isPunctOrSymbol(r rune) bool { return unicode.IsPunct(r) || unicode.IsSymbol(r) }

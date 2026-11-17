@@ -49,6 +49,9 @@ func (t *Tokenizer) preSplit(text string) []string {
 	if fam.falcon {
 		return splitFalcon(text)
 	}
+	if fam.deepseekLLM {
+		return splitDeepseekLLM(text)
+	}
 	// The family's earlier expressions cut first, in the order llama.cpp lists them, and the
 	// main rule then runs on every piece that leaves.
 	pieces := []string{text}
@@ -90,7 +93,8 @@ func splitDeepseekCoder(text string) []string {
 		// spacePrefix reports whether the expression says \s? before the run.
 		spacePrefix bool
 		// single makes each matching character its own chunk, which is what an expression
-		// without a + quantifier means: \p{N} takes one digit, where \p{L}+ takes a run.
+		// without a + quantifier means: the newline alternative takes one CR or LF, so a
+		// CRLF pair is two chunks, where the number alternative takes the whole run.
 		single bool
 	}
 	pieces := []string{text}
@@ -485,6 +489,10 @@ type preRule struct {
 	// what GPT-4o and its siblings do. It is a suffix on the run rather than a separate
 	// alternative, so a word and its "'s" stay one chunk.
 	contractionSuffix bool
+	// deepseekLLM marks the five-expression rule whose letter class is spelled out as 87
+	// ranges rather than written as \p{L}. The shape matches deepseek-coder's, but none of
+	// the terms do, so it has its own splitter.
+	deepseekLLM bool
 	// cjk is whether a run of CJK characters is its own chunk, from the family's
 	// "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+" expression. Without it those
 	// characters go through the letter rule, which groups them the same way -- but the family
@@ -552,6 +560,8 @@ func preFamilyOf(p preType) (preRule, bool) {
 		return preRule{whitespaceOnly: true}, true
 	case preDeepseekCoder:
 		return preRule{coder: true}, true
+	case preDeepseekLLM:
+		return preRule{deepseekLLM: true}, true
 	case preGPT4O:
 		// "[^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))*((?=[\p{L}\p{M}])([^A-Z]))+(?:'s|'t|...)?"
 		// "|...|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"
@@ -1041,4 +1051,115 @@ var knownPreNames = []string{
 	"whitespace",
 	"youtu",
 	"zonos3",
+}
+
+// deepseek-llm's rule is five expressions applied in sequence, which is the same shape as
+// deepseek-coder's but with different terms throughout -- so it needs its own splitter
+// rather than a flag on that one.
+//
+// The letter class is the unusual part: the expression spells out 87 ranges and 2729
+// characters instead of writing \p{L}. It is a strict subset of the letters -- Latin, Greek,
+// Cyrillic, Armenian, Georgian and a few others, with CJK, Arabic and the Indic scripts left
+// out -- so reusing isLetterAt would group text this rule splits apart.
+var deepseekLLMLetterRanges = [][2]rune{
+	{0x0041, 0x005A}, {0x0061, 0x007A}, {0x00B5, 0x00B5}, {0x00C0, 0x00D6},
+	{0x00D8, 0x00F6}, {0x00F8, 0x01BA}, {0x01BC, 0x01BF}, {0x01C4, 0x0293},
+	{0x0295, 0x02AF}, {0x0370, 0x0373}, {0x0376, 0x0377}, {0x037B, 0x037D},
+	{0x037F, 0x037F}, {0x0386, 0x0386}, {0x0388, 0x038A}, {0x038C, 0x038C},
+	{0x038E, 0x03A1}, {0x03A3, 0x03F5}, {0x03F7, 0x0481}, {0x048A, 0x052F},
+	{0x0531, 0x0556}, {0x10A0, 0x10C5}, {0x13A0, 0x13F5}, {0x13F8, 0x13FD},
+	{0x1C90, 0x1CBA}, {0x1CBD, 0x1CBF}, {0x1D00, 0x1D2B}, {0x1D6B, 0x1D77},
+	{0x1D79, 0x1D9A}, {0x1E00, 0x1F15}, {0x1F18, 0x1F1D}, {0x1F20, 0x1F45},
+	{0x1F48, 0x1F4D}, {0x1F50, 0x1F57}, {0x1F59, 0x1F59}, {0x1F5B, 0x1F5B},
+	{0x1F5D, 0x1F5D}, {0x1F5F, 0x1F7D}, {0x1F80, 0x1FB4}, {0x1FB6, 0x1FBC},
+	{0x1FBE, 0x1FBE}, {0x1FC2, 0x1FC4}, {0x1FC6, 0x1FCC}, {0x1FD0, 0x1FD3},
+	{0x1FD6, 0x1FDB}, {0x1FE0, 0x1FEC}, {0x1FF2, 0x1FF4}, {0x1FF6, 0x1FFC},
+	{0x2102, 0x2102}, {0x2107, 0x2107}, {0x210A, 0x2113}, {0x2115, 0x2115},
+	{0x2119, 0x211D}, {0x2124, 0x2124}, {0x2126, 0x2126}, {0x2128, 0x2128},
+	{0x212A, 0x212D}, {0x212F, 0x2134}, {0x2139, 0x2139}, {0x213C, 0x213F},
+	{0x2145, 0x2149}, {0x214E, 0x214E}, {0x2183, 0x2184}, {0x2C00, 0x2C7B},
+	{0x2C7E, 0x2CE4}, {0x2CEB, 0x2CEE}, {0x2CF2, 0x2CF3}, {0xA640, 0xA66D},
+	{0xA680, 0xA69B}, {0xA722, 0xA76F}, {0xA771, 0xA787}, {0xA78B, 0xA78E},
+	{0xAB70, 0xABBF}, {0xFB00, 0xFB06}, {0xFB13, 0xFB17}, {0xFF21, 0xFF3A},
+	{0xFF41, 0xFF5A}, {0x10400, 0x1044F}, {0x104B0, 0x104D3}, {0x104D8, 0x104FB},
+	{0x10C80, 0x10CB2}, {0x10CC0, 0x10CF2}, {0x118A0, 0x118DF}, {0x1E900, 0x1E943},
+}
+
+// deepseekLLMPunctRanges is the punctuation class: ASCII printable punctuation and its
+// fullwidth forms, curly quotes, and the CJK space and stop. It is a list rather than \p{P}
+// because the expression names these ranges, and a category would take in punctuation the
+// rule leaves to the letter pass.
+var deepseekLLMPunctRanges = [][2]rune{
+	{0x0021, 0x002F}, {0x003A, 0x007E}, {0x2018, 0x201F}, {0x3000, 0x3002},
+	{0xFF01, 0xFF0F}, {0xFF1A, 0xFF5E},
+}
+
+// inRanges reports whether r falls in one of the ranges, which must be sorted and disjoint.
+func inRanges(ranges [][2]rune, r rune) bool {
+	lo, hi := 0, len(ranges)-1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		switch {
+		case r < ranges[mid][0]:
+			hi = mid - 1
+		case r > ranges[mid][1]:
+			lo = mid + 1
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func isDeepseekLLMLetter(r rune) bool { return inRanges(deepseekLLMLetterRanges, r) }
+func isDeepseekLLMPunct(r rune) bool  { return inRanges(deepseekLLMPunctRanges, r) }
+
+// isDeepseekLLMCJK is the family's CJK alternative. The expression lists three ranges that
+// overlap at U+4E00, which leaves U+0800-U+9FA5 and U+AC00-U+D7FF; the first starts at
+// Samaritan rather than at a Han character, so it also takes the scripts between -- that is
+// what the expression says, and it is why those scripts stay one chunk instead of falling to
+// the letter pass, which does not cover them.
+func isDeepseekLLMCJK(r rune) bool {
+	return (r >= 0x0800 && r <= 0x9FA5) || (r >= 0xAC00 && r <= 0xD7FF)
+}
+
+// isNumber reports whether r is \p{N}: a digit, a letter number, or another numeric
+// character. It is wider than isDigit, which is \p{Nd} only, and this family's expression
+// writes the wider class.
+func isNumber(r rune) bool { return unicode.IsNumber(r) }
+
+func isDeepseekLLMLetterAt(s string) bool { return classifyAt(s, isDeepseekLLMLetter) }
+func isDeepseekLLMPunctAt(s string) bool  { return classifyAt(s, isDeepseekLLMPunct) }
+func isDeepseekLLMCJKAt(s string) bool    { return classifyAt(s, isDeepseekLLMCJK) }
+func isNumberAt(s string) bool            { return classifyAt(s, isNumber) }
+
+// splitDeepseekLLM applies the family's five expressions in order: a newline on its own, then
+// letter runs, punctuation runs, CJK runs, and number runs. The first two take one preceding
+// whitespace character as part of the run (\s?), the rest do not.
+//
+// Text that none of them match is left in place, which is how a run of a script outside the
+// letter class -- Arabic, say -- stays whole instead of being cut apart.
+func splitDeepseekLLM(text string) []string {
+	pieces := []string{text}
+	for _, st := range []struct {
+		pred        func(string) bool
+		spacePrefix bool
+		// single makes each matching character its own chunk, which is what an expression
+		// without a + quantifier means: the newline alternative takes one CR or LF, so a
+		// CRLF pair is two chunks, where the number alternative takes the whole run.
+		single bool
+	}{
+		{pred: isNewlineAt, single: true},
+		{pred: isDeepseekLLMLetterAt, spacePrefix: true},
+		{pred: isDeepseekLLMPunctAt, spacePrefix: true},
+		{pred: isDeepseekLLMCJKAt},
+		{pred: isNumberAt},
+	} {
+		var next []string
+		for _, piece := range pieces {
+			next = append(next, splitRunsOf(piece, st.pred, st.spacePrefix, st.single)...)
+		}
+		pieces = next
+	}
+	return pieces
 }

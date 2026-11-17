@@ -943,7 +943,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 65
+		wantImplemented = 66
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1002,6 +1002,82 @@ func TestDbrxAndSmaugShareTheLlama3Rule(t *testing.T) {
 		}
 		if got := tok.preSplit("a1234b"); !sameStrings(got, []string{"a", "123", "4", "b"}) {
 			t.Errorf("%q preSplit(\"a1234b\") = %q, want the llama3 split", name, got)
+		}
+	}
+}
+
+// TestDeepseekLLMChunks pins the deepseek-llm rule, whose letter class is written out as
+// ranges rather than as \p{L}.
+//
+// The expected splits come from applying llama.cpp's six expressions in sequence in Python's
+// regex module, then comparing code point by code point against this implementation over 500
+// random strings drawn from the class boundaries. They agree; these are the cases that make
+// the rule's shape visible.
+func TestDeepseekLLMChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preDeepseekLLM}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// Letters keep their run, punctuation is its own chunk, and one preceding space is
+		// taken with the run it precedes.
+		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
+		{"don't", []string{"don", "'", "t"}},
+		{"x=y", []string{"x", "=", "y"}},
+		// Numbers group as a run, not in threes: this is what separates the family from
+		// llama3 and from deepseek-coder.
+		{"123456", []string{"123456"}},
+		{"a1b2", []string{"a", "1", "b", "2"}},
+		// Each newline is its own chunk, so CRLF is two.
+		{"a\r\nb", []string{"a", "\r", "\n", "b"}},
+		// CJK is its own chunk. The range starts at U+0800 rather than at a Han character,
+		// so the scripts between are taken by this alternative and stay whole.
+		{"你好世界", []string{"你好世界"}},
+		{"日本語テスト", []string{"日本語テスト"}},
+		// The letter class covers Latin, Greek and Cyrillic but not Arabic, which none of
+		// the expressions match -- so it stays as one gap chunk instead of being cut.
+		{"Привет мир", []string{"Привет", " мир"}},
+		{"مرحبا", []string{"مرحبا"}},
+		// One space before a run belongs to it; the others stand alone.
+		{"  hello", []string{" ", " hello"}},
+		{"a  b", []string{"a", " ", " b"}},
+	}
+	for _, c := range cases {
+		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDeepseekLLMRangesAreSorted guards the property inRanges depends on.
+//
+// The class in llama.cpp is not written in ascending order -- the fullwidth punctuation
+// ranges come before the curly quotes -- and a table used as-is makes the binary search miss
+// entries. That is how the first version of this family merged a quote into the following CJK
+// ideograph: U+201E was in the class but unreachable.
+func TestDeepseekLLMRangesAreSorted(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		ranges [][2]rune
+	}{
+		{"deepseekLLMLetterRanges", deepseekLLMLetterRanges},
+		{"deepseekLLMPunctRanges", deepseekLLMPunctRanges},
+	} {
+		for i := 1; i < len(c.ranges); i++ {
+			prev, cur := c.ranges[i-1], c.ranges[i]
+			if prev[0] > prev[1] {
+				t.Errorf("%s[%d] = %U..%U is reversed", c.name, i-1, prev[0], prev[1])
+			}
+			if cur[0] <= prev[1] {
+				t.Errorf("%s[%d] = %U..%U overlaps or touches %U..%U",
+					c.name, i, cur[0], cur[1], prev[0], prev[1])
+			}
+		}
+	}
+	// Every rune of the class has to be reachable, which a lookup at the edges shows.
+	for _, r := range []rune{0x201E, 0x0021, 0xFF5E, 0x10400, 0x03A9, 0x00B5} {
+		if !isDeepseekLLMLetter(r) && !isDeepseekLLMPunct(r) {
+			t.Errorf("%U is in neither class but was expected to be", r)
 		}
 	}
 }

@@ -133,6 +133,11 @@ const (
 	// preGPT4O is tekken's shape with one-to-three digit groups and an optional clitic
 	// suffix on the letter alternatives.
 	preGPT4O
+	// preDeepseekLLM is deepseek-llm's five-expression rule. It looks like deepseek-coder's
+	// but differs in every term that matters: the letter class is spelled out rather than
+	// written \p{L}, the punctuation is a range list rather than \p{P}, and numbers group as
+	// a run rather than singly.
+	preDeepseekLLM
 )
 
 // bpeRunes is the encoding direction of the GPT-2 byte table: one escaped rune per byte.
@@ -411,6 +416,8 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preWhitespace
 		case "bloom", "gpt3-finnish", "poro-chat":
 			t.pre = preBloom
+		case "deepseek-llm":
+			t.pre = preDeepseekLLM
 		case "deepseek-coder":
 			t.pre = preDeepseekCoder
 		case "falcon":

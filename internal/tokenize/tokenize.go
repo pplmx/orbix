@@ -454,7 +454,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 			t.pre = preDeepseek3
 		case "tekken", "nemotron-3.5-embed", "pixtral":
 			t.pre = preTekken
-		case "gpt-4o", "llama4", "inkling2", "kanana2", "talkie", "minimax-m2":
+		case "granite-embed-multi-97m", "gpt-4o", "llama4", "inkling2", "kanana2", "talkie", "minimax-m2":
 			t.pre = preGPT4O
 		// dbrx and smaug-bpe share llama3's expression verbatim: llama.cpp's DBRX and SMAUG
 		// cases fall through to the same regex, and the source says so in a comment. What

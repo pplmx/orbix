@@ -953,7 +953,7 @@ func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 
 	const (
 		wantNames       = 100
-		wantImplemented = 92
+		wantImplemented = 93
 	)
 	if got := len(knownPreNames); got != wantNames {
 		t.Errorf("knownPreNames has %d entries, README says %d", got, wantNames)
@@ -1366,6 +1366,10 @@ func TestSharedRuleNamesResolveToTheirBaseFamily(t *testing.T) {
 	// grok-2 writes \s*[\r\n]+ where bailingmoe has \s*[\r\n]; both consume the whole run,
 	// so the rules agree on every newline input tried.
 	check(t, []string{"grok-2", "bailingmoe", "bailingmoe2", "llada-moe"}, preBailingMoE)
+	// GRANITE_EMB_MULTI holds GPT4O's expression verbatim. The name is easy to confuse with
+	// granite-embed-multi-311m, which is in the GEMMA4 branch and maps to mmbert instead: the
+	// two share a prefix but not a rule.
+	check(t, []string{"granite-embed-multi-97m", "gpt-4o"}, preGPT4O)
 }
 
 // TestBailingMoEChunks pins the bailingmoe rule, which is llama3's shape with a bare \p{N}.

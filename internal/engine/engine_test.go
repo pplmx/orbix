@@ -1083,3 +1083,73 @@ func TestQueueFullFreesUpAgain(t *testing.T) {
 		t.Errorf("Submit after the queue drained: %v", err)
 	}
 }
+
+// TestPrefixCacheSharedWhileConcurrent is the case the sequential reuse test misses: two
+// requests in flight at once, over the same prompt, with the cache on.
+//
+// Sequential requests are the easy case -- the first finishes, its blocks are released into the
+// index, and the second finds them. Concurrent ones share those blocks while both are still
+// reading them, which is the state that a block-count or refcount bug corrupts: the two sequences
+// are advanced in the same rounds, and a block handed to one must not be recycled under the other.
+//
+// The assertion is the same property the sequential test relies on and which makes the whole
+// optimization safe: turning reuse on must not change the output. Two identical greedy requests
+// that share a prefix have to agree with each other and with the same run under no cache.
+func TestPrefixCacheSharedWhileConcurrent(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, _ := gguf.Open(path)
+	tok, _ := tokenize.New(gf)
+	prompt := tok.Encode("Once upon a time there was a little girl named Lily who lived", true)
+
+	// run submits n identical requests before pumping any of them, so all n are resident and
+	// advancing together rather than one at a time.
+	run := func(opts Options, n int) [][]int32 {
+		t.Helper()
+		e, err := New(path, opts)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		chans := make([]<-chan Event, n)
+		for i := range n {
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 4})
+			if err != nil {
+				t.Fatalf("Submit %d: %v", i, err)
+			}
+			chans[i] = ch
+		}
+		// Drain until every sequence has finished; Pump returns how many advanced.
+		for e.Pump() > 0 {
+		}
+		out := make([][]int32, n)
+		for i, ch := range chans {
+			out[i], _ = collect(t, ch)
+		}
+		return out
+	}
+
+	const n = 3
+	plain := run(Options{BlockSize: 4, Blocks: 256, MaxActive: 8}, n)
+	cached := run(Options{BlockSize: 4, Blocks: 256, MaxActive: 8, PrefixCache: true}, n)
+
+	for i := range n {
+		// Each cached sequence must produce exactly what the uncached run did.
+		if len(cached[i]) != len(plain[i]) {
+			t.Fatalf("request %d: cached produced %d tokens, uncached %d", i, len(cached[i]), len(plain[i]))
+		}
+		for j := range cached[i] {
+			if cached[i][j] != plain[i][j] {
+				t.Fatalf("request %d token %d: cached %d, uncached %d", i, j, cached[i][j], plain[i][j])
+			}
+		}
+		// And the concurrent requests agree with each other, which is what shows they did not
+		// read each other's KV state.
+		if len(cached[i]) != len(cached[0]) {
+			t.Fatalf("request %d produced %d tokens, request 0 produced %d", i, len(cached[i]), len(cached[0]))
+		}
+		for j := range cached[i] {
+			if cached[i][j] != cached[0][j] {
+				t.Fatalf("request %d token %d: %d, request 0: %d", i, j, cached[i][j], cached[0][j])
+			}
+		}
+	}
+}

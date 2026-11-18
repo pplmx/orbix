@@ -18,5 +18,6 @@
 //
 // The package sits above llama and below the serving layer. It knows about
 // sequences, slots, and fairness; it knows nothing about HTTP or JSON. That
-// split is what lets the REPL, the CLI, and a future server share one path.
+// split is what lets the REPL, the CLI, the benchmark and internal/server share one
+// path -- the server is the third caller, not a hypothetical one.
 package engine

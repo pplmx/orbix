@@ -32,8 +32,8 @@ func cmdChat(args []string) error {
 	system := fs.String("system", "", "system prompt prepended to the conversation")
 	maxTokens := maxTokensFlag(fs, 128)
 	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
-	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it")
-	topP := fs.Float64("top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it")
+	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it. Only applies with --temp > 0")
+	topP := fs.Float64("top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it. Only applies with --temp > 0")
 	cache := registerCacheFlags(fs, true)
 	noPrefix := fs.Bool("no-prefix-cache", false, "disable prefix reuse between turns")
 	if err := fs.Parse(args); err != nil {

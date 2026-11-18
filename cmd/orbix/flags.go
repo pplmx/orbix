@@ -53,8 +53,10 @@ func registerCacheFlags(fs *flag.FlagSet, workers bool) cacheFlags {
 	c.blocks = fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
 	if workers {
 		c.workers = fs.Int("workers", 0,
-			"kernel goroutines per batched pass; 0 means one per CPU. A pass can only use as many "+
-				"as it has sequences (or prompt rows), so a larger number adds nothing")
+			"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+
+				"the outputs a pass can split, which for the vocabulary projection is its width "+
+				"rather than the batch size -- measured on a 128-core host, 8 workers give about "+
+				"two thirds of what 32 do, and beyond 32 the difference is inside the noise")
 	}
 	return c
 }

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -840,6 +841,49 @@ func TestSpanCarriesTheRequiredGenAIAttributes(t *testing.T) {
 // than the coverage number suggests, because these strings go into error.type and a backend
 // groups failures by them. A branch that returned "" would make failed requests count as
 // unclassified rather than as a named class.
+// TestRenderChatPromptCapitalizesRunes covers the neutral transcript's role capitalization.
+//
+// It sliced role[:1] to uppercase the first letter, which cuts a multi-byte rune in half: a
+// client sending role "é" got "\ufffd\xa9: ..." in the prompt, because the first byte of é
+// became U+FFFD and the continuation byte was written as text. The role is caller-supplied
+// JSON, so any string reaches here -- the CLI hardcodes "user"/"assistant", but the server
+// passes the request's role through unchanged.
+//
+// Measured before the fix, through the server: a chat request with role "é" returned 200, so
+// nothing failed -- the prompt just opened with the two garbage bytes and the model answered
+// from a transcript that did not say who was speaking.
+func TestRenderChatPromptCapitalizesRunes(t *testing.T) {
+	cases := []struct {
+		role string
+		want string
+		why  string
+	}{
+		{"user", "User: hi\nAssistant:", "ASCII capitalizes as before"},
+		{"system", "System: hi\nAssistant:", "the role the fallback must not lose"},
+		{"", "User: hi\nAssistant:", "an empty role defaults to user"},
+		{"é", "É: hi\nAssistant:", "a two-byte rune must survive whole"},
+		{"中文", "中文: hi\nAssistant:", "capitalizing a rune with no upper case leaves it alone"},
+	}
+	for _, c := range cases {
+		got := RenderChatPrompt([]Turn{{Role: c.role, Text: "hi"}})
+		if got != c.want {
+			t.Errorf("RenderChatPrompt(role=%q) = %q, want %q (%s)", c.role, got, c.want, c.why)
+		}
+		// The transcript is encoded into tokens, so it has to be valid UTF-8 whatever the
+		// role was -- that is the property the byte slice broke.
+		if !utf8.ValidString(got) {
+			t.Errorf("RenderChatPrompt(role=%q) = %q, which is not valid UTF-8", c.role, got)
+		}
+	}
+
+	// The system prompt is the reason this fallback matters: an unsupported template must
+	// not lose the instruction, or every request runs without it.
+	sys := RenderChatPrompt([]Turn{{Role: "system", Text: "be brief"}, {Role: "user", Text: "hi"}})
+	if !strings.Contains(sys, "System: be brief") {
+		t.Errorf("neutral transcript dropped the system turn: %q", sys)
+	}
+}
+
 func TestClassifyError(t *testing.T) {
 	cases := []struct {
 		name string

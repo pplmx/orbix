@@ -3,6 +3,7 @@ package engine
 import (
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/chat"
 	"github.com/pplmx/orbix/internal/gguf"
@@ -41,8 +42,17 @@ func RenderChatPrompt(turns []Turn) string {
 		if role == "" {
 			role = "user"
 		}
-		b.WriteString(strings.ToUpper(role[:1]))
-		b.WriteString(role[1:])
+		// Capitalize the first character, not the first byte. role comes from the client's
+		// JSON, so it can be any string: slicing [:1] cuts a multi-byte rune in half, and the
+		// transcript then shows U+FFFD followed by the stray continuation byte. Measured with
+		// role "é": "\ufffd\xa9: x". Decoding the first rune and keeping the rest as text is
+		// what makes the capitalizing independent of the encoding.
+		if first, size := utf8.DecodeRuneInString(role); first != utf8.RuneError || size > 1 {
+			b.WriteString(strings.ToUpper(string(first)))
+			b.WriteString(role[size:])
+		} else {
+			b.WriteString(role)
+		}
 		b.WriteString(": ")
 		b.WriteString(strings.TrimSpace(t.Text))
 		b.WriteString("\n")

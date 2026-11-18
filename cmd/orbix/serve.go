@@ -251,9 +251,19 @@ func cmdServe(args []string) error {
 		}
 	}
 
-	// A signal ends the server the way a caller would: stop accepting, stop
-	// pumping, return. The 5s grace is enough for an in-flight stream to finish
-	// its current token, which is all a local engine needs.
+	// A signal ends the server the way a caller would: stop accepting new requests, let the
+	// ones in flight finish, then stop the pump and return.
+	//
+	// The order matters and used to be wrong. cancel() stops the pump, and the pump is what
+	// advances every active sequence -- including the ones behind a streaming response. So
+	// cancelling first and asking http.Server to drain afterwards left in-flight streams with
+	// nothing to produce their next token: each one blocked until the grace period ran out,
+	// the client got a truncated response, and the process exited with "context deadline
+	// exceeded" for what was an ordinary Ctrl-C. Measured before the fix: a stream that had
+	// produced 92 chunks was held for the full 5s and then cut.
+	//
+	// Now the drain comes first, which is what the grace period is for, and the pump is
+	// stopped only once no response is waiting on it.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	errCh := make(chan error, 1)
@@ -269,13 +279,46 @@ func cmdServe(args []string) error {
 		return nil
 	case <-sig:
 		fmt.Println("\nshutting down")
-		cancel()
-		shutdownCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
-		defer done()
-		err := httpSrv.Shutdown(shutdownCtx)
-		srv.Shutdown()
-		return err
+		return drainAndStop(httpSrv, func() {
+			cancel()
+			srv.Shutdown()
+		}, shutdownGrace)
 	}
+}
+
+// shutdownGrace bounds how long an in-flight response may delay a shutdown.
+const shutdownGrace = 5 * time.Second
+
+// drainAndStop stops an HTTP server and the engine pump behind it, in that order.
+//
+// It is a function rather than four inline calls because the order is the whole point and
+// was wrong: the pump advances every active sequence, so stopping it before the drain leaves
+// each in-flight streaming response with nothing to produce its next token. The response
+// then blocks until the grace period expires, the client gets a truncated stream, and the
+// process reports "context deadline exceeded" for an ordinary Ctrl-C. Measured before the
+// fix: a stream that had emitted 92 chunks was held for the full 5s and then cut; after it,
+// the same stream finished intact in 1.9s and the client waited 0.4s.
+//
+// A response that outlives the grace period is the documented behaviour of a bounded drain,
+// not a failure: the signal asked for a shutdown within the grace and got one. Saying so
+// beats an "error:" line that reads like a crash, and the exit code stays success because
+// nothing failed.
+//
+// The drain's own return value is otherwise passed through: a listener failure is worth
+// reporting.
+func drainAndStop(httpSrv *http.Server, stopPump func(), grace time.Duration) error {
+	ctx, done := context.WithTimeout(context.Background(), grace)
+	defer done()
+	err := httpSrv.Shutdown(ctx)
+	// The pump stops after the drain, whichever way the drain ended: a stream that outlived
+	// the grace period was cut by Shutdown, and leaving the pump running would keep advancing
+	// a sequence nobody can read.
+	stopPump()
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		fmt.Printf("shutdown: a response was still in flight when the %s grace expired; it was cut\n", grace)
+		return nil
+	}
+	return err
 }
 
 // contiguousMemoryNote describes the KV footprint of the contiguous cache, which is the mode

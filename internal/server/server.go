@@ -226,6 +226,14 @@ func (s *Server) StartPump(ctx context.Context) {
 // Safe to call more than once, and safe to call before StartPump. Closing the channel
 // twice panics, which a server handling two shutdown signals at once would hit: a signal
 // handler and a deferred cleanup both running is the ordinary case, not an exotic one.
+//
+// The pump is what advances every active sequence, so shutting it down ends every response
+// still in flight. A caller that wants those responses to finish must drain the HTTP server
+// first and call this afterwards: cmd/orbix's serve does exactly that, and the order used to
+// be reversed there, which left streaming responses with nothing to produce their next token
+// until the drain's grace period cut them off. The sequencing is the caller's because this
+// package does not know what is being served -- a caller using the engine directly may have
+// no in-flight requests to wait for at all.
 func (s *Server) Shutdown() {
 	s.stopOnce.Do(func() { close(s.stop) })
 	s.wg.Wait()

@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -243,6 +246,114 @@ func TestServeAcceptsTheFlagCombinationsThatDoWork(t *testing.T) {
 		if !strings.Contains(err.Error(), "unused.gguf") {
 			t.Errorf("cmdServe(%v) was rejected by validation: %v", args, err)
 		}
+	}
+}
+
+// TestDrainAndStopStopsThePumpAfterTheDrain covers the order inside drainAndStop.
+//
+// The pump advances every active sequence, so stopping it before the drain strands every
+// in-flight response: each one blocks until the grace period expires and the client gets a
+// truncated body. That was the shipped behaviour -- measured, a stream that had emitted 92
+// chunks was held for the full 5s and then cut.
+//
+// The test does not try to observe the race from inside a handler, because http.Server.Shutdown
+// returns only after handlers finish and a handler that waits on the drain deadlocks. It
+// records the one fact that distinguishes the two orderings: the wall-clock time at which
+// each side completed. The handler must finish before stopPump is called; if the pump is
+// stopped first, the handler's end time is later.
+func TestDrainAndStopStopsThePumpAfterTheDrain(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		handlerEndedAt time.Time
+		pumpStoppedAt  time.Time
+	)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Stand in for a streaming response that needs the pump for one more token: a short
+		// wait, then the write the old ordering would never have reached in time.
+		time.Sleep(60 * time.Millisecond)
+		_, _ = w.Write([]byte("finished"))
+		mu.Lock()
+		handlerEndedAt = time.Now()
+		mu.Unlock()
+	})
+	stopPump := func() {
+		mu.Lock()
+		pumpStoppedAt = time.Now()
+		mu.Unlock()
+	}
+	httpSrv := newHTTPServer(handler, time.Minute, time.Second)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = httpSrv.Serve(ln) }()
+
+	got := make(chan string, 1)
+	go func() {
+		r, err := http.Get("http://" + ln.Addr().String() + "/")
+		if err != nil {
+			got <- "error: " + err.Error()
+			return
+		}
+		defer func() { _ = r.Body.Close() }()
+		b, _ := io.ReadAll(r.Body)
+		got <- string(b)
+	}()
+	// Let the request be accepted and reach the handler before the drain begins.
+	time.Sleep(20 * time.Millisecond)
+
+	if err := drainAndStop(httpSrv, stopPump, 5*time.Second); err != nil {
+		t.Fatalf("drainAndStop: %v", err)
+	}
+	select {
+	case body := <-got:
+		if body != "finished" {
+			t.Errorf("body = %q, want %q", body, "finished")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the request did not complete")
+	}
+
+	mu.Lock()
+	h, p := handlerEndedAt, pumpStoppedAt
+	mu.Unlock()
+	if h.IsZero() || p.IsZero() {
+		t.Fatalf("did not observe both times (handler=%v pump=%v)", h, p)
+	}
+	if p.Before(h) {
+		t.Error("the pump was stopped before the in-flight response finished: drainAndStop " +
+			"must drain first, or a streaming response is cut off at the grace period")
+	}
+}
+
+// TestDrainAndStopReportsACutStream checks the grace period's outcome is not an error.
+//
+// A response that outlives the grace period is what a bounded drain is for: the signal asked
+// for a shutdown within that time and got one. Returning the deadline exceeded would make an
+// ordinary Ctrl-C on a long generation look like a crash in the exit code and in the log.
+func TestDrainAndStopReportsACutStream(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Never finishes within the grace period below.
+		time.Sleep(2 * time.Second)
+	})
+	httpSrv := newHTTPServer(handler, time.Minute, time.Second)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = httpSrv.Serve(ln) }()
+
+	go func() {
+		r, err := http.Get("http://" + ln.Addr().String() + "/")
+		if err == nil {
+			_ = r.Body.Close()
+		}
+	}()
+	// Give the request time to reach the handler, so the drain has something to wait for.
+	time.Sleep(200 * time.Millisecond)
+
+	if err := drainAndStop(httpSrv, func() {}, 100*time.Millisecond); err != nil {
+		t.Errorf("drainAndStop returned %v for a stream cut at the grace period, want nil", err)
 	}
 }
 

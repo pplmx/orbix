@@ -347,8 +347,13 @@ func runPolicy(o suiteOptions, policy engine.Priority) (result, error) {
 	// Pump until both requests finish, draining their channels between rounds. Draining
 	// is not optional: the event buffers are bounded, and a 60-token sequence fills its
 	// buffer long before it is done, which would block Pump forever.
-	var tokens int
+	//
+	// Each drain runs on its own goroutine and reports the count it saw rather than
+	// incrementing a shared total. Two goroutines doing tokens++ without a lock is a data
+	// race -- the same defect runRequests had, fixed there by a mutex and left here -- and
+	// the race detector reports it as soon as the suite test drives this scenario.
 	type shortStats struct {
+		tokens   int
 		round    int
 		latency  time.Duration
 		firstTok bool
@@ -363,25 +368,26 @@ func runPolicy(o suiteOptions, policy engine.Priority) (result, error) {
 					st.round = eng.Round()
 					st.latency = time.Since(start)
 				}
-				tokens++
+				st.tokens++
 			}
 		}
 		shortFirst <- st
 	}()
-	longDone := make(chan struct{})
+	longTokens := make(chan int, 1)
 	go func() {
-		defer close(longDone)
+		var n int
 		for ev := range longCh {
 			if ev.HasToken {
-				tokens++
+				n++
 			}
 		}
+		longTokens <- n
 	}()
 
 	for eng.Pump() > 0 {
 	}
-	<-longDone
 	st := <-shortFirst
+	tokens := st.tokens + <-longTokens
 	return result{
 		tokens:  tokens,
 		elapsed: time.Since(start),

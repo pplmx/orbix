@@ -23,9 +23,13 @@
 //
 // The file is read with os.Open and ReadAt, not mmap. A memory map would be faster
 // to start and would let the kernel page weights in on demand, but it fails differently:
-// a truncated or replaced file becomes a segmentation fault inside a matmul rather than
-// an error at load. An error a caller can report is worth more here than the start-up
-// time, and the whole file is read once anyway.
+// a truncated or replaced file becomes a fatal fault inside a matmul rather than an error
+// at load. On Linux that fault is SIGBUS, not SIGSEGV -- the address is valid and the
+// backing file is gone -- which is worth naming because the two are easy to conflate and
+// only the second is what a reader would guess from "memory map went wrong". A Go program
+// sees both as "fatal error: fault", so nothing in this package could catch either.
+// An error a caller can report is worth more here than the start-up time, and the whole
+// file is read once anyway.
 //
 // Metadata is parsed into a map, not a schema. Keys differ between architectures and
 // between converter versions; a struct with one field per known key would reject files it

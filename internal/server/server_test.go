@@ -758,6 +758,39 @@ func TestClientDisconnectStopsGeneration(t *testing.T) {
 		"engine still has an active sequence after the client left")
 }
 
+// TestEmptyChatContentIsAccepted pins the asymmetry with the completions endpoint.
+//
+// A blank prompt is refused there because a completion with nothing to continue is not a
+// request; a blank message here is accepted, because chat content is markup that may
+// legitimately be empty -- an assistant turn carrying only a tool call is the usual case, and
+// the neutral transcript renders it as "User: \n" rather than failing.
+//
+// The two are one line apart in the handlers, so without a test the difference reads as an
+// oversight. Measured: {"messages":[{"role":"user","content":""}]} returns 200 with 8 prompt
+// tokens against the test fixture, while {"prompt":""} returns 400.
+func TestEmptyChatContentIsAccepted(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// Chat: accepted.
+	resp := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages":[{"role":"user","content":""}],"max_tokens":2}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("empty chat content = %d, want 200", resp.StatusCode)
+	}
+	body := decodeBody[chatResponse](t, resp)
+	if len(body.Choices) != 1 {
+		t.Errorf("got %d choices, want 1", len(body.Choices))
+	}
+
+	// Completions: refused, which is the half the existing table already covers -- asserted
+	// here too so the two behaviours are visible together.
+	resp = post(t, srv.Handler(), "/v1/completions", `{"prompt":"","max_tokens":2}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty prompt = %d, want 400", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+}
+
 func TestConcurrentRequestsAllComplete(t *testing.T) {
 	srv, _ := newTestServer(t)
 	const n = 6

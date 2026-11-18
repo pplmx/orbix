@@ -73,6 +73,9 @@ type Attribute struct {
 	// Int reports whether Value holds an integer, which OTLP marks with a different
 	// field name than a string.
 	Int bool
+	// Bool reports whether Value holds a boolean, which OTLP marks with its own field
+	// rather than a quoted "true".
+	Bool bool
 	// Strings, when non-nil, makes this a string[] attribute and Value is ignored. Some
 	// convention attributes are arrays rather than scalars, and a backend queries them by
 	// that shape.
@@ -81,6 +84,11 @@ type Attribute struct {
 
 // StringAttr returns a string attribute.
 func StringAttr(key, value string) Attribute { return Attribute{Key: key, Value: value} }
+
+// BoolAttr returns a boolean attribute.
+func BoolAttr(key string, value bool) Attribute {
+	return Attribute{Key: key, Value: fmt.Sprintf("%t", value), Bool: true}
+}
 
 // StringsAttr returns a string[] attribute.
 func StringsAttr(key string, values ...string) Attribute {

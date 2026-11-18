@@ -505,6 +505,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		Trace:      s.cfg.Trace,
 		Operation:  op,
 		ResponseID: id,
+		Stream:     p.stream,
 	})
 	if err != nil {
 		// A full queue is not the client's fault and not permanent: the request is well

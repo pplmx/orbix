@@ -606,3 +606,39 @@ func TestEncodeStringArrayAttribute(t *testing.T) {
 		t.Error("array attribute also has stringValue set")
 	}
 }
+
+// TestEncodeBoolAttribute covers the boolValue branch.
+//
+// gen_ai.request.stream is a boolean in the convention, and a backend reads it as one; a quoted
+// "true" in stringValue is a different attribute value type.
+func TestEncodeBoolAttribute(t *testing.T) {
+	span := testSpan(t, "chat")
+	span.Attributes = append(span.Attributes, BoolAttr("gen_ai.request.stream", true))
+	body, err := Encode(nil, []Span{span})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	req := unmarshalRequest(t, body)
+	attrs := req.ResourceSpans[0].ScopeSpans[0].Spans[0].Attributes
+
+	var found *keyValue
+	for i := range attrs {
+		if attrs[i].Key == "gen_ai.request.stream" {
+			found = &attrs[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("gen_ai.request.stream is missing: %+v", attrs)
+	}
+	if found.Value.BoolValue == nil {
+		t.Fatalf("stream is not a boolean: %+v", found.Value)
+	}
+	if !*found.Value.BoolValue {
+		t.Error("stream is false, want true")
+	}
+	// A boolean must not also arrive as a string, which is how a backend would read it as
+	// a non-empty value regardless of true or false.
+	if found.Value.StringValue != nil {
+		t.Error("boolean attribute also has stringValue set")
+	}
+}

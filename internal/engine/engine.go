@@ -62,6 +62,11 @@ type Request struct {
 	// "chat". It is separate from the prompt because the two endpoints differ only in how
 	// the prompt was rendered, and a trace reader distinguishes them by this attribute.
 	Operation string
+	// Stream reports whether the caller is consuming this as a stream. The convention says
+	// gen_ai.request.stream is set if and only if the request is streaming, and that an
+	// unset attribute means non-streaming -- so leaving a streamed request unmarked is a
+	// statement that it was not streamed.
+	Stream bool
 	// ResponseID is the completion id the caller will return, e.g. "chatcmpl-123". The
 	// convention requires it on the span, and it is how a trace is joined to the response
 	// a user is looking at.
@@ -364,6 +369,9 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 		}
 		if req.ResponseID != "" {
 			attrs = append(attrs, otel.StringAttr("gen_ai.response.id", req.ResponseID))
+		}
+		if req.Stream {
+			attrs = append(attrs, otel.BoolAttr("gen_ai.request.stream", true))
 		}
 		// The span name is the operation name, which is what the convention says to use.
 		if span, ok := tracer.StartTrace(op, 2, attrs...); ok {

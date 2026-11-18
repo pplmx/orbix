@@ -68,6 +68,7 @@ type keyValue struct {
 type anyValue struct {
 	StringValue *string     `json:"stringValue,omitempty"`
 	IntValue    *string     `json:"intValue,omitempty"`
+	BoolValue   *bool       `json:"boolValue,omitempty"`
 	ArrayValue  *arrayValue `json:"arrayValue,omitempty"`
 }
 
@@ -152,6 +153,13 @@ func encodeAttrs(attrs []Attribute) []keyValue {
 		if a.Int {
 			v := a.Value
 			out = append(out, keyValue{Key: a.Key, Value: anyValue{IntValue: &v}})
+			continue
+		}
+		if a.Bool {
+			// A bool gets its own field, not a string: a backend that reads
+			// gen_ai.request.stream as a boolean cannot use "true" quoted.
+			v := a.Value == "true"
+			out = append(out, keyValue{Key: a.Key, Value: anyValue{BoolValue: &v}})
 			continue
 		}
 		if a.Strings != nil {

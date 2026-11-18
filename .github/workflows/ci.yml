@@ -157,6 +157,26 @@ jobs:
   # Documentation is code here: README is the project's front page and each package's
   # doc.go is its authoritative description, so a broken link or a malformed table is a
   # defect like any other.
+  # The hooks in .pre-commit-config.yaml check things `make check` does not: trailing
+  # whitespace and final newlines in non-Go files, YAML/TOML/JSON syntax, and merge-conflict
+  # markers. Measured before adding this job -- appending a whitespace line to
+  # .github/workflows/ci.yml left `make check` green, so nothing was catching it.
+  #
+  # Local hooks only run for whoever installed them; without this job the checks apply to
+  # contributors who remembered `prek install` and to nobody else.
+  prek:
+    name: prek
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # An exact version, not a major tag: prek-action stopped publishing moving major and
+      # minor tags at v3, so `@v3` would not resolve. Bumping it should be a reviewed commit
+      # rather than a branch that turns red when upstream changes a rule.
+      #
+      # No extra-args: the action already runs `prek run --all-files`.
+      - uses: j178/prek-action@v3.1.0
+
   docs:
     name: docs
     runs-on: ubuntu-latest

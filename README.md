@@ -332,10 +332,16 @@ curl http://127.0.0.1:8080/v1/completions \
 ```
 
 This is a property of an unauthenticated API that also performs work, not a bug in the CORS
-decision: adding CORS would not close it, because CORS governs who may read a response, not who
-may cause one. What closes it is binding to loopback or putting authentication in front. The
-default `--addr :8080` listens on every interface; a host reachable from elsewhere is an
-inference API anyone can spend.
+decision. Adding CORS would not close it, because CORS governs who may read a response, not who
+may cause one; and checking the Content-Type would only narrow it, since the tolerance is what
+makes the `curl -d` form above usable in the first place. Measured with `--max-active 2`: six
+such requests from a page's origin were accepted in a row and generated 240 tokens between
+them, while the preflighted equivalent is already refused -- `OPTIONS` on these routes answers
+405, so a cross-origin `application/json` request never leaves the preflight.
+
+What closes it is binding to loopback or authenticating in front. The default `--addr :8080`
+listens on every interface; a host reachable from elsewhere is an inference API anyone can
+spend.
 
 ### Embed in a Go service
 

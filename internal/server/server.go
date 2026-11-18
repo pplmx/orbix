@@ -910,6 +910,24 @@ func decodeJSON(r *http.Request, dst any) error {
 	// text/plain has still sent JSON, and refusing it would reject a request this server can serve
 	// perfectly well. curl -d sets application/x-www-form-urlencoded rather than leaving the header
 	// off, which is exactly that case and is how most hand-written example requests here are sent.
+	//
+	// The cost of that tolerance is real and is worth stating where the decision lives, because it
+	// is not visible from either endpoint: a cross-origin page can make the server generate.
+	// POST with Content-Type: text/plain is a "simple request" under the Fetch standard, so the
+	// browser sends it with no CORS preflight, and this server parses the body whatever the header
+	// says. The page cannot read the reply -- no Access-Control-Allow-Origin is sent -- but the
+	// request runs. Measured with --max-active 2: six such requests from a page's origin were
+	// accepted in a row and generated 240 tokens between them. The preflighted alternative is
+	// already refused: OPTIONS on these routes answers 405, so a cross-origin application/json
+	// request never leaves the preflight.
+	//
+	// Keeping the tolerance is the decision, and the cost is an unauthenticated API that performs
+	// work rather than a Content-Type problem. The tolerance is what makes the text/plain path
+	// usable at all, so checking the header would trade a documented convenience for less exposure
+	// than the word "bypass" suggests: the page still cannot read anything, and the request path
+	// it needs is the one already documented for curl -d. What closes the exposure is binding
+	// loopback or authenticating in front, which is what the README's "No CORS and no
+	// authentication" section tells a deployer to do.
 	if enc := r.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
 		return fmt.Errorf("%w: %s; send the body uncompressed", errUnsupportedEncoding, enc)
 	}

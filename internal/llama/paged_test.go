@@ -435,3 +435,69 @@ func TestNewBlockPoolChargesBookkeeping(t *testing.T) {
 		t.Errorf("error %q does not charge the bookkeeping (512 MiB KV + 1 GiB arrays)", err)
 	}
 }
+
+// TestContiguousSpansRejectsOutOfRange covers the argument checks on the cache's span accessor.
+//
+// Every forward pass reaches this method once per layer per head, and none of the arguments is
+// validated by the caller. Three of the four checks had no test at all: only the kv head bound was
+// covered, by a paged test that happens to hit it. A panic here would surface as a crash inside the
+// forward pass with no indication of which argument was wrong.
+//
+// The zero-row case was worse than untested -- it was broken. n=0 passed the "negative or too
+// large" check and then computed an end offset from n-1, which is -1, and panicked on a slice bound.
+// No caller in the package asks for zero rows, so the forward pass never hit it, but the method is
+// reachable from anywhere the package is used.
+func TestContiguousSpansRejectsOutOfRange(t *testing.T) {
+	cfg := testConfig()
+	c, err := NewKVCache(cfg, 16)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+
+	cases := []struct {
+		name         string
+		layer, kv, n int
+		wantErr      bool
+	}{
+		{"negative layer", -1, 0, 1, true},
+		{"layer past the end", cfg.Layers, 0, 1, true},
+		{"negative kv head", 0, -1, 1, true},
+		{"kv head past the end", 0, cfg.KVHeads, 1, true},
+		{"negative positions", 0, 0, -1, true},
+		{"more positions than the cache holds", 0, 0, 17, true},
+		// Zero rows is a valid request: there is nothing to read.
+		{"zero positions", 0, 0, 0, false},
+		{"the largest valid request", 0, 0, 16, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("spans(%d, %d, %d) panicked: %v", tc.layer, tc.kv, tc.n, r)
+				}
+			}()
+			keys, values, err := c.spans(tc.layer, tc.kv, tc.n)
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Fatalf("spans(%d, %d, %d) error = %v, want error: %v", tc.layer, tc.kv, tc.n, err, tc.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			// A successful call describes n rows, however many spans carry them.
+			var rows int
+			for _, s := range keys {
+				rows += s.rows
+			}
+			if rows != tc.n {
+				t.Errorf("%d rows across %d spans, want %d", rows, len(keys), tc.n)
+			}
+			var vrows int
+			for _, s := range values {
+				vrows += s.rows
+			}
+			if vrows != tc.n {
+				t.Errorf("%d value rows, want %d", vrows, tc.n)
+			}
+		})
+	}
+}

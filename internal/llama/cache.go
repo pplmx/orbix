@@ -146,6 +146,13 @@ func (c *KVCache) spans(layer, kv, n int) (keys, values []span, err error) {
 	if n < 0 || n > c.ctx {
 		return nil, nil, fmt.Errorf("llama: %d positions requested, cache holds %d", n, c.ctx)
 	}
+	// Zero rows is a request attention can carry out -- there is nothing to read -- but the end
+	// offset below is computed from n-1, which is -1 here and would panic on a slice bound. The
+	// callers in this package always ask for at least one row, so this is about the contract rather
+	// than about a path in the forward pass; a panic from a public method is still a crash.
+	if n == 0 {
+		return []span{}, []span{}, nil
+	}
 	end := off + (n-1)*dim + head
 	keys = []span{{data: c.k[layer][off:end], stride: dim, rows: n, width: head}}
 	values = []span{{data: c.v[layer][off:end], stride: dim, rows: n, width: head}}

@@ -52,6 +52,16 @@ type Request struct {
 	Stop []int32
 	// Sampler picks each next token. Nil means greedy.
 	Sampler llama.Sampler
+	// Operation names the GenAI operation for the trace span: "chat" for a chat
+	// completion, "text_completion" for the legacy completions endpoint. Empty means
+	// "chat". It is separate from the prompt because the two endpoints differ only in how
+	// the prompt was rendered, and a trace reader distinguishes them by this attribute.
+	Operation string
+	// ResponseID is the completion id the caller will return, e.g. "chatcmpl-123". The
+	// convention requires it on the span, and it is how a trace is joined to the response
+	// a user is looking at.
+	ResponseID string
+
 	// Cancel, when set, stops the sequence at the start of its next round. The
 	// sequence then reports Done with the finish reason "cancel". A caller that
 	// owns a connection sets this to its request context so a client that goes
@@ -332,11 +342,26 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	}
 	if req.Trace != nil {
 		tracer := req.Trace.Tracer()
-		if span, ok := tracer.StartTrace("chat.completion", 2,
+		op := req.Operation
+		if op == "" {
+			op = "chat"
+		}
+		attrs := []otel.Attribute{
+			// Required by the GenAI conventions, and the discriminator a backend uses to
+			// pick the provider-specific attribute set. "orbix" is this engine's own name,
+			// which the convention allows: the value is the provider as the instrumentation
+			// knows it, not an upstream registry entry.
+			otel.StringAttr("gen_ai.operation.name", op),
+			otel.StringAttr("gen_ai.provider.name", "orbix"),
 			otel.StringAttr("gen_ai.request.model", cfg.Name),
 			otel.IntAttr("gen_ai.usage.input_tokens", int64(len(req.Prompt))),
 			otel.IntAttr("gen_ai.request.max_tokens", int64(req.MaxTokens)),
-		); ok {
+		}
+		if req.ResponseID != "" {
+			attrs = append(attrs, otel.StringAttr("gen_ai.response.id", req.ResponseID))
+		}
+		// The span name is the operation name, which is what the convention says to use.
+		if span, ok := tracer.StartTrace(op, 2, attrs...); ok {
 			s.reqSpan, s.traceOn = span, true
 		}
 	}

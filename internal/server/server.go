@@ -480,14 +480,31 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 
 	stopIDs := s.stopTokenIDs(p.stop)
+	// OpenAI prefixes a completion id with "cmpl-" and a chat completion with "chatcmpl-".
+	// The prefix is cosmetic to a parser but visible to anyone reading a log, and the wrong
+	// one makes a completion look like a chat response.
+	prefix := "cmpl-"
+	if p.chat {
+		prefix = "chatcmpl-"
+	}
+	id := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
+
+	// The two endpoints differ only in how the prompt was rendered, so the operation name
+	// is what tells them apart in a trace.
+	op := "text_completion"
+	if p.chat {
+		op = "chat"
+	}
 	ch, err := s.eng.Submit(engine.Request{
-		Prompt:    promptTokens,
-		MaxTokens: maxTokens,
-		Priority:  p.priority,
-		Stop:      stopIDs,
-		Sampler:   sampler,
-		Cancel:    r.Context().Done(),
-		Trace:     s.cfg.Trace,
+		Prompt:     promptTokens,
+		MaxTokens:  maxTokens,
+		Priority:   p.priority,
+		Stop:       stopIDs,
+		Sampler:    sampler,
+		Cancel:     r.Context().Done(),
+		Trace:      s.cfg.Trace,
+		Operation:  op,
+		ResponseID: id,
 	})
 	if err != nil {
 		// A full queue is not the client's fault and not permanent: the request is well
@@ -503,14 +520,6 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 	s.requests.Add(1)
 
-	// OpenAI prefixes a completion id with "cmpl-" and a chat completion with "chatcmpl-".
-	// The prefix is cosmetic to a parser but visible to anyone reading a log, and the wrong
-	// one makes a completion look like a chat response.
-	prefix := "cmpl-"
-	if p.chat {
-		prefix = "chatcmpl-"
-	}
-	id := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
 	if p.stream {
 		s.streamResponse(w, r, ch, id, p.chat, p.stop)
 		return

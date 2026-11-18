@@ -552,7 +552,10 @@ func TestTracingRecordsRequestSpans(t *testing.T) {
 	case c := <-got:
 		body := string(c.body)
 		for _, want := range []string{
-			`"chat.completion"`,
+			// Required by the GenAI conventions, and the span name is the operation name.
+			`"gen_ai.operation.name"`,
+			`"gen_ai.provider.name"`,
+			`"chat"`,
 			`"gen_ai.request.model"`,
 			`"gen_ai.usage.input_tokens"`,
 			`"gen_ai.usage.output_tokens"`,
@@ -684,5 +687,73 @@ func TestCancelledRequestSpanIsError(t *testing.T) {
 	// The status code is what a trace query filters on. 1 is ok, 2 is error.
 	if !strings.Contains(body, `"status":{"code":2`) {
 		t.Errorf("cancelled span is not marked error: %s", body)
+	}
+}
+
+// TestSpanCarriesTheRequiredGenAIAttributes checks the three attributes the GenAI conventions
+// mark Required, plus the span name rule that goes with them.
+//
+// Without gen_ai.operation.name and gen_ai.provider.name a backend cannot tell which operation
+// a span describes or which provider-specific attribute set to read it against; without
+// gen_ai.response.id a trace cannot be joined to the response a user is looking at.
+func TestSpanCarriesTheRequiredGenAIAttributes(t *testing.T) {
+	cases := []struct {
+		name, operation, wantOp string
+	}{
+		{"chat", "chat", "chat"},
+		{"legacy completions", "text_completion", "text_completion"},
+		{"unset defaults to chat", "", "chat"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var body []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				body = b
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			exp, err := otel.NewExporter(otel.ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+			if err != nil {
+				t.Fatalf("NewExporter: %v", err)
+			}
+			defer func() { _ = exp.Close() }()
+
+			e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2})
+			ch, err := e.Submit(Request{
+				Prompt: tok.Encode("Once", true), MaxTokens: 2,
+				Trace: exp, Operation: c.operation, ResponseID: "chatcmpl-test",
+			})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			for e.Pump() > 0 {
+			}
+			for range ch {
+			}
+			if err := exp.Flush(context.Background()); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+
+			mu.Lock()
+			got := string(body)
+			mu.Unlock()
+			for _, want := range []string{
+				`"gen_ai.operation.name"`,
+				`"gen_ai.provider.name"`,
+				`"gen_ai.response.id"`,
+				`"chatcmpl-test"`,
+				`"name":"` + c.wantOp + `"`, // the span name is the operation name
+				`"stringValue":"` + c.wantOp + `"`,
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("span is missing %s: %s", want, got)
+				}
+			}
+		})
 	}
 }

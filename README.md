@@ -388,48 +388,29 @@ attend over. Anything over the limit is answered `413` and the connection is clo
 reading the rest. Without the bound the cost rose with the body: a 64 MiB request spent 82
 seconds being read and tokenized before the server could say it was too long.
 
-### Embed in a Go service
+### Embedding it in a Go service
 
-```go
-package main
+Not supported today, and the reason is structural rather than an omission. Every package that
+would do the work lives under `internal/`, which Go forbids another module from importing:
 
-import (
-	"context"
-	"fmt"
-	"log"
-
-	"github.com/pplmx/orbix"
-	"github.com/pplmx/orbix/kv/paged"
-)
-
-func main() {
-	eng := orbix.NewEngine(
-		orbix.WithKVCache(paged.New(paged.Config{BlockSize: 16})),
-		orbix.WithMaxBatchSize(32),
-	)
-	if err := eng.Load(context.Background(), "./model.gguf", orbix.LoadOptions{}); err != nil {
-		log.Fatal(err)
-	}
-	defer eng.Close()
-
-	events, err := eng.Scheduler().Submit(context.Background(), orbix.Request{
-		Prompt:    "What does a KV cache store?",
-		MaxTokens: 256,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for ev := range events {
-		switch ev.Type {
-		case orbix.EventToken:
-			fmt.Print(ev.Token)
-		case orbix.EventDone:
-			fmt.Println()
-		}
-	}
-}
+```text
+use of internal package github.com/pplmx/orbix/internal/engine not allowed
 ```
+
+That is deliberate for now -- `internal/` is what makes the package boundaries a rule the
+compiler enforces rather than a convention, and the layers have moved enough that a frozen
+public API would have been a liability. The interfaces in [Core Interfaces](#core-interfaces)
+are the shape such an API would take; the table there says which of them exist and which do
+not, and nothing in this section should be read as a promise that they are reachable.
+
+What works instead:
+
+- **Run the server and talk HTTP.** `orbix serve` is the supported integration surface, and it is
+  the OpenAI shape, so the client libraries already exist: see
+  [Serve a GGUF model](#serve-a-gguf-model), and the `curl` calls there are the contract.
+- **Fork or copy what you need.** The code is structured to be read, and `internal/engine` is the
+  entry point a fork would call: `engine.New(path, engine.Options{...})` returns an engine,
+  `Submit` queues, `Pump` advances a round, and `Stats` reports. That is what the CLI does.
 
 ### Cross-compile
 

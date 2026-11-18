@@ -1486,4 +1486,20 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	if withStop := collectStream(t, io.NopCloser(strings.NewReader(w2.Body.String()))); withStop != want {
 		t.Errorf("with a stop configured, streamed %q, want %q", withStop, want)
 	}
+
+	// The shortest truncation of all: a budget of one token, so the stream ends after a
+	// single byte of a three-byte character. Nothing in the pending bytes forms a character,
+	// and both paths have to say so the same way -- U+FFFD, not nothing.
+	single := []int32{head}
+	wantSingle := tok.DecodeCompletion(single)
+	ch3 := make(chan engine.Event, 2)
+	ch3 <- engine.Event{Token: head, HasToken: true}
+	ch3 <- engine.Event{Done: true, FinishReason: "length"}
+	close(ch3)
+	w3 := httptest.NewRecorder()
+	srv.streamResponse(w3, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+		ch3, "cmpl-test", false, nil)
+	if got := collectStream(t, io.NopCloser(strings.NewReader(w3.Body.String()))); got != wantSingle {
+		t.Errorf("one-byte stream gave %q, the same token decodes to %q", got, wantSingle)
+	}
 }

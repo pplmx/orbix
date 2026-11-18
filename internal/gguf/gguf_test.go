@@ -2,6 +2,7 @@ package gguf
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math"
@@ -500,6 +501,74 @@ func TestGetRejectsNarrowingOverflow(t *testing.T) {
 // 3.5 is reported unrepresentable instead of truncated. Truncation here would be the quiet
 // kind of wrong -- an alignment of 33 read as 32 still divides, and the file's tensors are
 // then read from the wrong offsets.
+// TestRejectsArrayOfArrays covers the one structural rule GGUF's metadata section states
+// about arrays: "Arrays can contain other types but not other arrays" (gguf-spec.md, III).
+//
+// Nothing enforced it. A file declaring an array whose element type is itself an array was
+// read into Value{Type: TypeArray, Array: []Value{{Type: TypeArray, ...}}}, which the rest of
+// the package has no meaning for: GetArray compares each element's type against T, so an
+// array inside an array reads as "the key is absent" -- a silent skip, not an error, and
+// exactly what this parser is written not to do.
+//
+// The guard is on the element type rather than on a recursion depth, because the format
+// allows one level: there is no depth to count once an array element cannot be an array.
+func TestRejectsArrayOfArrays(t *testing.T) {
+	// hand-built: the fixture builder has no way to express a shape the format forbids.
+	var b bytes.Buffer
+	b.WriteString(Magic)
+	u32 := func(v uint32) {
+		var x [4]byte
+		binary.LittleEndian.PutUint32(x[:], v)
+		b.Write(x[:])
+	}
+	u64 := func(v uint64) {
+		var x [8]byte
+		binary.LittleEndian.PutUint64(x[:], v)
+		b.Write(x[:])
+	}
+
+	u32(Version)
+	u64(0) // no tensors
+	u64(1) // one metadata entry
+	u64(uint64(len("nested")))
+	b.WriteString("nested")
+	u32(uint32(TypeArray)) // value type: array
+	u32(uint32(TypeArray)) // element type: array, which the format forbids
+	u64(1)                 // one element
+	// The inner array the forbidden element type would describe.
+	u32(uint32(TypeUint8))
+	u64(1)
+	b.WriteByte(7)
+
+	_, err := Read(bytes.NewReader(b.Bytes()))
+	if err == nil {
+		t.Fatal("Read accepted an array of arrays")
+	}
+	// The message has to say the shape is the problem: this file is otherwise well-formed,
+	// so an error about lengths or EOF would send a reader looking in the wrong place.
+	if !strings.Contains(err.Error(), "array of arrays") {
+		t.Errorf("error %q does not name the nesting as the problem", err)
+	}
+}
+
+// TestNormalArraysStillParse is the other half: rejecting nesting must not reject the flat
+// arrays every real file has.
+func TestNormalArraysStillParse(t *testing.T) {
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	// The fixture carries a string array (tokens) and an int32 array (token_type).
+	tokens, ok := f.GetArray[string]("tokenizer.ggml.tokens")
+	if !ok || len(tokens) == 0 {
+		t.Fatalf("GetArray[string](tokens) = %v, %v", tokens, ok)
+	}
+	types, ok := f.GetArray[int32]("tokenizer.ggml.token_type")
+	if !ok || len(types) != len(tokens) {
+		t.Errorf("GetArray[int32](token_type) has %d values, want %d", len(types), len(tokens))
+	}
+}
+
 func TestScalarAsFloatToInteger(t *testing.T) {
 	cases := []struct {
 		name   string

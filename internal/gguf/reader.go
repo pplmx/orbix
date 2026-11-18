@@ -174,6 +174,18 @@ func (r *reader) array() (Value, error) {
 		return Value{}, err
 	}
 	et := ValueType(elemType)
+	// GGUF's metadata section forbids an array of arrays: "Arrays can contain other types
+	// but not other arrays" (gguf-spec.md, section III). Accepting one would give the value
+	// a shape the rest of this package has no meaning for -- GetArray compares each element's
+	// type against T, so an array element inside an array reads as "the key is absent", which
+	// is the silent skip this package's parser rules exist to prevent.
+	//
+	// Refused here rather than by depth counting: one level is the rule, so there is nothing
+	// to count. The recursion in value() cannot run away because it can no longer be entered
+	// for an array element.
+	if et == TypeArray {
+		return Value{}, fmt.Errorf("gguf: array of arrays is not allowed by the format")
+	}
 	v := Value{Type: TypeArray, ElemType: et}
 
 	// An array element is at least one byte on disk, so n can never exceed

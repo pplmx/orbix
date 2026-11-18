@@ -162,9 +162,6 @@ jobs:
       - name: just test-race
         run: just test-race
 
-  # Documentation is code here: README is the project's front page and each package's
-  # doc.go is its authoritative description, so a broken link or a malformed table is a
-  # defect like any other.
   # The hooks in .pre-commit-config.yaml check things `just check` does not: trailing
   # whitespace and final newlines in non-Go files, YAML/TOML/JSON syntax, and merge-conflict
   # markers. Measured before adding this job -- appending a whitespace line to
@@ -234,6 +231,12 @@ jobs:
             just RANGE="HEAD~1..HEAD" commits
           fi
 
+  # Documentation is code here: the README is the project's front page and the
+  # pull-request template shapes every contribution, so a broken link or a malformed table
+  # is a defect like any other. This job runs the same `just docs` a contributor runs.
+  #
+  # It does not lint the package doc.go files -- those are Go, and rumdl refuses them.
+  # Their prose is checked by review, which is why it lives in the diff.
   docs:
     name: docs
     runs-on: ubuntu-latest

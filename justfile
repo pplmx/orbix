@@ -67,6 +67,10 @@ fmt:
 
 # run golangci-lint
 lint:
+    @command -v golangci-lint >/dev/null 2>&1 || { \
+        echo "golangci-lint not found: install it (https://golangci-lint.run/docs/welcome/install/) or run CI's check job"; \
+        exit 1; \
+    }
     golangci-lint run
 
 # run kernel and engine benchmarks

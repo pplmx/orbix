@@ -23,7 +23,7 @@ export CGO_ENABLED := 0
 # no user is a build that breaks without anyone noticing.
 CROSS_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build test test-race lint fmt vet bench clean check cross docs fuzz
+.PHONY: all build test test-race lint fmt vet bench clean check cross docs fuzz hooks
 
 all: check
 
@@ -110,6 +110,22 @@ docs:
 		exit 1; \
 	}
 	rumdl check .
+
+## hooks: run the pre-commit hooks over every tracked file
+##
+## The hooks check what `make check` cannot see -- trailing whitespace and final newlines in
+## non-Go files, YAML/TOML/JSON syntax, merge-conflict markers. Measured: a whitespace-only
+## line appended to a workflow file left `check` green.
+##
+## A separate target because prek is a Rust binary that a Go-only contributor may not have,
+## for the same reason `docs` is separate from `check`. CI runs it as its own job with
+## `--all-files`, which is the same command.
+hooks:
+	@command -v prek >/dev/null 2>&1 || { \
+		echo "prek not found: install it (https://prek.j178.dev) or run CI's prek job"; \
+		exit 1; \
+	}
+	prek run --all-files
 
 ## cross: build every supported platform with CGo disabled
 cross:

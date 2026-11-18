@@ -152,6 +152,49 @@ func TestSuitePolicyPairsDiffer(t *testing.T) {
 	}
 }
 
+// TestSuitePolicyRowExplainsRaisedTokenCount covers the note that keeps the table from
+// contradicting its own header.
+//
+// The policy rows need a long request the queue can order, so they raise anything below 60
+// tokens. Measured with --max-tokens 4: the header printed "generating: 4 tokens per request"
+// and the policy rows reported 63, with nothing to say why. A reader comparing rows has no
+// way to tell a bug in the token count from a deliberate floor.
+//
+// Both directions are asserted, because a note that appears unconditionally would be noise
+// on every ordinary run.
+func TestSuitePolicyRowExplainsRaisedTokenCount(t *testing.T) {
+	// Below the floor: the note must say what was asked, what was used, and why.
+	low := raisedNote(true, 4, 60)
+	for _, want := range []string{"4", "60", "--max-tokens"} {
+		if !strings.Contains(low, want) {
+			t.Errorf("note %q does not mention %q", low, want)
+		}
+	}
+	// Above the floor: silent.
+	if got := raisedNote(false, 120, 120); got != "" {
+		t.Errorf("note for a run that was not raised: %q", got)
+	}
+
+	// And the rows really do report the raised total: 60 long + 3 short.
+	o := testSuiteOptions(t)
+	o.maxTok = 4
+	for _, sc := range scenarioList() {
+		if sc.name != "policy shortest" && sc.name != "policy fifo" {
+			continue
+		}
+		res, err := sc.run(o)
+		if err != nil {
+			t.Fatalf("%s: %v", sc.name, err)
+		}
+		if res.tokens != 63 {
+			t.Errorf("%s generated %d tokens, want 63 (60 raised + 3 short)", sc.name, res.tokens)
+		}
+		if !strings.Contains(res.extra, "raised") {
+			t.Errorf("%s note %q does not explain the raised count", sc.name, res.extra)
+		}
+	}
+}
+
 // TestSuiteRejectsUnknownPolicyFlag is a guard on the flag surface: the suite ignores
 // --policy, which is easy to miss and would otherwise look like the flag being broken.
 func TestSuiteRejectsUnknownPolicyFlag(t *testing.T) {

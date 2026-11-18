@@ -333,9 +333,17 @@ func runPolicy(o suiteOptions, policy engine.Priority) (result, error) {
 	if err != nil {
 		return result{}, err
 	}
+	// The long request needs enough tokens for the policy to have something to reorder:
+	// a queue of two requests that both finish in three tokens measures the scheduler's
+	// startup, not its ordering. The floor is therefore raised rather than the row being
+	// skipped, and the note says so -- without that the table contradicts its own header,
+	// which prints the caller's --max-tokens (measured: "generating: 4 tokens per request"
+	// above a policy row reporting 63).
 	long := o.maxTok
+	raised := false
 	if long < 60 {
 		long = 60
+		raised = true
 	}
 	start := time.Now()
 	longCh, err := eng.Submit(engine.Request{Prompt: o.prompt, MaxTokens: long, Sampler: llama.Greedy{}})
@@ -399,8 +407,20 @@ func runPolicy(o suiteOptions, policy engine.Priority) (result, error) {
 		// it says nothing about the policy.
 		firstToken: st.latency,
 		firstRound: st.round,
-		extra:      fmt.Sprintf("short request's first token on round %d", st.round),
+		extra: fmt.Sprintf("short request's first token on round %d%s",
+			st.round, raisedNote(raised, o.maxTok, long)),
 	}, nil
+}
+
+// raisedNote explains a policy row that generated more tokens than the caller asked for.
+//
+// It is empty when the floor did not apply, so the ordinary note is unchanged.
+func raisedNote(raised bool, asked, used int) string {
+	if !raised {
+		return ""
+	}
+	return fmt.Sprintf("; the long request used %d tokens, raised from --max-tokens %d so the "+
+		"queue has something to order", used, asked)
 }
 
 // benchLoad opens a model just far enough to read its tokenizer and config, which is

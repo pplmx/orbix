@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -816,6 +817,40 @@ func TestEmbedRejectsNegativeToken(t *testing.T) {
 	}
 	if _, err := m.DecodeStep([]Cache{cache}, []int32{-1}); err == nil {
 		t.Error("DecodeStep accepted a negative token id")
+	}
+}
+
+// TestForwardEmbedRejectsNegativeToken covers the third copy of the negative-token check.
+//
+// The first two were corrected in decodeBatch.embed and the batched prefill path; Model.embed
+// in forward.go had the same sum-based guard and was missed, because the fix went to the two
+// sites the bug report named rather than to every site that performs the indexing.
+//
+// Its callers happen to validate -- Forward checks the token before calling, and
+// logitsForCached relies on its tokens having come from a prefill that checked -- so this is
+// not a live crash. It is the function that indexes, though, and "the caller checked" is an
+// invariant that lives in a different file from the slice expression.
+func TestForwardEmbedRejectsNegativeToken(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	for _, token := range []int{-1, -32, cfg.VocabSize} {
+		err := m.embed(token)
+		if err == nil {
+			t.Errorf("embed(%d) accepted a token outside the vocabulary of %d", token, cfg.VocabSize)
+			continue
+		}
+		if !strings.Contains(err.Error(), "outside vocabulary") {
+			t.Errorf("embed(%d) error %q does not name the range", token, err)
+		}
+	}
+	// A legal token must still work, or the guard could be satisfied by refusing everything.
+	if err := m.embed(0); err != nil {
+		t.Errorf("embed(0) failed: %v", err)
 	}
 }
 

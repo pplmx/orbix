@@ -119,6 +119,46 @@ func TestMetricsSplitFinishedByReason(t *testing.T) {
 	}
 }
 
+// TestMetricsExportsEveryFinishReason ties the exposition to the engine's own list.
+//
+// The handler used to name the five reasons itself. That copy kept compiling when the engine
+// added one, and the failure would have been a label no scrape ever showed -- a dashboard
+// missing a reason rather than a build error. It now iterates engine.FinishReasons, and this
+// test compares the labels in the body against that list rather than against a literal, so the
+// two cannot disagree.
+func TestMetricsExportsEveryFinishReason(t *testing.T) {
+	srv, _ := newTestServer(t)
+	body := readBody(t, get(t, srv.Handler(), "/metrics"))
+
+	var have []string
+	for _, line := range strings.Split(body, "\n") {
+		rest, ok := strings.CutPrefix(line, "orbix_requests_finished_by_reason_total{reason=\"")
+		if !ok {
+			continue
+		}
+		label, _, ok := strings.Cut(rest, "\"}")
+		if !ok {
+			t.Fatalf("malformed sample %q", line)
+		}
+		have = append(have, label)
+	}
+
+	want := engine.FinishReasons()
+	if len(have) != len(want) {
+		t.Fatalf("exported %d reasons %v, engine defines %d %v", len(have), have, len(want), want)
+	}
+	// Order is not part of the contract, so compare as sets.
+	seen := map[string]bool{}
+	for _, h := range have {
+		seen[h] = true
+	}
+	for _, r := range want {
+		if !seen[r.String()] {
+			t.Errorf("engine defines reason %q but /metrics does not export it", r.String())
+		}
+	}
+}
+
 // finishedTotal reads orbix_requests_finished_total out of an exposition body.
 func finishedTotal(t *testing.T, body string) int {
 	t.Helper()

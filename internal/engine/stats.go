@@ -85,6 +85,19 @@ const (
 	FinishReasonCount
 )
 
+// FinishReasons is every reason a request can end, in array-index order.
+//
+// Exported so a consumer that wants to report all of them does not restate the list: a
+// hardcoded set elsewhere would keep compiling when a new reason was added, and the failure
+// would be a metric label that no traffic ever reaches rather than a build error.
+func FinishReasons() []FinishReason {
+	out := make([]FinishReason, 0, FinishReasonCount)
+	for r := FinishStop; r < FinishReasonCount; r++ {
+		out = append(out, r)
+	}
+	return out
+}
+
 // String returns the name the event stream and the HTTP response already use, so a metric
 // label and a finish_reason field cannot drift apart.
 func (r FinishReason) String() string {

@@ -37,11 +37,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	// whose clients disconnect mid-generation looks healthy in every other number. Those
 	// sequences are counted as finished, they contribute a normal-looking latency, and the
 	// only sign is that most of them ended in "cancel" or "abandoned" rather than "stop".
-	var reasons []labeledValue
-	for _, r := range []engine.FinishReason{
-		engine.FinishStop, engine.FinishLength, engine.FinishCancel,
-		engine.FinishAbandoned, engine.FinishError,
-	} {
+	// The reasons come from the engine rather than a list restated here: a new one would
+	// otherwise keep this file compiling while its label never appeared in a scrape.
+	all := engine.FinishReasons()
+	reasons := make([]labeledValue, 0, len(all))
+	for _, r := range all {
 		reasons = append(reasons, labeledValue{
 			label: r.String(),
 			value: float64(st.FinishedByReason[r]),

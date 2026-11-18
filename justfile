@@ -187,6 +187,16 @@ release:
     }
     cz bump --yes
 
-# remove build output
+# The list mirrors .gitignore's artifact entries rather than naming only bin/: a `clean` that
+# leaves 7 MiB of rumdl cache and stray test binaries is a clean that surprises the next person
+# to look at the working tree.
+#
+# remove everything the build and the tools leave behind
 clean:
-    rm -rf bin
+    @# The compiler's own cache is shared across projects and lives outside the tree; removing
+    @# it here would slow every other Go checkout on the machine.
+    @rm -rf bin .rumdl_cache .cache
+    @find . -name '*.test' -type f -delete
+    @find . -name '*.out' -type f -delete
+    @find . -name '*.prof' -type f -delete
+    @echo "clean: removed bin/, caches, and test/profiling artifacts"

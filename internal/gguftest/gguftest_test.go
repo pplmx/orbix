@@ -13,8 +13,13 @@ import (
 
 // The fixture is only useful if the packages it feeds accept it, so these tests exercise
 // the same entry points a checkpoint goes through: the reader, the tokenizer, and a
-// forward pass. A fixture that parses but cannot run would move 74 tests from "skipped"
-// to "failing", which is worse than leaving them skipped.
+// forward pass. A fixture that parses but cannot run would move every test that depends on
+// it from "skipped" to "failing", which is worse than leaving them skipped.
+//
+// The count is deliberately not written down. It was 74 when this comment was added and has
+// grown since; nothing can pin a number that lives in prose, so the comment describes the
+// consequence instead of quantifying it. The tests that would fail are the ones behind
+// gguftest, and `go test ./...` reports which those are when it happens.
 
 // readFile reads a fixture, for the determinism test.
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }

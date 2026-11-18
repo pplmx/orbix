@@ -92,7 +92,21 @@ fuzz:
             | sed 's/func //' | sort -u || true)
         for t in $targets; do
             echo "==> $pkg $t ({{FUZZTIME}})"
-            go test "$pkg" -run '^$' -fuzz "^$t$$" -fuzztime {{FUZZTIME}}
+            # The `$` is written `\$`: a shebang recipe's body is handed to bash as written,
+            # so `$$` there is bash's PID, not just's escape for a literal dollar. That made
+            # the pattern `^FuzzParse1234`, which matches no target.
+            out=$(go test "$pkg" -run '^$' -fuzz "^$t\$" -fuzztime {{FUZZTIME}} 2>&1) || {
+                printf '%s\n' "$out"
+                exit 1
+            }
+            # Go answers a -fuzz regexp matching nothing with this warning and exit 0, so
+            # without the check the recipe exits "ok" having fuzzed nothing -- which is how
+            # the `$$` bug above survived: every run reported success.
+            if printf '%s' "$out" | grep -q 'no fuzz tests to fuzz'; then
+                echo "\$t matched no fuzz target in \$pkg" >&2
+                exit 1
+            fi
+            printf '%s\n' "$out" | tail -2
         done
     done
     echo "fuzz: ok"

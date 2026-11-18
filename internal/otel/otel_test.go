@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -481,5 +483,81 @@ func TestCloseFlushesQueuedSpans(t *testing.T) {
 	}
 	if spans != 1 {
 		t.Errorf("posted %d spans, want 1", spans)
+	}
+}
+
+// TestExporterRecordsFromManyGoroutines covers the concurrency the exporter exists for.
+//
+// A span is recorded from whatever goroutine finished the work, so the queue is written by as many
+// goroutines as the server has requests in flight while the background sender drains it. The
+// existing tests record from one goroutine, so the locking was only ever exercised serially.
+//
+// Two properties matter and they are different: nothing may be lost (every span recorded under the
+// queue limit has to arrive), and the split between sent and dropped must add up. A lock that
+// dropped a span silently would still produce a valid-looking export, and the count is what says
+// otherwise.
+func TestExporterRecordsFromManyGoroutines(t *testing.T) {
+	const (
+		goroutines = 8
+		perG       = 25
+		total      = goroutines * perG
+	)
+	var got atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+			if res, ok := payload["resourceSpans"].([]any); ok {
+				for _, rs := range res {
+					m, _ := rs.(map[string]any)
+					if ss, ok := m["scopeSpans"].([]any); ok {
+						for _, s := range ss {
+							sm, _ := s.(map[string]any)
+							spans, _ := sm["spans"].([]any)
+							got.Add(int64(len(spans)))
+						}
+					}
+				}
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// A queue large enough to hold everything, so the drop path is not what is under test here:
+	// this test is about nothing being lost to a race on the queue itself.
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint: srv.URL, Interval: 20 * time.Millisecond,
+		MaxQueue: total * 2, MaxBatch: 7,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+
+	tr := exp.Tracer()
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Go(func() {
+			for i := range perG {
+				span, ok := tr.StartTrace(fmt.Sprintf("g%d-i%d", g, i), 1)
+				if !ok {
+					t.Errorf("StartTrace failed")
+					return
+				}
+				exp.Record(span.Finish(nil))
+			}
+		})
+	}
+	wg.Wait()
+
+	// Close flushes what is still queued, so after it returns every recorded span has either
+	// been posted or counted as dropped.
+	if err := exp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if dropped := exp.Dropped(); dropped != 0 {
+		t.Errorf("dropped %d spans with a queue of %d", dropped, total*2)
+	}
+	if n := got.Load(); n != total {
+		t.Errorf("collector received %d spans, want %d", n, total)
 	}
 }

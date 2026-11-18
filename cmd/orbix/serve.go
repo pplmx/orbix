@@ -37,6 +37,24 @@ func otelResource(version, model string) []otel.Attribute {
 	}
 }
 
+// newHTTPServer builds the server with the timeouts this service needs.
+//
+// ReadHeaderTimeout is small because headers are small. IdleTimeout needs an explicit value:
+// net/http falls back to ReadTimeout, and ReadTimeout cannot be set here because it bounds the
+// whole request including the handler's run, which for a generation that streams for minutes
+// would cut the response off mid-flight. Zero for both means an idle keep-alive socket is held
+// for the life of the process -- measured, 30 idle connections held 30 descriptors.
+//
+// WriteTimeout is left unset for the same reason as ReadTimeout: a slow generation is a
+// legitimate response, not a slow client.
+func newHTTPServer(h http.Handler, idle, readHeader time.Duration) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: readHeader,
+		IdleTimeout:       idle,
+	}
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -178,10 +196,7 @@ func cmdServe(args []string) error {
 	// port, and a caller (or a test) needs the one it got.
 	url := "http://" + ln.Addr().String()
 
-	httpSrv := &http.Server{
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	httpSrv := newHTTPServer(srv.Handler(), 120*time.Second, 10*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

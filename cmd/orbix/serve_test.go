@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pplmx/orbix/internal/llama"
 )
@@ -310,5 +312,36 @@ func TestOTelResourceHasNoSpanAttributes(t *testing.T) {
 	}
 	if got := seen["service.version"]; got != "v1.2.3" {
 		t.Errorf("service.version = %q, want v1.2.3", got)
+	}
+}
+
+// TestHTTPServerTimeouts pins the two timeouts whose absence is invisible until a process has
+// been up long enough to accumulate sockets.
+//
+// net/http's zero value means no timeout for all four fields, and IdleTimeout's fallback is
+// ReadTimeout -- which this server must leave unset, because ReadTimeout bounds the handler's
+// whole run and a generation can stream for minutes. So an unset IdleTimeout is not "the default
+// applies", it is "an idle keep-alive socket is held for the life of the process".
+func TestHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer(http.NotFoundHandler(), 120*time.Second, 10*time.Second)
+
+	if srv.IdleTimeout <= 0 {
+		t.Errorf("IdleTimeout = %v, want a positive value", srv.IdleTimeout)
+	}
+	if srv.ReadHeaderTimeout <= 0 {
+		t.Errorf("ReadHeaderTimeout = %v, want a positive value", srv.ReadHeaderTimeout)
+	}
+	// Both would bound a legitimate long generation and must stay unset.
+	if srv.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0: it would cut off a long stream", srv.WriteTimeout)
+	}
+	if srv.ReadTimeout != 0 {
+		t.Errorf("ReadTimeout = %v, want 0: it would cut off a long stream", srv.ReadTimeout)
+	}
+	// IdleTimeout longer than ReadHeaderTimeout is the intent: headers arrive fast, a
+	// keep-alive pause between requests does not.
+	if srv.IdleTimeout <= srv.ReadHeaderTimeout {
+		t.Errorf("IdleTimeout %v is not longer than ReadHeaderTimeout %v",
+			srv.IdleTimeout, srv.ReadHeaderTimeout)
 	}
 }

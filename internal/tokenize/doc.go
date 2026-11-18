@@ -24,6 +24,13 @@
 // split wrong, so the model answered a different question -- while applying the list gives
 // "to establish a new religion".
 //
+// The score path no longer exists here, and the figures above come from the comparison that
+// settled the question rather than from something a reader can rerun: "roughly a third" was
+// a measurement over a corpus of unusual inputs, not a property this package asserts. What
+// survives as a checkable fact is the rule itself, and the tests pin it against llama.cpp's
+// expressions. The paragraph keeps the history because the reason for the choice is the
+// comparison, and a number nobody can reproduce still says more than "we preferred this".
+//
 // Pre-tokenization is a separate question from the merge algorithm. A byte-level BPE model
 // was trained on chunks, not on raw text: the trainer cut the corpus first and a merge never
 // spans a boundary, so reproducing the vocabulary's expectations means applying the same cut

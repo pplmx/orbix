@@ -923,7 +923,7 @@ This is primarily a personal learning project, but issues and design discussions
 - Keep dependencies directional: kernels must not import the scheduler; the scheduler must not import the server.
 - Kernel changes must include a correctness test against the reference implementation and a benchmark.
 - New model architectures go through the architecture registry; do not add model-specific branches to the scheduler or server.
-- Naming: brand **Orbix**, binary **`orbix`**, package **`orbix`**.
+- Naming: brand **Orbix**, binary **`orbix`**, module path **`github.com/pplmx/orbix`**. There is no importable root package -- the layers are under `internal/` -- so a package named `orbix` would be a new decision rather than a rename.
 
 ## License
 

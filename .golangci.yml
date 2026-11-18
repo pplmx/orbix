@@ -32,6 +32,31 @@ linters:
         path: internal/chat/expr\.go
         text: "QF1002"
 
+  settings:
+    depguard:
+      # The dependency direction AGENTS.md calls a hard constraint: "dependencies point
+      # downward only". Only one class of violation needs a linter: a dependency between two
+      # packages at the same level. Everything else -- llamas importing the server, the engine
+      # importing the server -- closes a cycle through the reverse edge and the compiler
+      # rejects it before lint runs. Two leaves have no reverse edge to close, so an import
+      # between them compiles, passes every test, and quietly couples two layers that were
+      # meant to be independent.
+      rules:
+        leaves-stay-independent:
+          files:
+            - "**/internal/gguf/**"
+            - "**/internal/f16/**"
+            - "**/internal/kernel/**"
+            - "**/internal/chat/**"
+            - "**/internal/otel/**"
+          deny:
+            - pkg: "github.com/pplmx/orbix/internal/tokenize"
+              desc: "tokenize is a leaf; it may depend on gguf, and nothing may depend on it from below"
+            - pkg: "github.com/pplmx/orbix/internal/quant"
+              desc: "quant is a leaf above gguf and f16"
+  enable:
+    - depguard
+
 formatters:
   enable:
     - gofmt

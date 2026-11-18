@@ -560,10 +560,10 @@ orbix_kv_pool_used_fraction 0
 ```
 
 The exposition format is written by hand rather than through a client library, for the
-same reason the GGUF parser is: it is four lines of syntax, and the hand-written encoder
-is read by the code review rather than trusted as a dependency. The tests parse the
-output back the way a scraper would, so a HELP line in the wrong place fails a test
-instead of a dashboard.
+same reason the GGUF parser is: a family is three lines -- `# HELP`, `# TYPE`, and one
+sample -- and the hand-written encoder is read by the code review rather than trusted as
+a dependency. Thirteen families come to 39 lines. The tests parse the output back the way
+a scraper would, so a HELP line in the wrong place fails a test instead of a dashboard.
 
 Two of the metrics exist because their failure mode is invisible in latency until it is
 already failing. `orbix_requests_queued` growing against a steady round rate is a

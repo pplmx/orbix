@@ -2,11 +2,16 @@
 // submissions and engine events back into JSON or server-sent events.
 //
 // It is the last layer in the reading order (GGUF, kernels, KV cache, scheduler,
-// server) and it is deliberately the thinnest. Everything that makes inference
-// work -- tokenization, batching, cache management -- is already decided below it;
-// what is left is the part that only exists because the caller is on the network:
-// decoding a request body, choosing a status code, flushing a stream, and noticing
-// that a client hung up.
+// server) and it makes no inference decisions of its own. Everything that makes
+// inference work -- tokenization, batching, cache management -- is already decided below
+// it; what is left is the part that only exists because the caller is on the network:
+// decoding a request body, refusing a field the engine cannot honour, choosing a status
+// code, flushing a stream, and noticing that a client hung up.
+//
+// "Makes no inference decisions" is a statement about the work, not about the size: this
+// is the third-largest package in the repository, because the OpenAI schema is wide and
+// refusing unsupported fields one by one is most of it. The thinness that matters is that
+// none of those lines can change what the model computes.
 //
 // The API shape is OpenAI's, which is the de-facto interface for local inference.
 // Implementing it means the server can be driven by the OpenAI client libraries and
@@ -25,7 +30,7 @@
 // engine's counters is a job that belongs to whoever owns the process lifetime. The
 // numbers themselves are collected in internal/engine: a server that inferred queue
 // depth or pool occupancy from the outside would be reporting a guess. What lives
-// here is only the encoding, and it is written by hand -- four lines of Prometheus
-// text format do not justify a client library in a repository whose point is to make
-// each layer legible.
+// here is only the encoding, and it is written by hand -- a three-line family in a
+// format whose whole grammar fits on a page does not justify a client library in a
+// repository whose point is to make each layer legible.
 package server

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -512,6 +513,80 @@ func TestGetRejectsNarrowingOverflow(t *testing.T) {
 //
 // The guard is on the element type rather than on a recursion depth, because the format
 // allows one level: there is no depth to count once an array element cannot be an array.
+// TestRefusesOversizedMetadataValue covers the allocation a corrupt length must not buy.
+//
+// A GGUF string is a u64 length followed by that many bytes, and until now the length chose
+// the allocation before any of the bytes had arrived. Measured: a file of a few hundred bytes
+// claiming a 1 GiB string made Read allocate 1024 MiB and only then report
+// io.ErrUnexpectedEOF. Eight bytes of input bought a gigabyte.
+//
+// Two bounds answer it. A single value may not claim more than maxMetadataBytes, which is
+// far above any real metadata (the largest strings in a 580 MB checkpoint are a few hundred
+// bytes) and far below a gigabyte; and the read is chunked, so a claim that passes the first
+// bound still costs only the bytes that actually arrive.
+func TestRefusesOversizedMetadataValue(t *testing.T) {
+	build := func(claimed uint64, supplied int) []byte {
+		var b bytes.Buffer
+		b.WriteString(Magic)
+		u32 := func(v uint32) {
+			var x [4]byte
+			binary.LittleEndian.PutUint32(x[:], v)
+			b.Write(x[:])
+		}
+		u64 := func(v uint64) {
+			var x [8]byte
+			binary.LittleEndian.PutUint64(x[:], v)
+			b.Write(x[:])
+		}
+		u32(Version)
+		u64(0)
+		u64(1)
+		u64(uint64(len("k")))
+		b.WriteString("k")
+		u32(uint32(TypeString))
+		u64(claimed)
+		b.Write(bytes.Repeat([]byte("a"), supplied))
+		return b.Bytes()
+	}
+
+	// Over the limit: refused before allocating, and the message names the number.
+	data := build(1<<30, 4)
+	before := allocDelta(t, func() {
+		if _, err := Read(bytes.NewReader(data)); err == nil {
+			t.Error("Read accepted a 1 GiB string claim")
+		} else if !strings.Contains(err.Error(), "refusing to allocate") {
+			t.Errorf("error %q does not say the size is the problem", err)
+		}
+	})
+	// The bound is what saves the memory, so assert on memory rather than on the error
+	// alone: a guard that refused after allocating would still return that error.
+	if before > 64<<20 {
+		t.Errorf("a 1 GiB claim allocated %.1f MiB before being refused", float64(before)/(1<<20))
+	}
+
+	// Under the limit but bigger than the file: must not preallocate the claim either.
+	data = build(32<<20, 1<<20)
+	delta := allocDelta(t, func() {
+		if _, err := Read(bytes.NewReader(data)); err == nil {
+			t.Error("Read accepted a truncated 32 MiB value")
+		}
+	})
+	if delta > 8<<20 {
+		t.Errorf("a 32 MiB claim with 1 MiB of data allocated %.1f MiB", float64(delta)/(1<<20))
+	}
+}
+
+// allocDelta runs fn and reports how many bytes were allocated during it.
+func allocDelta(t *testing.T, fn func()) uint64 {
+	t.Helper()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
 func TestRejectsArrayOfArrays(t *testing.T) {
 	// hand-built: the fixture builder has no way to express a shape the format forbids.
 	var b bytes.Buffer

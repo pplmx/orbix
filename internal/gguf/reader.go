@@ -26,12 +26,34 @@ func (r *reader) readFull(b []byte) error {
 }
 
 func (r *reader) bytes(n uint64) ([]byte, error) {
-	if n > uint64(math.MaxInt32) {
-		return nil, fmt.Errorf("gguf: refusing to allocate %d bytes", n)
+	// The length comes from the file and is not corroborated by anything before the bytes
+	// are read, so it must not decide an allocation on its own. Measured: a file of a few
+	// hundred bytes claiming a 1 GiB string made Read allocate 1024 MiB and then report
+	// io.ErrUnexpectedEOF -- eight bytes of input costing a gigabyte, seven times over for a
+	// 64-bit length field. The cap below is the first half of the answer and the chunked read
+	// is the second: with the cap alone, every value just under it is still a free 2 GiB.
+	//
+	// maxMetadataBytes bounds one string or byte run. Real GGUF metadata is small -- the
+	// largest strings in a 580 MB checkpoint are a few hundred bytes of chat template, and
+	// the vocabulary arrives as an array of short strings -- so this is orders of magnitude
+	// above anything a writer produces while still being far below a gigabyte.
+	const maxMetadataBytes = 64 << 20
+	if n > maxMetadataBytes {
+		return nil, fmt.Errorf("gguf: refusing to allocate %d bytes for one value (limit %d)",
+			n, maxMetadataBytes)
 	}
-	b := make([]byte, n)
-	if err := r.readFull(b); err != nil {
-		return nil, err
+
+	// Read in bounded chunks and grow only as bytes actually arrive. A file that claims more
+	// than it holds therefore costs the bytes it really has, not the bytes it promised.
+	b := make([]byte, 0, min(n, 4096))
+	var chunk [4096]byte
+	for remaining := n; remaining > 0; {
+		size := min(remaining, uint64(len(chunk)))
+		if err := r.readFull(chunk[:size]); err != nil {
+			return nil, err
+		}
+		b = append(b, chunk[:size]...)
+		remaining -= size
 	}
 	return b, nil
 }

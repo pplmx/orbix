@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +38,72 @@ func readBody(t *testing.T, resp *http.Response) string {
 		t.Fatalf("read body: %v", err)
 	}
 	return string(raw)
+}
+
+// TestMetricsUnderConcurrentRequests scrapes /metrics while requests are running.
+//
+// Every existing metrics test scrapes between requests, so nothing exercised the one thing
+// the endpoint exists for: an operator polls it while the pump is advancing sequences. The
+// two disagree about locking -- Stats takes the engine mutex once for its fields and the pool
+// takes its own for Free -- and a scrape is allowed to see a slightly stale combination, but
+// it must not race. That is what -race decides, and the test only has to get both sides
+// running at once to ask the question.
+//
+// The body is also checked to be complete on every scrape: a handler that raced would most
+// likely show up as a truncated or half-written exposition rather than as a failed request.
+func TestMetricsUnderConcurrentRequests(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var wg sync.WaitGroup
+	// Scrapers. Failures are collected rather than reported from the goroutine: t.Errorf
+	// is safe there but t.Fatalf is not, and a bare return would drop the failure entirely.
+	var mu sync.Mutex
+	var problems []string
+	note := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		problems = append(problems, fmt.Sprintf(format, args...))
+	}
+	for range 4 {
+		wg.Go(func() {
+			for range 25 {
+				resp := get(t, h, "/metrics")
+				body := readBody(t, resp)
+				if resp.StatusCode != http.StatusOK {
+					note("scrape returned %d", resp.StatusCode)
+					return
+				}
+				// The model label is written last, so its presence means the whole
+				// exposition reached the buffer.
+				if !strings.Contains(body, "model_info{model=") {
+					note("scrape body is missing the final metric; len=%d", len(body))
+					return
+				}
+			}
+		})
+	}
+	// Requests, so the pump has something to advance while the scrapes read.
+	for range 4 {
+		wg.Go(func() {
+			for range 3 {
+				resp := post(t, h, "/v1/completions", `{"prompt": "Once upon a time", "max_tokens": 4}`)
+				_ = readBody(t, resp)
+			}
+		})
+	}
+	wg.Wait()
+	for _, p := range problems {
+		t.Error(p)
+	}
+
+	// And the counters the scrapers read must add up afterwards: a race that corrupted a
+	// counter would leave a request accepted but never finished.
+	st := srv.eng.Stats()
+	if st.RequestsSubmitted != st.RequestsFinished {
+		t.Errorf("submitted %d but finished %d with no requests outstanding",
+			st.RequestsSubmitted, st.RequestsFinished)
+	}
 }
 
 // scrape fetches /metrics and returns its body.

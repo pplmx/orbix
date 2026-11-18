@@ -319,8 +319,14 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	maxQueued := e.maxQueued
 	e.mu.Unlock()
 	if queued >= maxQueued {
-		return nil, fmt.Errorf("engine: %d requests already waiting for %d slots: %w",
-			queued, e.maxActive, ErrQueueFull)
+		// The detail goes in parentheses after the sentinel rather than before it. Wrapping
+		// the other way round produced "engine: 8 requests already waiting for 8 slots:
+		// engine: too many requests waiting" in the 503 body a client reads -- the sentinel's
+		// own "engine: too many requests waiting" is appended by %w, so anything placed before
+		// it repeats the prefix. llama.ErrPoolExhausted is wrapped this way for the same
+		// reason, and the two messages are the only capacity errors a client ever sees.
+		return nil, fmt.Errorf("%w (%d queued for %d active slots)",
+			ErrQueueFull, queued, e.maxActive)
 	}
 
 	// Paged sequences take blocks as they generate; contiguous ones reserve the

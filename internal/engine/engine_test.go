@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -1054,6 +1055,44 @@ func TestQueueFullIsRefused(t *testing.T) {
 	// that no round is going to reach.
 	if want := maxActive + maxQueued; accepted != want {
 		t.Errorf("accepted %d requests, want %d (MaxActive + MaxQueued)", accepted, want)
+	}
+}
+
+// TestQueueFullMessageNamesTheCapacityOnce checks the text a client actually reads.
+//
+// ErrQueueFull is wrapped with %w, so the sentinel's own "engine: too many requests
+// waiting" is appended to whatever the wrapper writes. Writing the detail first produced
+//
+//	engine: 8 requests already waiting for 8 slots: engine: too many requests waiting
+//
+// in the 503 body -- the package prefix twice, and the same capacity described two
+// different ways. Nothing asserted the text: the server test checks the status code and
+// the Retry-After header, and this package checks errors.Is, so a doubled prefix could
+// ship and did.
+//
+// The assertion is deliberately on the prefix count rather than on exact wording, so
+// rewording the message is not a test break, while repeating the prefix still is.
+func TestQueueFullMessageNamesTheCapacityOnce(t *testing.T) {
+	const maxActive, maxQueued = 1, 2
+	e, tok, _ := loadModelPath(t, Options{MaxActive: maxActive, MaxQueued: maxQueued})
+	prompt := tok.Encode("Once upon a time", true)
+	for range maxActive + maxQueued {
+		if _, err := e.Submit(Request{Prompt: prompt, MaxTokens: 20}); err != nil {
+			t.Fatalf("filling the engine: %v", err)
+		}
+	}
+	_, err := e.Submit(Request{Prompt: prompt, MaxTokens: 20})
+	if !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("Submit = %v, want ErrQueueFull", err)
+	}
+	msg := err.Error()
+	if n := strings.Count(msg, "engine:"); n != 1 {
+		t.Errorf("message names the package %d times, want 1 (a client reads this):\n%s", n, msg)
+	}
+	// The detail still has to describe the capacity the caller ran into, or a message
+	// without a doubled prefix has been bought by saying nothing.
+	if !strings.Contains(msg, "queued") || !strings.Contains(msg, "slots") {
+		t.Errorf("message does not describe the queue: %q", msg)
 	}
 }
 

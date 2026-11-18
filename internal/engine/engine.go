@@ -36,6 +36,12 @@ type Event struct {
 	Err error
 	// FinishReason says why generation stopped: "length", "stop", or "error".
 	FinishReason string
+	// Generated is how many tokens the sequence produced in total, set on the terminal
+	// event. It is the honest figure for usage reporting, because a caller can stop reading
+	// early -- at a stop string in the stream, say -- and still owe the count of what the
+	// model actually generated. The alternative, counting the events a consumer happened to
+	// receive, under-reports by however many it skipped.
+	Generated int
 	// Round is the engine round that produced this event.
 	//
 	// It is stamped here rather than read from Engine.Round() by the consumer because a
@@ -824,6 +830,9 @@ func (e *Engine) finish(s *sequence, last Event) {
 		}
 	}
 	if last.Err != nil || last.Done {
+		// Every path out of the sequence comes through here, so this is where the total
+		// belongs: filling it at the six finish call sites would be six chances to forget.
+		last.Generated = len(s.out)
 		// Best effort, like every other event: the caller may have stopped reading, and
 		// this call must not be the thing that stalls the shared pump.
 		s.emit(last)

@@ -1495,6 +1495,84 @@ func TestStreamingRespectsStopStrings(t *testing.T) {
 	}
 }
 
+// TestStreamingUsageCountsEveryGeneratedToken covers the usage figures when a stop string
+// ends the stream early.
+//
+// completion_tokens has to be the same number on both endpoints for the same request, because
+// OpenAI defines it as every token the model generated rather than the text that reached the
+// caller, and the blocking body counts them all. The streaming loop broke out at the stop and
+// stopped counting, so one request reported 17 through /v1/completions and 2 through the same
+// endpoint with stream: true -- measured against the fixture with stop "the" and a 60-token
+// budget.
+//
+// The engine now reports the total on its terminal event, and the stream reads that event for
+// the figure instead of tallying what it happened to see. Reading it costs one round, not the
+// rest of the budget, which is why the two durations stay close.
+func TestStreamingUsageCountsEveryGeneratedToken(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// The fixture's own output contains NUL bytes, which cannot travel through a stop string,
+	// so the stop text is taken from that output the way TestStreamingRespectsStopStrings does
+	// it: pick a run of printable runes the model does produce.
+	full := decodeBody[completionResponse](t, post(t, h, "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 20}`)).Choices[0].Text
+	runes := []rune(full)
+	start := -1
+	for i := 0; i+2 <= len(runes); i++ {
+		if runes[i] != 0 && runes[i+1] != 0 && i > 0 {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Skipf("continuation %q has no printable run of two runes", full)
+	}
+	stopText := string(runes[start : start+2])
+
+	body := `"prompt": "Once upon a time", "max_tokens": 20, "stop": [` + quoteJSON(stopText) + `]`
+	blocking := decodeBody[completionResponse](t, post(t, h, "/v1/completions", "{"+body+"}"))
+	if blocking.Choices[0].FinishReason != "stop" {
+		t.Fatalf("the blocking endpoint did not stop on %q: %+v", stopText, blocking.Choices[0])
+	}
+
+	raw := readBody(t, post(t, h, "/v1/completions",
+		"{"+body+`, "stream": true, "stream_options": {"include_usage": true}}`))
+	var streamed *usage
+	var text strings.Builder
+	for _, line := range strings.Split(raw, "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Text string `json:"text"`
+			} `json:"choices"`
+			Usage *usage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			t.Fatalf("chunk %q is not JSON: %v", payload, err)
+		}
+		for _, c := range chunk.Choices {
+			text.WriteString(c.Text)
+		}
+		if chunk.Usage != nil {
+			streamed = chunk.Usage
+		}
+	}
+	if streamed == nil {
+		t.Fatal("the stream carried no usage chunk")
+	}
+	if streamed.CompletionTokens != blocking.Usage.CompletionTokens {
+		t.Errorf("completion_tokens = %d streaming and %d blocking for the same request",
+			streamed.CompletionTokens, blocking.Usage.CompletionTokens)
+	}
+	if text.String() != blocking.Choices[0].Text {
+		t.Errorf("streamed text %q, blocking text %q", text.String(), blocking.Choices[0].Text)
+	}
+}
+
 // TestUnknownModelIsRefused covers the model field on both endpoints.
 //
 // The field is what an OpenAI client uses to check it is talking to the server it meant to.

@@ -963,6 +963,24 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 					// unread, which is what the engine does for a client that stopped
 					// reading. What changes here is only what this response reports.
 					reason = "stop"
+					// The engine keeps producing after this point, and completion_tokens has
+					// to include that output: OpenAI defines it as every token the model
+					// generated, not the text that reached the caller, and the blocking body
+					// counts them all (len(out)). Counting only the events this loop happened
+					// to read reported 2 where the same request reported 17 through the other
+					// endpoint -- the two disagreeing about one request is the defect.
+					//
+					// So the terminal event is read for its Generated figure. It is small and
+					// comes one round after the stop, so the wait is a round, not the rest of
+					// the budget. Nothing is written while draining.
+					for ev2 := range ch {
+						if ev2.Done || ev2.Err != nil {
+							if ev2.Generated > generated {
+								generated = ev2.Generated
+							}
+							break
+						}
+					}
 					break
 				}
 				// Nothing matched yet, but the tail may be the beginning of a stop string,

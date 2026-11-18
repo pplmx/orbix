@@ -904,6 +904,15 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 		}
 		b, err := json.Marshal(payload)
 		if err != nil {
+			// Unreachable with the payloads built here -- maps of strings, ints, nils and
+			// nested maps of the same, none of which can fail to encode. Kept because a
+			// future field that does fail should end the stream rather than write a chunk
+			// with a hole in it, and returning false already means "stop streaming".
+			//
+			// It shares a return value with the write failure below, and the two mean
+			// different things: a write failure means the client is gone, while this one
+			// would mean the server built something it could not describe. Nothing above
+			// distinguishes them today because nothing can reach this branch.
 			return false
 		}
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {

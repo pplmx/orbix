@@ -27,7 +27,37 @@ import numpy as np
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else "/models/Qwen2.5-0.5B-Instruct"
 OUT = sys.argv[2] if len(sys.argv) > 2 else "qwen2-f32.gguf"
-CFG = json.load(open(f"{SRC}/config.json"))
+
+# The two ways this is run wrong, reported as what they mean rather than as a traceback. A
+# converter is pointed at a directory a person typed, and "FileNotFoundError: ... /config.json"
+# makes them read a stack to learn the path was wrong.
+if not os.path.isdir(SRC):
+    sys.exit(f"hf_to_gguf: {SRC} is not a directory; pass the checkpoint directory as the first argument")
+CFG_PATH = f"{SRC}/config.json"
+if not os.path.exists(CFG_PATH):
+    sys.exit(f"hf_to_gguf: {CFG_PATH} not found; the first argument must be a Hugging Face "
+             f"checkpoint directory (the one holding config.json and *.safetensors)")
+CFG = json.load(open(CFG_PATH))
+
+# The tensor-name mapping and every metadata key below are Qwen2's, so a checkpoint of another
+# architecture fails further down with a KeyError naming an internal tensor. Saying which
+# architecture the directory actually holds is what tells the reader they passed the wrong one.
+MODEL_TYPE = CFG.get("model_type", "")
+if MODEL_TYPE != "qwen2":
+    sys.exit(f"hf_to_gguf: {SRC} is a {MODEL_TYPE or 'unknown'} checkpoint; this converter "
+             f"writes Qwen2 metadata and tensor names, so it can only convert model_type=qwen2")
+
+# This converter reads the single-file form. A sharded checkpoint keeps several
+# *.safetensors plus an index, and opening the missing fixed name would report a path rather
+# than the reason it is absent.
+WEIGHTS = f"{SRC}/model.safetensors"
+if not os.path.exists(WEIGHTS):
+    shards = sorted(f for f in os.listdir(SRC) if f.endswith(".safetensors"))
+    if shards:
+        sys.exit(f"hf_to_gguf: {SRC} is sharded ({len(shards)} .safetensors files, e.g. "
+                 f"{shards[0]}); this converter reads the single-file form only")
+    sys.exit(f"hf_to_gguf: {SRC} has no model.safetensors; the checkpoint directory must hold "
+             f"the weights alongside config.json")
 
 NAMES = [  # GGUF key order is arbitrary; names must match llama.cpp's mapping.
     (("model.embed_tokens.weight",), "token_embd.weight"),
@@ -54,7 +84,7 @@ def load_safetensors(path):
         out[name] = arr.astype(np.float32)
     return out
 
-T = load_safetensors(f"{SRC}/model.safetensors")
+T = load_safetensors(WEIGHTS)
 print("loaded", len(T), "tensors")
 
 # Map HF names onto GGUF names.

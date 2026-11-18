@@ -1369,6 +1369,16 @@ func (t *Tokenizer) renderPiece(piece string) string {
 	if !t.byteLevel {
 		return strings.ReplaceAll(piece, spacePrefix, " ")
 	}
+	// Both callers test byteLevel before they get here -- Decode and StreamDecoder.Token
+	// route a byte-level piece to bpeUnescapeBytes, which renders the bytes directly so a
+	// character split across tokens can be held back. That makes this line unreachable from
+	// production code today, which is why coverage reports it at 0%.
+	//
+	// Kept rather than deleted: it is the correct answer for a byte-level piece when there
+	// is no byte buffer to append to, so a caller that reached it would get the right text
+	// instead of an escaped rune. The alternative is a branch that reads as "byte-level has
+	// no rendering here", which is how the two families got mixed up in the first place --
+	// see the Spanish "¡" note above.
 	return bpeUnescape(piece)
 }
 

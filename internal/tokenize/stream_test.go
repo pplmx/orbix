@@ -329,6 +329,45 @@ func TestStreamDecoderMatchesDecodeOnSplitBytes(t *testing.T) {
 // The failure this catches is worse than the one on the real model. With the byte-level pieces
 // rendered one at a time, a truncated character reached the client as its raw bytes -- "ä" for
 // 中's first byte -- instead of as U+FFFD. That is invalid UTF-8 in a JSON body.
+// TestRenderPieceIsUnreachableForByteLevel pins why bpeUnescape has no production caller.
+//
+// renderPiece has a byte-level branch, but both of its callers -- Decode and
+// StreamDecoder.Token -- route a byte-level piece to bpeUnescapeBytes first, because a
+// character split across tokens has to be held back rather than emitted as bytes. So the
+// branch is correct and unreachable, and coverage reports the function below at 0%.
+//
+// The test states both halves: production code never reaches bpeUnescape, and renderPiece
+// still answers correctly if it ever did. Without the second claim the branch looks like
+// dead code to delete; without the first, bpeUnescape looks like a path that needs testing.
+func TestRenderPieceIsUnreachableForByteLevel(t *testing.T) {
+	path := gguftest.Model{
+		Vocab:          []string{"<unk>", "<s>", "</s>", "ä", "¸", "Ń"},
+		TokenizerModel: "gpt2",
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !tok.byteLevel {
+		t.Fatal("the fixture is not byte-level, so it cannot exercise the branch")
+	}
+
+	// The direct call does render the byte, so the branch is right.
+	if got := tok.renderPiece(tok.tokens[3]); got != "\xe4" {
+		t.Errorf("renderPiece(byte piece) = %q, want the single byte \xe4", got)
+	}
+
+	// And the production path bypasses it: the same token through Decode reads the whole
+	// character once the other two bytes arrive, which a per-byte rendering could not do.
+	if got := tok.Decode([]int32{3, 4, 5}); got != "中" {
+		t.Errorf("Decode([3 4 5]) = %q, want 中", got)
+	}
+}
+
 func TestStreamDecoderSplitBytesBuiltVocab(t *testing.T) {
 	// 中 is e4 b8 ad. These pieces are those bytes: ä is rune 0xE4, ¸ is rune 0xB8, and
 	// Ń is rune 0x143, which GPT-2's table maps to byte 0xAD.

@@ -262,6 +262,74 @@ func TestExporterPostsToTracesPath(t *testing.T) {
 	}
 }
 
+// TestExporterReportsCollectorRefusal covers the failure a real deployment sees most: a
+// collector that answers, but answers with an error.
+//
+// The exporter was tested against a server that accepted everything, so this branch -- read
+// a bounded amount of the body, include it in the error -- was at 0%. It is the branch that
+// decides whether an operator learns *why* the collector refused: "400 Bad Request" alone
+// sends them to the exporter's logs again, while the collector's own message usually names
+// the problem.
+func TestExporterReportsCollectorRefusal(t *testing.T) {
+	// A body long enough to prove the 512-byte limit bites, with the useful part first.
+	const collectorMsg = `{"error":"unknown field ResourceSpans"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, collectorMsg+strings.Repeat("x", 2000))
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	exp.Record(testSpan(t, "chat"))
+	err = exp.Flush(context.Background())
+	if err == nil {
+		t.Fatal("Flush succeeded against a collector that returned 400")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "400") {
+		t.Errorf("error %q does not carry the status code", msg)
+	}
+	if !strings.Contains(msg, "unknown field ResourceSpans") {
+		t.Errorf("error %q does not carry the collector's message", msg)
+	}
+	// Bounded read: the 2000 filler bytes must not all appear.
+	if len(msg) > 700 {
+		t.Errorf("error is %d bytes; the body read is supposed to be bounded at 512", len(msg))
+	}
+}
+
+// TestExporterReportsUnreachableCollector covers the other half: nothing is listening.
+//
+// This is the case that must not crash and must not hang. The default client has a 5s
+// timeout so a hung collector cannot pin the sender goroutine, and a connection refusal
+// reaches the error return rather than a panic.
+func TestExporterReportsUnreachableCollector(t *testing.T) {
+	// Grab a port, then close it: connecting to it is refused rather than hanging.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{Endpoint: url, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	exp.Record(testSpan(t, "chat"))
+	err = exp.Flush(context.Background())
+	if err == nil {
+		t.Fatal("Flush succeeded with no collector listening")
+	}
+	if !strings.Contains(err.Error(), "export") {
+		t.Errorf("error %q does not say the export failed", err)
+	}
+}
+
 // TestExporterToleratesEndpointWithPath accepts both spellings of the endpoint, which
 // appear interchangeably in collector documentation.
 func TestExporterToleratesEndpointWithPath(t *testing.T) {

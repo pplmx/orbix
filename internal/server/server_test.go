@@ -524,6 +524,30 @@ func TestModelRetrieveAndUnknownEndpoints(t *testing.T) {
 		}
 	})
 
+	// A known path with the wrong method is a 405 with Allow, not a 404. The fallback route is
+	// method-less, so it takes the path from the mux and has to reproduce the mux's own answer:
+	// OPTIONS is the CORS preflight, and README's account of why a cross-origin
+	// application/json request never reaches the engine rests on the preflight being refused.
+	t.Run("wrong method on a known route", func(t *testing.T) {
+		cases := []struct{ method, path, allow string }{
+			{http.MethodOptions, "/v1/chat/completions", http.MethodPost},
+			{http.MethodGet, "/v1/completions", http.MethodPost},
+			{http.MethodPost, "/v1/models", http.MethodGet},
+			{http.MethodPost, "/v1/models/llama", http.MethodGet},
+		}
+		for _, c := range cases {
+			req := httptest.NewRequest(c.method, c.path, nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s = %d, want 405", c.method, c.path, w.Code)
+			}
+			if got := w.Header().Get("Allow"); got != c.allow {
+				t.Errorf("%s %s Allow = %q, want %q", c.method, c.path, got, c.allow)
+			}
+		}
+	})
+
 	// A path outside the API keeps the plain-text 404: it is not an API route, and a probe
 	// or a browser hitting it should not be told JSON it never asked for.
 	t.Run("path outside the api", func(t *testing.T) {

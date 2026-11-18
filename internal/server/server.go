@@ -142,6 +142,12 @@ func New(eng *engine.Engine, tok *tokenize.Tokenizer, cfg Config) (*Server, erro
 	// JSON parse error inside the client rather than with the not-found error the API
 	// documents. The plain-text body stays right for a probe at a path outside the API,
 	// which is why this is scoped to /v1.
+	//
+	// It is method-less on purpose: a Go mux grants a method-less pattern the path, so a
+	// request to a known route with the wrong method lands here rather than getting the
+	// mux's own 405. That 405 is load-bearing -- README's CORS note rests on OPTIONS
+	// answering it, since a cross-origin application/json request then never leaves the
+	// preflight -- so handleUnimplemented restores it for a route that exists.
 	mux.HandleFunc("/v1/", s.handleUnimplemented)
 	s.mux = mux
 	return s, nil
@@ -367,7 +373,49 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 // engine deliberately does not implement (embeddings, images, responses), and the honest
 // answer is a JSON 404 naming the path rather than Go's plain-text "404 page not found",
 // which the SDK cannot decode and reports as a parse failure.
+// v1Routes is every path under /v1 this server serves, with the method each answers.
+//
+// It exists so the fallback can tell "this route does not take that method" from "this path
+// is not a route": the first is a 405 with an Allow header, which is what a mux would have
+// said had the method-less fallback not taken the path from it, and the second is a 404. The
+// distinction is not cosmetic -- a cross-origin preflight is answered by the 405 and not by
+// a 404, which is what keeps a browser from sending an unauthenticated inference request.
+var v1Routes = map[string]string{
+	"/v1/chat/completions": http.MethodPost,
+	"/v1/completions":      http.MethodPost,
+	"/v1/models":           http.MethodGet,
+}
+
+// handleUnimplemented answers a request under /v1 that no route above matched.
+//
+// Two cases arrive here, because the fallback pattern is method-less and therefore wins the
+// path from the mux:
+//
+//   - The path is a route but the method is not the one it takes. That is a 405 with Allow,
+//     the same answer the mux gives when the fallback is absent. OPTIONS lands here, which is
+//     the CORS preflight: answering 404 instead would tell a browser the route is missing,
+//     while 405 tells it the method is not allowed, and the preflight fails either way -- but
+//     only the 405 is true, and README's account of the CORS gap depends on it.
+//   - The path is not a route at all. That is a 404 in the API's envelope, so an SDK that
+//     called an endpoint this engine does not implement raises a not-found rather than a
+//     JSON parse error.
 func (s *Server) handleUnimplemented(w http.ResponseWriter, r *http.Request) {
+	// A models sub-path is a dynamic route, so it is matched by prefix rather than by the
+	// exact entries above.
+	allowed, known := v1Routes[r.URL.Path]
+	if !known && strings.HasPrefix(r.URL.Path, "/v1/models/") {
+		allowed, known = http.MethodGet, true
+	}
+	if known && allowed != r.Method {
+		w.Header().Set("Allow", allowed)
+		var body errorBody
+		body.Error.Message = fmt.Sprintf("The method %s is not allowed on %s; it takes %s",
+			r.Method, r.URL.Path, allowed)
+		body.Error.Type = "invalid_request_error"
+		body.Error.Code = "method_not_allowed"
+		writeJSON(w, http.StatusMethodNotAllowed, body)
+		return
+	}
 	var body errorBody
 	body.Error.Message = fmt.Sprintf("The endpoint %s %s is not implemented by this server",
 		r.Method, r.URL.Path)

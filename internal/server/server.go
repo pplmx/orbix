@@ -29,7 +29,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
@@ -107,10 +106,6 @@ type Server struct {
 	// log is cfg.Logger, kept as the concrete field so the request wrapper can check
 	// for nil cheaply.
 	log *slog.Logger
-
-	// requests and tokens are counters for /metrics and for tests.
-	requests atomic.Int64
-	tokens   atomic.Int64
 }
 
 // New builds a server around a loaded engine and tokenizer.
@@ -218,11 +213,6 @@ func (s *Server) StartPump(ctx context.Context) {
 func (s *Server) Shutdown() {
 	s.stopOnce.Do(func() { close(s.stop) })
 	s.wg.Wait()
-}
-
-// Stats returns the request and token counters.
-func (s *Server) Stats() (requests, tokens int64) {
-	return s.requests.Load(), s.tokens.Load()
 }
 
 // chatRequest is the subset of the OpenAI chat request the server honours.
@@ -520,7 +510,6 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.requests.Add(1)
 
 	if p.stream {
 		s.streamResponse(w, r, ch, id, p.chat, p.stop)
@@ -549,7 +538,6 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 		}
 		if ev.HasToken {
 			out = append(out, ev.Token)
-			s.tokens.Add(1)
 		}
 		if ev.Done {
 			reason = ev.FinishReason
@@ -661,7 +649,6 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 			return
 		}
 		if ev.HasToken {
-			s.tokens.Add(1)
 			text := dec.Token(ev.Token)
 			if text == "" {
 				continue

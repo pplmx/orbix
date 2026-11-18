@@ -746,7 +746,7 @@ just lint      # golangci-lint run
 just check     # the local gate: vet, test, lint, gofmt
 just docs      # rumdl check: Markdown is code here too
 just hooks     # prek: whitespace, final newlines, and YAML/TOML/JSON syntax
-just commits   # cz check: commit subjects across a range (RANGE=origin/main..HEAD)
+just commits   # cz check: commit subjects across a range; override RANGE=base..HEAD first
 just release-preview # what the next release would be; changes nothing
 just fuzz      # run every fuzz target; FUZZTIME sets the per-target budget
 just build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix

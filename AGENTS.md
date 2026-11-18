@@ -24,7 +24,7 @@ just fuzz    # 跑全部 fuzz target，FUZZTIME 控制每个的时长（默认 3
 just bench   # 基准测试
 just cross   # 交叉编译到每个声称支持的平台（CGO_ENABLED=0）
 just hooks   # 跑 prek 的 pre-commit 钩子（非 Go 文件的空白、换行、YAML/TOML/JSON 语法）
-just commits # 按 Conventional Commits 校验某段提交信息（RANGE=origin/main..HEAD）
+just commits # 按 Conventional Commits 校验某段提交信息；改范围用 `just RANGE=base..HEAD commits`
 just release-preview # 看下一次 release 会是什么版本、changelog 写什么，不改任何东西
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```

@@ -373,6 +373,18 @@ func TestLoadConfigRejects(t *testing.T) {
 			want: "not divisible",
 		},
 		{
+			// Zero is not merely invalid, it is the value the divisibility check two lines
+			// below would divide by: without this guard, head_count % 0 panics rather than
+			// returning an error. A file that writes the key with zero is the shape this
+			// catches, and it is not hypothetical -- a converter that defaults the key
+			// without reading it produces exactly that.
+			name: "zero kv heads",
+			mutate: func(c *tinyConfig) []kv {
+				return replaceKey(c.kvs(), "llama.attention.head_count_kv", u32Val(0))
+			},
+			want: "must be positive",
+		},
+		{
 			name: "kv heads not dividing heads",
 			mutate: func(c *tinyConfig) []kv {
 				return replaceKey(c.kvs(), "llama.attention.head_count_kv", u32Val(3))

@@ -104,6 +104,12 @@ func LoadWeights(path string) (*Weights, error) {
 			return nil, fmt.Errorf("llama: rope_freqs has %d values, want %d for rope dim %d",
 				len(freqs), want, cfg.RopeDim)
 		}
+		// This tensor is loaded outside the batch below, so it needs the same check the
+		// weights get: a NaN frequency factor poisons the rotation for every position, which
+		// is the same silent-garbage failure the batch guard exists to prevent.
+		if err := checkFinite(map[string][]float32{"rope_freqs.weight": freqs}); err != nil {
+			return nil, err
+		}
 		cfg.RopeFreqs = freqs
 	}
 

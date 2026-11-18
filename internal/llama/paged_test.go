@@ -2,6 +2,7 @@ package llama
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -499,5 +500,54 @@ func TestContiguousSpansRejectsOutOfRange(t *testing.T) {
 				t.Errorf("%d value rows, want %d", vrows, tc.n)
 			}
 		})
+	}
+}
+
+// TestPoolFreeIsSafeConcurrently covers the pairing the race detector found on a running
+// server: the pump goroutine takes and returns blocks while /metrics reads Free() from an HTTP
+// handler. BlockPool has no internal synchronisation of its own, so that read raced with
+// acquire's slice truncation.
+//
+// Exercise the same pair directly. Under -race this fails without the mutex on Free and on the
+// acquire/release path; under a plain build it is a smoke test that the counts still add up.
+func TestPoolFreeIsSafeConcurrently(t *testing.T) {
+	cfg := Config{Layers: 1, KVHeads: 1, HeadDim: 4, ContextLen: 8}
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 8})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	const total = 8
+
+	// One goroutine mimics the pump: take a block, give it back, repeatedly.
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 500 {
+			id, err := pool.acquire()
+			if err != nil {
+				return
+			}
+			_ = pool.release(id)
+		}
+	})
+
+	// The other mimics /metrics: read the free count while the first is mutating it.
+	seen := make([]int, 0, 500)
+	wg.Go(func() {
+		for range 500 {
+			seen = append(seen, pool.Free())
+		}
+	})
+	wg.Wait()
+
+	// Every observation has to be a value the pool could actually be in: never negative, never
+	// more than it owns. A torn or stale read would show up here as well as in the race report.
+	for i, n := range seen {
+		if n < 0 || n > total {
+			t.Fatalf("Free() observation %d = %d, want 0..%d", i, n, total)
+		}
+	}
+	// The pump gave every block back, so the pool must end full.
+	if got := pool.Free(); got != total {
+		t.Errorf("Free() = %d after the load, want %d", got, total)
 	}
 }

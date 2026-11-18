@@ -203,11 +203,13 @@ func (x *PrefixIndex) evictTail() bool {
 		return false
 	}
 	delete(x.entries, key)
-	_ = x.pool.release(entry.block)
+	_ = x.pool.releaseLocked(entry.block)
 	return true
 }
 
-// evictOne gives up one entry, reporting whether there was one.
+// evictOne gives up one entry, reporting whether there was one. It is called from
+// BlockPool.acquire with p.mu already held, so the release it performs has to be the
+// unlocked form -- release would take the same non-reentrant mutex and deadlock.
 func (x *PrefixIndex) evictOne() bool { return x.evictTail() }
 
 // Len returns how many prefixes are remembered.

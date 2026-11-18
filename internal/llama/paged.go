@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 )
 
 // ErrPoolExhausted is returned when a sequence needs a block and the pool has none left,
@@ -71,6 +72,11 @@ type BlockPool struct {
 	cfg   Config
 	block int // positions per block
 	total int // blocks in the pool
+
+	// mu guards free and refs. The engine mutates them from the pump goroutine, and
+	// /metrics reads Free() from an HTTP handler on another goroutine, so the two must
+	// not overlap: the race detector reports exactly that pair under load.
+	mu sync.Mutex
 
 	// free lists block ids that no sequence holds. It is a stack: the most
 	// recently released block is reused first, which keeps the working set
@@ -184,8 +190,13 @@ func (p *BlockPool) BlockSize() int { return p.block }
 // Blocks returns the total number of blocks the pool owns.
 func (p *BlockPool) Blocks() int { return p.total }
 
-// Free returns how many blocks are unallocated.
-func (p *BlockPool) Free() int { return len(p.free) }
+// Free returns how many blocks are unallocated. It is safe to call from another goroutine
+// while the pump is running; /metrics does exactly that.
+func (p *BlockPool) Free() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.free)
+}
 
 // Positions returns how many positions the pool can hold in total.
 func (p *BlockPool) Positions() int { return p.total * p.block }
@@ -207,6 +218,8 @@ func (p *BlockPool) Bytes() int64 {
 // request is not, so the speculative claim loses. Only when nothing is left to
 // give up does exhaustion surface as an error.
 func (p *BlockPool) acquire() (int32, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for len(p.free) == 0 {
 		if p.index == nil || !p.index.evictOne() {
 			return 0, fmt.Errorf("%w (%d blocks of %d positions)", ErrPoolExhausted, p.total, p.block)
@@ -220,6 +233,8 @@ func (p *BlockPool) acquire() (int32, error) {
 
 // retain adds a holder to a block.
 func (p *BlockPool) retain(id int32) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if id < 0 || int(id) >= p.total {
 		return fmt.Errorf("llama: block %d outside the pool (%d)", id, p.total)
 	}
@@ -232,6 +247,15 @@ func (p *BlockPool) retain(id int32) error {
 
 // release drops one holder, returning the block to the free list when none is left.
 func (p *BlockPool) release(id int32) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.releaseLocked(id)
+}
+
+// releaseLocked is release's body for a caller that already holds p.mu. acquire reaches it
+// through PrefixIndex.evictOne, which gives up a block to make room -- calling release there
+// would take the same non-reentrant mutex a second time and deadlock.
+func (p *BlockPool) releaseLocked(id int32) error {
 	if id < 0 || int(id) >= p.total {
 		return fmt.Errorf("llama: block %d outside the pool (%d)", id, p.total)
 	}
@@ -247,6 +271,8 @@ func (p *BlockPool) release(id int32) error {
 
 // RefCount returns how many holders a block has, for tests and diagnostics.
 func (p *BlockPool) RefCount(id int32) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if id < 0 || int(id) >= p.total {
 		return 0
 	}

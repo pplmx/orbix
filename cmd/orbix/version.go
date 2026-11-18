@@ -25,15 +25,20 @@ func cmdVersion(args []string) error {
 		return nil
 	}
 	fmt.Printf("orbix %s\n", version)
-	fmt.Printf("  commit:  %s\n", commit)
-	fmt.Printf("  built:   %s\n", date)
-	fmt.Printf("  go:      %s\n", runtime.Version())
-	fmt.Printf("  platform:%s/%s\n", runtime.GOOS, runtime.GOARCH)
-	fmt.Printf("  cgo:     %v\n", cgoEnabled())
+	// One column width for every label, so the values line up and a reader can scan them. The
+	// widest label is CGO_ENABLED, which only appears for a binary built by the go tool; the
+	// rest are padded to match rather than to the longest one present, because a report whose
+	// alignment changed depending on how the binary was built would be harder to compare.
+	const label = "  %-13s%s\n"
+	fmt.Printf(label, "commit:", commit)
+	fmt.Printf(label, "built:", date)
+	fmt.Printf(label, "go:", runtime.Version())
+	fmt.Printf(label, "platform:", runtime.GOOS+"/"+runtime.GOARCH)
+	fmt.Printf(label, "cgo:", fmt.Sprint(cgoEnabled()))
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		for _, s := range bi.Settings {
 			if s.Key == "CGO_ENABLED" {
-				fmt.Printf("  CGO_ENABLED: %s\n", s.Value)
+				fmt.Printf(label, "CGO_ENABLED:", s.Value)
 			}
 		}
 	}

@@ -157,6 +157,43 @@ func TestVersionCommand(t *testing.T) {
 			t.Errorf("version output missing %q:\n%s", want, out)
 		}
 	}
+
+	// Every field's value starts in the same column. This report is read by a person comparing two
+	// builds, mostly to answer "is this binary the commit I think it is", and a value that starts
+	// further left than its neighbours makes that scan slower for no reason. The check caught a real
+	// case: "platform:" carried no padding while every other label did, and "CGO_ENABLED:" sat flush
+	// against its value because the label is exactly as wide as the column was.
+	var columns []int
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if !strings.HasPrefix(line, "  ") {
+			continue
+		}
+		// Where the value begins: the label is separated from it by a run of spaces after a colon.
+		// Searching for ":" alone finds the hour inside a timestamp, and counting from the colon
+		// without skipping the padding would measure the label's length rather than the column.
+		colon := strings.Index(line, ":")
+		if colon < 0 {
+			continue
+		}
+		rest := line[colon+1:]
+		trimmed := strings.TrimLeft(rest, " ")
+		if trimmed == "" || len(trimmed) == len(rest) {
+			// No padding: the value is flush against the colon, which is the failure this check is
+			// for rather than a line to measure.
+			columns = append(columns, -1)
+			continue
+		}
+		columns = append(columns, len(line)-len(trimmed))
+	}
+	if len(columns) < 4 {
+		t.Fatalf("found %d labelled fields, want at least 4:\n%s", len(columns), out)
+	}
+	for _, c := range columns[1:] {
+		if c != columns[0] {
+			t.Errorf("value column varies: %v (from %v)", columns, columns[0])
+			break
+		}
+	}
 }
 
 func TestFormatBytes(t *testing.T) {

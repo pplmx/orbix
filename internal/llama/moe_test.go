@@ -437,8 +437,9 @@ func TestMoEDecodeMatchesPrefill(t *testing.T) {
 	}
 	want := append([]float32(nil), wantLogits...)
 
-	// Same cache, built by prefilling all but the last token and then decoding it. The decode
-	// step goes through moeRowsFromDecode; the prefill above went through moeRowsFromBatch.
+	// Same cache, built by prefilling all but the last token and then decoding it through
+	// DecodeStep. That is the call that reads moeRowsFromDecode; Forward has its own single-sequence
+	// expert path and would not exercise the shim this test is about.
 	split, err := NewKVCache(cfg, cfg.ContextLen)
 	if err != nil {
 		t.Fatalf("NewKVCache: %v", err)
@@ -446,10 +447,14 @@ func TestMoEDecodeMatchesPrefill(t *testing.T) {
 	if _, err := m.Prefill(split, tokens[:len(tokens)-1], 0); err != nil {
 		t.Fatalf("Prefill prefix: %v", err)
 	}
-	gotLogits, err := m.Forward(split, int(tokens[len(tokens)-1]), split.Len())
+	flat, err := m.DecodeStep([]Cache{split}, []int32{tokens[len(tokens)-1]})
 	if err != nil {
-		t.Fatalf("Forward: %v", err)
+		t.Fatalf("DecodeStep: %v", err)
 	}
+	if len(flat) != len(want) {
+		t.Fatalf("DecodeStep returned %d values for one request, want %d", len(flat), len(want))
+	}
+	gotLogits := flat
 	if len(gotLogits) != len(want) {
 		t.Fatalf("%d logits from decode, %d from prefill", len(gotLogits), len(want))
 	}

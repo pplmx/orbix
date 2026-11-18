@@ -269,6 +269,13 @@ response but a different one -- the failure would surface as an `IndexError` or 
 the caller, far from the request that caused it. Several at once are all named, so one round
 trip fixes the request.
 
+`stream_options.include_usage` is honoured rather than ignored, because it is the only way a
+streaming caller learns what it spent: without it a streamed response reports no usage at all.
+With it, one extra chunk arrives before `[DONE]` whose `choices` is an empty array and whose
+`usage` holds the whole request's counts, and every ordinary chunk in the same stream carries
+`"usage": null`. Both halves are the documented contract, and the counts equal what the
+non-streaming body reports for the same request.
+
 Two things about the chat
 endpoint are worth knowing before pointing a client at it:
 

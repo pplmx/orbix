@@ -1687,7 +1687,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", false, nil)
+		ch, "cmpl-test", false, nil, false, 0)
 
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
@@ -1705,7 +1705,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch2)
 	w2 := httptest.NewRecorder()
 	srv.streamResponse(w2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch2, "cmpl-test", false, []string{"this stop never appears"})
+		ch2, "cmpl-test", false, []string{"this stop never appears"}, false, 0)
 	if withStop := collectStream(t, io.NopCloser(strings.NewReader(w2.Body.String()))); withStop != want {
 		t.Errorf("with a stop configured, streamed %q, want %q", withStop, want)
 	}
@@ -1721,7 +1721,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch3)
 	w3 := httptest.NewRecorder()
 	srv.streamResponse(w3, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch3, "cmpl-test", false, nil)
+		ch3, "cmpl-test", false, nil, false, 0)
 	if got := collectStream(t, io.NopCloser(strings.NewReader(w3.Body.String()))); got != wantSingle {
 		t.Errorf("one-byte stream gave %q, the same token decodes to %q", got, wantSingle)
 	}
@@ -1790,7 +1790,7 @@ func TestStreamReleasesHeldTextWhenNoStopMatches(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", false, []string{"中X"})
+		ch, "cmpl-test", false, []string{"中X"}, false, 0)
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
 		t.Errorf("streamed %q with an unmatched stop, want %q", got, want)
@@ -1928,6 +1928,148 @@ func TestSamplerErrorsNameTheField(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStreamIncludeUsage covers the one streaming option this server honours.
+//
+// When stream_options.include_usage is set, OpenAI's contract has two halves and a client
+// depends on both: one extra chunk is streamed before [DONE] whose choices is an *empty
+// array* (that empty array is how a client recognises it) and whose usage holds the whole
+// request's counts; and every ordinary chunk in the same stream carries "usage": null, so a
+// client can read the field unconditionally.
+//
+// The counts must match the non-streaming body for the same request, or a caller that
+// switches modes for the same work gets two different bills. Both endpoints are covered
+// because they build their usage in different places.
+func TestStreamIncludeUsage(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// decodeChunks reads a stream body into the chunks before [DONE].
+	decodeChunks := func(t *testing.T, body io.ReadCloser) []map[string]json.RawMessage {
+		t.Helper()
+		defer func() { _ = body.Close() }()
+		var out []map[string]json.RawMessage
+		sc := bufio.NewScanner(body)
+		for sc.Scan() {
+			line := sc.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			if payload == "[DONE]" {
+				break
+			}
+			var m map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(payload), &m); err != nil {
+				t.Fatalf("chunk is not JSON: %v: %s", err, payload)
+			}
+			out = append(out, m)
+		}
+		return out
+	}
+
+	for _, tc := range []struct{ name, path, body string }{
+		{"completions", "/v1/completions", `{"prompt": "Once upon a time", "max_tokens": 4}`},
+		{"chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "Once upon a time"}], "max_tokens": 4}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The non-streaming body is the reference for the counts.
+			var body map[string]any
+			if err := json.Unmarshal([]byte(tc.body), &body); err != nil {
+				t.Fatalf("test body: %v", err)
+			}
+			plain := post(t, srv.Handler(), tc.path, tc.body)
+			wantUsage := decodeBody[struct {
+				Usage map[string]int `json:"usage"`
+			}](t, plain).Usage
+			if wantUsage == nil {
+				t.Fatal("the non-streaming body has no usage to compare against")
+			}
+
+			// The same request, streamed, asking for usage.
+			body["stream"] = true
+			body["stream_options"] = map[string]any{"include_usage": true}
+			streamedBody, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			resp := post(t, srv.Handler(), tc.path, string(streamedBody))
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d", resp.StatusCode)
+			}
+			chunks := decodeChunks(t, resp.Body)
+
+			// Split into ordinary chunks and the usage chunk by how OpenAI marks it.
+			var ordinary, withEmptyChoices []map[string]json.RawMessage
+			for _, c := range chunks {
+				var choices []json.RawMessage
+				if err := json.Unmarshal(c["choices"], &choices); err != nil {
+					t.Fatalf("choices: %v", err)
+				}
+				if len(choices) == 0 {
+					withEmptyChoices = append(withEmptyChoices, c)
+					continue
+				}
+				ordinary = append(ordinary, c)
+			}
+			if len(withEmptyChoices) != 1 {
+				t.Fatalf("%d chunks with empty choices, want exactly 1 (the usage chunk)",
+					len(withEmptyChoices))
+			}
+			// It must be the last chunk before [DONE], which is where a client looks for it.
+			var lastChoices []json.RawMessage
+			if err := json.Unmarshal(chunks[len(chunks)-1]["choices"], &lastChoices); err != nil {
+				t.Fatalf("last chunk choices: %v", err)
+			}
+			if len(lastChoices) != 0 {
+				t.Error("the usage chunk is not the last chunk before [DONE]")
+			}
+
+			// Every ordinary chunk carries usage:null, including the finish chunk. A client
+			// reading the field unconditionally must not hit a missing key.
+			for i, c := range ordinary {
+				raw, ok := c["usage"]
+				if !ok {
+					t.Errorf("ordinary chunk %d has no usage key; the contract says it is null", i)
+					continue
+				}
+				if string(raw) != "null" {
+					t.Errorf("ordinary chunk %d usage = %s, want null", i, raw)
+				}
+			}
+
+			var gotUsage map[string]int
+			if err := json.Unmarshal(withEmptyChoices[0]["usage"], &gotUsage); err != nil {
+				t.Fatalf("usage chunk: %v", err)
+			}
+			for _, k := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+				if gotUsage[k] != wantUsage[k] {
+					t.Errorf("streamed %s = %d, non-streaming = %d", k, gotUsage[k], wantUsage[k])
+				}
+			}
+		})
+	}
+
+	// Without the option, no chunk carries usage and none has empty choices: a client that
+	// did not ask for it must not receive a chunk whose shape it does not expect.
+	t.Run("absent without the option", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2, "stream": true}`)
+		chunks := decodeChunks(t, resp.Body)
+		for i, c := range chunks {
+			if _, ok := c["usage"]; ok {
+				t.Errorf("chunk %d has a usage key without stream_options", i)
+			}
+			var choices []json.RawMessage
+			if err := json.Unmarshal(c["choices"], &choices); err != nil {
+				t.Fatalf("choices: %v", err)
+			}
+			if len(choices) == 0 {
+				t.Errorf("chunk %d has empty choices without stream_options", i)
+			}
+		}
+	})
 }
 
 // TestResponseShapeFieldsAreRefused covers the one kind of unsupported request field this

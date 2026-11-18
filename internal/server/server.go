@@ -277,10 +277,23 @@ type chatRequest struct {
 	Stream      bool      `json:"stream"`
 	Stop        stopField `json:"stop"`
 
+	// StreamOptions is OpenAI's stream_options. Only include_usage is honoured, because it
+	// is the only member a client reads a value from; see generateParams.includeUsage.
+	StreamOptions *streamOptions `json:"stream_options"`
+
 	// Seed makes a sampled reply reproducible: the same prompt, settings and seed produce
 	// the same text. It is ignored when temperature is 0, because greedy is already
 	// deterministic and spending a generator on it would only slow the request down.
 	Seed int64 `json:"seed"`
+}
+
+// streamOptions is OpenAI's stream_options. Only the members this server acts on are
+// declared; an unknown member is ignored like any other unknown field.
+type streamOptions struct {
+	// IncludeUsage asks for one extra chunk before [DONE] whose usage field is the whole
+	// request's token counts. Without it a streaming response reports no usage at all,
+	// which leaves a streaming client unable to account for what it spent.
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMessage struct {
@@ -308,6 +321,9 @@ type completionRequest struct {
 	TopP        *float64  `json:"top_p"`
 	Stream      bool      `json:"stream"`
 	Stop        stopField `json:"stop"`
+
+	// StreamOptions is OpenAI's stream_options; see chatRequest.
+	StreamOptions *streamOptions `json:"stream_options"`
 
 	// Seed makes a sampled reply reproducible: the same prompt, settings and seed produce
 	// the same text. It is ignored when temperature is 0, because greedy is already
@@ -552,16 +568,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	prompt := s.renderChat(req.Messages)
 	s.generate(w, r, generateParams{
-		prompt:      prompt,
-		maxTokens:   req.MaxTokens,
-		priority:    req.Priority,
-		temperature: req.Temperature,
-		topK:        req.TopK,
-		topP:        req.TopP,
-		stream:      req.Stream,
-		stop:        req.Stop,
-		chat:        true,
-		seed:        req.Seed,
+		prompt:       prompt,
+		maxTokens:    req.MaxTokens,
+		priority:     req.Priority,
+		temperature:  req.Temperature,
+		topK:         req.TopK,
+		topP:         req.TopP,
+		stream:       req.Stream,
+		stop:         req.Stop,
+		chat:         true,
+		seed:         req.Seed,
+		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
 
@@ -589,15 +606,16 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.generate(w, r, generateParams{
-		prompt:      req.Prompt,
-		maxTokens:   req.MaxTokens,
-		priority:    req.Priority,
-		temperature: req.Temperature,
-		topK:        req.TopK,
-		topP:        req.TopP,
-		stream:      req.Stream,
-		stop:        req.Stop,
-		seed:        req.Seed,
+		prompt:       req.Prompt,
+		maxTokens:    req.MaxTokens,
+		priority:     req.Priority,
+		temperature:  req.Temperature,
+		topK:         req.TopK,
+		topP:         req.TopP,
+		stream:       req.Stream,
+		stop:         req.Stop,
+		seed:         req.Seed,
+		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
 
@@ -629,6 +647,10 @@ type generateParams struct {
 	stream      bool
 	stop        []string
 	chat        bool
+	// includeUsage asks for the extra chunk that carries token usage at the end of a
+	// stream; see stream_options. It has no effect on a non-streaming response, which
+	// always carries usage.
+	includeUsage bool
 	// seed makes sampling reproducible. Zero means "choose one", which is what a caller
 	// that did not ask for reproducibility gets.
 	seed int64
@@ -737,7 +759,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 
 	if p.stream {
-		s.streamResponse(w, r, ch, id, p.chat, p.stop)
+		s.streamResponse(w, r, ch, id, p.chat, p.stop, p.includeUsage, len(promptTokens))
 		return
 	}
 	s.blockingResponse(w, r, ch, id, p, promptTokens)
@@ -820,7 +842,14 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 }
 
 // streamResponse writes server-sent events, one per token.
-func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, chat bool, stop []string) {
+//
+// includeUsage asks for the closing usage chunk OpenAI sends when
+// stream_options.include_usage is set. Its contract has two halves and both matter: the
+// extra chunk has an empty choices array and carries the totals, and every ordinary chunk
+// in the same stream carries "usage": null. A client written against the documented shape
+// distinguishes the two by choices being empty, and one that reads usage off every chunk
+// without a null there would see the field missing rather than absent.
+func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, chat bool, stop []string, includeUsage bool, promptTokens int) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this connection")
@@ -857,6 +886,14 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 		payload["object"] = object
 		payload["created"] = time.Now().Unix()
 		payload["model"] = s.cfg.ModelName
+		if includeUsage {
+			// Set on every ordinary chunk, not only the usage one: OpenAI documents the
+			// field as present-and-null here, and a client that inspects it on each chunk
+			// then needs no branch for "the field is missing".
+			if _, ok := payload["usage"]; !ok {
+				payload["usage"] = nil
+			}
+		}
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return false
@@ -870,6 +907,8 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 
 	dec := s.tok.Seq()
 	reason := "stop"
+	// generated counts engine tokens for the usage chunk; see the HasToken branch.
+	generated := 0
 	// seen is the text already handed to the client, kept only when a stop string has to
 	// be matched against it.
 	seen := ""
@@ -886,6 +925,11 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 			return
 		}
 		if ev.HasToken {
+			// Counted here rather than from the emitted text: the usage figures describe what
+			// the model produced, and a token that decodes to nothing is still a token the
+			// engine generated. The non-streaming body counts the same way (len(out)), so the
+			// two agree for one request.
+			generated++
 			text := dec.Token(ev.Token)
 			if text == "" {
 				continue
@@ -966,12 +1010,42 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	if !chat {
 		final["choices"] = []map[string]any{{"index": 0, "text": "", "finish_reason": stopReason}}
 	}
+	if includeUsage {
+		// The finish chunk is built here rather than by send, so it needs the null too.
+		// Missing it here is easy to overlook and visible to a client: the docs say every
+		// chunk in the stream carries the field, so a client reading usage off each chunk
+		// sees one absence in the middle of the nulls.
+		final["usage"] = nil
+	}
 	b, err := json.Marshal(final)
 	if err != nil {
 		return
 	}
 	if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
 		return
+	}
+	// The usage chunk, when asked for, goes after the finish chunk and before [DONE].
+	// OpenAI's shape is specific and a client depends on both halves: choices is an empty
+	// array (which is how a client tells this chunk apart from a text one) and usage carries
+	// the whole request's counts. Sending it with a choice in it, or without the empty array,
+	// breaks the check a client uses to find it.
+	if includeUsage {
+		usage := map[string]any{
+			"id": id, "object": object, "created": time.Now().Unix(), "model": s.cfg.ModelName,
+			"choices": []map[string]any{},
+			"usage": map[string]int{
+				"prompt_tokens":     promptTokens,
+				"completion_tokens": generated,
+				"total_tokens":      promptTokens + generated,
+			},
+		}
+		ub, err := json.Marshal(usage)
+		if err != nil {
+			return
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", ub); err != nil {
+			return
+		}
 	}
 	_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()

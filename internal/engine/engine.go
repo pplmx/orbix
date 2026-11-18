@@ -62,6 +62,9 @@ type Request struct {
 	// "chat". It is separate from the prompt because the two endpoints differ only in how
 	// the prompt was rendered, and a trace reader distinguishes them by this attribute.
 	Operation string
+	// ResponseModel is the model name the caller will see in the response, when it differs
+	// from what the convention puts in gen_ai.request.model. Empty omits the attribute.
+	ResponseModel string
 	// Stream reports whether the caller is consuming this as a stream. The convention says
 	// gen_ai.request.stream is set if and only if the request is streaming, and that an
 	// unset attribute means non-streaming -- so leaving a streamed request unmarked is a
@@ -369,6 +372,15 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 		}
 		if req.ResponseID != "" {
 			attrs = append(attrs, otel.StringAttr("gen_ai.response.id", req.ResponseID))
+		}
+		// The convention separates the requested model from the one that answered: a
+		// provider resolves an alias to a dated version, and the two differ. This server
+		// serves exactly the one checkpoint it loaded, so both attributes hold the same
+		// value today. It is set anyway because the attribute is Recommended and its
+		// meaning is accurate -- what generated the response -- rather than because a
+		// reader can learn something new from it.
+		if req.ResponseModel != "" {
+			attrs = append(attrs, otel.StringAttr("gen_ai.response.model", req.ResponseModel))
 		}
 		if req.Stream {
 			attrs = append(attrs, otel.BoolAttr("gen_ai.request.stream", true))

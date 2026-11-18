@@ -496,16 +496,17 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		op = "chat"
 	}
 	ch, err := s.eng.Submit(engine.Request{
-		Prompt:     promptTokens,
-		MaxTokens:  maxTokens,
-		Priority:   p.priority,
-		Stop:       stopIDs,
-		Sampler:    sampler,
-		Cancel:     r.Context().Done(),
-		Trace:      s.cfg.Trace,
-		Operation:  op,
-		ResponseID: id,
-		Stream:     p.stream,
+		Prompt:        promptTokens,
+		MaxTokens:     maxTokens,
+		Priority:      p.priority,
+		Stop:          stopIDs,
+		Sampler:       sampler,
+		Cancel:        r.Context().Done(),
+		Trace:         s.cfg.Trace,
+		Operation:     op,
+		ResponseID:    id,
+		Stream:        p.stream,
+		ResponseModel: s.cfg.ModelName,
 	})
 	if err != nil {
 		// A full queue is not the client's fault and not permanent: the request is well

@@ -727,6 +727,7 @@ func TestSpanCarriesTheRequiredGenAIAttributes(t *testing.T) {
 			ch, err := e.Submit(Request{
 				Prompt: tok.Encode("Once", true), MaxTokens: 2,
 				Trace: exp, Operation: c.operation, ResponseID: "chatcmpl-test",
+				ResponseModel: "served-model",
 			})
 			if err != nil {
 				t.Fatalf("Submit: %v", err)
@@ -746,9 +747,11 @@ func TestSpanCarriesTheRequiredGenAIAttributes(t *testing.T) {
 				`"gen_ai.operation.name"`,
 				`"gen_ai.provider.name"`,
 				`"gen_ai.response.id"`,
+				`"gen_ai.response.model"`,
 				`"chatcmpl-test"`,
 				`"name":"` + c.wantOp + `"`, // the span name is the operation name
 				`"stringValue":"` + c.wantOp + `"`,
+				`"gen_ai.response.model"`, `"served-model"`,
 			} {
 				if !strings.Contains(got, want) {
 					t.Errorf("span is missing %s: %s", want, got)

@@ -515,7 +515,8 @@ curl -sSL -o /tmp/stories15M-q4_0.gguf \
 ```
 
 The gates take the suite from twelve skipped tests to none, so a machine holding the
-checkpoints can check every claim the project makes:
+checkpoints can check every claim the project makes -- measured: 521 tests pass and none are
+skipped, against 12 skipped with no checkpoint on disk:
 
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \

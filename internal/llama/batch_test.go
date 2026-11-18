@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"runtime"
@@ -755,6 +756,69 @@ func TestDecodeStepTinyModel(t *testing.T) {
 //
 // Workers=1 takes the serial path inside Runner.Parallel, so the comparison is against
 // the same code with the fan-out removed rather than against a second implementation.
+// TestEmbedRejectsNegativeToken covers a hole in the bounds check both embedding paths used
+// to have: it compared the offset plus the row width against the slice length, which a
+// negative token passes.
+//
+// Measured on a 363-token vocabulary with hidden 32: token -1 gives off = -32, and
+// off+32 = 0 <= len(TokenEmbedding), so the guard was satisfied and the copy then panicked on
+// a slice expression starting below zero. Every negative token behaved that way, because
+// multiplying a negative by the row width only makes the sum more negative, never larger than
+// the slice.
+//
+// The fix checks the token against the vocabulary before computing any offset, so the sum is
+// only ever formed from a non-negative product.
+func TestEmbedRejectsNegativeToken(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	b := &decodeBatch{cfg: cfg, n: 1, x: make([]float32, cfg.Hidden)}
+	cases := []struct {
+		token string
+		want  bool // true means it must be refused
+	}{
+		{token: "-1", want: true},
+		{token: "-100", want: true},
+		{token: "0", want: false},
+		{token: "vocab-1", want: false},
+		{token: "vocab", want: true},
+	}
+	for _, c := range cases {
+		tok := 0
+		switch c.token {
+		case "vocab-1":
+			tok = cfg.VocabSize - 1
+		case "vocab":
+			tok = cfg.VocabSize
+		default:
+			if _, err := fmt.Sscanf(c.token, "%d", &tok); err != nil {
+				t.Fatalf("bad case %q: %v", c.token, err)
+			}
+		}
+		err := b.embed(m, 0, tok)
+		if refused := err != nil; refused != c.want {
+			t.Errorf("embed(token=%s) error = %v, want refused=%v", c.token, err, c.want)
+		}
+	}
+
+	// The batch path has its own copy of the same check; drive it through a real decode so
+	// the guard is exercised where a corrupt sampler would reach it.
+	cache, err := NewKVCache(cfg, 32)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	if _, err := m.Prefill(cache, []int32{int32(cfg.BOSID)}, 0); err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	if _, err := m.DecodeStep([]Cache{cache}, []int32{-1}); err == nil {
+		t.Error("DecodeStep accepted a negative token id")
+	}
+}
+
 func TestParallelAttentionIsBitIdentical(t *testing.T) {
 	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	cfg := loadConfigAt(t, path)

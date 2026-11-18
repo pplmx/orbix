@@ -267,6 +267,14 @@ func (m *Model) normRows(b *batch, weight []float32) error {
 func (m *Model) embedBatch(b *batch, tokens []int32) error {
 	cfg := m.W.Config
 	for i, tok := range tokens {
+		// The guard is on the token, not on the offset: a negative token makes off negative
+		// and `off+Hidden` can still be within the slice, so a check written against the sum
+		// alone lets it through and the copy panics on a slice expression starting below zero.
+		// The sum is then computed only after the token is known to be in range, which is what
+		// keeps it from overflowing on a 32-bit int as well.
+		if int(tok) < 0 || int(tok) >= cfg.VocabSize {
+			return fmt.Errorf("llama: token %d outside vocabulary of %d", tok, cfg.VocabSize)
+		}
 		off := int(tok) * cfg.Hidden
 		if off+cfg.Hidden > len(m.W.TokenEmbedding) {
 			return fmt.Errorf("llama: token %d embedding outside %d values", tok, len(m.W.TokenEmbedding))
@@ -576,6 +584,12 @@ func newDecodeBatch(cfg Config, n int) *decodeBatch {
 // embed copies one sequence's token embedding into its row.
 func (b *decodeBatch) embed(m *Model, row, token int) error {
 	cfg := m.W.Config
+	// Same rule as the batch path above, and for the same reason: the token is what has to be
+	// in range, because a negative one produces a negative offset that the sum-based check
+	// cannot see.
+	if token < 0 || token >= cfg.VocabSize {
+		return fmt.Errorf("llama: token %d outside vocabulary of %d", token, cfg.VocabSize)
+	}
 	off := token * cfg.Hidden
 	if off+cfg.Hidden > len(m.W.TokenEmbedding) {
 		return fmt.Errorf("llama: token %d embedding outside %d values", token, len(m.W.TokenEmbedding))

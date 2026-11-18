@@ -16,6 +16,21 @@
 // The second is what lets a queue be longer than the memory would otherwise
 // allow.
 //
+// One goroutine drives the work. Submit queues a request and returns a channel; nothing
+// runs until that goroutine calls Pump, and Pump must never be called concurrently. The
+// reason is not a lock the engine declines to take: the model underneath owns one set of
+// scratch buffers, so two rounds at once would write the same slices and produce output
+// that is neither round's. Callers keep Pump on one goroutine and call Submit from
+// wherever -- internal/server does exactly that.
+//
+// A caller that stops reading is given up on rather than waited for. Each sequence has a
+// 64-event buffer; when it fills, the send waits two seconds for it to drain and then
+// retires the sequence, freeing its slot. Without that bound one stalled reader would
+// hold a slot and stall the shared pump for everyone, which is the failure that made the
+// bound necessary. The consequence for a consumer is a real one and is written down in
+// the README: drain as you go, because a stream nobody reads is abandoned rather than
+// paused.
+//
 // The package sits above llama and below the serving layer. It knows about
 // sequences, slots, and fairness; it knows nothing about HTTP or JSON. That
 // split is what lets the REPL, the CLI, the benchmark and internal/server share one

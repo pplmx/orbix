@@ -450,3 +450,71 @@ func TestRunRefusesContextPastTheTrainedWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestBenchReportsPrefixReuse covers the line that tells an operator whether turning on
+// --prefix-cache did anything.
+//
+// Without it a one-off bench printed the same report whether sharing happened or not, so a run
+// whose prompt was too short to fill a block looked identical to one where the cache was broken.
+// --suite has always reported the number for its reuse pair; this is the single-run path.
+//
+// Gated on MODEL because the figures only exist once real weights have prefilled something.
+func TestBenchReportsPrefixReuse(t *testing.T) {
+	path := os.Getenv("MODEL")
+	if path == "" {
+		t.Skip("set MODEL to a GGUF file")
+	}
+	// Long enough to span more than one default 16-position block, which is the condition for
+	// anything to be shareable at all.
+	longPrompt := strings.Repeat("word ", 24)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+		why  string
+	}{
+		{
+			name: "cache off prints no reuse line",
+			args: []string{"--model", path, "--max-tokens", "2", "--concurrency", "2",
+				"--requests", "4", "--prompt", longPrompt},
+			want: "",
+			why:  "a run that could not reuse anything should not claim a figure",
+		},
+		{
+			name: "cache on with a shareable prompt prints a count",
+			args: []string{"--model", path, "--max-tokens", "2", "--concurrency", "2",
+				"--requests", "8", "--prefix-cache", "--blocks", "128", "--block-size", "16",
+				"--prompt", longPrompt},
+			want: "prompt positions",
+			why:  "the requests share a prompt that spans whole blocks, so some of it is reused",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				if err := cmdBench(c.args); err != nil {
+					t.Fatalf("cmdBench: %v", err)
+				}
+			})
+			got := false
+			for _, line := range strings.Split(out, "\n") {
+				if strings.HasPrefix(line, "reused:") {
+					got = true
+					if c.want == "" {
+						t.Errorf("unexpected reuse line: %q", line)
+					} else if !strings.Contains(out, c.want) {
+						t.Errorf("reuse line %q does not contain %q", line, c.want)
+					}
+				}
+			}
+			if c.want != "" && !got {
+				t.Errorf("no reuse line printed; want one containing %q (%s)\noutput:\n%s",
+					c.want, c.why, out)
+			}
+			if c.want == "" && got {
+				t.Errorf("a reuse line was printed for a run whose cache was off (%s)", c.why)
+			}
+		})
+	}
+}

@@ -184,5 +184,26 @@ func cmdBench(args []string) error {
 		}
 		fmt.Printf("finish:      %s\n", strings.Join(parts, " "))
 	}
+	// Only when the flag was on, and only when there is something to report: a "0 reused" line
+	// on a run that could not have reused anything would read as a defect rather than as a
+	// measurement. The suite already prints this for its reuse pair; a one-off bench with
+	// --prefix-cache was the one place an operator could turn sharing on and get no feedback
+	// about whether it did anything.
+	if *prefixCache {
+		if reused := eng.Stats().PrefixReused; reused > 0 {
+			fmt.Printf("reused:      %d prompt positions\n", reused)
+		} else {
+			// Concurrent requests prefill together, so none of them can attach a prefix another
+			// has not written yet. Saying so is the difference between "sharing is broken" and
+			// "sharing cannot apply to this shape of run" -- the reuse pair in --suite is
+			// sequential for exactly this reason.
+			// Reuse works at whole blocks, so the default five-token prompt has nothing to
+			// share however many requests run. Measured on this model: a prompt that spans a
+			// 16-position block reports reuse at both concurrency 1 and concurrency 16, so
+			// concurrency is not the variable -- prompt length is.
+			fmt.Printf("reused:      none (a prompt shorter than one %d-position block leaves no\n"+
+				"             whole block to share, whatever the concurrency)\n", eng.Pool().BlockSize())
+		}
+	}
 	return nil
 }

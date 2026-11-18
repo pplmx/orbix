@@ -263,9 +263,13 @@ endpoint are worth knowing before pointing a client at it:
   good than the model's own format.
   If you would rather control the prompt, send it to `/v1/completions`, which passes
   text through verbatim.
-- **`stop` matches on token ids.** A stop string is encoded and its first token
-  is used, which covers `"\n"` and marker strings. A stop that spans several
-  tokens is not matched.
+- **`stop` is matched on text, and stops generation early only for single-token
+  strings.** An earlier version of this note said a stop spanning several tokens
+  was not matched, which understated it: the decoded text is checked against every
+  stop string, so `"中国的首都"` -- four tokens -- truncates correctly. What a
+  multi-token string does not do is stop generation sooner; the sequence runs to
+  its token budget unread while the response is already cut. For `"\n"` and other
+  markers, which encode to one token, the engine halts the sequence itself.
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \

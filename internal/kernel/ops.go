@@ -202,9 +202,15 @@ func Softmax(scores []float32) {
 		sum += e
 	}
 	if sum == 0 {
-		// Only reachable with NaN input; leave the row alone rather than
-		// dividing by zero and turning a bad value into a silent uniform
-		// distribution.
+		// Not reachable from any input this package has been given: the maximum element
+		// contributes exp(0) = 1, so the sum is at least 1 unless max is NaN or +Inf, and
+		// then the sum is NaN rather than zero. Kept as a guard because the invariant is
+		// about float64 accumulation and not about the slice, which is the part a future
+		// edit could change -- and dividing by zero here would turn one bad value into a
+		// uniform distribution that looks like a real answer.
+		//
+		// An earlier version of this comment said it was "only reachable with NaN input",
+		// which is backwards: NaN skips the guard rather than reaching it.
 		return
 	}
 	inv := float32(1 / sum)

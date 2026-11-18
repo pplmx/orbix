@@ -459,3 +459,83 @@ func TestMatMulTransposedMatchesRowRange(t *testing.T) {
 		}
 	}
 }
+
+// TestSoftmaxPropagatesNonFinite pins what the reduction does with a NaN or an infinity.
+//
+// A NaN logit makes every output NaN, and that is the correct result rather than a bug: the
+// normaliser is a sum over the row, so one poisoned term poisons the total and the whole
+// distribution becomes meaningless. The alternative -- returning a distribution that looks
+// valid -- would turn a corrupt weight into plausible text, which is the failure mode worth
+// avoiding. Greedy decoding reads the logits without going through this function, so it can
+// still pick a token when Softmax cannot.
+//
+// The test exists because nothing pinned it: the behaviour is reachable only from a damaged
+// checkpoint, and "the row comes back all NaN" is the observation that identifies one.
+func TestSoftmaxPropagatesNonFinite(t *testing.T) {
+	nan := float32(math.NaN())
+	inf := float32(math.Inf(1))
+
+	for _, c := range []struct {
+		name   string
+		in     []float32
+		allNaN bool
+	}{
+		{"one NaN poisons the row", []float32{1, nan, 3}, true},
+		{"every value NaN", []float32{nan, nan}, true},
+		{"+Inf as the maximum", []float32{1, inf, 3}, true},
+		{"-Inf is ordinary", []float32{0, float32(math.Inf(-1))}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			scores := append([]float32(nil), c.in...)
+			Softmax(scores)
+			var sawNaN bool
+			for _, v := range scores {
+				if math.IsNaN(float64(v)) {
+					sawNaN = true
+				}
+			}
+			if sawNaN != c.allNaN {
+				t.Errorf("Softmax(%v) = %v, want allNaN=%v", c.in, scores, c.allNaN)
+			}
+			if !c.allNaN {
+				// The ordinary case has to stay a distribution: -Inf underflows to zero
+				// weight and the finite value takes all of it.
+				var sum float64
+				for _, v := range scores {
+					sum += float64(v)
+				}
+				if math.Abs(sum-1) > 1e-6 {
+					t.Errorf("Softmax(%v) = %v, sum %v, want 1", c.in, scores, sum)
+				}
+			}
+		})
+	}
+}
+
+// TestSiLUSaturatesAtBothEnds pins the activation's limits.
+//
+// SiLU is x * sigmoid(x), which tends to x for large positive and to 0 for large negative. The
+// implementation clamps the exponent so a very negative input cannot overflow to +Inf and
+// produce NaN; the clamps are what this checks, at magnitudes a real weight can reach.
+func TestSiLUSaturatesAtBothEnds(t *testing.T) {
+	x := []float32{-1000, -88, 0, 88, 1000}
+	SiLU(x)
+	for i, v := range x {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			t.Errorf("SiLU produced %v at index %d (input %v)", v, i, []float32{-1000, -88, 0, 88, 1000}[i])
+		}
+	}
+	// The extremes are the function's limits: 0 on the far left, the input itself on the right.
+	// -0 and 0 compare equal, and the implementation can produce either -- that is a sign bit,
+	// not a value difference, so the assertion is on the number rather than its representation.
+	if x[0] != 0 {
+		t.Errorf("SiLU(-1000) = %v, want 0", x[0])
+	}
+	if math.Abs(float64(x[4]-1000)) > 1e-3 {
+		t.Errorf("SiLU(1000) = %v, want ~1000", x[4])
+	}
+	// At zero the function is exactly zero, since x multiplies the sigmoid.
+	if x[2] != 0 {
+		t.Errorf("SiLU(0) = %v, want 0", x[2])
+	}
+}

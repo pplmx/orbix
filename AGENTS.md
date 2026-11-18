@@ -20,6 +20,7 @@ make test-race # 竞态检测（单独覆盖 CGO_ENABLED=1，仅测试用）
 make lint    # golangci-lint run
 make check   # 本地门槛：vet + test + lint + gofmt
 make docs    # Markdown 门槛：rumdl check .
+make fuzz    # 跑全部 fuzz target，FUZZTIME 控制每个的时长（默认 30s）
 make bench   # 基准测试
 make cross   # 交叉编译到每个声称支持的平台（CGO_ENABLED=0）
 ```
@@ -29,6 +30,8 @@ make cross   # 交叉编译到每个声称支持的平台（CGO_ENABLED=0）
 CI 的 Go 相关 job 调用 Make 目标，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `make test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `make` 里的其他变量。五个 job 各自验证一条 README 声明——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建 + 产物自报 `cgo: false`）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`make test-race` 单独覆盖）、docs（`make docs`）。
 
 本地跑 `make check` 绿了，CI 的 gate 就应该绿；docs、cross、test-race、test-darwin 是需要额外工具或平台的独立门槛，各自有对应的 Make 目标，动到 Markdown 就加跑 `make docs`。这条分工是因为 rumdl 不在 Go 工具链里：把 `docs` 塞进 `check` 会让只装了 Go 的贡献者无法通过本地门槛。
+
+`make fuzz` 同理不并进 `check`：它按时间跑而不是按用例跑，默认 30 秒一个 target，全套要几分钟。但 **seed corpus 由 `make test` 跑**——`go test` 会重放 `testdata/fuzz/` 里的每个文件，所以一个修好的崩溃会一直防住回归，不需要记得跑 fuzz。
 
 ## 目录
 

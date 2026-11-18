@@ -23,7 +23,7 @@ export CGO_ENABLED := 0
 # no user is a build that breaks without anyone noticing.
 CROSS_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build test test-race lint fmt vet bench clean check cross docs
+.PHONY: all build test test-race lint fmt vet bench clean check cross docs fuzz
 
 all: check
 
@@ -66,6 +66,27 @@ lint:
 ## bench: run kernel and engine benchmarks
 bench:
 	go test -run '^$$' -bench . -benchmem $(PKG)
+
+## fuzz: run every fuzz target for a short time
+##
+## The targets live beside the code they check and `go test` runs their seed corpus on every
+## `make test`, which is what keeps a known crash from coming back. This target is for finding
+## new ones: it runs each target for FUZZTIME (default 30s), so a full pass costs a couple of
+## minutes and is worth doing before a release rather than on every save.
+##
+## FUZZTIME is per target. A run that reports FAIL has written the input to the package's
+## testdata/fuzz, and that file belongs in the commit that fixes it.
+FUZZTIME ?= 30s
+fuzz:
+	@set -e; for pkg in $$(go list ./...); do \
+		targets=$$(grep -ho 'func Fuzz[A-Za-z0-9_]*' $$(go list -f '{{.Dir}}' $$pkg)/*_test.go 2>/dev/null \
+			| sed 's/func //' | sort -u); \
+		for t in $$targets; do \
+			echo "==> $$pkg $$t ($$FUZZTIME)"; \
+			go test $$pkg -run '^$$' -fuzz "^$$t$$" -fuzztime $$FUZZTIME || exit 1; \
+		done; \
+	done
+	@echo "fuzz: ok"
 
 ## check: the full local gate - format, vet, test, lint
 check: vet test lint

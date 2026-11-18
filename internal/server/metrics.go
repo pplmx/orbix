@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // metricsNamespace prefixes every exported name, so a scrape cannot collide with an
@@ -111,7 +112,35 @@ func (b *metricsBuilder) gauge(name, doc, typ string, value float64) {
 func (b *metricsBuilder) labeled(name, doc, typ string, value float64, label, labelValue string) {
 	fmt.Fprintf(&b.buf, "# HELP %s_%s %s\n", metricsNamespace, name, doc)
 	fmt.Fprintf(&b.buf, "# TYPE %s_%s %s\n", metricsNamespace, name, typ)
-	fmt.Fprintf(&b.buf, "%s_%s{%s=%q} %s\n", metricsNamespace, name, label, labelValue, formatFloat(value))
+	fmt.Fprintf(&b.buf, "%s_%s{%s=\"%s\"} %s\n", metricsNamespace, name, label,
+		escapeLabelValue(labelValue), formatFloat(value))
+}
+
+// escapeLabelValue escapes a label value for the text exposition format.
+//
+// The format requires exactly three characters to be escaped: backslash, double quote, and line
+// feed. Go's %q is close but not the same rule -- it also escapes tabs and control characters as
+// \t and \xNN, which Prometheus reads back literally. A model name containing a tab would come
+// out of a scrape as the two characters backslash-t rather than a tab.
+func escapeLabelValue(v string) string {
+	if !strings.ContainsAny(v, "\\\"\n") {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v) + 8)
+	for _, r := range v {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // formatFloat renders a value the way the exposition format expects.

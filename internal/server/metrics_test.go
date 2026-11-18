@@ -504,3 +504,29 @@ func TestPrefixReuseOnChatCompletions(t *testing.T) {
 			"want positive", got)
 	}
 }
+
+// TestEscapeLabelValue pins the three characters the text exposition format requires to be
+// escaped, and the ones it does not.
+//
+// Go's %q was used here first. It agrees on backslash, quote, and line feed but also escapes
+// tabs and control characters, which Prometheus reads back literally -- so a label value
+// containing a tab would arrive as the two characters backslash and t.
+func TestEscapeLabelValue(t *testing.T) {
+	cases := []struct{ in, want, why string }{
+		{"plain", "plain", "nothing to escape"},
+		{"qwen2.5-7b", "qwen2.5-7b", "dots and dashes are legal as-is"},
+		{`back\slash`, `back\\slash`, "backslash"},
+		{`has"quote`, `has\"quote`, "double quote"},
+		{"new\nline", `new\nline`, "line feed"},
+		// The three below are where %q and the exposition format disagree. A tab, a carriage
+		// return, and a non-ASCII byte are all allowed verbatim by the format.
+		{"tab\there", "tab\there", "a tab stays a tab"},
+		{"cr\rhere", "cr\rhere", "a carriage return stays literal"},
+		{"中文模型", "中文模型", "UTF-8 passes through"},
+	}
+	for _, c := range cases {
+		if got := escapeLabelValue(c.in); got != c.want {
+			t.Errorf("%s: escapeLabelValue(%q) = %q, want %q", c.why, c.in, got, c.want)
+		}
+	}
+}

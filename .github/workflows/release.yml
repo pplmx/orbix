@@ -1,0 +1,102 @@
+# Publish a release when a version tag is pushed.
+#
+# The tag is created by `just release` locally, not by this workflow: a release is a decision,
+# and having CI derive a version from commits would mean two places deciding what the next
+# number is. What CI does is turn a tag that already exists into artifacts, which is the part
+# that benefits from a clean machine.
+#
+# Everything here builds on `just`, for the same reason the main workflow does: a release that
+# ran `go build` directly could disagree with `just cross` about flags or about which platforms
+# are supported.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # The default is read; publishing assets needs write on the release itself.
+  contents: write
+
+env:
+  # Matches the main workflow. The binary records this in its build info, and a release built
+  # any other way would be one this project does not support.
+  CGO_ENABLED: "0"
+
+jobs:
+  test:
+    name: gate before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # A tag can be pushed at any commit. Publishing artifacts for a tree that does not pass
+      # its own gate would put a broken build where people look first.
+      - name: just check
+        run: just check
+
+  publish:
+    name: build and publish
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `git describe` is what the version comes from, and a shallow clone has no tags.
+          fetch-depth: 0
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # Builds all five platforms into bin/. The script lives in the justfile rather than being
+      # repeated here so the release artifacts and a local `just cross` come from one list.
+      - name: just cross
+        run: just cross
+
+      # A released binary has to report the tag it was built from, not a commit hash. This is
+      # the one place where a wrong version string would be published rather than noticed.
+      - name: verify the binary reports the tag
+        run: |
+          want="${GITHUB_REF_NAME}"
+          got=$(./bin/orbix-linux-amd64 version | head -1 | awk '{print $2}')
+          if [ "$got" != "$want" ]; then
+            echo "::error::binary reports $got, tag is $want"
+            exit 1
+          fi
+
+      - name: checksums
+        run: |
+          cd bin
+          # One file per artifact rather than one listing: a consumer downloads a binary and
+          # the single line that describes it.
+          for f in orbix-*; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          cat ./*.sha256
+
+      - name: publish
+        uses: softprops/action-gh-release@v3
+        with:
+          # The body is generated from the commits in this tag's range, not read from
+          # CHANGELOG.md: the two would say the same thing, and generating it here means the
+          # workflow does not fail on the first release, where the file does not exist yet.
+          # CHANGELOG.md stays the copy that ships in the repository.
+          generate_release_notes: true
+          files: |
+            bin/orbix-*
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

@@ -160,6 +160,29 @@ cross:
         GOOS=$os GOARCH=$arch go build -trimpath -ldflags '{{LDFLAGS}}' -o "$out" ./cmd/orbix
     done
 
+# Prints the version cz would bump to and the changelog section it would write, then stops. The
+# real bump is a person's decision: it writes a tag, and a tag is what `git describe` turns into
+# the version a binary reports.
+#
+# show what the next release would be, without changing anything
+release-preview:
+    @command -v cz >/dev/null 2>&1 || { \
+        echo "cz not found: install commitizen (https://commitizen-tools.github.io/commitizen/)"; \
+        exit 1; \
+    }
+    cz bump --dry-run --yes
+
+# `major_version_zero` is on in .cz.toml, so a breaking change before 1.0 bumps the minor rather
+# than the major -- the project is pre-1.0 and says so in the README.
+#
+# bump the version, write CHANGELOG.md, and tag
+release:
+    @command -v cz >/dev/null 2>&1 || { \
+        echo "cz not found: install commitizen (https://commitizen-tools.github.io/commitizen/)"; \
+        exit 1; \
+    }
+    cz bump --yes
+
 # remove build output
 clean:
     rm -rf bin

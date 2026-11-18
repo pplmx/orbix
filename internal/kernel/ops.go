@@ -137,8 +137,12 @@ func AddBias(dst, bias []float32, rows, width int) error {
 	if len(bias) < width {
 		return fmt.Errorf("kernel: bias has %d values, need %d", len(bias), width)
 	}
-	if len(dst) < rows*width {
-		return fmt.Errorf("kernel: dst has %d values, need %d", len(dst), rows*width)
+	// rows is the only argument here that no slice length bounds, so rows*width can overflow int --
+	// and it does so to a small positive value, not a negative one, which is why the comparison below
+	// used to pass and the loop then indexed past dst. Dividing instead of multiplying keeps both
+	// sides of the comparison in range.
+	if width > 0 && rows > len(dst)/width {
+		return fmt.Errorf("kernel: dst has %d values, need %d rows of %d", len(dst), rows, width)
 	}
 	for r := range rows {
 		row := dst[r*width : (r+1)*width]

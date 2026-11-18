@@ -539,3 +539,97 @@ func TestSiLUSaturatesAtBothEnds(t *testing.T) {
 		t.Errorf("SiLU(0) = %v, want 0", x[2])
 	}
 }
+
+// TestAddBias covers the bias pass that a Qwen2 model needs on q, k and v.
+//
+// The function had no test of its own. It is reached only when a model carries attention biases --
+// the Llama fixtures do not -- so the end-to-end bias tests in the llama package were the only
+// coverage, and they check the answer rather than the argument handling.
+//
+// Three behaviours are easy to get wrong and cheap to pin: the addition applies bias[i] to every
+// row (not once), an empty bias is a no-op so callers need not branch on a bias-free model, and a
+// bias longer than the row width is allowed and uses its prefix.
+func TestAddBias(t *testing.T) {
+	t.Run("applies to every row", func(t *testing.T) {
+		dst := []float32{1, 2, 3, 4, 5, 6}
+		if err := AddBias(dst, []float32{10, 20, 30}, 2, 3); err != nil {
+			t.Fatalf("AddBias: %v", err)
+		}
+		want := []float32{11, 22, 33, 14, 25, 36}
+		for i := range want {
+			if dst[i] != want[i] {
+				t.Errorf("dst[%d] = %v, want %v", i, dst[i], want[i])
+			}
+		}
+	})
+
+	t.Run("empty bias is a no-op", func(t *testing.T) {
+		dst := []float32{1, 2, 3}
+		if err := AddBias(dst, nil, 1, 3); err != nil {
+			t.Fatalf("AddBias with no bias: %v", err)
+		}
+		for i, v := range []float32{1, 2, 3} {
+			if dst[i] != v {
+				t.Errorf("dst[%d] = %v, want %v (unchanged)", i, dst[i], v)
+			}
+		}
+	})
+
+	t.Run("longer bias uses its prefix", func(t *testing.T) {
+		dst := []float32{1, 1}
+		if err := AddBias(dst, []float32{5, 5, 5}, 1, 2); err != nil {
+			t.Fatalf("AddBias with a long bias: %v", err)
+		}
+		if dst[0] != 6 || dst[1] != 6 {
+			t.Errorf("dst = %v, want [6 6]", dst)
+		}
+	})
+
+	t.Run("zero rows is a no-op", func(t *testing.T) {
+		dst := []float32{1, 2}
+		if err := AddBias(dst, []float32{9, 9}, 0, 2); err != nil {
+			t.Fatalf("AddBias with no rows: %v", err)
+		}
+		if dst[0] != 1 || dst[1] != 2 {
+			t.Errorf("dst = %v, want [1 2] (unchanged)", dst)
+		}
+	})
+}
+
+// TestAddBiasRejectsBadShapes covers the argument checks.
+//
+// rows is the only argument no slice length bounds -- width is limited by the bias and the
+// destination, but a caller can pass any row count at all. That asymmetry made rows*width the one
+// product here that can overflow, and it wrapped to a small positive number rather than a negative
+// one, so the length check passed and the loop indexed past the destination:
+//
+//	AddBias(dst[:4096], bias[:4096], 2^53+1, 4096)  ->  slice bounds out of range [:8192]
+//
+// The check divides instead of multiplying now, which keeps both sides in range.
+func TestAddBiasRejectsBadShapes(t *testing.T) {
+	cases := []struct {
+		name        string
+		dst, bias   []float32
+		rows, width int
+	}{
+		{"negative rows", make([]float32, 4), []float32{1, 2}, -1, 2},
+		{"negative width", make([]float32, 4), []float32{1, 2}, 1, -2},
+		{"bias shorter than width", make([]float32, 4), []float32{1}, 2, 2},
+		{"dst too small", make([]float32, 3), []float32{1, 2}, 2, 2},
+		// The overflow case: 2^53+1 rows of 4096 is far more than the destination holds, and the
+		// product wraps to exactly the destination's length.
+		{"row count whose product overflows", make([]float32, 4096), make([]float32, 4096), 1<<53 + 1, 4096},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("AddBias panicked instead of returning an error: %v", r)
+				}
+			}()
+			if err := AddBias(c.dst, c.bias, c.rows, c.width); err == nil {
+				t.Fatal("AddBias accepted invalid arguments")
+			}
+		})
+	}
+}

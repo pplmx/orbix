@@ -430,6 +430,18 @@ type generateParams struct {
 }
 
 func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generateParams) {
+	if p.maxTokens < 0 {
+		// Refused rather than treated as "unset". The field is a plain int, so zero is the
+		// only distinguishable "not sent", and the code below reaches it with "<= 0" -- which
+		// meant a negative budget silently became the server's default. A client asking for
+		// -5 tokens asked for nothing this server can do, and answering with 256 tokens of
+		// text is the one reply it cannot have meant. It is also the rule every command in
+		// cmd/orbix follows for the same flag value.
+		writeErrorParam(w, http.StatusBadRequest,
+			fmt.Sprintf("max_tokens must not be negative, got %d", p.maxTokens),
+			"max_tokens", "invalid_value")
+		return
+	}
 	maxTokens := p.maxTokens
 	if maxTokens <= 0 {
 		maxTokens = s.cfg.MaxTokens

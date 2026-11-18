@@ -1368,6 +1368,72 @@ func TestTopPRejectsOutOfRange(t *testing.T) {
 	}
 }
 
+// TestNegativeMaxTokensIsRefused covers the request field that was silently replaced by the
+// server's default.
+//
+// max_tokens is a plain int, so a zero is the only distinguishable "field not sent", and
+// generate reaches the default with "<= 0". A negative budget therefore did not fail and did
+// not clamp: it fell through to Config.MaxTokens, so a client that asked for -5 tokens got 256
+// tokens of text with finish_reason "length" -- a reply it cannot have meant, reported as a
+// normal one. Every command in cmd/orbix refuses a negative --max-tokens for the same reason.
+//
+// The status, the param and the code are all asserted, because the point of the error is that a
+// client can find the field without parsing the sentence.
+func TestNegativeMaxTokensIsRefused(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	cases := []struct{ name, path, body string }{
+		{
+			name: "completions",
+			path: "/v1/completions",
+			body: `{"prompt": "Once upon a time", "max_tokens": -5}`,
+		},
+		{
+			name: "chat completions",
+			path: "/v1/chat/completions",
+			body: `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": -5}`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, h, c.path, c.body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; a negative budget is not a smaller budget",
+					resp.StatusCode)
+			}
+			out := decodeBody[struct {
+				Error struct {
+					Type  string `json:"type"`
+					Param string `json:"param"`
+					Code  string `json:"code"`
+				} `json:"error"`
+			}](t, resp)
+			if out.Error.Type != "invalid_request_error" {
+				t.Errorf("type = %q, want invalid_request_error", out.Error.Type)
+			}
+			if out.Error.Param != "max_tokens" {
+				t.Errorf("param = %q, want max_tokens", out.Error.Param)
+			}
+			if out.Error.Code != "invalid_value" {
+				t.Errorf("code = %q, want invalid_value", out.Error.Code)
+			}
+		})
+	}
+
+	// The values that do work must keep working, so the check cannot pass by refusing every
+	// budget. Zero means "use the server default" and a positive count is the normal case; both
+	// have to reach generation rather than validation.
+	for _, budget := range []int{0, 3} {
+		body := fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d}`, budget)
+		resp := post(t, h, "/v1/completions", body)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("max_tokens=%d: status = %d, want 200", budget, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
 // TestCompressedBodyIsRefusedWith415 covers a client that compresses its request.
 //
 // HTTP allows a request body to carry a Content-Encoding, and a client library that enables

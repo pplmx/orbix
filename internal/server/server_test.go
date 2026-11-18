@@ -139,6 +139,83 @@ func post(t *testing.T, h http.Handler, path, body string) *http.Response {
 	return w.Result()
 }
 
+// TestOversizedBodyIs413 covers the bound on how much a request may send.
+//
+// Before it existed the decoder read whatever arrived: a 64 MiB body was read in full,
+// tokenized, and rejected as context_length_exceeded after 82 seconds of CPU. No status
+// code can be chosen until the body is parsed, so all that work happened before the request
+// was known to be impossible -- and making the body bigger always cost more, with no point
+// at which the server stopped reading.
+//
+// 413 rather than 400 is the part a client acts on: the JSON was fine, the size was not.
+func TestOversizedBodyIs413(t *testing.T) {
+	srv, _ := newTestServer(t)
+	limit := srv.maxBodyBytes()
+
+	// One byte past the limit, with a body that is valid JSON up to the truncation so the
+	// failure cannot be blamed on syntax.
+	body := `{"prompt":"` + strings.Repeat("x", int(limit)) + `","max_tokens":1}`
+	resp := post(t, srv.Handler(), "/v1/completions", body)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for a body over %d bytes", resp.StatusCode, limit)
+	}
+	env := decodeBody[errorBody](t, resp)
+	if !strings.Contains(env.Error.Message, "too large") {
+		t.Errorf("message %q does not say the body is too large", env.Error.Message)
+	}
+
+	// The same limit must reject a chat request, since it shares the decoder.
+	chatBody := `{"messages":[{"role":"user","content":"` + strings.Repeat("y", int(limit)) + `"}]}`
+	resp2 := post(t, srv.Handler(), "/v1/chat/completions", chatBody)
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("chat status = %d, want 413", resp2.StatusCode)
+	}
+}
+
+// TestNormalRequestFitsUnderTheBodyLimit is the other half: the bound must not reject
+// requests the model can actually serve. A prompt filling the context is the largest
+// legitimate body there is, and it has to pass the size check -- whether the engine can
+// generate from it is a separate question.
+func TestNormalRequestFitsUnderTheBodyLimit(t *testing.T) {
+	srv, _ := newTestServer(t)
+	limit := srv.maxBodyBytes()
+	if limit < 1<<20 {
+		t.Errorf("body limit is %d bytes; a small context must not produce a limit that "+
+			"rejects ordinary conversation", limit)
+	}
+	// A body comfortably inside the limit must get past decodeJSON to a semantic error,
+	// which proves the size check did not fire.
+	body := `{"prompt":"` + strings.Repeat("a", 4096) + `","max_tokens":1}`
+	resp := post(t, srv.Handler(), "/v1/completions", body)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		t.Errorf("a %d-byte body was rejected against a limit of %d", len(body), limit)
+	}
+}
+
+// TestMaxBodyBytesScalesWithContext pins the derivation: the limit is the context size
+// times a per-token byte allowance, with a floor so a tiny model still accepts normal
+// requests.
+func TestMaxBodyBytesScalesWithContext(t *testing.T) {
+	cases := []struct {
+		ctx  int
+		want int64
+		why  string
+	}{
+		{ctx: 64, want: 1 << 20, why: "a tiny context still gets the 1 MiB floor"},
+		{ctx: 1000, want: 1 << 20, why: "48 KB is below the floor"},
+		{ctx: 131072, want: 131072 * 48, why: "a 128k context allows 6 MiB of text"},
+	}
+	for _, c := range cases {
+		srv := &Server{cfg: Config{ContextLen: c.ctx}}
+		if got := srv.maxBodyBytes(); got != c.want {
+			t.Errorf("maxBodyBytes(ctx=%d) = %d, want %d (%s)", c.ctx, got, c.want, c.why)
+		}
+	}
+}
+
 func decodeBody[T any](t *testing.T, resp *http.Response) T {
 	t.Helper()
 	defer func() { _ = resp.Body.Close() }()

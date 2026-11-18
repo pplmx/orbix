@@ -553,15 +553,8 @@ func (s *Server) rejectShapeFields(w http.ResponseWriter, fields []shapeField, r
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
-	if err := decodeJSON(r, &req); err != nil {
-		// 415 for a body this server will not decode, 400 for one it tried to. The difference
-		// matters to a client: the first says "change what you send", the second says "what you
-		// sent was malformed".
-		status := http.StatusBadRequest
-		if errors.Is(err, errUnsupportedEncoding) {
-			status = http.StatusUnsupportedMediaType
-		}
-		writeError(w, status, err.Error())
+	if err := decodeJSON(w, r, &req, s.maxBodyBytes()); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if !s.checkModel(w, req.Model) {
@@ -592,15 +585,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	var req completionRequest
-	if err := decodeJSON(r, &req); err != nil {
-		// 415 for a body this server will not decode, 400 for one it tried to. The difference
-		// matters to a client: the first says "change what you send", the second says "what you
-		// sent was malformed".
-		status := http.StatusBadRequest
-		if errors.Is(err, errUnsupportedEncoding) {
-			status = http.StatusUnsupportedMediaType
-		}
-		writeError(w, status, err.Error())
+	if err := decodeJSON(w, r, &req, s.maxBodyBytes()); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if !s.checkModel(w, req.Model) {
@@ -1196,11 +1182,34 @@ func (s *Server) stopTokenIDs(stop []string) []int32 {
 	return ids
 }
 
+// maxBodyBytes is the largest request body this server will read.
+//
+// Derived from the context rather than fixed, because the two are the same constraint seen
+// from different ends: a request cannot usefully carry more text than the model can attend
+// over. bytesPerToken is deliberately generous -- a token's surface text is a few bytes of
+// UTF-8, and JSON escapes some of them -- so the limit never rejects a servable request
+// while still bounding the work to something proportional to the context.
+//
+// The floor matters as much as the multiple: a tiny context would otherwise compute a
+// limit small enough to reject ordinary conversation, and the point of the bound is to
+// stop a huge body, not to make a small model unusable.
+func (s *Server) maxBodyBytes() int64 {
+	const (
+		bytesPerToken = 48
+		minLimit      = 1 << 20 // 1 MiB
+	)
+	limit := int64(s.cfg.ContextLen) * bytesPerToken
+	if limit < minLimit {
+		return minLimit
+	}
+	return limit
+}
+
 // errUnsupportedEncoding marks a request whose body is compressed in a way this server does not
 // decode, so the handler can answer 415 rather than a 400 that blames the JSON.
 var errUnsupportedEncoding = errors.New("unsupported content encoding")
 
-func decodeJSON(r *http.Request, dst any) error {
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
 	defer func() { _ = r.Body.Close() }()
 	// A client may compress its request body, and the only thing that must happen here is that
 	// the result is not a JSON error: reading a gzip stream as text yields "invalid character
@@ -1237,13 +1246,56 @@ func decodeJSON(r *http.Request, dst any) error {
 	if enc := r.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
 		return fmt.Errorf("%w: %s; send the body uncompressed", errUnsupportedEncoding, enc)
 	}
+	// Bound the read before decoding it. Without this the decoder consumes whatever the
+	// client sends: measured against this server, a 64 MiB body was read in full and turned
+	// into a context_length_exceeded error that reported the prompt as 524290 tokens, after
+	// 82 seconds of CPU. No status code can be sent until the body is parsed, so the work is
+	// spent before the request is known to be impossible -- which makes an unbounded body a
+	// cheaper attack than a long prompt, since the tokens do not have to be valid.
+	//
+	// The limit is generous by construction rather than by guess: a request may carry at
+	// most ContextLen tokens, and a single token's text is at most a few UTF-8 bytes, so a
+	// body above this many bytes cannot describe a servable request. MaxBytesReader also
+	// stops reading at the limit, so the cost is bounded even when the client keeps sending.
+	//
+	// w is passed rather than nil so the reader can mark the connection for closing once
+	// the limit is hit. With nil the server answers 413 and then tears the connection down
+	// mid-request, which a client sees as a reset rather than as the response it was just
+	// sent -- measured: a 64 MiB body produced ConnectionResetError instead of 413.
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	// Unknown fields are ignored on purpose: see chatRequest.
 	if err := dec.Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return fmt.Errorf("%w: body exceeds %d bytes", errBodyTooLarge, tooBig.Limit)
+		}
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	return nil
 }
+
+// writeDecodeError answers a body this server could not accept.
+//
+// Three failures with three different meanings, and the status is what a client acts on:
+// 400 says the JSON was malformed and retrying the same bytes is pointless, 415 says the
+// encoding is unsupported and the client should change that, 413 says the body was too
+// large and the request must be made smaller. Reporting all three as 400 would send a
+// client with a compressed or oversized body looking for a syntax error.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	switch {
+	case errors.Is(err, errUnsupportedEncoding):
+		status = http.StatusUnsupportedMediaType
+	case errors.Is(err, errBodyTooLarge):
+		status = http.StatusRequestEntityTooLarge
+	}
+	writeError(w, status, err.Error())
+}
+
+// errBodyTooLarge marks a request body past the server's size limit, so the handler can
+// answer 413 rather than a 400 that blames the JSON.
+var errBodyTooLarge = errors.New("request body too large")
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")

@@ -1,6 +1,10 @@
 package gguf
 
-import "testing"
+import (
+	"math"
+	"strconv"
+	"testing"
+)
 
 func TestQuantSizeTable(t *testing.T) {
 	// The size table is the one place where a typo silently produces a size
@@ -115,5 +119,79 @@ func TestValueTypeStrings(t *testing.T) {
 	}
 	if got, want := ValueType(99).String(), "ValueType(99)"; got != want {
 		t.Errorf("unknown String() = %q, want %q", got, want)
+	}
+}
+
+// TestValueString covers the rendering `orbix model inspect` prints for every metadata
+// value.
+//
+// The method has a branch per GGUF value type, and the CLI depends on all of them: the
+// human-readable dump prints these strings, and the --json path uses the same method for its
+// metadata map. Nothing tested it, so a missed case -- a bool printed as "0"/"1", an int64
+// losing its sign, an array reported without its element type -- would appear only in the
+// tool's output.
+//
+// The float cases are the ones worth looking at: a float32 stored as 1e-5 does not survive a
+// float64 round trip exactly, so FormatFloat renders it at the precision the file's own type
+// carries. Printing the float64 expansion would suggest the file holds digits it cannot.
+func TestValueString(t *testing.T) {
+	cases := []struct {
+		name string
+		v    Value
+		want string
+	}{
+		{"string", Value{Type: TypeString, Str: "llama"}, "llama"},
+		{"empty string", Value{Type: TypeString, Str: ""}, ""},
+		{"bool true", Value{Type: TypeBool, Bool: true}, "true"},
+		{"bool false", Value{Type: TypeBool, Bool: false}, "false"},
+		{"uint8", Value{Type: TypeUint8, Uint: 42}, "42"},
+		{"uint64 max", Value{Type: TypeUint64, Uint: math.MaxUint64}, strconv.FormatUint(math.MaxUint64, 10)},
+		{"int8 negative", Value{Type: TypeInt8, Int: -7}, "-7"},
+		{"int64 min", Value{Type: TypeInt64, Int: math.MinInt64}, strconv.FormatInt(math.MinInt64, 10)},
+		// A float32 carried in a float64 shows its float32 digits, not the expansion.
+		{"float32", Value{Type: TypeFloat32, Float: float64(float32(0.1))}, "0.1"},
+		{"float64", Value{Type: TypeFloat64, Float: 0.1}, "0.1"},
+		{"array", Value{Type: TypeArray, ElemType: TypeString,
+			Array: []Value{{Type: TypeString, Str: "a"}}}, "[1 string]"},
+		{"empty array", Value{Type: TypeArray, ElemType: TypeInt32}, "[0 int32]"},
+		// An unrecognized type reports its number rather than guessing a rendering: a value
+		// this build does not understand is a fact a reader should see.
+		{"unknown type", Value{Type: ValueType(99)}, "ValueType(99)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.v.String(); got != c.want {
+				t.Errorf("String() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestFormatFloatPrecision pins the precision decision FormatFloat makes from the on-disk
+// type.
+//
+// A float32 stored as 1e-5 is 9.999999747378752e-06 as a float64, and printing that in a dump
+// claims a precision the file does not have. The two types therefore format differently, and
+// the difference is the whole point of passing the type in.
+func TestFormatFloatPrecision(t *testing.T) {
+	// The same float64 value, formatted as each source type. The float32 rendering is
+	// shorter because the value is what a float32 can hold.
+	f := float64(float32(1e-5))
+	if got, want := FormatFloat(TypeFloat32, f), strconv.FormatFloat(f, 'g', -1, 32); got != want {
+		t.Errorf("FormatFloat(float32) = %q, want %q", got, want)
+	}
+	// A value that is exactly representable formats the same either way, so this pins that
+	// the float32 path is not truncating indiscriminately.
+	if got, want := FormatFloat(TypeFloat32, 8), "8"; got != want {
+		t.Errorf("FormatFloat(float32, 8) = %q, want %q", got, want)
+	}
+	// A float64 keeps its own digits.
+	if got, want := FormatFloat(TypeFloat64, 0.1), "0.1"; got != want {
+		t.Errorf("FormatFloat(float64, 0.1) = %q, want %q", got, want)
+	}
+	// Any non-float32 type takes the float64 path, which is what a caller reaching a
+	// float64 metadata value expects.
+	if got, want := FormatFloat(TypeFloat64, 1.0/3), strconv.FormatFloat(1.0/3, 'g', -1, 64); got != want {
+		t.Errorf("FormatFloat(float64, 1/3) = %q, want %q", got, want)
 	}
 }

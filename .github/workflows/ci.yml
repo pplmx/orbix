@@ -219,12 +219,19 @@ jobs:
 
       # On a pull request the range is base..head. On a push to main there is nothing to
       # compare against, so only the pushed commit is checked.
+      #
+      # RANGE goes before the recipe name. `just commits RANGE=...` reads an assignment as a
+      # recipe to run, so it failed with "justfile does not contain recipe
+      # `RANGE=HEAD~1..HEAD`" -- which is what carryover from `make commits RANGE=...` looks
+      # like, where the assignment may follow the target. Nothing caught it locally: the
+      # pull-request form resolves fine in a checkout that has origin/<base>, and the push
+      # form only runs on main, where the failure is on a commit that is already pushed.
       - name: just commits
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            just commits RANGE="origin/${{ github.base_ref }}..HEAD"
+            just RANGE="origin/${{ github.base_ref }}..HEAD" commits
           else
-            just commits RANGE="HEAD~1..HEAD"
+            just RANGE="HEAD~1..HEAD" commits
           fi
 
   docs:

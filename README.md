@@ -216,26 +216,33 @@ rather than as a description:
 | `KVCacheManager` | Not a separate interface: `llama.BlockPool` owns allocation and `llama.PrefixIndex` owns prefix matching          |
 | `Backend`        | Not implemented, by decision. One compute path exists, and a remote one could not support what the scheduler does |
 
-The compute kernels are internal but exposed for testing and benchmarking:
+The compute kernels are real, exported, and callable from this repository's own packages. The
+signatures are the ones in `internal/kernel` today:
 
 ```go
 package kernel
 
-func MatMulQ4_0(dst, a []float32, b []byte, m, n, k int)
-func Attention(q, k, v []float32, mask []float32, scale float32)
-func RMSNorm(dst, src, weight []float32, eps float32)
+func MatMul(dst, a, b []float32, m, n, k int) error
+func MatMulTransposed(dst, a, b []float32, m, n, k int) error
+func MatVec(dst, a, v []float32, n, k int) error
+func RMSNorm(dst, src, weight []float32, eps float32) error
 
-// Runner evaluates the partitionable kernels across a bounded worker set.
+// NewRunner returns a Runner that may use up to workers goroutines.
 func NewRunner(workers int) *Runner
 func (r *Runner) MatVec(dst, a, v []float32, n, k int) error
 func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error
 ```
 
+Decoding a quantized tensor is not a kernel: it lives in `internal/quant`, so a Q4_0 matrix
+arrives here already widened to float32. Attention is not a kernel either -- it is assembled in
+`internal/llama` from `Softmax`, `RMSNorm`, `AddBias` and `AddInPlace`, because the mask and the
+cache layout are model concerns rather than arithmetic ones.
+
 ## Quick Start
 
-`orbix run`, `orbix model inspect`, `orbix bench`, and `orbix serve` work today.
-The embedding snippet below is the target API, kept here so the shape of the
-engine stays visible while that layer is built.
+`orbix run`, `orbix model inspect`, `orbix bench`, and `orbix serve` work today. Embedding the
+engine in another Go module does not, for a reason the section at the end of this chapter
+explains: the packages are under `internal/`.
 
 ### Serve a GGUF model
 

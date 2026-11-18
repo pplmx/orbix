@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,65 @@ func TestRunNoArgsPrintsUsage(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("usage output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestCommandHelpIsNotAFailure covers the exit status of `orbix <command> -h`.
+//
+// The usage text tells the reader to run exactly that to see a command's flags, and the flag
+// package prints them and returns flag.ErrHelp to say "nothing went wrong, this was a request
+// for help". Reporting it as an error made every one of those commands exit 1 with an extra
+// "orbix: flag: help requested" line, while `orbix help` exited 0 -- two documented paths to
+// the same information, disagreeing on whether asking for it succeeded.
+//
+// The assertion is on report's status rather than on a subprocess, because main calls
+// os.Exit: the mapping is what has to be right, and testing it directly also keeps the test
+// from depending on an exec.
+func TestCommandHelpIsNotAFailure(t *testing.T) {
+	// Every command that has its own flag set. `version` and `help` are absent because they
+	// handle -h themselves and never reach the flag package; they are covered below.
+	commands := [][]string{
+		{"run", "-h"},
+		{"chat", "-h"},
+		{"bench", "-h"},
+		{"serve", "-h"},
+		{"model", "inspect", "-h"},
+	}
+	for _, args := range commands {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stderr bytes.Buffer
+			// The flag package writes the help text itself; discard it so the test output
+			// stays readable, and keep stderr only to prove nothing extra was added.
+			old := os.Stderr
+			devnull, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stderr = devnull
+			err = run(args)
+			os.Stderr = old
+			_ = devnull.Close()
+
+			if got := report(err, &stderr); got != 0 {
+				t.Errorf("report(run(%v)) = %d, want 0 for a help request", args, got)
+			}
+			if strings.Contains(stderr.String(), "help requested") {
+				t.Errorf("help request reported as an error: %q", stderr.String())
+			}
+		})
+	}
+
+	// The half that has to keep failing: a genuine error still exits non-zero and still says
+	// what went wrong, so the help case above cannot pass by mapping everything to 0.
+	var stderr bytes.Buffer
+	if got := report(errors.New("boom"), &stderr); got != 1 {
+		t.Errorf("report(err) = %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "boom") {
+		t.Errorf("error message not written to stderr: %q", stderr.String())
+	}
+	if got := report(nil, &stderr); got != 0 {
+		t.Errorf("report(nil) = %d, want 0", got)
 	}
 }
 

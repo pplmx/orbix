@@ -283,16 +283,25 @@ type chatTurn struct {
 // nothing.
 //
 // The pool is sized for one full context by default, so this only happens when --blocks was set
-// below that. /clear is the way out that does not need a restart.
+// below that.
+//
+// /clear is offered as a way out only when it can be one. It empties the history, so the next
+// prompt is just the new message -- but the message the user already typed is part of the prompt
+// too, and if that alone exceeds the pool then /clear changes nothing and the same error comes
+// back. The previous wording called /clear "the way out" unconditionally, which was wrong for
+// that case: measured on a 60-word message against --blocks 4, the error repeated verbatim after
+// /clear. Saying when it helps costs one clause and stops the advice from being a dead end.
 func explainChatError(err error) error {
 	if !errors.Is(err, llama.ErrPoolExhausted) {
 		return err
 	}
 	// The engine's message already gives the pool's size, so this adds only what it cannot know:
-	// that the session will repeat the failure, and the two ways out.
-	return fmt.Errorf("%w -- this conversation outgrew the pool, and the next turn will fail the same"+
-		" way because a failed turn does not grow the history; /clear starts a new conversation,"+
-		" or leave --blocks unset to size the pool for the whole context", err)
+	// that the session repeats the failure, and what actually helps.
+	return fmt.Errorf("%w -- this conversation outgrew the pool, and the next turn will fail the"+
+		" same way because a failed turn does not grow the history; /clear forgets the history,"+
+		" which helps if the history is what overflowed but not if the message alone is longer"+
+		" than the pool; raising --blocks, or leaving it unset to size the pool for the whole"+
+		" context, always helps", err)
 }
 
 func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, system string, history []chatTurn, user string, opts chatOptions) (string, error) {

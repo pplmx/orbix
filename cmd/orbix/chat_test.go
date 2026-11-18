@@ -280,9 +280,11 @@ func TestChatAliasesAreNotSentToTheModel(t *testing.T) {
 // names the pool's size, which is the wrong end of the problem, and suggests nothing. Observed with
 // --blocks 2: twelve of fifteen turns printed the bare error and none of them said what to do.
 //
-// Both pieces of advice are checked elsewhere rather than assumed: /clear ends the failure (verified by
-// driving a real session past the point of exhaustion) and an unset --blocks sizes the pool for a full
-// context, which is what the session does when the flag is absent.
+// The advice has to be advice, not a list of commands. /clear empties the history, so it ends the
+// failure only when the history is what overflowed: the message the user just typed is part of the
+// prompt too. Measured on a 60-word message against --blocks 4, the error came back verbatim after
+// /clear, which is why the message now says which case it is in instead of calling /clear "the way
+// out". Raising --blocks, or leaving it unset, works in both cases and is named first in effect.
 func TestExplainChatError(t *testing.T) {
 	// An unrelated error passes through untouched: wrapping every error would bury the ones that
 	// already say what went wrong.
@@ -305,6 +307,29 @@ func TestExplainChatError(t *testing.T) {
 		if !strings.Contains(got.Error(), want) {
 			t.Errorf("error %q does not mention %q", got, want)
 		}
+	}
+	// /clear must not be presented as an unconditional cure. The condition is the difference
+	// between advice and a dead end, and its absence is the defect this comment records.
+	if !strings.Contains(got.Error(), "if the history is what overflowed") {
+		t.Errorf("error %q names /clear without saying when it helps", got)
+	}
+}
+
+// TestClearDoesNotAlwaysEndPoolExhaustion pins the case the message now describes.
+//
+// It is a session-level test because the claim is about what /clear does to a real session:
+// with a message longer than the whole pool, the same error must come back after /clear. If
+// someone later changes /clear to release the pool, this test will say so -- and the message
+// would then be free to call /clear unconditional again.
+func TestClearDoesNotAlwaysEndPoolExhaustion(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	// A pool far smaller than one message: 2 blocks of 16 positions cannot hold ~60 words.
+	long := strings.Repeat("word ", 60)
+	out := runChat(t, chatOptions{
+		model: path, maxTokens: 2, topK: 40, blocks: 2, blockSize: 16,
+	}, long+"\n/clear\n"+long+"\n/exit\n")
+	if n := strings.Count(out, "block pool exhausted"); n != 2 {
+		t.Errorf("saw %d pool-exhaustion errors, want 2 (one before /clear and one after):\n%s", n, out)
 	}
 }
 

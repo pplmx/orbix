@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 
 	"github.com/pplmx/orbix/internal/llama"
 )
@@ -373,5 +376,40 @@ func TestEveryNumericFlagRefusesNegatives(t *testing.T) {
 				t.Errorf("error %q came from opening the model, so the flag was not validated", msg)
 			}
 		})
+	}
+}
+
+// TestRunRefusesContextPastTheTrainedWindow covers the one --ctx value that looks usable and is not.
+//
+// The flag's help says "0 uses the model's trained amount", which reads as though any other value is
+// allowed. A larger one is not: the rope table is built from the trained context, so a bigger cache
+// asks it for positions it does not hold and the decode loop fails mid-run with "position 128 outside
+// the rope table" -- after the prompt has been processed and part of the answer printed. Extending a
+// model past its window needs rope scaling, which this engine does not implement.
+//
+// Checked against a constructed model so the numbers are exact: the fixture's ContextLen is the
+// window, and one token past it is the smallest request that must be refused.
+func TestRunRefusesContextPastTheTrainedWindow(t *testing.T) {
+	const window = 64
+	path := gguftest.Model{NoEOS: true, ContextLen: window}.Write(t, t.TempDir())
+
+	// Anything up to the trained window is usable, as long as the prompt fits -- "hi" encodes to
+	// three tokens against this vocabulary, so the smaller cases leave room for it.
+	for _, n := range []string{"8", fmt.Sprint(window)} {
+		if err := cmdRun([]string{"--model", path, "--ctx", n, "--max-tokens", "1", "hi"}); err != nil {
+			t.Errorf("--ctx %s was refused: %v", n, err)
+		}
+	}
+
+	err := cmdRun([]string{"--model", path, "--ctx", fmt.Sprint(window + 1), "hi"})
+	if err == nil {
+		t.Fatal("--ctx past the trained window was accepted")
+	}
+	// The message has to say what the limit is and why it exists; "outside the rope table" from
+	// inside the decode loop does neither.
+	for _, want := range []string{"--ctx", fmt.Sprint(window + 1), "rope scaling"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }

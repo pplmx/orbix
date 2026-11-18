@@ -88,6 +88,16 @@ func cmdRun(args []string) error {
 	if nCtx <= 0 {
 		nCtx = cfg.ContextLen
 	}
+	// The rope table is built from the model's trained context, so a larger cache would ask for
+	// positions the table does not hold -- which surfaced as "position 128 outside the rope table"
+	// from inside the decode loop, after the prompt had already been processed. Extending a model
+	// past its trained window needs rope scaling, which this engine does not implement, so the
+	// answer is a refusal that says so rather than a cache that cannot be used.
+	if nCtx > cfg.ContextLen {
+		return fmt.Errorf("run: --ctx %d is past this model's trained context of %d;"+
+			" going beyond it needs rope scaling, which is not implemented",
+			nCtx, cfg.ContextLen)
+	}
 	cache, err := llama.NewKVCache(cfg, nCtx)
 	if err != nil {
 		return err
@@ -144,6 +154,20 @@ func cmdRun(args []string) error {
 			cfg, m.W.Params(), loadTime.Round(time.Millisecond), promptLen,
 			n, genTime.Round(time.Millisecond), float64(n)/genTime.Seconds(),
 			cache.Len(), cache.Cap(), cache.Bytes())
+		// A budget larger than the window is silently cut down to fit, which is the useful
+		// behaviour -- but a run that asked for 128 and produced 123 looks like the model
+		// stopped early, so say when the window is what stopped it. The test is the cache
+		// being full rather than n < *maxTokens: a model that emits its end-of-sequence token
+		// also produces fewer tokens than asked, and that is not a capacity limit.
+		if cache.Len() == cache.Cap() && n < *maxTokens {
+			// --ctx cannot help here: the window is the model's trained context, and a larger
+			// cache would ask the rope table for positions it does not hold. The budget is what a
+			// caller can lower, and the prompt is what they can shorten.
+			fmt.Fprintf(os.Stderr,
+				"note:   the %d-token window is full, so the %d-token budget was cut to %d;"+
+					" shorten the prompt or lower --max-tokens\n",
+				cache.Cap(), *maxTokens, n)
+		}
 	}
 	return nil
 }

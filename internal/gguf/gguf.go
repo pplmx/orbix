@@ -86,6 +86,17 @@ func Open(path string) (*File, error) {
 	return file, err
 }
 
+// maxPreallocEntries caps how many entries the parser reserves space for before reading them.
+//
+// The counts in a header are attacker-controlled, and make() with a huge capacity is an
+// immediate allocation: a file declaring 2^60 tensors is killed by the allocator before any
+// read can fail. Reserving a sane amount and letting append grow the rest keeps a legitimate
+// large file working -- the append cost is amortised -- while a lying header fails on the read
+// that runs out of bytes.
+//
+// 4096 is well above any real metadata block and small enough to be free.
+const maxPreallocEntries = 4096
+
 // Read parses a GGUF file from r.
 //
 // Errors are wrapped with enough context to name the field that failed, since
@@ -116,10 +127,19 @@ func Read(r io.Reader) (*File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gguf: read metadata count: %w", err)
 	}
-
+	// Both counts drive an allocation below, and both come from the file. A corrupted or
+	// hostile header can declare 2^60 entries, and make() honours that as a request for
+	// terabytes -- the process is killed by the allocator before any read can fail, so the
+	// error paths below never get a chance to run.
+	//
+	// The counts themselves are left alone: a legitimate file may declare tens of thousands
+	// of tensors, and rejecting a large count would reject it too. What is bounded is the
+	// *pre-allocation*. Appending grows the slice on demand, so a file that declares more
+	// entries than it holds fails on the read that runs out of data, with the contextual
+	// error it already produced.
 	file := &File{
 		Version:  version,
-		Metadata: make(map[string]Value, kvCount),
+		Metadata: make(map[string]Value, min(kvCount, maxPreallocEntries)),
 	}
 
 	for i := uint64(0); i < kvCount; i++ {
@@ -138,7 +158,7 @@ func Read(r io.Reader) (*File, error) {
 		file.Metadata[key] = val
 	}
 
-	file.TensorInfos = make([]TensorInfo, 0, count)
+	file.TensorInfos = make([]TensorInfo, 0, min(count, maxPreallocEntries))
 	for i := uint64(0); i < count; i++ {
 		ti, err := readTensorInfo(rr)
 		if err != nil {

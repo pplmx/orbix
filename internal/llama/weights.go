@@ -2,6 +2,9 @@ package llama
 
 import (
 	"fmt"
+	"maps"
+	"math"
+	"slices"
 
 	"github.com/pplmx/orbix/internal/quant"
 )
@@ -136,6 +139,17 @@ func LoadWeights(path string) (*Weights, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A single non-finite weight does not stay local: it flows through the layer norms into
+	// every logit, and the model then answers with whatever token 0 is -- tens of thousands of
+	// perfectly valid ids that happen to spell nothing. The run exits 0, so nothing downstream
+	// reports a problem, and the user concludes the model is bad rather than the file.
+	//
+	// Checking here costs one pass over the weights that were just decoded, against a load
+	// that already read and dequantized them, and it turns that failure into a message that
+	// names the tensor.
+	if err := checkFinite(tensors); err != nil {
+		return nil, err
+	}
 
 	w := &Weights{
 		Config:         cfg,
@@ -169,6 +183,25 @@ func LoadWeights(path string) (*Weights, error) {
 		}
 	}
 	return w, nil
+}
+
+// checkFinite reports the first tensor holding a NaN or an infinity.
+//
+// Names are sorted so the message is the same on every run rather than depending on map order,
+// which matters because a user comparing two load attempts would otherwise see a different
+// tensor named each time -- the difference between "this file is corrupt" and "these files are
+// corrupt in different places".
+func checkFinite(tensors map[string][]float32) error {
+	for _, name := range slices.Sorted(maps.Keys(tensors)) {
+		values := tensors[name]
+		for i, v := range values {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				return fmt.Errorf("llama: weight %q has a non-finite value %v at index %d of %d;"+
+					" the file is corrupt or truncated", name, v, i, len(values))
+			}
+		}
+	}
+	return nil
 }
 
 // splitExperts cuts a stacked expert tensor into one contiguous slice per expert.

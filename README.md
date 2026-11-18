@@ -655,6 +655,11 @@ with a long window should be run with `--blocks`, where the total is the pool si
 
 ## Development
 
+The commands below are [just](https://just.systems) recipes. `just` is a single binary and not
+usually preinstalled, so install it first — `cargo install just`, `brew install just`,
+`winget install --id Casey.Just --exact`, or a pre-built binary from its releases page. Every recipe in the block
+below is a short shell command; the justfile is the readable list of what they are.
+
 ```bash
 git clone https://github.com/pplmx/orbix
 cd orbix
@@ -669,6 +674,8 @@ just release-preview # what the next release would be; changes nothing
 just fuzz      # run every fuzz target; FUZZTIME sets the per-target budget
 just build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix
 just bench     # run kernel and engine benchmarks
+just cross     # build all five supported platforms with CGo disabled
+just test-race # the suite under the race detector; needs cgo, so it is separate
 ```
 
 `just check` is what a contributor runs before pushing; it needs only the Go toolchain and

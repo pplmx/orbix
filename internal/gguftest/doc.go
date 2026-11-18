@@ -2,10 +2,15 @@
 //
 // The engine, server, and CLI tests need a model they can actually run: attention needs
 // a cache, generation needs an end-of-sequence token, and a tokenizer needs a vocabulary.
-// Those tests were gated on the MODEL environment variable, which meant 74 of the
-// project's 320 tests were skipped wherever a checkpoint was not on disk -- in CI, all of
-// them. A checkpoint is not needed for any of those assertions; what is needed is a model
-// small enough to construct in a test and complete enough to run.
+// Most of those tests were gated on the MODEL environment variable, which meant they were
+// skipped wherever a checkpoint was not on disk -- in CI, all of them. A checkpoint is not
+// needed for any of those assertions; what is needed is a model small enough to construct in
+// a test and complete enough to run.
+//
+// No counts are quoted here. The figures that were (74 skipped of 320 tests when this package
+// was written) move with every checkpoint-gated test added or removed, and nothing can pin a
+// number that lives in prose; `go test ./... -v | grep -c '^--- SKIP'` is the answer for
+// whatever tree is being read.
 //
 // The files this package produces are real GGUFs, parsed by the same reader a checkpoint
 // goes through. They are deliberately tiny -- a few kilobytes, two layers, two attention

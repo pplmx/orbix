@@ -25,7 +25,13 @@ hand-written writer makes and the format's own readers catch:
 import json, os, struct, sys
 import numpy as np
 
-SRC = sys.argv[1] if len(sys.argv) > 1 else "/models/Qwen2.5-0.5B-Instruct"
+# The source has no default. It used to fall back to a path on the machine this was written
+# on, which is not a path anyone else has, so omitting the argument failed with a
+# FileNotFoundError about a directory the reader never chose.
+if len(sys.argv) < 2:
+    sys.exit("hf_to_gguf: missing source directory\n"
+             "usage: hf_to_gguf.py <checkpoint-dir> [out.gguf]")
+SRC = sys.argv[1]
 OUT = sys.argv[2] if len(sys.argv) > 2 else "qwen2-f32.gguf"
 
 # The two ways this is run wrong, reported as what they mean rather than as a traceback. A

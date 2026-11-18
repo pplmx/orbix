@@ -822,6 +822,13 @@ func decodeJSON(r *http.Request, dst any) error {
 	// The body is not decompressed. A local engine serves prompts measured in kilobytes, so the
 	// bytes saved are worth less than the dependency and the decompression-bomb surface that
 	// would come with handling them.
+	//
+	// Content-Type is deliberately not checked, and the asymmetry is the point: an encoding the
+	// server will not apply changes the bytes, so proceeding yields a parse error about something
+	// else, while a media type only says what the bytes are. A client that labels JSON as
+	// text/plain has still sent JSON, and refusing it would reject a request this server can serve
+	// perfectly well. curl -d sets application/x-www-form-urlencoded rather than leaving the header
+	// off, which is exactly that case and is how most hand-written example requests here are sent.
 	if enc := r.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
 		return fmt.Errorf("%w: %s; send the body uncompressed", errUnsupportedEncoding, enc)
 	}

@@ -134,6 +134,50 @@ func (c tinyConfig) kvs() []kv {
 //
 // used == experts is legal and must stay accepted: routing every expert is a real
 // configuration, if an expensive one.
+// TestZeroWidthVocabularyIsRefused covers the shape that makes every logits row empty.
+//
+// Nothing checked VocabSize, and a file whose token_embd.weight is [hidden, 0] loaded with
+// VocabSize 0. The consequence is one layer down: a forward pass returns an empty logits
+// row, and Temperature.Next panics on it at the fallback that indexes the last candidate --
+// the case where float64 accumulation of the probabilities lands a hair below 1. Greedy
+// returns 0 there without complaining, so the two samplers disagree about what an empty row
+// means, which is a reason to refuse the shape rather than to teach both to tolerate it.
+//
+// Measured before the check: LoadConfig accepted the file with VocabSize=0.
+func TestZeroWidthVocabularyIsRefused(t *testing.T) {
+	c := tinyConfig{hidden: 8, layers: 1, heads: 2, kvHeads: 2, ffn: 16, ctx: 32, vocab: 0}
+	f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), c.tensors(), nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	_, err = LoadConfig(f)
+	if err == nil {
+		t.Fatal("LoadConfig accepted a zero-width vocabulary; samplers index that empty row")
+	}
+	// The message has to name the tensor, since the shape is spread over the metadata and
+	// the embedding is what actually carries the vocabulary width.
+	for _, want := range []string{"token_embd.weight", "vocabulary"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// A one-token vocabulary is degenerate but legal, and must still load: the rule is about
+	// zero width, not about small vocabularies.
+	c.vocab = 1
+	f, err = gguf.Read(bytes.NewReader(buildFile(c.kvs(), c.tensors(), nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig refused a one-token vocabulary: %v", err)
+	}
+	if cfg.VocabSize != 1 {
+		t.Errorf("VocabSize = %d, want 1", cfg.VocabSize)
+	}
+}
+
 func TestExpertUsedCountMustNotExceedExpertCount(t *testing.T) {
 	cases := []struct {
 		name    string

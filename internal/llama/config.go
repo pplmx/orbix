@@ -307,6 +307,14 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	if got := int(emb.Dims[0]); got != cfg.Hidden {
 		return Config{}, fmt.Errorf("llama: token_embd.weight row length %d, want embedding_length %d", got, cfg.Hidden)
 	}
+	// A zero-width embedding gives VocabSize 0, and the first forward pass then produces an
+	// empty logits row: samplers are written for one row per position, and Temperature.Next
+	// indexes the last candidate when floating-point accumulation falls short of 1, so an
+	// empty row panics there. Refused at load time, where the shape can be named, rather than
+	// left for a sampler to trip over.
+	if emb.Dims[1] == 0 {
+		return Config{}, fmt.Errorf("llama: token_embd.weight has a zero-width vocabulary")
+	}
 	cfg.VocabSize = int(emb.Dims[1])
 
 	_, hasOutput := f.Tensor("output.weight")

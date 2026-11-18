@@ -65,6 +65,15 @@ type Temperature struct {
 }
 
 // Next samples one token.
+//
+// logits must be non-empty; it is one row of a forward pass and therefore has VocabSize
+// entries. An empty slice panics at the fallback below rather than returning a token,
+// which is deliberate: there is no token to name, and 0 would be a plausible-looking id for
+// a sampler that was handed nothing. Greedy returns 0 on an empty slice instead, because its
+// loop simply does not run -- the inconsistency is older than this comment.
+//
+// A model cannot reach here with an empty row: LoadConfig refuses a zero-width vocabulary
+// because this is what an empty row would panic in.
 func (s Temperature) Next(logits []float32) int32 {
 	if s.Temp <= 0 || s.NextFloat == nil {
 		return Greedy{}.Next(logits)

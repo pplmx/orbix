@@ -1425,3 +1425,49 @@ func TestCompressedBodyIsRefusedWith415(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamFlushesTrailingPartialCharacter covers the end of a stream whose last tokens hold
+// only part of a character.
+//
+// The decoder holds back an incomplete sequence so the next token can finish it, which is what
+// keeps a split character from rendering as U+FFFD mid-stream. When generation ends there is no
+// next token, so whatever is held has to be released explicitly; without that the stream ended
+// one character short of what the same tokens produce without --stream.
+//
+// Driven through streamResponse with a synthetic channel rather than through a model, because
+// which tokens a constructed fixture generates is not controllable -- the point is the end of
+// the stream, not the generation that led there.
+func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
+	srv, tok := newTestServerModel(t, gguftest.Model{
+		Vocab:          []string{"<unk>", "<s>", "</s>", "ä", "¸", "Ń"},
+		TokenizerModel: "gpt2",
+		NoBytes:        false,
+	})
+
+	// Token ids 3,4,5 are the escaped bytes e4 b8 ad, which together are 中. Send only the
+	// first two, so the stream ends mid-character.
+	const (
+		head = int32(3)
+		mid  = int32(4)
+	)
+	tailBytes := []int32{head, mid}
+	want := tok.DecodeCompletion(tailBytes)
+	if want == "" {
+		t.Fatalf("DecodeCompletion of %v is empty; the fixture does not hold these bytes", tailBytes)
+	}
+
+	ch := make(chan engine.Event, 4)
+	ch <- engine.Event{Token: head, HasToken: true}
+	ch <- engine.Event{Token: mid, HasToken: true}
+	ch <- engine.Event{Done: true, FinishReason: "length"}
+	close(ch)
+
+	w := httptest.NewRecorder()
+	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+		ch, "cmpl-test", false, nil)
+
+	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
+	if got != want {
+		t.Errorf("streamed %q, the same tokens decode to %q", got, want)
+	}
+}

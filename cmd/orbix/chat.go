@@ -357,6 +357,15 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 					reply.WriteString(text)
 				}
 			}
+			// A character split across the last tokens is still held by the decoder,
+			// waiting for a byte that never arrives. Dropping it would make the printed
+			// reply differ from the non-streaming decode of the same tokens.
+			if tail := dec.Flush(); tail != "" {
+				if _, err := fmt.Fprint(out, tail); err != nil {
+					return "", err
+				}
+				reply.WriteString(tail)
+			}
 			if _, err := fmt.Fprintln(out); err != nil {
 				return "", err
 			}
@@ -375,6 +384,13 @@ func drainChatEvents(ch <-chan engine.Event, out io.Writer, dec *tokenize.Stream
 		select {
 		case ev, ok := <-ch:
 			if !ok {
+				// The channel closed, so no more tokens can complete a held-back character.
+				if tail := dec.Flush(); tail != "" {
+					if _, err := fmt.Fprint(out, tail); err != nil {
+						return err
+					}
+					reply.WriteString(tail)
+				}
 				return nil
 			}
 			if ev.Err != nil {

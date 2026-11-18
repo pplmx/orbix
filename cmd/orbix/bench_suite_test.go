@@ -195,14 +195,43 @@ func TestSuitePolicyRowExplainsRaisedTokenCount(t *testing.T) {
 	}
 }
 
-// TestSuiteRejectsUnknownPolicyFlag is a guard on the flag surface: the suite ignores
-// --policy, which is easy to miss and would otherwise look like the flag being broken.
-func TestSuiteRejectsUnknownPolicyFlag(t *testing.T) {
-	// ParsePriority is the single validator for the name; the suite never calls it, so a
-	// typo'd --policy passes silently. Pin that ParsePriority still rejects bad input,
-	// which is what a reader of the flag table would expect.
-	if _, err := engine.ParsePriority("nonsense"); err == nil {
-		t.Fatal("ParsePriority accepted an unknown policy")
+// TestSuiteRejectsFlagsItWouldIgnore covers the guard that replaced silent flag loss.
+//
+// This test used to say the suite "ignores --policy" and that a typo'd value "passes
+// silently", which was true and was the defect: cmdBench now walks what was actually set and
+// refuses anything the suite does not read. The comment survived the fix, so the test
+// asserted the old behaviour -- that ParsePriority rejects a bad name -- which no longer
+// describes anything the suite does with the flag.
+//
+// Driven through cmdBench rather than through a copied flag list, so the assertion is about
+// the code path a caller takes. A copy of the allowed set inside the test would pass while
+// the real one drifted.
+func TestSuiteRejectsFlagsItWouldIgnore(t *testing.T) {
+	model := suiteModel(t)
+
+	// Each of these changes what the table would measure, so accepting it silently would
+	// report numbers the operator did not ask for.
+	for _, extra := range [][]string{
+		{"--policy", "shortest"},
+		{"--concurrency", "4"},
+		{"--requests", "10"},
+		{"--prefix-cache"},
+	} {
+		args := append([]string{"--model", model, "--suite", "--max-tokens", "1"}, extra...)
+		err := cmdBench(args)
+		if err == nil {
+			t.Errorf("cmdBench accepted %v with --suite", extra)
+			continue
+		}
+		if !strings.Contains(err.Error(), "--suite") {
+			t.Errorf("%v: error %q does not say --suite is why", extra, err)
+		}
+	}
+
+	// The flags the suite does use must still be accepted, or the guard would be satisfied
+	// by refusing everything. Run with a one-token budget so the table finishes quickly.
+	if err := cmdBench([]string{"--model", model, "--suite", "--max-tokens", "1", "--workers", "2"}); err != nil {
+		t.Errorf("cmdBench rejected the flags --suite uses: %v", err)
 	}
 }
 

@@ -43,6 +43,16 @@ func TestContiguousMemoryNote(t *testing.T) {
 	if want := itoa1(wantMiB); !strings.Contains(got, want) {
 		t.Errorf("note %q has no total %q (want %.2f MiB)", got, want, wantMiB)
 	}
+	// The divisor is 1024-based, so the label has to be MiB. This assertion exists because it was
+	// not: humanBytes divided by 1<<20 and printed "MB", while bench.go divided by the same number
+	// and printed "MiB" -- two reports of one pool, off by the 4.9% between a megabyte and a
+	// mebibyte, with nobody comparing them. The name of the variable above said MiB all along.
+	if !strings.Contains(got, "MiB") {
+		t.Errorf("note %q labels a 1024-based size without MiB", got)
+	}
+	if strings.Contains(got, " MB") || strings.Contains(got, " KB") || strings.Contains(got, " GB") {
+		t.Errorf("note %q uses decimal unit labels for binary sizes", got)
+	}
 
 	// Doubling the slots doubles the total, which is the property the line exists to convey.
 	doubled := contiguousMemoryNote(cfg, 8, 136)
@@ -52,8 +62,11 @@ func TestContiguousMemoryNote(t *testing.T) {
 }
 
 // itoa1 formats like the function under test, so the assertion compares the same rendering.
+// itoa1 renders one decimal place with the unit the function under test uses. The unit is
+// MiB because the divisor is 1<<20; it said MB once, matching humanBytes' label rather than its
+// arithmetic, and both were wrong in the same direction.
 func itoa1(v float64) string {
-	return fmt.Sprintf("%.1f MB", v)
+	return fmt.Sprintf("%.1f MiB", v)
 }
 
 // TestReservationWarning covers the line that tells an operator a contiguous reservation is
@@ -122,7 +135,7 @@ func TestPoolReservationWarning(t *testing.T) {
 	if !strings.Contains(got, "--blocks") {
 		t.Errorf("warning does not name the flag that fixes it: %q", got)
 	}
-	if !strings.Contains(got, "20.0 GB") {
+	if !strings.Contains(got, "20.0 GiB") {
 		t.Errorf("warning does not state the reservation: %q", got)
 	}
 	if !strings.Contains(got, "virtual") && !strings.Contains(got, "commits pages") {

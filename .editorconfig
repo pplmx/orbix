@@ -33,6 +33,12 @@ trim_trailing_whitespace = false
 [{*.yml,*.yaml,*.json,*.toml}]
 indent_size = 2
 
+[go.mod]
+# The go command indents a require block with tabs, the same way gofmt indents Go. Without this
+# an editor following [*] would rewrite those blocks with spaces and the next `go mod tidy`
+# would put the tabs back, so every dependency change would show as a two-way diff.
+indent_style = tab
+
 [justfile]
 # Recipes indent with 4 spaces, which is what `just` requires.
 indent_style = space

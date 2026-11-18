@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/pplmx/orbix/internal/gguftest"
-
 	"github.com/pplmx/orbix/internal/engine"
+	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/llama"
 )
 
 // The chat REPL is driven through its session function rather than through the
@@ -213,5 +215,40 @@ func TestChatAliasesAreNotSentToTheModel(t *testing.T) {
 		"/quit\n")
 	if strings.Contains(out, "user: /quit") || strings.Contains(out, "user: /q") {
 		t.Errorf("a command was recorded as a user message:\n%s", out)
+	}
+}
+
+// TestExplainChatError covers the one chat failure that repeats on its own.
+//
+// A failed turn leaves the history untouched, so the next turn submits the same conversation against
+// the same full pool and fails identically -- for as long as the session lasts. The engine's message
+// names the pool's size, which is the wrong end of the problem, and suggests nothing. Observed with
+// --blocks 2: twelve of fifteen turns printed the bare error and none of them said what to do.
+//
+// Both pieces of advice are checked elsewhere rather than assumed: /clear ends the failure (verified by
+// driving a real session past the point of exhaustion) and an unset --blocks sizes the pool for a full
+// context, which is what the session does when the flag is absent.
+func TestExplainChatError(t *testing.T) {
+	// An unrelated error passes through untouched: wrapping every error would bury the ones that
+	// already say what went wrong.
+	plain := errors.New("llama: something else")
+	if got := explainChatError(plain); got != plain {
+		t.Errorf("an unrelated error was rewritten: %v", got)
+	}
+
+	exhausted := fmt.Errorf("%w (2 blocks of 16 positions)", llama.ErrPoolExhausted)
+	got := explainChatError(exhausted)
+	if got == exhausted {
+		t.Fatal("pool exhaustion was not explained")
+	}
+	// The original chain has to survive, because a caller checking errors.Is still needs to see
+	// what failed.
+	if !errors.Is(got, llama.ErrPoolExhausted) {
+		t.Error("the explanation dropped ErrPoolExhausted from the chain")
+	}
+	for _, want := range []string{"/clear", "--blocks"} {
+		if !strings.Contains(got.Error(), want) {
+			t.Errorf("error %q does not mention %q", got, want)
+		}
 	}
 }

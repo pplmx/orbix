@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -209,7 +210,7 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 		if err != nil {
 			// A failed turn leaves the history untouched, so the next question is
 			// asked against the same context rather than against a broken one.
-			if _, werr := fmt.Fprintf(out, "error: %v\n", err); werr != nil {
+			if _, werr := fmt.Fprintf(out, "error: %v\n", explainChatError(err)); werr != nil {
 				return werr
 			}
 			continue
@@ -267,6 +268,27 @@ type chatTurn struct {
 // expects and what makes prefix reuse pay: every turn's prompt starts with the
 // previous turn's prompt, so the engine can attach those blocks instead of
 // recomputing them.
+// explainChatError adds what the caller can do about an error the engine reports bare.
+//
+// Exhausting the pool is the one failure here that repeats: the history is not advanced on a failed
+// turn, so the next turn submits the same conversation against the same full pool and fails
+// identically, for as long as the session lasts. The engine's message names the pool's size, which
+// is the wrong end of the problem -- the session already knows what it asked for -- and suggests
+// nothing.
+//
+// The pool is sized for one full context by default, so this only happens when --blocks was set
+// below that. /clear is the way out that does not need a restart.
+func explainChatError(err error) error {
+	if !errors.Is(err, llama.ErrPoolExhausted) {
+		return err
+	}
+	// The engine's message already gives the pool's size, so this adds only what it cannot know:
+	// that the session will repeat the failure, and the two ways out.
+	return fmt.Errorf("%w -- this conversation outgrew the pool, and the next turn will fail the same"+
+		" way because a failed turn does not grow the history; /clear starts a new conversation,"+
+		" or leave --blocks unset to size the pool for the whole context", err)
+}
+
 func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, system string, history []chatTurn, user string, opts chatOptions) (string, error) {
 	prompt, err := opts.renderer.Render(chatTurns(system, history, user))
 	if err != nil {

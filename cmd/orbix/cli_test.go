@@ -739,3 +739,48 @@ func TestBenchSuiteRefusesFlagsItWouldIgnore(t *testing.T) {
 		t.Errorf("--suite rejected the flags it does use: %v", err)
 	}
 }
+
+// TestBenchSuiteRunsEndToEnd is the accepting half of the flag check above, on the path the
+// check gates rather than on validation alone.
+//
+// Every existing suite test calls the scenarios directly, so nothing covered the command that
+// wires them together: `cmdBench --suite` builds the prompt, sizes the table, and prints the
+// conditions. The flag-validation change sits between the two, which is exactly where a
+// check written slightly too broadly would trade a silent ignore for a broken command.
+//
+// The assertions are on structure, not on numbers: throughput on a fixture varies with the
+// machine, so what has to hold is that every scenario produced a row, none of them failed,
+// and the header names the conditions that make the numbers judgeable.
+func TestBenchSuiteRunsEndToEnd(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+
+	out := captureStdout(t, func() {
+		err := cmdBench([]string{"--model", path, "--suite", "--max-tokens", "1",
+			"--prompt", "Once upon a time", "--workers", "2"})
+		if err != nil {
+			t.Fatalf("cmdBench --suite: %v", err)
+		}
+	})
+
+	// The conditions belong above the table: a throughput figure without them cannot be
+	// compared against anything, which is what the suite exists to allow.
+	for _, want := range []string{"model:", "prompt:", "generating:", "machine:", "go:", "SCENARIO"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing the %q line:\n%s", want, out)
+		}
+	}
+	// A scenario that failed prints "failed:" in its NOTE column instead of numbers, so its
+	// absence is what distinguishes a complete table from one that skipped a row.
+	if strings.Contains(out, "failed:") {
+		t.Errorf("a scenario failed:\n%s", out)
+	}
+	// Every row in the table, in the order scenarioList declares them.
+	for _, name := range []string{
+		"single stream", "batch x4", "batch x16", "paged x16",
+		"prefix no reuse", "prefix reuse x4", "policy shortest", "policy fifo",
+	} {
+		if !strings.Contains(out, name) {
+			t.Errorf("output missing the %q row:\n%s", name, out)
+		}
+	}
+}

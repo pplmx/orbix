@@ -324,20 +324,20 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	// The limit protects the arena the contiguous layout takes here as much as it
 	// protects the queue: a paged sequence takes blocks lazily, but its turn still
 	// only comes after the slots ahead of it, so accepting it would not help either.
-	e.mu.Lock()
-	queued := len(e.active) - e.maxActive
-	maxQueued := e.maxQueued
-	e.mu.Unlock()
-	if queued >= maxQueued {
-		// The detail goes in parentheses after the sentinel rather than before it. Wrapping
-		// the other way round produced "engine: 8 requests already waiting for 8 slots:
-		// engine: too many requests waiting" in the 503 body a client reads -- the sentinel's
-		// own "engine: too many requests waiting" is appended by %w, so anything placed before
-		// it repeats the prefix. llama.ErrPoolExhausted is wrapped this way for the same
-		// reason, and the two messages are the only capacity errors a client ever sees.
-		return nil, fmt.Errorf("%w (%d queued for %d active slots)",
-			ErrQueueFull, queued, e.maxActive)
-	}
+	// The queue check lives in the same critical section as the insert below, not in a
+	// snapshot taken before it. It used to read len(active) under the lock, release, build the
+	// cache, and re-acquire to insert -- so every goroutine that arrived during the gap saw the
+	// same stale count and all of them were admitted. Measured with MaxActive 1 and MaxQueued
+	// 2: twelve concurrent submits were all accepted and twelve sequences ended up active.
+	//
+	// That is a TOCTOU rather than a data race, which is why the race detector stays quiet:
+	// every access to len(active) is guarded, and the defect is that the value outlives the
+	// guard that read it.
+	//
+	// The cache is therefore built before the count is consulted, which is what a rejected
+	// request used to avoid. It is the honest trade: a pool block is recycled when the sequence
+	// is discarded, and a contiguous arena is freed with it, so a refusal costs the allocation
+	// of one cache -- the alternative was admitting unboundedly many requests to save it.
 
 	// Paged sequences take blocks as they generate; contiguous ones reserve the
 	// whole context now. Both are created here so a request's admission cost is
@@ -405,6 +405,16 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 		if span, ok := tracer.StartTrace(op, 2, attrs...); ok {
 			s.reqSpan, s.traceOn = span, true
 		}
+	}
+	// Checked here, under the same lock that publishes the sequence: see the note above on
+	// why a snapshot taken earlier cannot be trusted.
+	if q := len(e.active) - e.maxActive; q >= e.maxQueued {
+		e.mu.Unlock()
+		// The sequence was never published, so its channel and cache go with it. The caller
+		// gets an error and a nil channel, which is the contract a rejected Submit has always
+		// had.
+		return nil, fmt.Errorf("%w (%d queued for %d active slots)",
+			ErrQueueFull, q, e.maxActive)
 	}
 	e.active[id] = s
 	e.requestsSubmitted++

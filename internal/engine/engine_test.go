@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1055,6 +1056,61 @@ func TestQueueFullIsRefused(t *testing.T) {
 	// that no round is going to reach.
 	if want := maxActive + maxQueued; accepted != want {
 		t.Errorf("accepted %d requests, want %d (MaxActive + MaxQueued)", accepted, want)
+	}
+}
+
+// TestQueueFullHoldsUnderConcurrentSubmit covers the limit from several goroutines at once,
+// which is the case that broke it.
+//
+// Submit used to read len(active) under the lock, release it, build the cache, and re-acquire
+// to insert. Every goroutine arriving during that gap saw the same count, so all of them
+// passed the check: measured with MaxActive 1 and MaxQueued 2, twelve concurrent submits were
+// all accepted and twelve sequences ended up active. The sequential test above cannot see it,
+// because with one caller no gap ever contains a second request.
+//
+// It is a TOCTOU rather than a data race -- each read of len(active) is guarded, and the bug is
+// that the value outlives the guard -- so -race alone would not have found it either; the
+// assertion is on the count.
+func TestQueueFullHoldsUnderConcurrentSubmit(t *testing.T) {
+	const maxActive, maxQueued = 1, 2
+	e, tok, _ := loadModelPath(t, Options{MaxActive: maxActive, MaxQueued: maxQueued})
+	prompt := tok.Encode("Once upon a time", true)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	accepted, refused := 0, 0
+	for range 12 {
+		wg.Go(func() {
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 20})
+			if err != nil {
+				if !errors.Is(err, ErrQueueFull) {
+					return
+				}
+				mu.Lock()
+				refused++
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			accepted++
+			mu.Unlock()
+			go func() {
+				for range ch {
+				}
+			}()
+		})
+	}
+	wg.Wait()
+
+	if want := maxActive + maxQueued; accepted != want {
+		t.Errorf("accepted %d concurrent requests, want %d (MaxActive + MaxQueued); "+
+			"the limit admitted more than it should", accepted, want)
+	}
+	if refused == 0 {
+		t.Error("every concurrent request was accepted, so the limit did nothing")
+	}
+	if got := e.Stats().Active; got != accepted {
+		t.Errorf("engine reports %d active after %d accepted", got, accepted)
 	}
 }
 

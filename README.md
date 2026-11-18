@@ -647,8 +647,11 @@ MODEL_KQUANT=/tmp/tinymixtral.gguf \
 CGO_ENABLED=0 go test ./...
 ```
 
-`just test` sets the same variable; it is written here because this block is a copyable command
-rather than a reference to the recipe.
+`just test` does not set these variables. It runs `go test -count=1 ./...` with the justfile's
+`CGO_ENABLED=0` export and nothing more, so the checkpoint-gated tests skip under it exactly as
+they do without it. The block is written out here because a copyable command is what a reader
+holding the checkpoints needs; putting the paths in the recipe would mean every contributor's
+`just test` ran a different suite.
 
 Worth knowing before judging that run: a file whose weights were never trained produces
 a flat next-token distribution -- one measured at p(argmax) = 0.0003 against 0.26 for a

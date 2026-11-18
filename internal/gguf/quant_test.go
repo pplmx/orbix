@@ -87,6 +87,56 @@ func TestQuantSizeScalesWithElementCount(t *testing.T) {
 	}
 }
 
+// TestQuantSizeRejectsPartialBlocks covers an element count that is not a whole number of
+// blocks, which a quantized tensor cannot have.
+//
+// Size divided by the block size with integer division, so a 33-element Q4_0 tensor reported
+// 18 bytes -- the floor, one block -- while the encoded form needs two blocks, 36 bytes.
+// Understating the length is not a cosmetic error: the bounds check in TensorData compares it
+// against the file size, so the reader is accepted and then runs out halfway through the
+// tensor, which surfaces as a short read far from the file that caused it.
+//
+// quant.Decode already refuses this case with "is not a multiple of". This is the same rule
+// at the layer that computes the length, so the file is rejected where its numbers can be
+// named. Real files are unaffected: a writer only emits whole blocks.
+func TestQuantSizeRejectsPartialBlocks(t *testing.T) {
+	// Q4_0 packs 32 weights into 18 bytes.
+	const block = 32
+	cases := []struct {
+		n    int64
+		want bool
+		why  string
+	}{
+		{0, true, "an empty tensor is zero blocks, which is exact"},
+		{block, true, "exactly one block"},
+		{2 * block, true, "two blocks"},
+		{1, false, "a fraction of a block has no encoded form"},
+		{block - 1, false, "one short of a block"},
+		{block + 1, false, "one past a block"},
+		{3*block + 7, false, "three blocks and a remainder"},
+	}
+	for _, c := range cases {
+		got, ok := Q4_0.Size(c.n)
+		if ok != c.want {
+			t.Errorf("Q4_0.Size(%d) ok = %v, want %v (%s)", c.n, ok, c.want, c.why)
+			continue
+		}
+		if ok {
+			// Whole blocks must still report the right byte count, or the check would be
+			// satisfied by refusing everything.
+			if wantBytes := c.n / block * 18; got != wantBytes {
+				t.Errorf("Q4_0.Size(%d) = %d, want %d", c.n, got, wantBytes)
+			}
+		}
+	}
+
+	// The same rule through TensorInfo, which is the path a file takes.
+	ti := TensorInfo{Name: "w", Dims: []uint64{33}, Type: Q4_0}
+	if sz, ok := ti.Bytes(); ok {
+		t.Errorf("a 33-element Q4_0 tensor reported %d bytes; it has no valid encoding", sz)
+	}
+}
+
 func TestUnknownQuantType(t *testing.T) {
 	// Type 4 was Q4_2, removed from ggml; a file using it must be reported,
 	// not guessed at.

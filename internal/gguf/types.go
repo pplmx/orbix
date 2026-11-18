@@ -207,6 +207,18 @@ func (q QuantType) Size(n int64) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
+	// A quantized tensor is a whole number of blocks: the encoded representation has no way to
+	// store a partial one. An element count that is not a multiple of the block size therefore
+	// describes a tensor this package cannot size, and the integer division below would answer
+	// with the floor -- understating the bytes and letting a bounds check pass for a reader
+	// that runs out halfway through. Reported as unknown, like an unrecognised type.
+	//
+	// The dequantizer already refuses this case (quant.Decode's "is not a multiple of" check);
+	// this is the same rule at the layer that computes the length, so a file is rejected where
+	// its numbers can still be named rather than after a short read.
+	if n%int64(info.block) != 0 {
+		return 0, false
+	}
 	blocks := n / int64(info.block)
 	// n comes from a product of dimensions read out of the file, so it can be enormous. The
 	// multiplication below would wrap to a negative byte count, and a negative length is worse

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
@@ -826,6 +828,54 @@ func TestSpanCarriesTheRequiredGenAIAttributes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestClassifyError covers every value classifyError can produce.
+//
+// The end-to-end test below reaches only "canceled", because that is the one failure a
+// fixture can produce deterministically: pool exhaustion, an abandoned caller and a
+// model-side failure each need a contrived engine state. classifyError is a pure function
+// over the error, so the other three are cheap to pin here -- and pinning them matters more
+// than the coverage number suggests, because these strings go into error.type and a backend
+// groups failures by them. A branch that returned "" would make failed requests count as
+// unclassified rather than as a named class.
+func TestClassifyError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"canceled", context.Canceled, "canceled"},
+		{"pool exhausted", llama.ErrPoolExhausted, "pool_exhausted"},
+		{"caller gone", errCallerGone, "caller_gone"},
+		{"model failure", errors.New("prefill failed"), "inference_failed"},
+		{"nil error", nil, "inference_failed"},
+
+		// The classification is by errors.Is, so the sentinel has to survive wrapping --
+		// that is how it reaches here: every engine error is wrapped with context.
+		{"wrapped canceled", fmt.Errorf("round 3: %w", context.Canceled), "canceled"},
+		{"wrapped pool", fmt.Errorf("admission: %w", llama.ErrPoolExhausted), "pool_exhausted"},
+		{"wrapped caller gone", fmt.Errorf("emit: %w", errCallerGone), "caller_gone"},
+
+		// A deadline is not a cancellation in this engine: nothing inside the pump sets one,
+		// so a request that carries it is a model-side failure to the trace. Asserted rather
+		// than left implicit, because the two are easy to conflate.
+		{"deadline exceeded", context.DeadlineExceeded, "inference_failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classifyError(c.err); got != c.want {
+				t.Errorf("classifyError(%v) = %q, want %q", c.err, got, c.want)
+			}
+		})
+	}
+
+	// Every value must be a non-empty constant, since error.type is what a backend groups on.
+	for _, err := range []error{context.Canceled, llama.ErrPoolExhausted, errCallerGone, errors.New("x")} {
+		if got := classifyError(err); got == "" {
+			t.Errorf("classifyError(%v) returned an empty class", err)
+		}
 	}
 }
 

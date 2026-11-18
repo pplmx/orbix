@@ -328,6 +328,15 @@ func (c Config) validate(f *gguf.File) error {
 		{"output_norm.weight", []uint64{uint64(c.Hidden)}},
 		{"output.weight", []uint64{uint64(c.Hidden), uint64(c.VocabSize)}},
 	}
+	// Every layer contributes at least one tensor of its own, so a block count larger than the
+	// file's tensor count cannot be satisfied -- and building the expectation list for it is not
+	// free: the loop below allocates a few strings per layer, so a header claiming 2^30 layers
+	// spends minutes and gigabytes before the first missing-tensor error can be produced. The
+	// count is checked up front so the failure is immediate and the allocation never happens.
+	if c.Layers > f.TensorCount() {
+		return fmt.Errorf("llama: block_count %d exceeds the %d tensors in the file",
+			c.Layers, f.TensorCount())
+	}
 	for l := range c.Layers {
 		p := fmt.Sprintf("blk.%d.", l)
 		wants = append(wants,

@@ -762,3 +762,38 @@ func TestLoadConfigWindowLenIgnoresNonPositive(t *testing.T) {
 		t.Errorf("WindowLen = %d, want 0", cfg.WindowLen)
 	}
 }
+
+// TestBlockCountIsBoundedByTensorCount covers a header whose layer count is far larger than the
+// file can possibly contain.
+//
+// Every layer contributes at least one tensor, so a block count above the file's tensor count
+// cannot be satisfied -- and finding that out the obvious way is expensive: LoadConfig builds an
+// expectation list with a handful of strings per layer, so a header claiming 2^30 layers spends
+// minutes and gigabytes before the first missing-tensor error is reachable. Measured before the
+// bound was added: the call had not returned after 60 seconds. After it: 10ms, naming both numbers.
+//
+// A corrupted download produces this, which is why the header is not assumed honest.
+func TestBlockCountIsBoundedByTensorCount(t *testing.T) {
+	// A file whose block count is far beyond its tensor count. The tensors are the tiny
+	// fixture's, so the mismatch is the only thing wrong with it.
+	c := tinyConfig{hidden: 8, layers: 1 << 20, heads: 2, kvHeads: 2, ffn: 16, ctx: 64, vocab: 8}
+	f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), tinyConfig{hidden: 8, layers: 1, heads: 2, kvHeads: 2, ffn: 16, ctx: 64, vocab: 8}.tensors(), nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if n := f.TensorCount(); n >= c.layers {
+		t.Fatalf("fixture has %d tensors, not fewer than %d layers", n, c.layers)
+	}
+	_, err = LoadConfig(f)
+	if err == nil {
+		t.Fatal("a block count larger than the tensor count was accepted")
+	}
+	if !strings.Contains(err.Error(), "block_count") {
+		t.Errorf("error %q does not name block_count", err)
+	}
+	// Both numbers belong in the message: the declared count alone does not tell a user that the
+	// file is short, which is the part that says the download is bad.
+	if !strings.Contains(err.Error(), "tensors") {
+		t.Errorf("error %q does not say how many tensors the file holds", err)
+	}
+}

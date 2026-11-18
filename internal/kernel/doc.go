@@ -20,8 +20,8 @@
 // regression visible as inequality rather than as text that got slightly worse.
 //
 // There is no assembly, and no SIMD. The speed comes from using more than one core
-// and from the work being independent per row. A kernel that cannot be read in the
-// repository's own language would defeat the reason the repository exists.
+// and from the work being independent per output element. A kernel that cannot be read
+// in the repository's own language would defeat the reason the repository exists.
 //
 // **A kernel that takes more than one slice checks that their shapes agree, and returns
 // an error when they do not.** A mismatched length in a matmul is a bug in the layer

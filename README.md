@@ -224,7 +224,7 @@ func MatMulQ4_0(dst, a []float32, b []byte, m, n, k int)
 func Attention(q, k, v []float32, mask []float32, scale float32)
 func RMSNorm(dst, src, weight []float32, eps float32)
 
-// Runner evaluates the row-partitioned kernels across a bounded worker set.
+// Runner evaluates the partitionable kernels across a bounded worker set.
 func NewRunner(workers int) *Runner
 func (r *Runner) MatVec(dst, a, v []float32, n, k int) error
 func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error
@@ -677,11 +677,11 @@ Orbix is a learning project, and it is honest about where it stands:
   prints its own conditions so a reader can judge a table taken elsewhere.
 - **Reference kernels are not optimized per instruction.** They are written to be
   readable, with no SIMD and no assembly. What they do use is more than one core: the
-  row-partitioned products run on a bounded worker set, which took decoding on
+  partitionable products run on a bounded worker set, which took decoding on
   stories15M from 65 to 235 tokens per second on a 128-core EPYC.
 - **SIMD and assembly are deliberately out of scope.** This project exists to make
   inference legible in one language, and a kernel that cannot be read in the
-  repository's own language defeats that. Parallelism over independent rows is where
+  repository's own language defeats that. Parallelism over independent outputs is where
   the speed comes from instead, and it is what the numbers above measure.
 - **A model runs in its trained context, and no larger.** The rope table is built for
   that window, so `--ctx` accepts a smaller value and refuses a larger one with a

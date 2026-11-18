@@ -238,6 +238,59 @@ func TestStreamingReassemblesToSameText(t *testing.T) {
 	}
 }
 
+// TestStreamingResponseDeclaresItselfUnbuffered covers the header that keeps a reverse proxy
+// from buffering the stream.
+//
+// nginx buffers proxied responses by default (`proxy_buffering on`), which holds an SSE
+// stream until the response ends. The events still arrive, all at once, which for a token
+// stream is the same as not streaming. nginx will not infer the intent from the media type --
+// its maintainers declined to special-case text/event-stream, since a media type describes how
+// a payload is formatted rather than how it is delivered -- so the application has to say so.
+//
+// Only the streaming responses may carry it. Sending it on everything would turn off
+// buffering for the whole API, and proxy buffers exist to decouple a fast upstream from a slow
+// client, which is worth keeping for the responses that are not streams.
+func TestStreamingResponseDeclaresItselfUnbuffered(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, NoBytes: true})
+	h := srv.Handler()
+
+	for _, path := range []string{"/v1/completions", "/v1/chat/completions"} {
+		t.Run("stream "+strings.ReplaceAll(strings.TrimPrefix(path, "/v1/"), "/", "_"), func(t *testing.T) {
+			body := `{"prompt": "Once upon a time", "max_tokens": 2, "stream": true}`
+			if strings.HasPrefix(path, "/v1/chat") {
+				body = `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2,
+					"stream": true}`
+			}
+			resp := post(t, h, path, body)
+			defer func() { _ = resp.Body.Close() }()
+			if got := resp.Header.Get("X-Accel-Buffering"); got != "no" {
+				t.Errorf("X-Accel-Buffering = %q on a stream, want \"no\"; "+
+					"a proxy would hold every token until the response ends", got)
+			}
+			// The response must still be a stream: the header is a request to the proxy, not
+			// a substitute for the content type.
+			if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+				t.Errorf("Content-Type = %q, want text/event-stream", got)
+			}
+		})
+	}
+
+	// The non-streaming paths keep the proxy's buffering, so they must not carry the header.
+	for _, path := range []string{"/v1/completions", "/v1/chat/completions"} {
+		t.Run("blocking "+strings.ReplaceAll(strings.TrimPrefix(path, "/v1/"), "/", "_"), func(t *testing.T) {
+			body := `{"prompt": "Once upon a time", "max_tokens": 2}`
+			if strings.HasPrefix(path, "/v1/chat") {
+				body = `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}`
+			}
+			resp := post(t, h, path, body)
+			defer func() { _ = resp.Body.Close() }()
+			if got := resp.Header.Get("X-Accel-Buffering"); got != "" {
+				t.Errorf("X-Accel-Buffering = %q on a buffered response, want empty", got)
+			}
+		})
+	}
+}
+
 // collectStream reads an SSE response and concatenates its text deltas.
 func collectStream(t *testing.T, body io.ReadCloser) string {
 	t.Helper()

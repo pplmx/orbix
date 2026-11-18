@@ -617,6 +617,18 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Connection", "keep-alive")
+	// nginx buffers proxied responses by default (proxy_buffering on), which holds an SSE
+	// stream until the response ends -- the stream still arrives intact, but all at once, and
+	// a token stream that arrives at the end is not a token stream. This header is nginx's own
+	// per-response switch for that, and nginx will not infer it: its maintainers declined to
+	// special-case text/event-stream on the grounds that a media type describes how a payload
+	// is formatted, not how it is delivered (nginx/nginx#1505).
+	//
+	// It costs nothing where it is not understood. A proxy that does not know it ignores it and
+	// a direct client has no use for it, so the only reader is nginx, and only to turn
+	// buffering off for this one response. The rest of the API keeps the proxy's default,
+	// which is what that default is for.
+	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
 	// OpenAI's spec is explicit that a completion is "always" text_completion, and its own

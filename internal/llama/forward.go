@@ -119,11 +119,16 @@ func (m *Model) Config() Config { return m.W.Config }
 // fan-out a run actually got.
 func (m *Model) Runner() *kernel.Runner { return m.run }
 
-// Logits returns the logits from the most recent successful Forward call.
+// Logits returns the logits from the most recent successful forward pass.
 //
 // The slice is owned by the model and is overwritten by the next forward pass,
-// so a caller that needs values past that point must copy. It returns nil before
-// the first forward pass.
+// so a caller that needs values past that point must copy.
+//
+// Before the first pass it holds VocabSize zeroes rather than nil, because the buffer is
+// allocated once in New and reused. A caller cannot use "nil" to tell whether a pass has
+// happened -- sampling those zeroes would return token 0, which is a valid-looking id --
+// so anything that must not run before a forward pass should be ordered by its own state
+// rather than by inspecting this slice.
 func (m *Model) Logits() []float32 { return m.logits }
 
 // Forward runs one token through the model at the given position and returns

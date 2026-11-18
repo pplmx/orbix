@@ -854,6 +854,44 @@ func TestForwardEmbedRejectsNegativeToken(t *testing.T) {
 	}
 }
 
+// TestLogitsBeforeForwardIsZeroesNotNil pins the buffer's initial state.
+//
+// No production code calls Logits() -- the engine takes the slice Prefill returns -- so this
+// is about the contract for a future caller. The doc used to say it "returns nil before the
+// first forward pass", which is wrong: the buffer is allocated once in New and reused, so a
+// fresh model reports VocabSize zeroes. Measured: nil=false len=363 for the fixture.
+//
+// The difference matters because the obvious guard is the wrong one. A caller that checked
+// for nil would be satisfied on a model where nothing had run, sample those zeroes, and get
+// token 0 -- a valid-looking id rather than an error.
+func TestLogitsBeforeForwardIsZeroesNotNil(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	got := m.Logits()
+	if got == nil {
+		t.Fatal("Logits() is nil before a forward pass; the doc says the buffer is allocated in New")
+	}
+	if len(got) != cfg.VocabSize {
+		t.Errorf("Logits() has %d entries, want %d", len(got), cfg.VocabSize)
+	}
+	for i, v := range got {
+		if v != 0 {
+			t.Fatalf("Logits()[%d] = %v before any pass, want zeroes", i, v)
+		}
+	}
+
+	// And it is the same buffer a pass fills, rather than a fresh allocation each call:
+	// the doc promises the slice is owned by the model.
+	if &got[0] != &m.logits[0] {
+		t.Error("Logits() returns a different slice from the model's buffer")
+	}
+}
+
 func TestParallelAttentionIsBitIdentical(t *testing.T) {
 	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	cfg := loadConfigAt(t, path)

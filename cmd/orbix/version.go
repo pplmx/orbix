@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"runtime"
 	"runtime/debug"
@@ -19,10 +20,28 @@ var (
 )
 
 // cmdVersion implements "orbix version".
+//
+// -json exists because this is the command a build script reads: checking that an artifact
+// reports cgo:false is what the cross-build job does by hand today, and parsing a two-column
+// text report for that is worse than parsing a document. The other commands refuse an unknown
+// flag through the flag package; this one reads its arguments itself and used to ignore them,
+// so `version --json` printed the human report and exited zero -- a caller piping it into a
+// JSON parser got a parse error where the flag said success.
 func cmdVersion(args []string) error {
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Println("Usage: orbix version")
-		return nil
+	asJSON := false
+	for _, a := range args {
+		switch a {
+		case "-h", "--help":
+			fmt.Println("Usage: orbix version [-json]")
+			return nil
+		case "-json", "--json":
+			asJSON = true
+		default:
+			return fmt.Errorf("version: unknown argument %q, want no arguments or -json", a)
+		}
+	}
+	if asJSON {
+		return writeVersionJSON()
 	}
 	fmt.Printf("orbix %s\n", version)
 	// One column width for every label, so the values line up and a reader can scan them. The
@@ -43,6 +62,45 @@ func cmdVersion(args []string) error {
 		}
 	}
 	return nil
+}
+
+// writeVersionJSON prints the same facts as the text report, as one JSON object.
+//
+// The fields are named after the labels a reader already sees, so the two outputs describe the
+// same thing rather than two overlapping ones. cgo_enabled is omitted when the binary carries no
+// build info to read it from, which is the same condition the text report uses to leave the line
+// out.
+func writeVersionJSON() error {
+	out := struct {
+		Version    string  `json:"version"`
+		Commit     string  `json:"commit"`
+		Built      string  `json:"built"`
+		Go         string  `json:"go"`
+		Platform   string  `json:"platform"`
+		Cgo        bool    `json:"cgo"`
+		CgoEnabled *string `json:"cgo_enabled,omitempty"`
+	}{
+		Version:  version,
+		Commit:   commit,
+		Built:    date,
+		Go:       runtime.Version(),
+		Platform: runtime.GOOS + "/" + runtime.GOARCH,
+		Cgo:      cgoEnabled(),
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			if s.Key == "CGO_ENABLED" {
+				v := s.Value
+				out.CgoEnabled = &v
+			}
+		}
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("version: encode: %w", err)
+	}
+	_, err = fmt.Println(string(b))
+	return err
 }
 
 // cgoEnabled reports whether this binary was built with CGo.

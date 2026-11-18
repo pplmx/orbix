@@ -271,6 +271,43 @@ func TestModelInspectJSON(t *testing.T) {
 	}
 }
 
+// TestVersionJSONAndUnknownArgs covers the two things `version` got wrong.
+//
+// It read its arguments itself -- it only looked for -h -- so `version --json` printed the human
+// report and exited zero. A build script piping that into a JSON parser got a parse error where
+// the flag said success. The other commands refuse an unknown flag through the flag package;
+// this one silently ignored it.
+//
+// The JSON exists because this is the command a script reads: the cross-build job checks that an
+// artifact reports cgo:false, and parsing a two-column text report for that is worse than parsing
+// a document.
+func TestVersionJSONAndUnknownArgs(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"version", "-json"}); err != nil {
+			t.Fatalf("version -json: %v", err)
+		}
+	})
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("version -json did not produce JSON: %v\n%s", err, out)
+	}
+	for _, want := range []string{"version", "commit", "built", "go", "platform", "cgo"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("version -json is missing %q; got %v", want, got)
+		}
+	}
+	if _, ok := got["cgo"].(bool); !ok {
+		t.Errorf("cgo is %T, want bool: %v", got["cgo"], got["cgo"])
+	}
+
+	// An unknown argument must fail rather than print the report and exit zero.
+	if err := run([]string{"version", "--bogus"}); err == nil {
+		t.Error("version --bogus succeeded, want an error")
+	} else if !strings.Contains(err.Error(), "--bogus") {
+		t.Errorf("error %q does not name the argument", err)
+	}
+}
+
 func TestVersionCommand(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := run([]string{"version"}); err != nil {

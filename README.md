@@ -445,7 +445,7 @@ turn's KV blocks instead of prefilling the whole conversation again.
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
 | `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization, and whether this build reproduces the model's pre-tokenizer | v0.1   |
 | `orbix run "<prompt>"`       | One-shot inference                                                                                           | v0.1   |
-| `orbix version`              | Print version and build info                                                                                 | v0.1   |
+| `orbix version`              | Print version and build info; `-json` for a machine-readable object                                          | v0.1   |
 | `orbix chat`                 | Interactive REPL with conversation history                                                                   | v0.3   |
 | `orbix serve`                | Start the OpenAI-compatible inference server                                                                 | v0.3   |
 | `orbix bench`                | Run a built-in throughput/latency benchmark                                                                  | v0.2   |

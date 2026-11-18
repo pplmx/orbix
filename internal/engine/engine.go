@@ -680,11 +680,20 @@ func (s *sequence) emit(ev Event) bool {
 	// The buffer is full, which is not proof the caller is gone: a pump running flat out
 	// can fill 64 slots before a reading goroutine is scheduled even once.
 	//
-	// A cancelled request is a definite goodbye and lets the send give up at once. Without
-	// a cancel channel there is no signal to wait on, so the wait is bounded instead: a
-	// caller that is merely behind drains within that window, and one that has left for
-	// good is abandoned rather than stalling the shared pump.
-	wait := abandonGrace
+	// The wait is bounded whether or not there is a cancel channel. A cancel channel says the
+	// caller can announce that it left; it does not say it will, and a caller that keeps the
+	// connection open while reading nothing never fires it. That case reached this select and
+	// blocked the shared pump forever: the buffer could not drain because the reader was not
+	// reading, and the cancel could not fire because the socket was still open. Measured with
+	// a 1000-position fixture, MaxTokens 900 against an undrained channel and an un-fired
+	// cancel: Pump was still inside the round after five seconds.
+	//
+	// A socket whose peer stops reading is exactly that shape -- TCP holds the connection and
+	// r.Context() stays live -- so the branch that trusted the cancel signal was the one a slow
+	// client takes. Both paths now share the same deadline, and the cancel is an early exit
+	// rather than the only exit.
+	timer := time.NewTimer(abandonGrace)
+	defer timer.Stop()
 	if s.req.Cancel != nil {
 		select {
 		case s.events <- ev:
@@ -692,10 +701,11 @@ func (s *sequence) emit(ev Event) bool {
 		case <-s.req.Cancel:
 			s.abandoned = true
 			return false
+		case <-timer.C:
+			s.abandoned = true
+			return false
 		}
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
 	select {
 	case s.events <- ev:
 		return true
@@ -706,11 +716,16 @@ func (s *sequence) emit(ev Event) bool {
 }
 
 // abandonGrace is how long a send waits for a full event buffer to drain before deciding
-// the caller is gone. It only applies to requests with no cancel channel.
+// the caller is gone. It applies to every request, with or without a cancel channel: the
+// channel lets a caller leave early, it does not guarantee the caller leaves at all.
 //
 // Large enough that a reading caller always wins the race, small enough that a pump with
-// several stalled sequences does not look hung. The HTTP server always supplies a cancel
-// channel, so this bound is for callers of the engine API directly.
+// several stalled sequences does not look hung.
+//
+// The comment here used to say the bound was "for callers of the engine API directly",
+// because the HTTP server always supplies a cancel channel. That reasoning is what hid the
+// bug: a server request whose peer stops reading keeps its context alive, so the cancel never
+// fires and the send had nothing to wait on. The server is the caller that needed the bound.
 const abandonGrace = 2 * time.Second
 
 // cancelled reports whether the sequence's cancel channel is closed.

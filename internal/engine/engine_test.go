@@ -1071,6 +1071,54 @@ func TestQueueFullIsRefused(t *testing.T) {
 // It is a TOCTOU rather than a data race -- each read of len(active) is guarded, and the bug is
 // that the value outlives the guard -- so -race alone would not have found it either; the
 // assertion is on the count.
+// TestFullBufferWithLiveCancelDoesNotStallPump covers the caller that keeps the connection
+// open and reads nothing.
+//
+// emit fell back to an unbounded send whenever the request had a cancel channel, on the
+// reasoning that a cancelled request is a definite goodbye. It is not: a cancel channel says
+// the caller *can* announce that it left, not that it will. A socket whose peer stops reading
+// is precisely that shape -- TCP holds the connection, r.Context() stays live, and the HTTP
+// handler blocks writing into a zero window -- so the sequence's buffer never drains and the
+// cancel never fires. Pump then waits for a slot that cannot arrive, and because Pump is
+// shared, every other request stops advancing with it.
+//
+// Measured before the fix, with a 1000-position fixture and MaxTokens 900 against an undrained
+// channel and an un-fired cancel: Pump was still inside the round after five seconds, and the
+// test had to be killed. Now it returns after abandonGrace.
+//
+// The assertion is a deadline rather than an exact duration, so a slower machine does not fail
+// it while a regression to unbounded waiting still does.
+func TestFullBufferWithLiveCancelDoesNotStallPump(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 1000}.Write(t, t.TempDir())
+	e, tok := loadEngineAt(t, path, Options{MaxActive: 1, Workers: 1})
+	prompt := tok.Encode("Once upon a time", true)
+
+	// Never closed: the caller is slow, not gone.
+	cancel := make(chan struct{})
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 900, Cancel: cancel})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	_ = ch // never drained, so the 64-slot buffer fills
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e.Pump() > 0 {
+		}
+	}()
+
+	// abandonGrace is 2s; allow a wide margin so this fails only on unbounded waiting.
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Pump never returned: a full buffer with a live cancel channel stalled the engine")
+	}
+	if got := e.Stats().Active; got != 0 {
+		t.Errorf("engine still reports %d active sequences after the round finished", got)
+	}
+}
+
 func TestQueueFullHoldsUnderConcurrentSubmit(t *testing.T) {
 	const maxActive, maxQueued = 1, 2
 	e, tok, _ := loadModelPath(t, Options{MaxActive: maxActive, MaxQueued: maxQueued})

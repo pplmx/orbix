@@ -473,6 +473,15 @@ which mechanisms pay for themselves. It pairs each mechanism with a control row 
 against contiguous caches, prefix reuse against none, shortest against FIFO -- so a
 difference is attributable to that mechanism rather than to the scenario changing.
 
+How much prefix reuse is worth depends on the mix, and the `prefix` pair is the case where it
+looks smallest. Those two rows use 32 prompt positions against 32 generated tokens per request,
+so reuse saves the prompt's forward pass and nothing else, and the totals differ by 7.5%. The same
+mechanism on a prompt-dominated workload is several times faster: with a 75-token shared prefix
+and one generated token, the first request took 61.0ms, the second 24.8ms and the third 20.3ms,
+and `orbix_prefix_positions_reused_total` recorded 64 positions -- four blocks, which is 85% of
+the 75-token prompt. A long prompt with a short answer (retrieval, classification, question
+answering) is where this pays; a short prompt with a long generation is where it does not.
+
 The suite fixes the settings its rows compare -- concurrency, request count, admission
 policy, and cache shape -- so those flags are refused rather than ignored when `--suite` is
 given, and the error names every one that was passed. `--model`, `--max-tokens`, `--prompt`,

@@ -287,6 +287,40 @@ func TestModelInspectJSON(t *testing.T) {
 // flag the engine-based commands register never reached it: the one parameter that decides a
 // single stream's speed could not be set. Measured on the fixture, 1 worker gave 63.5 tok/s and
 // 32 gave 248.3 -- a command whose default reported "this is slow" with no way to ask for more.
+// TestNegativeCacheFlagsNameTheOneGiven covers a message that was true and unhelpful.
+//
+// Both cache flags were checked together and reported as "must not be negative", so a caller
+// who typed `--blocks -1` was told that --blocks and --block-size were both wrong. Working out
+// which one they had given meant re-reading their own command line.
+//
+// The prefix comes from the caller, so the same check reports serve, chat and bench correctly;
+// the test uses serve and asserts each message names only the flag that was negative.
+func TestNegativeCacheFlagsNameTheOneGiven(t *testing.T) {
+	path := chatModel(t)
+
+	err := run([]string{"serve", "--model", path, "--blocks", "-1"})
+	if err == nil {
+		t.Fatal("serve --blocks -1 succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "--blocks") {
+		t.Errorf("error %q does not name --blocks", err)
+	}
+	if strings.Contains(err.Error(), "--block-size") {
+		t.Errorf("error %q blames --block-size, which was not given", err)
+	}
+
+	err = run([]string{"serve", "--model", path, "--block-size", "-1"})
+	if err == nil {
+		t.Fatal("serve --block-size -1 succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "--block-size") {
+		t.Errorf("error %q does not name --block-size", err)
+	}
+	if strings.Contains(err.Error(), "--blocks must") {
+		t.Errorf("error %q blames --blocks, which was not given", err)
+	}
+}
+
 func TestRunAcceptsWorkers(t *testing.T) {
 	path := chatModel(t)
 

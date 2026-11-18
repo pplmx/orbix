@@ -74,8 +74,14 @@ func registerCacheFlags(fs *flag.FlagSet, workers bool) cacheFlags {
 // validate rejects negative cache settings, which would otherwise reach the pool
 // constructor as a confusing error far from the flag that caused it.
 func (c cacheFlags) validate(prefix string) error {
-	if *c.blocks < 0 || *c.blockSize < 0 {
-		return fmt.Errorf("%s: --blocks and --block-size must not be negative", prefix)
+	// Named separately rather than as one "the cache flags" sentence: a caller who typed
+	// `--blocks -1` and is told that "--blocks and --block-size must not be negative" has to
+	// re-read their own command line to work out which of the two they got wrong.
+	if *c.blocks < 0 {
+		return fmt.Errorf("%s: --blocks must not be negative", prefix)
+	}
+	if *c.blockSize < 0 {
+		return fmt.Errorf("%s: --block-size must not be negative", prefix)
 	}
 	if c.workers != nil && *c.workers < 0 {
 		return fmt.Errorf("%s: --workers must not be negative", prefix)

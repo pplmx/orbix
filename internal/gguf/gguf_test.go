@@ -238,6 +238,66 @@ func TestTensorDataRejectsOutOfRange(t *testing.T) {
 	}
 }
 
+// TestParserRejectsStructuralCorruption covers the three error paths a corrupt file can
+// reach that no test exercised: an impossible dimension count, a tensor name that is not
+// in the directory, and a file with no general.architecture.
+//
+// Each is a check the parser performs for a specific reason, and each was reachable
+// without a test saying so -- the repository's convention is that a parser's error paths
+// are tested, because the alternative is a panic three frames deep in a decode loop.
+// The assertions name the message because the message is the whole product of these
+// paths: nothing else tells the caller which tensor or key was wrong.
+func TestParserRejectsStructuralCorruption(t *testing.T) {
+	t.Run("impossible dimension count", func(t *testing.T) {
+		// A GGUF tensor is at most 4-dimensional in ggml; the reader allows up to 8 and
+		// rejects beyond that rather than allocating a dims slice from the file's word.
+		tooMany := make([]uint64, 9)
+		for i := range tooMany {
+			tooMany[i] = 1
+		}
+		data := buildFile(nil, []TensorInfo{{Name: "w", Type: F32, Dims: tooMany}}, 32, nil)
+		_, err := Read(bytes.NewReader(data))
+		if err == nil {
+			t.Fatal("Read accepted a 9-dimensional tensor")
+		}
+		if !strings.Contains(err.Error(), "dimensions") {
+			t.Errorf("error %q does not say the dimension count is the problem", err)
+		}
+	})
+
+	t.Run("unknown tensor name", func(t *testing.T) {
+		data := buildFile(nil, []TensorInfo{{Name: "w", Type: F32, Dims: []uint64{4}}}, 32, make([]byte, 16))
+		path := filepath.Join(t.TempDir(), "one.gguf")
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if _, err := f.TensorData(path, "absent"); err == nil {
+			t.Fatal("TensorData(absent) succeeded")
+		} else if !strings.Contains(err.Error(), "no tensor named") {
+			t.Errorf("error %q does not say the name is not in the file", err)
+		}
+	})
+
+	t.Run("no architecture key", func(t *testing.T) {
+		// Arch is what every architecture-specific key is prefixed with, so a file
+		// without it cannot be interpreted at all; it must say so rather than return "".
+		data := buildFile(nil, nil, 32, nil)
+		f, err := Read(bytes.NewReader(data))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if arch, err := f.Arch(); err == nil {
+			t.Errorf("Arch returned %q with no error for a file with no general.architecture", arch)
+		} else if !strings.Contains(err.Error(), "general.architecture") {
+			t.Errorf("error %q does not name the missing key", err)
+		}
+	})
+}
+
 func TestReadRejectsBadInput(t *testing.T) {
 	good := sampleModel()
 

@@ -397,7 +397,7 @@ func TestNewBlockPoolRejectsUntenableSizes(t *testing.T) {
 	if err == nil {
 		t.Fatal("a pool larger than the budget was accepted")
 	}
-	for _, want := range []string{"1.5 GB", "1.0 GB"} {
+	for _, want := range []string{"1.5 GiB", "1.0 GiB"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -431,7 +431,7 @@ func TestNewBlockPoolChargesBookkeeping(t *testing.T) {
 	if err == nil {
 		t.Fatal("a pool whose bookkeeping exceeds the budget was accepted")
 	}
-	if !strings.Contains(err.Error(), "1.5 GB") {
+	if !strings.Contains(err.Error(), "1.5 GiB") {
 		t.Errorf("error %q does not charge the bookkeeping (512 MiB KV + 1 GiB arrays)", err)
 	}
 }

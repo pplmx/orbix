@@ -75,9 +75,9 @@ func NewKVCache(cfg Config, nCtx int) (*KVCache, error) {
 	if budget := availableMemoryHook(); budget > 0 {
 		need := int64(nCtx) * kvDim * valueSize * 2 * int64(cfg.Layers) // keys and values, every layer
 		if need > budget {
-			return nil, fmt.Errorf("llama: a %d-position cache for this model needs %.1f GB"+
-				" but only %.1f GB is available; the context length in the file is larger than"+
-				" this machine can hold", nCtx, bytesToGB(need), bytesToGB(budget))
+			return nil, fmt.Errorf("llama: a %d-position cache for this model needs %.1f GiB"+
+				" but only %.1f GiB is available; the context length in the file is larger than"+
+				" this machine can hold", nCtx, bytesToGiB(need), bytesToGiB(budget))
 		}
 	}
 	c := &KVCache{cfg: cfg, ctx: nCtx, k: make([][]float32, cfg.Layers), v: make([][]float32, cfg.Layers)}
@@ -96,8 +96,10 @@ func NewKVCache(cfg Config, nCtx int) (*KVCache, error) {
 // what every caller except a test sees.
 var availableMemoryHook = availableMemory
 
-// bytesToGB renders a byte count in gigabytes for an error message.
-func bytesToGB(n int64) float64 { return float64(n) / (1 << 30) }
+// bytesToGiB renders a byte count in gibibytes for an error message. The divisor is 1<<30, so the
+// label has to be GiB: a message that says GB after dividing by a binary unit is off by 7.4% from
+// what it claims to report.
+func bytesToGiB(n int64) float64 { return float64(n) / (1 << 30) }
 
 // Len returns the number of positions written.
 func (c *KVCache) Len() int { return c.len }

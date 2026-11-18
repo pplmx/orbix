@@ -152,9 +152,9 @@ func NewBlockPool(cfg Config, opts BlockPoolOptions) (*BlockPool, error) {
 	// them, which is the same failure one allocation later.
 	total := int64(cfg.Layers)*2*perLayer*valueSize + 2*8*int64(opts.Blocks)
 	if budget := availableMemoryHook(); budget > 0 && total > budget {
-		return nil, fmt.Errorf("llama: a pool of %d blocks of %d positions needs %.1f GB"+
-			" but only %.1f GB is available", opts.Blocks, block,
-			bytesToGB(total), bytesToGB(budget))
+		return nil, fmt.Errorf("llama: a pool of %d blocks of %d positions needs %.1f GiB"+
+			" but only %.1f GiB is available", opts.Blocks, block,
+			bytesToGiB(total), bytesToGiB(budget))
 	}
 
 	p := &BlockPool{

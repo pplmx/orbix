@@ -463,7 +463,7 @@ func TestKVCacheChecksAvailableMemory(t *testing.T) {
 	if err == nil {
 		t.Fatal("a 2 GiB cache was accepted against a 1 GiB budget")
 	}
-	for _, want := range []string{"2.0 GB", "1.0 GB", "context length"} {
+	for _, want := range []string{"2.0 GiB", "1.0 GiB", "context length"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}

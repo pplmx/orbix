@@ -518,3 +518,95 @@ func TestBenchReportsPrefixReuse(t *testing.T) {
 		})
 	}
 }
+
+// TestBenchRejectsCacheFlagsWithoutABlockPool covers the two cache settings that bench
+// accepted and then either ignored or crashed on.
+//
+// --prefix-cache without --blocks used to complete the whole measurement and then panic on
+// the run's last print: the reuse note reads the pool's block size to explain why nothing was
+// shared, and without --blocks there is no pool. A panic after a full benchmark is worse than
+// an early error in both directions -- the numbers look like a finished result and the exit
+// status is a crash -- and the underlying setting was wrong even when the print was reached.
+//
+// --block-size without --blocks was the quieter version of the same mistake: the run stayed on
+// the contiguous cache while the report printed a contiguous footprint, so the size that was
+// passed appeared nowhere and nothing said it had been dropped.
+//
+// Both are rejected before the model is opened, so this needs no checkpoint. The last case is
+// the accepting half: --blocks with --prefix-cache must still reach the model, or the check
+// could pass by refusing every combination.
+func TestBenchRejectsCacheFlagsWithoutABlockPool(t *testing.T) {
+	rejected := []struct {
+		name string
+		args []string
+		want string
+		why  string
+	}{
+		{
+			name: "prefix cache without a pool",
+			args: []string{"--prefix-cache"},
+			want: "--blocks",
+			why:  "the reuse note dereferences the pool, so the run panicked after measuring",
+		},
+		{
+			name: "block size without a pool",
+			args: []string{"--block-size", "32"},
+			want: "--blocks",
+			why:  "the contiguous cache stayed in place and the block size appeared nowhere",
+		},
+	}
+	for _, c := range rejected {
+		t.Run(c.name, func(t *testing.T) {
+			args := append([]string{"--model", "unused.gguf", "--max-tokens", "1"}, c.args...)
+			err := cmdBench(args)
+			if err == nil {
+				t.Fatalf("cmdBench accepted %v; %s", c.args, c.why)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not mention %q", err, c.want)
+			}
+			if strings.Contains(err.Error(), "unused.gguf") {
+				t.Errorf("error %q came from opening the model, so the flag was not validated", err)
+			}
+		})
+	}
+
+	// --blocks alone is a valid paged configuration, so it has to get past validation. Without
+	// a checkpoint the next thing it does is fail on the model path, which names the file.
+	err := cmdBench([]string{"--model", "unused.gguf", "--max-tokens", "1", "--blocks", "64",
+		"--prefix-cache"})
+	if err == nil || !strings.Contains(err.Error(), "unused.gguf") {
+		t.Errorf("--blocks with --prefix-cache was rejected by validation: %v", err)
+	}
+}
+
+// TestBenchPrefixCacheReportsReuseWithoutPanicking is the accepting half of the check above,
+// on a real run rather than on the validation.
+//
+// The rejection test proves the two broken combinations stop early; this proves the same
+// command still works when every flag is supplied, which is the half that a check written too
+// broadly would break. It reaches the reuse note at the end of the run -- the last print, and
+// the one that used to dereference a nil pool -- so a panic on the success path fails here.
+func TestBenchPrefixCacheReportsReuseWithoutPanicking(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	// Long enough to fill more than one 16-position block, so the note's "nothing to share"
+	// branch is not the one that happens to be exercised.
+	prompt := strings.Repeat("word ", 40)
+
+	out := captureStdout(t, func() {
+		err := cmdBench([]string{"--model", path, "--max-tokens", "1", "--concurrency", "1",
+			"--requests", "2", "--prefix-cache", "--blocks", "64", "--block-size", "16",
+			"--prompt", prompt})
+		if err != nil {
+			t.Fatalf("cmdBench: %v", err)
+		}
+	})
+	// The report must still describe a paged cache rather than falling back to the
+	// contiguous line, which is how the ignored --block-size used to read.
+	if !strings.Contains(out, "paged") {
+		t.Errorf("output does not describe a paged cache:\n%s", out)
+	}
+	if !strings.Contains(out, "reused:") {
+		t.Errorf("output has no reuse line:\n%s", out)
+	}
+}

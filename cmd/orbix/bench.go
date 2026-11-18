@@ -84,6 +84,23 @@ func cmdBench(args []string) error {
 		})
 	}
 
+	// Two settings only take effect with a pool, and both used to be accepted and then
+	// ignored: the run stayed on the contiguous cache while the report still described what
+	// the operator had asked for. --prefix-cache was worse than ignored -- the reuse note at
+	// the end of the run dereferenced the pool that --blocks would have created, so the run
+	// measured everything and then panicked on its last print instead of reporting.
+	//
+	// Checked before the model is opened, so a mistyped run costs nothing. The suite above is
+	// exempt because it configures its own cache for each scenario and uses neither flag.
+	if *prefixCache && *cache.blocks == 0 {
+		return fmt.Errorf("bench: --prefix-cache needs a paged cache; add --blocks (and " +
+			"optionally --block-size), or drop --prefix-cache")
+	}
+	if *cache.blockSize > 0 && *cache.blocks == 0 {
+		return fmt.Errorf("bench: --block-size needs --blocks; without a pool there are no " +
+			"blocks to size, and every request still reserves a whole context")
+	}
+
 	gf, err := gguf.Open(*model)
 	if err != nil {
 		return err

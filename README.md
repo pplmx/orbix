@@ -515,8 +515,11 @@ curl -sSL -o /tmp/stories15M-q4_0.gguf \
 ```
 
 The gates take the suite from twelve skipped tests to none, so a machine holding the
-checkpoints can check every claim the project makes -- measured: 521 tests pass and none are
-skipped, against 12 skipped with no checkpoint on disk:
+checkpoints can check every claim the project makes. Both numbers are observable in the run
+itself -- `go test ./... -v | grep -c '^--- SKIP'` reads 12 with no checkpoint on disk and 0 with
+all four set -- which is why they are named here instead of a test total: the count of tests
+changes with every commit and nothing can pin it, while the skip count is a property of the
+gating.
 
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \

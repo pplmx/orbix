@@ -576,6 +576,86 @@ func TestRefusesOversizedMetadataValue(t *testing.T) {
 	}
 }
 
+// TestRefusesOversizedArrayCount is the array half of the same problem: an element count is
+// a file's claim, and the capacity used to be taken from it.
+//
+// Measured before: a file of a few dozen bytes declaring a 67M-element byte array made Read
+// allocate 6144 MiB before reporting EOF, because a Value is 96 bytes and the slice was
+// reserved for every claimed element. The old guard rejected only counts above MaxInt32,
+// which is roughly 200 GiB of Values -- a bound the allocation could not survive, not a bound
+// that prevented asking.
+//
+// Now the count is capped at 64M (an element occupies at least one byte on disk, and real
+// files are far below: a 128k vocabulary is 128000 elements) and the slice grows with the
+// elements that actually arrive.
+func TestRefusesOversizedArrayCount(t *testing.T) {
+	build := func(claimed uint64, supplied int) []byte {
+		var b bytes.Buffer
+		b.WriteString(Magic)
+		u32 := func(v uint32) {
+			var x [4]byte
+			binary.LittleEndian.PutUint32(x[:], v)
+			b.Write(x[:])
+		}
+		u64 := func(v uint64) {
+			var x [8]byte
+			binary.LittleEndian.PutUint64(x[:], v)
+			b.Write(x[:])
+		}
+		u32(Version)
+		u64(0)
+		u64(1)
+		u64(uint64(len("arr")))
+		b.WriteString("arr")
+		u32(uint32(TypeArray))
+		u32(uint32(TypeUint8))
+		u64(claimed)
+		b.Write(bytes.Repeat([]byte{1}, supplied))
+		return b.Bytes()
+	}
+
+	// A huge claim must be refused before it allocates, and by name.
+	delta := allocDelta(t, func() {
+		if _, err := Read(bytes.NewReader(build(maxArrayElements+1, 4))); err == nil {
+			t.Error("Read accepted an array past the element limit")
+		} else if !strings.Contains(err.Error(), "too large") {
+			t.Errorf("error %q does not say the count is the problem", err)
+		}
+	})
+	if delta > 16<<20 {
+		t.Errorf("an oversized array claim allocated %.1f MiB before being refused",
+			float64(delta)/(1<<20))
+	}
+
+	// A claim under the limit but far larger than the file must not reserve it either.
+	delta = allocDelta(t, func() {
+		if _, err := Read(bytes.NewReader(build(1<<20, 4096))); err == nil {
+			t.Error("Read accepted a truncated array")
+		}
+	})
+	// 4096 elements that arrive plus growth headroom; the point is that it is not 1M Values.
+	if delta > 64<<20 {
+		t.Errorf("a 1M claim with 4096 elements of data allocated %.1f MiB", float64(delta)/(1<<20))
+	}
+}
+
+// TestRealisticArrayCountsStillParse pins that the new cap does not reject the largest arrays
+// real files carry: a 32k vocabulary and its per-token type table.
+func TestRealisticArrayCountsStillParse(t *testing.T) {
+	f, err := Read(bytes.NewReader(sampleModel()))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	// The fixture's vocabulary is small, so build the assertion around what the format allows
+	// rather than around the fixture: the cap must be orders of magnitude above a 128k vocab.
+	if maxArrayElements < 200000 {
+		t.Errorf("maxArrayElements = %d, which would reject a 128k vocabulary", maxArrayElements)
+	}
+	if _, ok := f.GetArray[string]("tokenizer.ggml.tokens"); !ok {
+		t.Error("the fixture's token array no longer parses")
+	}
+}
+
 // allocDelta runs fn and reports how many bytes were allocated during it.
 func allocDelta(t *testing.T, fn func()) uint64 {
 	t.Helper()

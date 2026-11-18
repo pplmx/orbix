@@ -18,6 +18,16 @@ type reader struct {
 	off int64 // bytes consumed so far
 }
 
+// maxArrayElements bounds one metadata array's declared length.
+//
+// An array element is at least one byte on disk, so this is also the largest count a file of
+// that many bytes could honestly carry. Real files are far below it: a 128k vocabulary is an
+// array of 128000 short strings.
+//
+// It replaces a MaxInt32 check, which bounded the count at a number the allocation could not
+// survive -- 2^31 Values is roughly 200 GiB -- while still letting a small file ask for 6 GiB.
+const maxArrayElements = 64 << 20
+
 // readFull fills b, returning the underlying error (including io.ErrUnexpectedEOF).
 func (r *reader) readFull(b []byte) error {
 	n, err := io.ReadFull(r.r, b)
@@ -214,10 +224,17 @@ func (r *reader) array() (Value, error) {
 	// the remaining file size. Guard against absurd counts before allocating
 	// the slice, which is what a trivially corrupt header would otherwise
 	// trigger.
-	if n > math.MaxInt32 {
+	if n > maxArrayElements {
 		return Value{}, fmt.Errorf("gguf: array of %d elements is too large", n)
 	}
-	v.Array = make([]Value, 0, n)
+	// Grown as elements arrive, not reserved up front: the count is the file's claim and is
+	// not corroborated by anything until the elements have been read. Measured before this:
+	// a file of a few dozen bytes claiming 67M elements made Read allocate 6 GiB before
+	// reporting EOF, because a Value is about 96 bytes and the capacity was taken from the
+	// claim. An element occupies at least one byte on disk, so a file cannot honestly hold
+	// more elements than it has bytes -- but Read is given a plain io.Reader and cannot know
+	// that length, which is why the growth has to be driven by what arrives.
+	v.Array = make([]Value, 0, min(n, 64))
 	for i := uint64(0); i < n; i++ {
 		elem, err := r.value(et)
 		if err != nil {

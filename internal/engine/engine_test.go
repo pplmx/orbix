@@ -1153,3 +1153,39 @@ func TestPrefixCacheSharedWhileConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestFractionFull pins the arithmetic behind orbix_kv_pool_used_fraction.
+//
+// The gauge is the one reading that says a paged deployment is close to refusing requests,
+// and it is invisible until that happens. Its formula is a single division, so a mistake
+// reverses or rescales it silently: a scrape showing 0.3 where the pool is 70% used reads as
+// plenty of headroom.
+//
+// Every case is recomputed here rather than taken from the function. The zero-block case is
+// not hypothetical -- a contiguous engine reports no pool at all -- and returning NaN there
+// would make the gauge parse as a string rather than a number.
+func TestFractionFull(t *testing.T) {
+	cases := []struct {
+		name         string
+		blocks, free int
+		want         float64
+	}{
+		{"no pool", 0, 0, 0},
+		{"no pool with a stray free count", 0, 5, 0},
+		{"empty pool", 10, 10, 0},
+		{"half used", 10, 5, 0.5},
+		{"seven of ten", 10, 3, 0.7},
+		{"one block of three used", 3, 2, 1.0 / 3},
+		{"two blocks of three used", 3, 1, 2.0 / 3},
+		{"full", 10, 0, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Stats{PoolBlocks: c.blocks, PoolFree: c.free}.FractionFull()
+			if got != c.want {
+				t.Errorf("FractionFull(blocks=%d, free=%d) = %v, want %v",
+					c.blocks, c.free, got, c.want)
+			}
+		})
+	}
+}

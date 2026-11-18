@@ -315,11 +315,6 @@ func (c *PagedKVCache) ReusedPositions() int { return c.reused }
 // BlocksHeld returns the number of blocks this sequence currently holds.
 func (c *PagedKVCache) BlocksHeld() int { return len(c.blocks) }
 
-// Bytes returns the storage this sequence holds, in bytes.
-func (c *PagedKVCache) Bytes() int64 {
-	return int64(c.BlocksHeld()) * int64(c.block) * int64(c.cfg.kvDim()) * 2 * 4 * int64(c.cfg.Layers)
-}
-
 // Reset releases every block and forgets the positions.
 func (c *PagedKVCache) Reset() error {
 	for _, id := range c.blocks {

@@ -5,14 +5,13 @@ import (
 	"sync"
 )
 
-// Runner evaluates the row-partitioned kernels across a bounded number of
-// workers.
+// Runner evaluates the partitionable kernels across a bounded number of workers.
 //
 // Decoding a token is a chain of matrix-vector products, one per projection, and
 // each of them walks a weight matrix that does not fit in cache. The arithmetic
 // is a handful of cycles per value while the load is the bottleneck, so the work
-// parallelizes cleanly: there is no shared state between output rows and no
-// reduction spanning rows.
+// parallelizes cleanly: there is no shared state between output elements and no
+// reduction spanning them.
 //
 // The split is always over independent output elements, never over the reduction
 // dimension. That is what makes a Runner a scheduling change rather than a

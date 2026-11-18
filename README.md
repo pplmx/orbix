@@ -104,7 +104,8 @@ is; the code below it is written to be read in the same order.
    values rather than a round trip.
 3. **[`internal/kernel`](internal/kernel/doc.go)** — the numerics: matmul, RMSNorm,
    softmax, SiLU, and the one rule everything else depends on, that parallelism is over
-   output rows so a parallel result equals the serial one exactly.
+   independent outputs -- never over a reduction -- so a parallel result equals the serial
+   one exactly.
 4. **[`internal/llama`](internal/llama/doc.go)** — attention, RoPE, and the KV cache. The
    cache is in this package rather than its own because it is a data structure the
    architecture owns: the contiguous and paged implementations are here, along with the

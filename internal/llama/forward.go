@@ -18,10 +18,10 @@ type Model struct {
 	W    *Weights
 	rope *rope
 
-	// run splits the row-partitioned kernels across goroutines. Decoding a
-	// token is a chain of matrix-vector products that are bounded by memory
-	// bandwidth, not arithmetic, so the rows parallelize well. The split is
-	// over independent rows, which keeps every result bit-identical to the
+	// run splits the partitionable kernels across goroutines. Decoding a token is a
+	// chain of matrix-vector products bounded by memory bandwidth, not arithmetic, so
+	// they parallelize well. The split is over independent output elements -- rows or
+	// columns depending on the product -- which keeps every result bit-identical to the
 	// serial kernel.
 	run *kernel.Runner
 
@@ -59,7 +59,7 @@ type Model struct {
 // Options controls how a Model runs. The zero value is the default: one worker
 // per available CPU, which is what a standalone CLI wants.
 type Options struct {
-	// Workers is the number of goroutines the row-partitioned kernels may use.
+	// Workers is the number of goroutines the partitionable kernels may use.
 	// 0 means runtime.GOMAXPROCS(0) and 1 means serial. A scheduler that already
 	// has its own parallelism sets this lower, so the two do not oversubscribe
 	// the machine fighting each other.

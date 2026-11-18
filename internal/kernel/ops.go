@@ -55,25 +55,33 @@ func MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMulTransposed(dst, a, b, m, n, k); err != nil {
 		return err
 	}
-	return matMulTransposedRows(dst, a, b, m, n, k, 0, m)
+	return matMulTransposedCols(dst, a, b, m, n, k, 0, n)
 }
 
-// matMulTransposedRows computes rows [lo,hi) of MatMulTransposed. Every output
-// element depends only on its own row of a, so a caller may split the row range
-// without changing any value.
-func matMulTransposedRows(dst, a, b []float32, m, n, k, lo, hi int) error {
-	// Rows are processed in tiles so each row of b is read once per tile instead of once
-	// per output row. The naive form reads b in full for every row of a -- 134 GB of
-	// traffic for a 2001x8192x2048 product, which runs at memory speed long before it
-	// runs out of arithmetic.
-	//
-	// The tiling changes only the order the elements are visited, never the order they
-	// are summed in: every output element is still the same p loop over the same two
-	// rows, so the result is bit-identical to the unblocked form.
+// matMulTransposedCols computes columns [jlo,jhi) of MatMulTransposed, all m rows.
+//
+// The parallel split is over columns of the output, not over its rows. A row split
+// cannot use more than m workers, and the decode case that matters most has m = 1:
+// one sequence, one activation row, the whole vocabulary as n. Splitting by row there
+// leaves the entire product on a single goroutine, which made single-stream decode
+// about 2.2x slower than a per-element split once the tiling landed. Every output
+// element depends only on its own row of a and its own column of b, so either
+// direction splits without changing a value; columns is the one that always has work
+// to hand out, because n is the vocabulary size in the projection that dominates a
+// decode step.
+//
+// Inside a column range the rows are still visited in tiles, so a row of b is loaded
+// once and used for every row of a in the tile rather than re-read per output row.
+// That is the memory-traffic win the tiling exists for, and it survives: each worker
+// owns a contiguous band of columns and reuses b within it.
+//
+// Neither the tiling nor the split changes the order of the p loop, so the result stays
+// bit-identical to a naive element-at-a-time multiply.
+func matMulTransposedCols(dst, a, b []float32, m, n, k, jlo, jhi int) error {
 	const rowTile = 8
-	for base := lo; base < hi; base += rowTile {
-		end := min(base+rowTile, hi)
-		for j := range n {
+	for base := 0; base < m; base += rowTile {
+		end := min(base+rowTile, m)
+		for j := jlo; j < jhi; j++ {
 			bRow := b[j*k : (j+1)*k]
 			for i := base; i < end; i++ {
 				aRow := a[i*k : (i+1)*k]

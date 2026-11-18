@@ -387,7 +387,7 @@ func BenchmarkRMSNorm(b *testing.B) {
 }
 
 // TestMatMulTransposedRowTilingIsExact pins the property the row tiling in
-// matMulTransposedRows depends on: the order output rows are visited changes, but each
+// matMulTransposedCols depends on: the order output rows are visited changes, but each
 // element is still the same p loop over the same two rows, so the result must be
 // bit-identical to a naive element-at-a-time multiply.
 //

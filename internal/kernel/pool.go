@@ -62,27 +62,68 @@ func (r *Runner) MatVec(dst, a, v []float32, n, k int) error {
 // MatMulTransposed computes dst = a @ bᵀ where b is stored as n x k, splitting
 // the product across the workers.
 //
-// The split is over output elements flattened into i*n+j order, not over the
-// rows of a alone. With m rows the two differ only when m is smaller than the
-// worker count, but that is exactly the decode case: a batch of m sequences has
-// m = B, so a row-only split would leave the vast majority of the product serial
-// for small B and would make batching strictly slower than looping over MatVec.
-// One row and a large n is a full-size product and should use the whole machine.
+// The split is over output columns, not over the rows of a. With m rows a row split
+// can use at most m workers, and the decode case that dominates is m = 1: a single
+// sequence's activation row against the whole vocabulary. Splitting by row there
+// leaves the product serial, which is 2.2x slower than it needs to be, while columns
+// scale with n and n is the vocabulary. Every output element depends only on its own
+// row of a and its own column of b, so neither direction can change a value.
 //
 // The result is identical to MatMulTransposed.
 func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMulTransposed(dst, a, b, m, n, k); err != nil {
 		return err
 	}
-	// Split over row ranges rather than elements: each worker then gets a contiguous band
-	// of output rows, and the row tiling inside matMulTransposedRows reuses a row of b
-	// across the band instead of re-reading it for every output row.
-	//
-	// Every output element depends only on its own row of a, so the split cannot change
-	// a value: two workers write disjoint rows and read the same b.
-	return r.splitRows(r.parts(m*n*k), m, func(lo, hi int) {
-		_ = matMulTransposedRows(dst, a, b, m, n, k, lo, hi)
+	// Split over column ranges: each worker gets a contiguous band of output columns and
+	// the row tiling inside matMulTransposedCols reuses a row of b across the band.
+	parts := r.parts(m * n * k)
+	if splitOverRows(m, n, parts) {
+		return r.splitRows(parts, m, func(lo, hi int) {
+			for j := range n {
+				for i := lo; i < hi; i++ {
+					var sum float32
+					aRow := a[i*k : (i+1)*k]
+					bRow := b[j*k : (j+1)*k]
+					for p := range k {
+						sum += aRow[p] * bRow[p]
+					}
+					dst[i*n+j] = sum
+				}
+			}
+		})
+	}
+	return r.splitCols(parts, n, func(jlo, jhi int) {
+		_ = matMulTransposedCols(dst, a, b, m, n, k, jlo, jhi)
 	})
+}
+
+// splitOverRows reports whether MatMulTransposed should split its output by rows rather
+// than by columns.
+//
+// Columns are the default because n is the vocabulary in the projection that dominates a
+// decode step, so a column split always has work to hand out. Rows win only in the one
+// shape where they give every worker more to do than columns would: a tall product whose
+// columns are too few to divide among the workers, as when a batched prefill multiplies a
+// long prompt by a short intermediate. Even then it is a preference, not a requirement --
+// a row split can only ever use m workers, which is why it is never the fallback for the
+// m = 1 case that made single-stream decode 2.2x slower.
+//
+// This function exists so that decision is a single named predicate a test can pin. The
+// regression it guards against was not a wrong value but a wrong axis, and a wrong axis
+// leaves every output bit-identical, so no comparison against the serial kernel could see
+// it.
+func splitOverRows(m, n, parts int) bool {
+	if parts <= 1 {
+		return false
+	}
+	if m <= 1 {
+		// One output row: a row split would put the whole product on one worker.
+		return false
+	}
+	// Rows win when they can occupy at least as many workers as columns can, and each
+	// worker still gets a row. n >= m means columns are at least as parallel, so the
+	// default stands.
+	return m > n
 }
 
 // Parallelism is only worth its spawn-and-join cost above a certain size, and
@@ -165,6 +206,16 @@ func (r *Runner) splitRows(parts, n int, fn func(lo, hi int)) error {
 		parts = n
 	}
 	return r.split(parts, n, fn)
+}
+
+// splitCols runs fn over the column range [0,n) in contiguous chunks.
+//
+// It is splitRows under another name, and the name is the point: the two call sites
+// split different axes of different products, and a reader who sees `splitRows` in
+// MatMulTransposed has to work out why a row split is right there. The mechanics are
+// identical, so there is nothing to keep in sync.
+func (r *Runner) splitCols(parts, n int, fn func(lo, hi int)) error {
+	return r.splitRows(parts, n, fn)
 }
 
 // split runs fn over [0,n) in at most parts contiguous chunks, returning when

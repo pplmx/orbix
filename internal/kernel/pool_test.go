@@ -184,11 +184,16 @@ func itoa(v int) string {
 	return string(buf[i:])
 }
 
-// TestRunnerSplitsShortAndWideProducts is the regression for the split shape
-// itself. An m=1 product against a 32000-wide vocabulary has one row, so a split
-// over rows alone would run entirely on one goroutine -- the exact case a batched
-// decode depends on. This pins the values, and BenchmarkBatchAmortizes below
-// reports the speed.
+// TestRunnerSplitsShortAndWideProducts is the regression for the split shape itself. An
+// m=1 product against a 32000-wide vocabulary has one row, so a split over rows alone
+// would run entirely on one goroutine -- the exact case a batched decode depends on.
+//
+// The value comparison below cannot catch that on its own: a serial kernel returns the
+// same numbers as a parallel one, which is the whole point of the split being over
+// independent elements. It passed for a release while single-stream decode had quietly
+// become 2.2x slower, because splitting over rows left m = 1 with one worker. The
+// worker-count assertion in TestRunnerUsesWorkersBeyondTheRowCount is what closes that
+// gap; this test keeps the values honest.
 func TestRunnerSplitsShortAndWideProducts(t *testing.T) {
 	r := rand.New(rand.NewSource(21))
 	const n, k = 32000, 288
@@ -209,6 +214,107 @@ func TestRunnerSplitsShortAndWideProducts(t *testing.T) {
 				t.Fatalf("m=%d: dst[%d] = %v, want %v", m, i, got[i], want[i])
 			}
 		}
+	}
+}
+
+// TestMatMulTransposedSplitsTheAxisThatHasWork pins which axis the product is split over,
+// not which numbers come out of it.
+//
+// This is the regression for a 2.2x slowdown in single-stream decode that shipped and
+// stayed: MatMulTransposed was split over the rows of a, a decode step has exactly one of
+// those, and so the vocabulary projection -- the largest single product in a token -- ran
+// on one goroutine. No value changed, so comparing against the serial kernel could not see
+// it, and the benchmark that would have caught it does not gate.
+//
+// The decision is now a predicate, splitOverRows, and this pins it at the shapes that
+// matter. m = 1 is the case that regressed; a tall product is the case a row split is still
+// right for, and it is here so the test cannot be satisfied by always answering "columns".
+func TestMatMulTransposedSplitsTheAxisThatHasWork(t *testing.T) {
+	const parts = 64
+	cases := []struct {
+		name     string
+		m, n     int
+		wantRows bool
+		why      string
+	}{
+		{
+			name: "single-stream decode", m: 1, n: 32000, wantRows: false,
+			why: "one activation row against the whole vocabulary; a row split would be one worker",
+		},
+		{
+			name: "small batch decode", m: 4, n: 32000, wantRows: false,
+			why: "four rows against 32000 columns; columns have far more to divide",
+		},
+		{
+			name: "batched prefill", m: 2001, n: 2048, wantRows: false,
+			why: "columns still outnumber rows, and n is the larger axis",
+		},
+		{
+			name: "tall and narrow", m: 4096, n: 64, wantRows: true,
+			why: "64 columns cannot fill 64 workers, 4096 rows can",
+		},
+		{
+			name: "serial product", m: 1, n: 8, wantRows: false,
+			why: "below the parallel threshold, so the axis does not arise",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := splitOverRows(c.m, c.n, parts)
+			if got != c.wantRows {
+				t.Errorf("splitOverRows(m=%d, n=%d, parts=%d) = %v, want %v: %s",
+					c.m, c.n, parts, got, c.wantRows, c.why)
+			}
+		})
+	}
+
+	// One worker means no split at all, whichever axis is chosen; asserting it keeps the
+	// predicate from claiming a row split the Runner would never perform.
+	if splitOverRows(4096, 64, 1) {
+		t.Error("splitOverRows reported a row split with one part, but a single part is not a split")
+	}
+}
+
+// TestRunnerMatMulTransposedIsExactUnderBothSplits checks that the two axes agree.
+//
+// The axis is chosen inside MatMulTransposed, so both branches need a shape that reaches
+// them: m > n for the row branch, m <= n for the column branch. Both must equal the serial
+// kernel exactly, because the split moves work between workers and never reorders the p
+// loop inside an element.
+func TestRunnerMatMulTransposedIsExactUnderBothSplits(t *testing.T) {
+	r := rand.New(rand.NewSource(77))
+	// parts() needs enough work to fan out at all, which is what makes the axis matter.
+	shapes := []struct {
+		name string
+		m    int
+		n    int
+		k    int
+	}{
+		{"column branch: one row, wide", 1, 2048, 512},
+		{"column branch: few rows, wide", 3, 1024, 512},
+		{"row branch: many rows, narrow", 4096, 64, 128},
+		{"row branch: tall, very narrow", 2048, 8, 512},
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			a := randSlice(r, sh.m*sh.k)
+			b := randSlice(r, sh.n*sh.k)
+			want := make([]float32, sh.m*sh.n)
+			if err := MatMulTransposed(want, a, b, sh.m, sh.n, sh.k); err != nil {
+				t.Fatalf("MatMulTransposed: %v", err)
+			}
+			for _, workers := range []int{2, 7, 64} {
+				got := make([]float32, sh.m*sh.n)
+				if err := NewRunner(workers).MatMulTransposed(got, a, b, sh.m, sh.n, sh.k); err != nil {
+					t.Fatalf("%d workers: %v", workers, err)
+				}
+				for i := range want {
+					if got[i] != want[i] {
+						t.Fatalf("%d workers: dst[%d] = %v, want %v", workers, i, got[i], want[i])
+					}
+				}
+			}
+		})
 	}
 }
 

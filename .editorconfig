@@ -1,0 +1,43 @@
+# Editor defaults so a file is formatted the same way whichever tool opens it.
+#
+# This does not replace the formatters the project already enforces: gofmt owns Go, and
+# rumdl owns Markdown with the rules in .rumdl.toml. What it fixes is the set of decisions
+# no formatter runs for -- indentation in YAML and JSON, the final newline, and line endings
+# -- so a contributor without the git hooks still writes files the hooks will accept.
+#
+# The values below match what the pre-commit hooks enforce, so an editor honouring this file
+# and a commit passing those hooks agree. Where they could disagree, the hook wins: rumdl
+# indents Markdown list continuations by 4, not 2.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.go]
+# gofmt uses tabs for indentation and spaces for alignment; the editor should not fight it.
+indent_style = tab
+indent_size = 4
+
+[{*.md,*.markdown}]
+# rumdl sets MD007 indent = 4, so list continuation lines are four spaces.
+indent_size = 4
+# Trailing whitespace in Markdown can be a hard line break; the pre-commit config excludes
+# Markdown from that hook for the same reason.
+trim_trailing_whitespace = false
+
+[{*.yml,*.yaml,*.json,*.toml}]
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+[{*.py}]
+indent_size = 4
+
+[{*.sh,*.bash}]
+indent_size = 2

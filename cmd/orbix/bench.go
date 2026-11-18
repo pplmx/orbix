@@ -60,6 +60,32 @@ func cmdBench(args []string) error {
 	if err := cache.validate("bench"); err != nil {
 		return err
 	}
+	// The suite fixes its own concurrency, request count, admission policy, and cache shape:
+	// those are the variables the rows compare, so letting a flag override them would remove
+	// the comparison the table exists to make. Which is exactly why the flags cannot be
+	// accepted and left unread. Passing `--suite --policy bogus` used to run the whole table
+	// and exit 0 with the invalid value never looked at, and `--suite --concurrency 32` printed
+	// a table of eight scenarios measured at other concurrencies with nothing to say so.
+	//
+	// Checked by walking what was actually set rather than by comparing against defaults: a
+	// default is indistinguishable from an explicit equal value, and the point is to tell the
+	// operator their flag did nothing.
+	if *suite {
+		var ignored []string
+		usedBySuite := map[string]bool{
+			"model": true, "max-tokens": true, "prompt": true, "workers": true, "suite": true,
+		}
+		fs.Visit(func(f *flag.Flag) {
+			if !usedBySuite[f.Name] {
+				ignored = append(ignored, "--"+f.Name)
+			}
+		})
+		if len(ignored) > 0 {
+			return fmt.Errorf("bench: --suite measures a fixed set of scenarios and does not use %s;"+
+				" drop the flag, or run without --suite to measure one configuration",
+				strings.Join(ignored, ", "))
+		}
+	}
 	total := *requests
 	if total <= 0 {
 		total = *concurrency

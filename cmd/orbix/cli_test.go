@@ -670,3 +670,72 @@ func TestBenchPrefixCacheReportsReuseWithoutPanicking(t *testing.T) {
 		t.Errorf("output has no reuse line:\n%s", out)
 	}
 }
+
+// TestBenchSuiteRefusesFlagsItWouldIgnore covers the six settings --suite takes and then
+// never reads.
+//
+// The suite fixes concurrency, request count, admission policy, and cache shape because those
+// are the variables its rows compare: letting a flag override one would delete the comparison
+// the table exists to make. Accepting the flag anyway was the defect. `--suite --policy bogus`
+// ran the entire table and exited 0 without ever parsing the value, and `--suite --concurrency
+// 32` printed eight scenarios measured at other concurrencies with nothing in the output to
+// say the flag had been dropped -- so an operator had no way to tell a typo from a setting
+// the suite honoured.
+//
+// The check walks fs.Visit rather than comparing values against defaults, and both cases below
+// exist to prove it: --policy's default and --concurrency's default are valid values, and the
+// test passes flags set to exactly those. A comparison against the default would accept both.
+func TestBenchSuiteRefusesFlagsItWouldIgnore(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+		why  string
+	}{
+		{
+			name: "policy at its default value",
+			args: []string{"--policy", "fifo"},
+			want: []string{"--policy"},
+			why:  "the suite picks a policy per scenario, so the value is never read",
+		},
+		{
+			name: "concurrency at its default value",
+			args: []string{"--concurrency", "1"},
+			want: []string{"--concurrency"},
+			why:  "the suite sets MaxActive per scenario, so the value is never read",
+		},
+		{
+			name: "several at once, all named",
+			args: []string{"--requests", "9", "--prefix-cache", "--block-size", "32"},
+			want: []string{"--requests", "--prefix-cache", "--block-size"},
+			why:  "an operator passing three wrong flags should learn about all three at once",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args := append([]string{"--model", "unused.gguf", "--suite"}, c.args...)
+			err := cmdBench(args)
+			if err == nil {
+				t.Fatalf("cmdBench accepted %v with --suite; %s", c.args, c.why)
+			}
+			// Every ignored flag has to be named: reporting the first one and stopping
+			// turns a single fix into as many runs as there were flags.
+			for _, w := range c.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not mention %s", err, w)
+				}
+			}
+			if strings.Contains(err.Error(), "unused.gguf") {
+				t.Errorf("error %q came from opening the model, so the flags were not checked", err)
+			}
+		})
+	}
+
+	// The flags the suite does read must stay accepted, or the check could pass by rejecting
+	// every option. Without a checkpoint they fail on the model path, which names the file.
+	err := cmdBench([]string{"--model", "unused.gguf", "--suite", "--max-tokens", "4",
+		"--prompt", "Once upon a time", "--workers", "2"})
+	if err == nil || !strings.Contains(err.Error(), "unused.gguf") {
+		t.Errorf("--suite rejected the flags it does use: %v", err)
+	}
+}

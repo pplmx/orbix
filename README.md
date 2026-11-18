@@ -382,6 +382,11 @@ which mechanisms pay for themselves. It pairs each mechanism with a control row 
 against contiguous caches, prefix reuse against none, shortest against FIFO -- so a
 difference is attributable to that mechanism rather than to the scenario changing.
 
+The suite fixes the settings its rows compare -- concurrency, request count, admission
+policy, and cache shape -- so those flags are refused rather than ignored when `--suite` is
+given, and the error names every one that was passed. `--model`, `--max-tokens`, `--prompt`,
+and `--workers` still apply: they describe the machine and the workload, not the mechanism.
+
 One measurement, stated with everything needed to judge it: stories15M q4_0 (19 MB), a
 41-token prompt, 8 generated tokens per request, 8 kernel workers, on a 128-core AMD EPYC
 7742, Go 1.27.3, linux/amd64. `orbix bench --suite` prints these conditions itself, so a

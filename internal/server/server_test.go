@@ -1573,3 +1573,37 @@ func TestStreamReleasesHeldTextWhenNoStopMatches(t *testing.T) {
 		t.Errorf("streamed %q with an unmatched stop, want %q", got, want)
 	}
 }
+
+// TestWriteErrorTypes pins the mapping from HTTP status to the error `type` field, which is what
+// a client branches on.
+//
+// The 503 case was wrong: every status above 499 reported "server_error", so an engine saying
+// "come back shortly" was indistinguishable from one that broke. OpenAI gives 503 its own type,
+// and its SDKs map that type to a retryable error, which is the behaviour this server means.
+func TestWriteErrorTypes(t *testing.T) {
+	cases := []struct {
+		status int
+		want   string
+		why    string
+	}{
+		{http.StatusBadRequest, "invalid_request_error", "a malformed request"},
+		{http.StatusNotFound, "invalid_request_error", "a path or model that does not exist"},
+		{http.StatusUnsupportedMediaType, "invalid_request_error", "an encoding this server will not decode"},
+		{http.StatusInternalServerError, "server_error", "this server failed"},
+		{http.StatusServiceUnavailable, "service_unavailable_error", "no capacity right now, retry later"},
+	}
+	for _, c := range cases {
+		w := httptest.NewRecorder()
+		writeError(w, c.status, "test")
+		if w.Code != c.status {
+			t.Errorf("status %d came back as %d", c.status, w.Code)
+		}
+		var body errorBody
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("status %d: decode body: %v", c.status, err)
+		}
+		if body.Error.Type != c.want {
+			t.Errorf("status %d (%s) has type %q, want %q", c.status, c.why, body.Error.Type, c.want)
+		}
+	}
+}

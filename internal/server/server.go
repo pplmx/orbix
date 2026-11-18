@@ -922,7 +922,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	var body errorBody
 	body.Error.Message = msg
 	body.Error.Type = "invalid_request_error"
-	if status >= 500 {
+	switch {
+	case status == http.StatusServiceUnavailable:
+		// OpenAI gives 503 its own type. A client that branches on `type` -- which the
+		// official SDKs do, mapping it to a retryable error rather than a failure -- would
+		// otherwise read "the server broke" where this engine means "come back shortly".
+		body.Error.Type = "service_unavailable_error"
+	case status >= 500:
 		body.Error.Type = "server_error"
 	}
 	writeJSON(w, status, body)

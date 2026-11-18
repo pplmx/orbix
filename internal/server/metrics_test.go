@@ -51,6 +51,92 @@ func readBody(t *testing.T, resp *http.Response) string {
 //
 // The body is also checked to be complete on every scrape: a handler that raced would most
 // likely show up as a truncated or half-written exposition rather than as a failed request.
+// TestMetricsSplitFinishedByReason covers the counter that makes a client walking away
+// visible.
+//
+// Every other number a server exports looks healthy while clients disconnect mid-generation:
+// the request is counted as finished, it contributes an ordinary latency, and nothing in the
+// queue depth or the pool occupancy says otherwise. Measured before this counter existed, an
+// aborted stream and a completed one produced access-log lines that differed only in byte
+// count.
+//
+// The assertion is that the parts sum to requests_finished_total. That is the property that
+// makes the split trustworthy: a reason missed in finish, or counted twice, breaks the sum
+// rather than showing up as a slightly wrong bucket nobody checks.
+func TestMetricsSplitFinishedByReason(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// One request that runs to its budget, and one whose client leaves straight away.
+	post(t, h, "/v1/completions", `{"prompt": "hi", "max_tokens": 2}`)
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		strings.NewReader(`{"prompt": "hi", "max_tokens": 50, "stream": true}`))
+	req = req.WithContext(cancelCtx)
+	cancel() // the client is gone before the handler starts
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	body := readBody(t, get(t, h, "/metrics"))
+
+	var byReason = map[string]int{}
+	for _, line := range strings.Split(body, "\n") {
+		rest, ok := strings.CutPrefix(line, "orbix_requests_finished_by_reason_total{reason=\"")
+		if !ok {
+			continue
+		}
+		label, value, ok := strings.Cut(rest, "\"} ")
+		if !ok {
+			t.Fatalf("malformed sample %q", line)
+		}
+		var n int
+		if _, err := fmt.Sscanf(value, "%d", &n); err != nil {
+			t.Fatalf("sample %q is not an integer: %v", line, err)
+		}
+		byReason[label] = n
+	}
+
+	// Every reason the engine defines has to be present, so a dashboard does not see a label
+	// appear and disappear as traffic changes.
+	for _, want := range []string{"stop", "length", "cancel", "abandoned", "error"} {
+		if _, ok := byReason[want]; !ok {
+			t.Errorf("no sample for reason %q; present: %v", want, byReason)
+		}
+	}
+
+	parts := 0
+	for _, n := range byReason {
+		parts += n
+	}
+	total := finishedTotal(t, body)
+	if parts != total {
+		t.Errorf("reasons sum to %d but requests_finished_total is %d (parts: %v)", parts, total, byReason)
+	}
+	if total == 0 {
+		t.Fatal("nothing finished, so this proves nothing")
+	}
+	if byReason["cancel"] == 0 {
+		t.Errorf("a cancelled request did not show up as reason=cancel: %v", byReason)
+	}
+}
+
+// finishedTotal reads orbix_requests_finished_total out of an exposition body.
+func finishedTotal(t *testing.T, body string) int {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		rest, ok := strings.CutPrefix(line, "orbix_requests_finished_total ")
+		if !ok {
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(rest, "%d", &n); err != nil {
+			t.Fatalf("requests_finished_total %q is not an integer: %v", line, err)
+		}
+		return n
+	}
+	t.Fatal("requests_finished_total is missing")
+	return 0
+}
+
 func TestMetricsUnderConcurrentRequests(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()

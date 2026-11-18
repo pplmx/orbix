@@ -205,8 +205,12 @@ type Engine struct {
 	// snapshot rather than a mix of moments.
 	requestsSubmitted uint64
 	requestsFinished  uint64
-	tokensGenerated   uint64
-	rounds            uint64
+
+	// finishedByReason splits requestsFinished by why each request ended. Written and read
+	// under mu, like the total it refines.
+	finishedByReason [FinishReasonCount]uint64
+	tokensGenerated  uint64
+	rounds           uint64
 	// prefixReused counts prompt positions served from a shared prefix instead of a
 	// forward pass. It stays zero for a contiguous cache, which cannot share.
 	prefixReused uint64
@@ -783,6 +787,12 @@ func (e *Engine) finish(s *sequence, last Event) {
 	e.mu.Lock()
 	delete(e.active, s.id)
 	e.requestsFinished++
+	// Split by reason in the same critical section as the total, so the parts always sum to
+	// it. reasonIndex only misses a reason finish is never called with, which would be a bug
+	// here: leaving it out of the split is honest, and guessing a bucket would not be.
+	if idx, ok := reasonIndex(last.FinishReason); ok {
+		e.finishedByReason[idx]++
+	}
 	e.mu.Unlock()
 
 	// Finish the request's span before the terminal event, so a caller that observes

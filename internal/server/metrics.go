@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/pplmx/orbix/internal/engine"
 )
 
 // metricsNamespace prefixes every exported name, so a scrape cannot collide with an
@@ -31,6 +33,23 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		"counter", st.RequestsSubmitted)
 	b.help("requests_finished_total", "Requests that reached their end, whatever the reason.",
 		"counter", st.RequestsFinished)
+	// The split matters more than the total for the same reason the pool gauges do: a server
+	// whose clients disconnect mid-generation looks healthy in every other number. Those
+	// sequences are counted as finished, they contribute a normal-looking latency, and the
+	// only sign is that most of them ended in "cancel" or "abandoned" rather than "stop".
+	var reasons []labeledValue
+	for _, r := range []engine.FinishReason{
+		engine.FinishStop, engine.FinishLength, engine.FinishCancel,
+		engine.FinishAbandoned, engine.FinishError,
+	} {
+		reasons = append(reasons, labeledValue{
+			label: r.String(),
+			value: float64(st.FinishedByReason[r]),
+		})
+	}
+	b.labeledSeries("requests_finished_by_reason_total",
+		"Requests that reached their end, split by why.",
+		"counter", "reason", reasons)
 	b.help("tokens_generated_total", "Tokens delivered to callers, in cumulative total.",
 		"counter", st.TokensGenerated)
 	b.help("rounds_total", "Scheduling rounds that advanced at least one sequence.",
@@ -114,6 +133,28 @@ func (b *metricsBuilder) labeled(name, doc, typ string, value float64, label, la
 	fmt.Fprintf(&b.buf, "# TYPE %s_%s %s\n", metricsNamespace, name, typ)
 	fmt.Fprintf(&b.buf, "%s_%s{%s=\"%s\"} %s\n", metricsNamespace, name, label,
 		escapeLabelValue(labelValue), formatFloat(value))
+}
+
+// labeledSeries writes one metric name with several label values, sharing one HELP and one
+// TYPE line.
+//
+// Prometheus treats a repeated HELP for the same name as an error, so the per-sample helper
+// above cannot express a metric with more than one label value: N values would emit N HELP
+// lines. This takes the whole series at once instead, which is the shape a counter split by
+// reason actually has.
+func (b *metricsBuilder) labeledSeries(name, doc, typ, label string, values []labeledValue) {
+	fmt.Fprintf(&b.buf, "# HELP %s_%s %s\n", metricsNamespace, name, doc)
+	fmt.Fprintf(&b.buf, "# TYPE %s_%s %s\n", metricsNamespace, name, typ)
+	for _, v := range values {
+		fmt.Fprintf(&b.buf, "%s_%s{%s=\"%s\"} %s\n", metricsNamespace, name, label,
+			escapeLabelValue(v.label), formatFloat(v.value))
+	}
+}
+
+// labeledValue is one label value and its number.
+type labeledValue struct {
+	label string
+	value float64
 }
 
 // escapeLabelValue escapes a label value for the text exposition format.

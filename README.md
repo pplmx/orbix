@@ -562,14 +562,26 @@ orbix_kv_pool_used_fraction 0
 The exposition format is written by hand rather than through a client library, for the
 same reason the GGUF parser is: a family is three lines -- `# HELP`, `# TYPE`, and one
 sample -- and the hand-written encoder is read by the code review rather than trusted as
-a dependency. Thirteen families come to 39 lines. The tests parse the output back the way
+a dependency. Fourteen families come to 46 lines, because a labelled series costs one
+line per value. The tests parse the output back the way
 a scraper would, so a HELP line in the wrong place fails a test instead of a dashboard.
 
-Two of the metrics exist because their failure mode is invisible in latency until it is
+Three of the metrics exist because their failure mode is invisible in latency until it is
 already failing. `orbix_requests_queued` growing against a steady round rate is a
 capacity problem rather than a slow model, and `orbix_kv_pool_free` reaching zero is a
 paged deployment about to start refusing requests. Neither is recoverable from timing
 alone.
+
+The third is `orbix_requests_finished_by_reason_total`, which splits the finished count by
+why each request ended. A client that disconnects mid-generation produces a request that
+looks entirely healthy in every other number: it counts as finished, it contributes an
+ordinary latency, and it consumes exactly the tokens it was given. Measured against a live
+server, an aborted stream and a completed one produced access-log lines differing only in
+byte count. With the split, a server whose clients keep leaving shows it as
+`reason="cancel"` or `reason="abandoned"` growing against `reason="stop"`, which is a
+network or timeout problem rather than a model problem. The parts always sum to
+`orbix_requests_finished_total`; the tests assert that, so a reason missed in the engine
+breaks a test instead of quietly unbalancing a dashboard.
 
 ## Supported Models and Quantization
 

@@ -17,6 +17,17 @@ type Stats struct {
 	// It is incremented in finish, so it includes cancellations and errors.
 	RequestsFinished uint64
 
+	// FinishedByReason splits RequestsFinished by why each request ended, so an operator
+	// can tell a healthy server from one whose clients keep leaving. A cancel and an
+	// abandoned sequence both look like a finished request in the total, and both are
+	// invisible in latency until they dominate: a client that disconnects after its first
+	// token still counts as a served request and still contributes a healthy-looking
+	// latency, while the server computes a generation nobody reads.
+	//
+	// Indexed by FinishReason rather than keyed by string: the set is closed, known at
+	// compile time, and a map would put an allocation on the finish path.
+	FinishedByReason [FinishReasonCount]uint64
+
 	// TokensGenerated counts the tokens a caller was told about, which is what the
 	// throughput they experience is measured in. It is not the model's forward passes:
 	// a batched round advances several sequences in one pass, so this number stays
@@ -56,6 +67,64 @@ type Stats struct {
 	PoolBlockSize int
 }
 
+// FinishReason identifies why a sequence ended. The values are the ones finish is called
+// with; anything else is a bug, and ReasonIndex keeps it out of the array rather than
+// letting it panic.
+type FinishReason int
+
+// The reasons a request can end, in the order they are array-indexed.
+const (
+	FinishStop FinishReason = iota
+	FinishLength
+	FinishCancel
+	FinishAbandoned
+	FinishError
+
+	// FinishReasonCount is one past the last reason. An array of this size has a slot for
+	// every value above.
+	FinishReasonCount
+)
+
+// String returns the name the event stream and the HTTP response already use, so a metric
+// label and a finish_reason field cannot drift apart.
+func (r FinishReason) String() string {
+	switch r {
+	case FinishStop:
+		return "stop"
+	case FinishLength:
+		return "length"
+	case FinishCancel:
+		return "cancel"
+	case FinishAbandoned:
+		return "abandoned"
+	case FinishError:
+		return "error"
+	}
+	return "unknown"
+}
+
+// reasonIndex maps the string finish is given to its array index.
+//
+// finish receives the reason as the string the event carries rather than as the enum,
+// because those strings are the contract with the caller: they appear in the event stream
+// and, for the ones OpenAI defines, in the response body. Converting once here keeps the
+// two representations tied together.
+func reasonIndex(reason string) (FinishReason, bool) {
+	switch reason {
+	case "stop":
+		return FinishStop, true
+	case "length":
+		return FinishLength, true
+	case "cancel":
+		return FinishCancel, true
+	case "abandoned":
+		return FinishAbandoned, true
+	case "error":
+		return FinishError, true
+	}
+	return 0, false
+}
+
 // FractionFull is what share of the pool is in use, or zero without a pool.
 func (s Stats) FractionFull() float64 {
 	if s.PoolBlocks == 0 {
@@ -83,6 +152,7 @@ func (e *Engine) Stats() Stats {
 	st := Stats{
 		RequestsSubmitted: e.requestsSubmitted,
 		RequestsFinished:  e.requestsFinished,
+		FinishedByReason:  e.finishedByReason,
 		TokensGenerated:   e.tokensGenerated,
 		Rounds:            e.rounds,
 		Active:            len(e.active),

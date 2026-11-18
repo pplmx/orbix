@@ -399,7 +399,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // It is built in one place because the list and the retrieve endpoint must not disagree: an
 // SDK that lists a model and then retrieves it compares the two, and a field present in one
 // and absent from the other reads as a server that changed underneath it.
-// modelObject is the model entry the list and retrieve endpoints return.
 //
 // created is zero rather than a real timestamp because nothing here knows one: a GGUF file
 // records no creation date, and the file's mtime is when it was copied rather than when the

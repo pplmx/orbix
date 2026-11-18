@@ -41,6 +41,12 @@ type Event struct {
 	// early -- at a stop string in the stream, say -- and still owe the count of what the
 	// model actually generated. The alternative, counting the events a consumer happened to
 	// receive, under-reports by however many it skipped.
+	//
+	// An abandoned sequence never delivers its terminal event: emit refuses everything once
+	// the caller is judged gone, which is what abandonment means. Measured with an unread
+	// channel and a 900-token budget, the caller received 67 events and then a closed channel
+	// with no Done at all, while the engine had generated 68. A consumer that needs a total
+	// for a request it stopped reading has to take it from somewhere other than this event.
 	Generated int
 	// Round is the engine round that produced this event.
 	//

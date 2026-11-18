@@ -1088,6 +1088,95 @@ func TestQueueFullIsRefused(t *testing.T) {
 //
 // The assertion is a deadline rather than an exact duration, so a slower machine does not fail
 // it while a regression to unbounded waiting still does.
+// TestTerminalEventReportsGeneratedTotal pins what Generated means and where it is absent.
+//
+// The field exists so a consumer that stops reading early -- the streaming path breaks out at
+// a stop string -- can still report how many tokens the model produced. Two things follow, and
+// both are easy to get wrong: for a fully-read sequence it must equal the number of token
+// events delivered, and for an abandoned one there is no terminal event at all to carry it.
+//
+// The second is not a defect to fix, it is what abandonment means -- emit refuses everything
+// once the caller is judged gone -- but a consumer that assumed otherwise would wait for an
+// event that never comes.
+func TestTerminalEventReportsGeneratedTotal(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 200}.Write(t, t.TempDir())
+
+	t.Run("equals the delivered tokens", func(t *testing.T) {
+		for _, budget := range []int{1, 5, 40} {
+			e, tok := loadEngineAt(t, path, Options{MaxActive: 1})
+			prompt := tok.Encode("Once upon a time", true)
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: budget})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			go func() {
+				for e.Pump() > 0 {
+				}
+			}()
+			delivered, generated := 0, -1
+			for ev := range ch {
+				if ev.HasToken {
+					delivered++
+				}
+				if ev.Done {
+					generated = ev.Generated
+				}
+			}
+			if generated < 0 {
+				t.Fatalf("budget %d: no terminal event carried a total", budget)
+			}
+			if delivered != generated {
+				t.Errorf("budget %d: delivered %d tokens but Generated = %d",
+					budget, delivered, generated)
+			}
+			if generated != budget {
+				t.Errorf("budget %d: Generated = %d, want the whole budget", budget, generated)
+			}
+		}
+	})
+
+	t.Run("an abandoned sequence sends no terminal event", func(t *testing.T) {
+		// Big context so the budget alone would keep it running; the test relies on the
+		// abandon, not on running out of positions.
+		long := gguftest.Model{NoEOS: true, ContextLen: 1000}.Write(t, t.TempDir())
+		e, tok := loadEngineAt(t, long, Options{MaxActive: 1})
+		prompt := tok.Encode("Once upon a time", true)
+
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 900})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		go func() {
+			for e.Pump() > 0 {
+			}
+		}()
+		// Read a few, then stop long enough for the buffer to fill and emit's grace to retire
+		// the sequence. The sleep is the load-bearing part: ranging over ch immediately after
+		// would keep draining the buffer, emit would succeed again, and no abandon would
+		// happen -- which is exactly how my first version of this subtest read 897 tokens and
+		// saw a Done.
+		for range 3 {
+			<-ch
+		}
+		time.Sleep(3 * time.Second)
+		sawDone, received := false, 0
+		for ev := range ch {
+			if ev.HasToken {
+				received++
+			}
+			if ev.Done {
+				sawDone = true
+			}
+		}
+		if sawDone {
+			t.Errorf("an abandoned sequence delivered a terminal event; received %d tokens", received)
+		}
+		if got := e.Stats().Active; got != 0 {
+			t.Errorf("Active = %d after the sequence was abandoned", got)
+		}
+	})
+}
+
 func TestFullBufferWithLiveCancelDoesNotStallPump(t *testing.T) {
 	path := gguftest.Model{NoEOS: true, ContextLen: 1000}.Write(t, t.TempDir())
 	e, tok := loadEngineAt(t, path, Options{MaxActive: 1, Workers: 1})

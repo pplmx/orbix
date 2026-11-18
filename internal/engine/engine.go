@@ -288,9 +288,19 @@ func New(path string, opts Options) (*Engine, error) {
 // Pool returns the shared block pool, or nil when the engine uses the contiguous
 // layout. It exists so a caller can report the memory budget and how much of it a
 // workload is using.
+//
+// Like Model and MaxActive, it reads a field that is assigned in New and never written
+// again, so no lock is taken here. The pool's own state is concurrent-safe; what is not
+// protected is the field, and it does not change.
 func (e *Engine) Pool() *llama.BlockPool { return e.pool }
 
 // Model exposes the loaded model, for configuration and statistics.
+//
+// The pointer is set in New and never replaced, so reading the field needs no lock. The
+// value it points at is not read-only, though: a forward pass writes the model's scratch
+// buffers, so a caller that runs inference through the returned pointer would be corrupting
+// a pass the engine is running. The call sites read Config(), W.Params() and Runner() --
+// configuration and counters, never a buffer -- which is the use this is for.
 func (e *Engine) Model() *llama.Model { return e.model }
 
 // Submit queues a request and returns the channel its events arrive on.

@@ -177,6 +177,46 @@ jobs:
       # No extra-args: the action already runs `prek run --all-files`.
       - uses: j178/prek-action@v3.1.0
 
+  # The commit-msg hook checks one message as it is written, and only where `prek install`
+  # ran. Nothing checked a branch as a whole: `prek run --all-files` skips commit-msg hooks
+  # (they need a message file), and `--last-commit` runs the same file hooks over one commit.
+  # So the format was conventional by habit rather than by gate.
+  #
+  # `cz check --rev-range` is the range form, which is why `make commits` exists to wrap it.
+  commits:
+    name: commits
+    runs-on: ubuntu-latest
+    steps:
+      # Full history of the head, plus the base branch by name: `cz check --rev-range`
+      # resolves both ends, and a default depth-1 checkout has neither. `ref` is what puts
+      # origin/<base_ref> into the clone -- fetch-depth alone does not create that remote
+      # branch, because actions/checkout fetches one ref unless told otherwise.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: fetch the base branch
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: install commitizen
+        run: pip install "commitizen>=4,<5"
+
+      # On a pull request the range is base..head. On a push to main there is nothing to
+      # compare against, so only the pushed commit is checked.
+      - name: make commits
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            make commits RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            make commits RANGE="HEAD~1..HEAD"
+          fi
+
   docs:
     name: docs
     runs-on: ubuntu-latest

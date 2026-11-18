@@ -23,7 +23,7 @@ export CGO_ENABLED := 0
 # no user is a build that breaks without anyone noticing.
 CROSS_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build test test-race lint fmt vet bench clean check cross docs fuzz hooks
+.PHONY: all build test test-race lint fmt vet bench clean check cross docs fuzz hooks commits
 
 all: check
 
@@ -126,6 +126,22 @@ hooks:
 		exit 1; \
 	}
 	prek run --all-files
+
+## commits: check commit messages against the Conventional Commits format
+##
+## The commit-msg hook does this for each commit as it is made, but a hook only runs where
+## `prek install` ran. CI needs the same check over a range rather than one message, and
+## `cz check --rev-range` is that command.
+##
+## RANGE defaults to origin/main..HEAD so a branch is checked as a whole; a shallow CI
+## checkout has no origin/main, so the workflow passes its own range explicitly.
+RANGE ?= origin/main..HEAD
+commits:
+	@command -v cz >/dev/null 2>&1 || { \
+		echo "cz not found: install commitizen (https://commitizen-tools.github.io/commitizen/)"; \
+		exit 1; \
+	}
+	cz check --rev-range $(RANGE)
 
 ## cross: build every supported platform with CGo disabled
 cross:

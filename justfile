@@ -44,17 +44,17 @@ build:
 
 # run the unit test suite with CGo disabled
 test:
-    # -count=1 disables the test result cache. A cached pass is a pass that did not run, and
-    # the gate exists to run things: a contributor who changes a test helper and sees green
-    # from a cached binary has learned nothing.
+    @# -count=1 disables the test result cache. A cached pass is a pass that did not run, and
+    @# the gate exists to run things: a contributor who changes a test helper and sees green
+    @# from a cached binary has learned nothing.
     go test -count=1 {{PKG}}
 
 # run the unit test suite under the race detector
 test-race:
-    # The race detector requires cgo, so this recipe overrides the CGo ban for itself only.
-    # That does not weaken the build: the ban exists so no shipping binary ever links C, and
-    # this recipe produces no binary -- it is a test instrument. Without the override the
-    # recipe could never have succeeded, because CGO_ENABLED=0 is exported to every recipe.
+    @# The race detector requires cgo, so this recipe overrides the CGo ban for itself only.
+    @# That does not weaken the build: the ban exists so no shipping binary ever links C, and
+    @# this recipe produces no binary -- it is a test instrument. Without the override the
+    @# recipe could never have succeeded, because CGO_ENABLED=0 is exported to every recipe.
     CGO_ENABLED=1 go test -count=1 -race {{PKG}}
 
 # run go vet
@@ -107,12 +107,12 @@ check: vet test lint
 
 # lint Markdown with rumdl
 docs:
-    # CI runs this as its own job, and the repository's convention is that Markdown is code:
-    # the README is the project's front page and each package's doc.go is its authoritative
-    # description, so a malformed table or a broken link is a defect like any other. It is a
-    # separate recipe rather than part of `check` because rumdl is a Python-era tool that a
-    # Go-only contributor may not have, and `check` should stay runnable with the Go toolchain
-    # and golangci-lint alone.
+    @# CI runs this as its own job, and the repository's convention is that Markdown is code:
+    @# the README is the project's front page and each package's doc.go is its authoritative
+    @# description, so a malformed table or a broken link is a defect like any other. It is a
+    @# separate recipe rather than part of `check` because rumdl is a Python-era tool that a
+    @# Go-only contributor may not have, and `check` should stay runnable with the Go toolchain
+    @# and golangci-lint alone.
     @command -v rumdl >/dev/null 2>&1 || { \
         echo "rumdl not found: install it (https://rumdl.dev) or run CI's docs job"; \
         exit 1; \
@@ -121,13 +121,13 @@ docs:
 
 # run the pre-commit hooks over every tracked file
 hooks:
-    # The hooks check what `just check` cannot see -- trailing whitespace and final newlines in
-    # non-Go files, YAML/TOML/JSON syntax, merge-conflict markers. Measured: a whitespace-only
-    # line appended to a workflow file left `check` green.
-    #
-    # A separate recipe because prek is a Rust binary that a Go-only contributor may not have,
-    # for the same reason `docs` is separate from `check`. CI runs it as its own job with
-    # --all-files, which is the same command.
+    @# The hooks check what `just check` cannot see -- trailing whitespace and final newlines in
+    @# non-Go files, YAML/TOML/JSON syntax, merge-conflict markers. Measured: a whitespace-only
+    @# line appended to a workflow file left `check` green.
+    @#
+    @# A separate recipe because prek is a Rust binary that a Go-only contributor may not have,
+    @# for the same reason `docs` is separate from `check`. CI runs it as its own job with
+    @# --all-files, which is the same command.
     @command -v prek >/dev/null 2>&1 || { \
         echo "prek not found: install it (https://prek.j178.dev) or run CI's prek job"; \
         exit 1; \
@@ -136,10 +136,10 @@ hooks:
 
 # check commit messages against the Conventional Commits format
 commits:
-    # The commit-msg hook does this for each commit as it is made, but a hook only runs where
-    # `prek install` ran. CI needs the same check over a range rather than one message, and
-    # `cz check --rev-range` is that command. prek's file-oriented run cannot substitute:
-    # commit-msg hooks need a message file and are skipped by `prek run --all-files`.
+    @# The commit-msg hook does this for each commit as it is made, but a hook only runs where
+    @# `prek install` ran. CI needs the same check over a range rather than one message, and
+    @# `cz check --rev-range` is that command. prek's file-oriented run cannot substitute:
+    @# commit-msg hooks need a message file and are skipped by `prek run --all-files`.
     @command -v cz >/dev/null 2>&1 || { \
         echo "cz not found: install commitizen (https://commitizen-tools.github.io/commitizen/)"; \
         exit 1; \

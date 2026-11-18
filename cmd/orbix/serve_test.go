@@ -120,6 +120,42 @@ func TestReservationWarning(t *testing.T) {
 // the kernel for 19.5GB whether or not a request ever touches those blocks. Measured on a
 // running server at that setting: VmSize 32GB against VmRSS 7.4GB after eight requests, so
 // the resident figure is not the reservation and an operator watching RSS would not see it.
+// TestPoolCapacityWarning is the other end of the same reporting: a pool too small to serve
+// anything rather than too large to be free.
+//
+// Measured before adding it: --blocks 1 --block-size 1 against a 128-position model started
+// cleanly, printed "paged, 1 blocks x 1 positions", and then refused every prompt longer
+// than one token with "llama: block pool exhausted (1 blocks of 1 positions)". The startup
+// line states the numbers but not that they cannot work, and the operator reading three
+// lines of cache report is not expected to divide 1 by 128.
+func TestPoolCapacityWarning(t *testing.T) {
+	// Enough capacity: no warning. 8 blocks of 16 positions covers a 128-position context
+	// exactly, which is the boundary the check is written against.
+	if got := poolCapacityWarning(8*16, 128); got != "" {
+		t.Errorf("warning for a pool that exactly fits the context: %q", got)
+	}
+	// More than enough.
+	if got := poolCapacityWarning(64*16, 128); got != "" {
+		t.Errorf("warning for a pool larger than the context: %q", got)
+	}
+	// No context to compare against: stay quiet rather than divide by it.
+	if got := poolCapacityWarning(0, 0); got != "" {
+		t.Errorf("warning with no context length: %q", got)
+	}
+
+	got := poolCapacityWarning(1, 128)
+	if got == "" {
+		t.Fatal("no warning for a one-position pool against a 128-position context")
+	}
+	// The same standard as the reservation warning: name what to change and state both
+	// numbers, since either one alone leaves the operator guessing which is wrong.
+	for _, want := range []string{"--blocks", "--block-size", "1", "128", "503"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning %q does not mention %q", got, want)
+		}
+	}
+}
+
 func TestPoolReservationWarning(t *testing.T) {
 	// Below the threshold: the small fixture's 2048 x 16 pool is 432MiB, which is a normal
 	// thing to configure and should not print a warning.

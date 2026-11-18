@@ -249,6 +249,9 @@ func cmdServe(args []string) error {
 		if note := poolReservationWarning(pool.Bytes()); note != "" {
 			fmt.Printf("%s\n", note)
 		}
+		if note := poolCapacityWarning(pool.Blocks()*pool.BlockSize(), eng.Model().Config().ContextLen); note != "" {
+			fmt.Printf("%s\n", note)
+		}
 	}
 
 	// A signal ends the server the way a caller would: stop accepting new requests, let the
@@ -347,6 +350,27 @@ func poolReservationWarning(reserved int64) string {
 	return fmt.Sprintf("warning:    the pool reserves all %s up front; a smaller --blocks lowers "+
 		"it, and Linux commits pages only as blocks are used, so resident memory will be lower "+
 		"until the pool fills.", humanBytes(reserved))
+}
+
+// poolCapacityWarning reports a pool whose total capacity is smaller than one request's
+// context, which means no request can run to completion.
+//
+// The pool report above already prints the block count and the positions per block, so the
+// shortage is derivable -- but it is not visible, and the failure arrives per request as a
+// 503 naming "block pool exhausted". Measured with --blocks 1 --block-size 1 against a
+// 128-position model: the server started, printed "paged, 1 blocks x 1 positions", accepted
+// the connection, and refused every prompt longer than one token. A config that cannot serve
+// anything should say so at startup, which is where the operator is still looking.
+//
+// This mirrors poolReservationWarning in the other direction: that one warns about a pool too
+// large to be free, this one about a pool too small to be useful.
+func poolCapacityWarning(capacity, contextLen int) string {
+	if capacity >= contextLen || contextLen <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("warning:    the pool holds %d positions but one request needs up to %d, "+
+		"so requests longer than %d will be refused with 503; raise --blocks or --block-size",
+		capacity, contextLen, capacity)
 }
 
 // humanBytes renders a byte count the way an operator reads it: whole kibibytes below a

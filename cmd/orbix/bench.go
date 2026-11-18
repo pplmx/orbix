@@ -3,7 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
@@ -171,7 +174,15 @@ func cmdBench(args []string) error {
 	fmt.Printf("throughput:  %.1f tok/s\n", perSec)
 	fmt.Printf("per stream:  %.1f tok/s\n", perSec/float64(*concurrency))
 	if len(reason) > 0 {
-		fmt.Printf("finish:      %v\n", reason)
+		// Sorted and spelled out rather than printed as a map: this is the line a reader uses to
+		// tell a truncated run from a complete one, and "map[length:8 stop:4]" makes them parse Go
+		// syntax to find out. Sorted because map iteration order is random, and two runs of the same
+		// benchmark should print the same report.
+		parts := make([]string, 0, len(reason))
+		for _, k := range slices.Sorted(maps.Keys(reason)) {
+			parts = append(parts, fmt.Sprintf("%s=%d", k, reason[k]))
+		}
+		fmt.Printf("finish:      %s\n", strings.Join(parts, " "))
 	}
 	return nil
 }

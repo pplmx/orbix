@@ -39,8 +39,10 @@ const (
 	// reordering the queue: each round takes the MaxActive sequences with the oldest
 	// last-served round, so no sequence can be passed over more than about
 	// len(active)/MaxActive rounds in a row. That is the property "fair" claims, and it
-	// is what makes it the right default for a long-running server where starvation of
-	// any request is the failure to avoid.
+	// is what makes it the better choice for a long-running server where starvation of
+	// any request is the failure to avoid. FIFO remains the default here, so that every
+	// other policy is a visible departure from submission order rather than a property a
+	// reader has to infer; a deployment that cares about worst-case wait sets this one.
 	PriorityFair
 )
 

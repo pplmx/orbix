@@ -119,6 +119,14 @@ check: vet test lint
     if [ -n "$unformatted" ]; then
         echo "gofmt needed on:"
         echo "$unformatted"
+        # Name the recipe that fixes it. check reports rather than rewrites -- a gate that
+        # edited the tree would make "did I change this?" unanswerable -- so the fix has to be
+        # somewhere, and it is `just fmt`.
+        #
+        # Single quotes, not double: this body is handed to bash as written, so backticks in a
+        # double-quoted string are command substitution. The first draft did that and printed
+        # "run internal/engine/zz_fmt.go to fix" -- it ran the filename.
+        echo 'run `just fmt` to fix'
         exit 1
     fi
     echo "check: ok"

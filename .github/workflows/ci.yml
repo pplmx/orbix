@@ -98,16 +98,25 @@ jobs:
         run: make cross
 
       - name: verify no CGo
-        # The binary reports the build tag state itself, so the ban is checked against
-        # the artifact rather than against the environment that produced it. A recipe
-        # that lost the CGO_ENABLED=0 export would show up here instead of as a mystery
-        # on a user's machine.
+        # The ban is checked against every artifact rather than against the environment that
+        # produced it, and against the artifact's own recorded build settings rather than by
+        # running it -- only linux/amd64 can be executed here, but `go version -m` reads the
+        # buildinfo of any Go binary, including the ones for platforms this job cannot run.
+        #
+        # Every target shares the Makefile's exported CGO_ENABLED today, so checking one would
+        # pass whenever the others do. The loop is what keeps that true: a per-target override
+        # added later, or a platform whose default differs, shows up here instead of as a
+        # mystery on a user's machine.
         run: |
           ./bin/orbix-linux-amd64 version
-          if ./bin/orbix-linux-amd64 version | grep -q 'cgo: *true'; then
-            echo "::error::the linux/amd64 binary was built with CGo"
-            exit 1
-          fi
+          failed=0
+          for f in bin/orbix-*; do
+            if ! go version -m "$f" | grep -q 'CGO_ENABLED=0'; then
+              echo "::error::$f was not built with CGO_ENABLED=0"
+              failed=1
+            fi
+          done
+          exit $failed
 
       - name: report artifacts
         run: ls -l bin/

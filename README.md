@@ -679,6 +679,11 @@ branch predictable rather than hoped for.
 The split is not cosmetic. `make check` sees Go files only: a whitespace-only line appended to a
 file under `.github/workflows/` leaves it green, exit 0, which is what `make hooks` catches.
 
+Run `prek install` once to make the hooks fire on every commit. `make hooks` is the same checks on
+demand and is what CI runs; installing is what makes them run without being asked. The hooks are
+in `.pre-commit-config.yaml`, and nothing about them is copied into the repository when installed --
+`prek install` writes shims under `.git/hooks/`, which git does not track.
+
 `make fuzz` searches rather than gates, which is why it is separate too. Six targets cover the
 paths that read untrusted bytes: the GGUF container, the quantization decoders, the chat template
 parser, and the tokenizer's pre-split and decode. Each keeps a seed corpus that `go test` replays

@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -62,6 +63,86 @@ func writeModel(t *testing.T, tensors []gguf.TensorInfo, data []byte) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// TestLoaderRejectsBadTensor covers the loader's refusal paths.
+//
+// Each is a check that exists so a corrupt or unsupported file produces a message naming
+// the tensor, rather than a short read, a slice panic, or a decoded array of garbage. They
+// were reachable but unasserted: coverage showed every one of these branches at zero, on a
+// package whose decoder functions are all at 100% -- the arithmetic was tested and the
+// guards around it were not.
+//
+// Tensor, TensorInto and TensorReader each perform their own checks rather than sharing
+// one, so each is driven separately; the assertions name the message because on these paths
+// the message is the entire product.
+func TestLoaderRejectsBadTensor(t *testing.T) {
+	// A file with one F32 tensor of two elements, so a valid name exists alongside the
+	// invalid ones.
+	good := writeModel(t, []gguf.TensorInfo{
+		{Name: "w", Type: gguf.F32, Dims: []uint64{2}},
+	}, make([]byte, 8))
+
+	t.Run("unknown name on every entry point", func(t *testing.T) {
+		l, err := OpenLoader(good)
+		if err != nil {
+			t.Fatalf("OpenLoader: %v", err)
+		}
+		defer func() { _ = l.Close() }()
+		if _, err := l.Tensor("absent"); err == nil {
+			t.Error("Tensor(absent) succeeded")
+		} else if !strings.Contains(err.Error(), "no tensor named") {
+			t.Errorf("Tensor error %q does not name the tensor", err)
+		}
+		if err := l.TensorInto("absent", make([]float32, 2)); err == nil {
+			t.Error("TensorInto(absent) succeeded")
+		} else if !strings.Contains(err.Error(), "no tensor named") {
+			t.Errorf("TensorInto error %q does not name the tensor", err)
+		}
+		if _, err := l.TensorReader("absent"); err == nil {
+			t.Error("TensorReader(absent) succeeded")
+		} else if !strings.Contains(err.Error(), "no tensor named") {
+			t.Errorf("TensorReader error %q does not name the tensor", err)
+		}
+	})
+
+	t.Run("destination size mismatch", func(t *testing.T) {
+		l, err := OpenLoader(good)
+		if err != nil {
+			t.Fatalf("OpenLoader: %v", err)
+		}
+		defer func() { _ = l.Close() }()
+		// The tensor holds two elements; a three-element destination is a caller bug that
+		// must be reported rather than half-filled.
+		if err := l.TensorInto("w", make([]float32, 3)); err == nil {
+			t.Error("TensorInto accepted a mismatched destination")
+		} else if !strings.Contains(err.Error(), "destination has") {
+			t.Errorf("error %q does not name the destination size", err)
+		}
+	})
+
+	t.Run("unsupported quantization type", func(t *testing.T) {
+		// A type this build cannot decode. The directory records it faithfully and the
+		// loader is what has to refuse it.
+		unsupported := gguf.QuantType(9999)
+		path := writeModel(t, []gguf.TensorInfo{
+			{Name: "odd", Type: unsupported, Dims: []uint64{2}},
+		}, make([]byte, 8))
+		l, err := OpenLoader(path)
+		if err != nil {
+			// The loader may refuse at open time, which is also a correct answer.
+			if !strings.Contains(err.Error(), "unsupported") {
+				t.Errorf("OpenLoader error %q does not say the type is unsupported", err)
+			}
+			return
+		}
+		defer func() { _ = l.Close() }()
+		if _, err := l.Tensor("odd"); err == nil {
+			t.Error("Tensor accepted an unsupported quantization type")
+		} else if !strings.Contains(err.Error(), "unsupported type") {
+			t.Errorf("error %q does not say the type is unsupported", err)
+		}
+	})
 }
 
 func TestLoaderTensor(t *testing.T) {

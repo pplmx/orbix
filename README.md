@@ -690,7 +690,13 @@ Orbix is a learning project, and it is honest about where it stands:
   A generation budget larger than the window is cut to fit, and `--stats` says when
   that happened, because a run that asked for 128 tokens and printed 123 otherwise
   looks like the model stopped early.
-- **Parallelism is over rows, never over a reduction.** Every output row is computed by one goroutine in the same order the serial kernel uses, so float32 addition is never reassociated and the parallel result is bit-identical. That is a deliberate constraint: a split reduction would be faster on paper and would silently change every number the project compares against llama.cpp.
+- **Parallelism is over independent outputs, never over a reduction.** The split decides
+  which goroutine computes which output element -- rows for a matvec, columns for a
+  transposed product -- and never splits the dot product itself, so every element is summed
+  in the same order the serial kernel uses. float32 addition is therefore never reassociated
+  and the parallel result is bit-identical. That is a deliberate constraint: a split reduction
+  would be faster on paper and would silently change every number the project compares against
+  llama.cpp.
 - **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 with 32 generated tokens per request it goes 239 tok/s at one stream to 655 tok/s at sixteen, medians of seven interleaved runs. Per-stream speed still drops as streams are added, because the model is one shared resource.
 - **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a
   request whose prompt starts with blocks the pool has already computed attaches them

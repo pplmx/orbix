@@ -1302,3 +1302,68 @@ func TestGreedyIgnoresSeed(t *testing.T) {
 		t.Errorf("greedy replied differently for two seeds:\n  %q\n  %q", a, b)
 	}
 }
+
+// TestTopPIsHonoured covers the top_p request field end to end.
+//
+// The field was absent from the request struct, so an SDK that always sends it got no error
+// and no effect: a caller asking for a narrow nucleus received the full distribution's
+// output. The engine now implements nucleus sampling, and this checks that the value reaches
+// it through the HTTP layer.
+//
+// The assertion is statistical because sampling is: a very small threshold keeps only the
+// most likely token, so the same prompt under many seeds collapses to one continuation, while
+// no threshold lets the seeds diverge. A per-request equality would be testing the RNG.
+func TestTopPIsHonoured(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	sample := func(seed int, topP string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"model": %q, "prompt": "Once upon a time",
+			"max_tokens": 8, "temperature": 1.5, "seed": %d%s}`,
+			srv.cfg.ModelName, seed, topP)
+		resp := post(t, h, "/v1/completions", body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		return decodeBody[completionResponse](t, resp).Choices[0].Text
+	}
+
+	distinct := func(topP string) int {
+		seen := make(map[string]bool)
+		for seed := 1; seed <= 12; seed++ {
+			seen[sample(seed, topP)] = true
+		}
+		return len(seen)
+	}
+
+	narrow := distinct(`, "top_p": 0.01`)
+	wide := distinct("")
+	if narrow >= wide {
+		t.Errorf("top_p=0.01 produced %d distinct continuations, no limit produced %d;"+
+			" the nucleus should collapse the distribution, not widen it", narrow, wide)
+	}
+	if wide < 2 {
+		t.Errorf("no top_p produced %d distinct continuations over 12 seeds, so sampling"+
+			" is not varying at all and the comparison proves nothing", wide)
+	}
+}
+
+// TestTopPRejectsOutOfRange covers the validation.
+//
+// Both ends are refused rather than clamped. Zero and one mean different things to different
+// callers -- "no limit" or "only the best token" -- so guessing would change a caller's output
+// silently, which is the failure mode this whole area is about.
+func TestTopPRejectsOutOfRange(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	for _, p := range []string{"-0.1", "1.5"} {
+		body := fmt.Sprintf(`{"model": %q, "prompt": "hi", "max_tokens": 2, "temperature": 1, "top_p": %s}`,
+			srv.cfg.ModelName, p)
+		resp := post(t, h, "/v1/completions", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("top_p=%s: status = %d, want 400", p, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}

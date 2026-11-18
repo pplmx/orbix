@@ -25,6 +25,7 @@ func (greedySampler) Next(logits []float32) int32 { return llama.Greedy{}.Next(l
 type temperatureSampler struct {
 	temp float32
 	topK int
+	topP float32
 	src  *rand.Rand
 }
 
@@ -33,6 +34,7 @@ func (t temperatureSampler) Next(logits []float32) int32 {
 	return llama.Temperature{
 		Temp:      t.temp,
 		TopK:      t.topK,
+		TopP:      t.topP,
 		NextFloat: t.src.Float64,
 	}.Next(logits)
 }

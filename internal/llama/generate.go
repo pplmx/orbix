@@ -3,6 +3,7 @@ package llama
 import (
 	"fmt"
 	"math"
+	"slices"
 )
 
 // Sampler picks the next token from a distribution of logits.
@@ -38,11 +39,26 @@ func (Greedy) Next(logits []float32) int32 {
 // Temperature samples from the logits after dividing by temp.
 //
 // temp <= 0 is treated as greedy, which is what every sampler API does and what
-// a user means by "no randomness". Top-k limits the candidate set before
-// sampling; k <= 0 disables the limit.
+// a user means by "no randomness".
+//
+// Two limits narrow the candidate set before the draw, and both are off at their
+// zero value:
+//
+//   - TopK keeps the k most likely tokens. The tail is negligible token by token
+//     and numerous, so it can dominate in aggregate.
+//   - TopP is nucleus sampling: keep the smallest set of most likely tokens whose
+//     probabilities sum to at least p. It adapts where TopK does not -- a peaked
+//     distribution keeps one or two candidates, a flat one keeps many.
+//
+// TopK applies first when both are set, which is the order the common APIs use:
+// the nucleus is computed over the k survivors rather than the whole vocabulary.
 type Temperature struct {
 	Temp float32
 	TopK int
+	// TopP is the nucleus threshold in (0, 1]. Zero or negative disables it, and so
+	// does a value at or above 1, because keeping every candidate is what happens
+	// without the limit.
+	TopP float32
 	// NextFloat returns a value in [0, 1). It is a field rather than a call to
 	// math/rand so a seed and a test can control it without global state.
 	NextFloat func() float64
@@ -63,6 +79,23 @@ func (s Temperature) Next(logits []float32) int32 {
 	if s.TopK > 0 && s.TopK < len(logits) {
 		sortTopK(candidates, logits, s.TopK)
 		candidates = candidates[:s.TopK]
+	}
+	// Nucleus sampling needs the candidates in descending probability order to find
+	// where the running total crosses p, and sortTopK leaves the survivors in no
+	// particular order within the slice. Sorting here is cheap: the slice is already
+	// narrowed by TopK in the common case.
+	if s.TopP > 0 && s.TopP < 1 {
+		slices.SortFunc(candidates, func(a, b int) int {
+			switch {
+			case logits[a] > logits[b]:
+				return -1
+			case logits[a] < logits[b]:
+				return 1
+			}
+			// Equal logits keep index order, so the choice between them is stable.
+			return a - b
+		})
+		candidates = nucleus(candidates, logits, s.Temp, s.TopP)
 	}
 
 	// Softmax over a scaled copy, then walk the cumulative distribution.
@@ -109,6 +142,44 @@ func sortTopK(idx []int, logits []float32, k int) {
 		}
 		idx[i], idx[best] = idx[best], idx[i]
 	}
+}
+
+// nucleus trims candidates to the smallest leading run whose probability mass reaches p.
+//
+// candidates must be sorted by descending logit, which is what makes the running total a
+// nucleus rather than an arbitrary subset. The run always keeps at least one token: a
+// threshold no single token reaches would otherwise leave nothing to draw from, and an
+// empty sampler is not a distribution.
+//
+// The probabilities are computed the same way Next computes them -- over the scaled logits
+// with the max subtracted -- so the nucleus and the draw agree about what the mass is. Doing
+// it twice is a few hundred exponentials; sharing it would mean returning a parallel array
+// from a helper whose job is to trim a slice.
+func nucleus(candidates []int, logits []float32, temp, p float32) []int {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	maxLogit := logits[candidates[0]]
+	var sum float64
+	exps := make([]float64, len(candidates))
+	for i, idx := range candidates {
+		e := math.Exp(float64((logits[idx] - maxLogit) / temp))
+		exps[i] = e
+		sum += e
+	}
+	if sum == 0 {
+		// Only reachable through a degenerate input (a NaN logit poisons the max). One
+		// candidate is still a valid answer and is better than dividing by zero.
+		return candidates[:1]
+	}
+	var acc float64
+	for i := range candidates {
+		acc += exps[i] / sum
+		if acc >= float64(p) {
+			return candidates[:i+1]
+		}
+	}
+	return candidates
 }
 
 // GenerateOptions controls Generate.

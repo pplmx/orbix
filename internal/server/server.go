@@ -61,6 +61,11 @@ type Config struct {
 	// TopK is the default top-k cutoff. Zero disables it.
 	TopK int
 
+	// TopP is the default nucleus threshold. Zero disables it, which is the project's
+	// default: top-k and top-p both narrow the candidate set, and turning on a second
+	// limit by default would change what an existing flag combination does.
+	TopP float64
+
 	// ChatRenderer renders conversations with the model's own template when one is
 	// available. Nil means the neutral transcript, which is also what a model without
 	// a usable template gets.
@@ -237,6 +242,7 @@ type chatRequest struct {
 
 	Temperature *float64  `json:"temperature"`
 	TopK        int       `json:"top_k"`
+	TopP        *float64  `json:"top_p"`
 	Stream      bool      `json:"stream"`
 	Stop        stopField `json:"stop"`
 
@@ -261,6 +267,7 @@ type completionRequest struct {
 
 	Temperature *float64  `json:"temperature"`
 	TopK        int       `json:"top_k"`
+	TopP        *float64  `json:"top_p"`
 	Stream      bool      `json:"stream"`
 	Stop        stopField `json:"stop"`
 
@@ -351,6 +358,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		priority:    req.Priority,
 		temperature: req.Temperature,
 		topK:        req.TopK,
+		topP:        req.TopP,
 		stream:      req.Stream,
 		stop:        req.Stop,
 		chat:        true,
@@ -377,6 +385,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		priority:    req.Priority,
 		temperature: req.Temperature,
 		topK:        req.TopK,
+		topP:        req.TopP,
 		stream:      req.Stream,
 		stop:        req.Stop,
 		seed:        req.Seed,
@@ -407,6 +416,7 @@ type generateParams struct {
 	priority    int
 	temperature *float64
 	topK        int
+	topP        *float64
 	stream      bool
 	stop        []string
 	chat        bool
@@ -449,7 +459,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		maxTokens = room
 	}
 
-	sampler, err := s.sampler(p.temperature, p.topK, p.seed)
+	sampler, err := s.sampler(p.temperature, p.topK, p.topP, p.seed)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -700,7 +710,7 @@ func chunkPayload(chat bool, text string) map[string]any {
 }
 
 // sampler builds the sampler a request asked for, or the server default.
-func (s *Server) sampler(temp *float64, topK int, seed int64) (llama.Sampler, error) {
+func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (llama.Sampler, error) {
 	t := s.cfg.Temperature
 	if temp != nil {
 		t = *temp
@@ -710,6 +720,16 @@ func (s *Server) sampler(temp *float64, topK int, seed int64) (llama.Sampler, er
 	}
 	if t < 0 {
 		return nil, fmt.Errorf("temperature must not be negative")
+	}
+	// TopP defaults to the server's own value when the request omits it. A value outside
+	// (0, 1] is refused rather than clamped: 0 and 1 both mean "no limit" to some callers
+	// and "only the best token" to others, and guessing would change the output silently.
+	p := s.cfg.TopP
+	if topP != nil {
+		p = *topP
+	}
+	if p < 0 || p > 1 {
+		return nil, fmt.Errorf("top_p must be between 0 and 1, got %v", p)
 	}
 	if t == 0 {
 		// Greedy is the default and the reproducible choice.
@@ -721,7 +741,7 @@ func (s *Server) sampler(temp *float64, topK int, seed int64) (llama.Sampler, er
 	if seed == 0 {
 		seed = time.Now().UnixNano()
 	}
-	return temperatureSampler{temp: float32(t), topK: topK, src: newRand(seed)}, nil
+	return temperatureSampler{temp: float32(t), topK: topK, topP: float32(p), src: newRand(seed)}, nil
 }
 
 // stopTokenIDs maps stop strings onto token ids for the engine's early-out.

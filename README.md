@@ -659,33 +659,33 @@ with a long window should be run with `--blocks`, where the total is the pool si
 git clone https://github.com/pplmx/orbix
 cd orbix
 
-make test      # CGO_ENABLED=0 go test ./...
-make lint      # golangci-lint run
-make check     # the local gate: vet, test, lint, gofmt
-make docs      # rumdl check: Markdown is code here too
-make hooks     # prek: whitespace, final newlines, and YAML/TOML/JSON syntax
-make commits   # cz check: commit subjects across a range (RANGE=origin/main..HEAD)
-make fuzz      # run every fuzz target; FUZZTIME sets the per-target budget
-make build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix
-make bench     # run kernel and engine benchmarks
+just test      # CGO_ENABLED=0 go test ./...
+just lint      # golangci-lint run
+just check     # the local gate: vet, test, lint, gofmt
+just docs      # rumdl check: Markdown is code here too
+just hooks     # prek: whitespace, final newlines, and YAML/TOML/JSON syntax
+just commits   # cz check: commit subjects across a range (RANGE=origin/main..HEAD)
+just fuzz      # run every fuzz target; FUZZTIME sets the per-target budget
+just build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix
+just bench     # run kernel and engine benchmarks
 ```
 
-`make check` is what a contributor runs before pushing; it needs only the Go toolchain and
-golangci-lint. `make docs` covers the README and every `doc.go` and needs rumdl, and `make hooks`
+`just check` is what a contributor runs before pushing; it needs only the Go toolchain and
+golangci-lint. `just docs` covers the README and every `doc.go` and needs rumdl, and `just hooks`
 runs the pre-commit hooks through prek — both are separate targets rather than part of `check`
 for the same reason: neither tool is in the Go toolchain, and `check` should stay runnable with
 Go and golangci-lint alone. The three are the gates CI runs, and running them makes a green
 branch predictable rather than hoped for.
 
-The split is not cosmetic. `make check` sees Go files only: a whitespace-only line appended to a
-file under `.github/workflows/` leaves it green, exit 0, which is what `make hooks` catches.
+The split is not cosmetic. `just check` sees Go files only: a whitespace-only line appended to a
+file under `.github/workflows/` leaves it green, exit 0, which is what `just hooks` catches.
 
-Run `prek install` once to make the hooks fire on every commit. `make hooks` is the same checks on
+Run `prek install` once to make the hooks fire on every commit. `just hooks` is the same checks on
 demand and is what CI runs; installing is what makes them run without being asked. The hooks are
 in `.pre-commit-config.yaml`, and nothing about them is copied into the repository when installed --
 `prek install` writes shims under `.git/hooks/`, which git does not track.
 
-`make fuzz` searches rather than gates, which is why it is separate too. Six targets cover the
+`just fuzz` searches rather than gates, which is why it is separate too. Six targets cover the
 paths that read untrusted bytes: the GGUF container, the quantization decoders, the chat template
 parser, and the tokenizer's pre-split and decode. Each keeps a seed corpus that `go test` replays
 on every run, so a crash that was found once stays fixed without anyone remembering to fuzz; the

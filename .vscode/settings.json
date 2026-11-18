@@ -1,12 +1,16 @@
 {
-  "// note": "Settings that follow this repo's constraints, not personal preferences. The build is CGO_ENABLED=0 only (see AGENTS.md), so the Go tooling here is told not to offer cgo-based diagnostics, and commands go through the Makefile rather than being reimplemented.",
+  "// note": "Settings that follow this repo's constraints, not personal preferences. The build is CGO_ENABLED=0 only (see AGENTS.md), so the Go tooling here is told not to offer cgo-based diagnostics, and commands go through the justfile rather than being reimplemented.",
   "go.toolsEnvVars": {
     "CGO_ENABLED": "0"
   },
   "go.buildTags": "",
-  "go.testFlags": ["-count=1"],
+  "go.testFlags": [
+    "-count=1"
+  ],
   "go.lintTool": "golangci-lint",
-  "go.lintFlags": ["--fast"],
+  "go.lintFlags": [
+    "--fast"
+  ],
   "go.formatTool": "gofmt",
   "go.useLanguageServer": true,
   "gopls": {

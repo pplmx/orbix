@@ -11,35 +11,35 @@
 
 ## 入口
 
-命令一律走 Makefile，不另起入口：
+命令一律走 justfile，不另起入口：
 
 ```bash
-make build   # 编译到 bin/orbix，注入版本信息
-make test    # go test -count=1 ./...
-make test-race # 竞态检测（单独覆盖 CGO_ENABLED=1，仅测试用）
-make lint    # golangci-lint run
-make check   # 本地门槛：vet + test + lint + gofmt
-make docs    # Markdown 门槛：rumdl check .
-make fuzz    # 跑全部 fuzz target，FUZZTIME 控制每个的时长（默认 30s）
-make bench   # 基准测试
-make cross   # 交叉编译到每个声称支持的平台（CGO_ENABLED=0）
-make hooks   # 跑 prek 的 pre-commit 钩子（非 Go 文件的空白、换行、YAML/TOML/JSON 语法）
-make commits # 按 Conventional Commits 校验某段提交信息（RANGE=origin/main..HEAD）
+just build   # 编译到 bin/orbix，注入版本信息
+just test    # go test -count=1 ./...
+just test-race # 竞态检测（单独覆盖 CGO_ENABLED=1，仅测试用）
+just lint    # golangci-lint run
+just check   # 本地门槛：vet + test + lint + gofmt
+just docs    # Markdown 门槛：rumdl check .
+just fuzz    # 跑全部 fuzz target，FUZZTIME 控制每个的时长（默认 30s）
+just bench   # 基准测试
+just cross   # 交叉编译到每个声称支持的平台（CGO_ENABLED=0）
+just hooks   # 跑 prek 的 pre-commit 钩子（非 Go 文件的空白、换行、YAML/TOML/JSON 语法）
+just commits # 按 Conventional Commits 校验某段提交信息（RANGE=origin/main..HEAD）
 ```
 
-配置以单一事实源维护：Go 用 `go.mod`，lint 用 `.golangci.yml`，Markdown 用 `.rumdl.toml`，提交钩子用 `.pre-commit-config.yaml`，行尾与二进制标记用 `.gitattributes`，编辑器约定用 `.editorconfig`，CI 用 `.github/workflows/ci.yml`。
+配置以单一事实源维护：Go 用 `go.mod`，lint 用 `.golangci.yml`，Markdown 用 `.rumdl.toml`，提交钩子用 `.pre-commit-config.yaml`，行尾与二进制标记用 `.gitattributes`，编辑器约定用 `.editorconfig`，命令入口用 `justfile`，CI 用 `.github/workflows/ci.yml`。
 
-CI 的 Go 相关 job 调用 Make 目标，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `make test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `make` 里的其他变量。七个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建 + 产物自报 `cgo: false`）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`make test-race` 单独覆盖）、prek（`make hooks`，补 `check` 看不见的非 Go 文件格式问题）、commits（`make commits`，按提交范围校验信息格式）、docs（`make docs`）。
+CI 的 Go 相关 job 调用 just 配方，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `just test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `justfile` 里的其他变量。七个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建 + 产物自报 `cgo: false`）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`just test-race` 单独覆盖）、prek（`just hooks`，补 `check` 看不见的非 Go 文件格式问题）、commits（`just commits`，按提交范围校验信息格式）、docs（`just docs`）。
 
-本地跑 `make check` 绿了，CI 的 gate 就应该绿；hooks、docs、cross、test-race、test-darwin 是需要额外工具或平台的独立门槛，各自有对应的 Make 目标，动到非 Go 文件就加跑 `make hooks`，动到 Markdown 也加跑 `make docs`。
+本地跑 `just check` 绿了，CI 的 gate 就应该绿；hooks、docs、cross、test-race、test-darwin 是需要额外工具或平台的独立门槛，各自有对应的 just 配方，动到非 Go 文件就加跑 `just hooks`，动到 Markdown 也加跑 `just docs`。
 
 这条分工是因为 rumdl 和 prek 都不在 Go 工具链里：把 `docs` 或 `hooks` 塞进 `check` 会让只装了 Go 的贡献者无法通过本地门槛。
 
-提交钩子还要 `prek install` 装一次才生效——它写 `.git/hooks/` 下的 shim，仓库里不落任何东西。装之前 `make hooks` 仍可手动跑，装之后每次 commit 自动跑，两条路径执行的是同一份 `.pre-commit-config.yaml`。
+提交钩子还要 `prek install` 装一次才生效——它写 `.git/hooks/` 下的 shim，仓库里不落任何东西。装之前 `just hooks` 仍可手动跑，装之后每次 commit 自动跑，两条路径执行的是同一份 `.pre-commit-config.yaml`。
 
-提交信息格式同理但机制不同：`commitizen` 钩子只检查**写下的那一条**，而且只在装了钩子的机器上跑；`make commits` 用 `cz check --rev-range` 检查**一整段**，CI 的 commits job 用它兜底。`prek run --all-files` 不会触发 commit-msg 阶段的钩子（它需要一个 message 文件），所以这两条路不能互相替代。
+提交信息格式同理但机制不同：`commitizen` 钩子只检查**写下的那一条**，而且只在装了钩子的机器上跑；`just commits` 用 `cz check --rev-range` 检查**一整段**，CI 的 commits job 用它兜底。`prek run --all-files` 不会触发 commit-msg 阶段的钩子（它需要一个 message 文件），所以这两条路不能互相替代。
 
-`make fuzz` 同理不并进 `check`：它按时间跑而不是按用例跑，默认 30 秒一个 target，全套要几分钟。但 **seed corpus 由 `make test` 跑**——`go test` 会重放 `testdata/fuzz/` 里的每个文件，所以一个修好的崩溃会一直防住回归，不需要记得跑 fuzz。
+`just fuzz` 同理不并进 `check`：它按时间跑而不是按用例跑，默认 30 秒一个 target，全套要几分钟。但 **seed corpus 由 `just test` 跑**——`go test` 会重放 `testdata/fuzz/` 里的每个文件，所以一个修好的崩溃会一直防住回归，不需要记得跑 fuzz。
 
 ## 目录
 
@@ -97,12 +97,12 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - 剩下那些设了 checkpoint 仍不着陆的行，多半是**防御性分支**：`engine.finish` 里 `cache.Reset()` 失败那条只在引用计数被破坏时触发，注释自己写着「a pool bug」。不为它伪造内部状态去凑覆盖率——不可达的错误路径正说明它所在的层是对的。
 - 验证一条回归测试有没有判别力，要靠改动被测代码后重跑，不是靠读代码推断。改动时注意**同文本多处出现**：`moeRowsFromBatch` 和 `moeRowsFromDecode` 的构造体逐字相同，用 Python `str.replace` 不加限定会打到第一个，于是测出来「注入不生效」而实际是没打到目标。改完用 `git diff` 确认命中位置。
 - 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。
-- `make test-race` 只覆盖测试里出现的并发。手动验证用 `CGO_ENABLED=1 go build -race` 出一个竞态版二进制，跑 `serve --max-active N`（配 `--blocks --block-size --prefix-cache` 开共享缓存），再打并发混合负载：非流式、SSE 流式、以及用 `timeout` 中途取消的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`，且 `orbix_requests_active` 归零——队列泄漏和竞态一样会让这个数停在非零。
+- `just test-race` 只覆盖测试里出现的并发。手动验证用 `CGO_ENABLED=1 go build -race` 出一个竞态版二进制，跑 `serve --max-active N`（配 `--blocks --block-size --prefix-cache` 开共享缓存），再打并发混合负载：非流式、SSE 流式、以及用 `timeout` 中途取消的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`，且 `orbix_requests_active` 归零——队列泄漏和竞态一样会让这个数停在非零。
 
 ## 文档
 
 - README 是门面和索引，权威正文放在各包 `doc.go`。
-- README 里承诺的 CLI 命令和 Make 目标必须真的可用；改接口时同步更新 README。
+- README 里承诺的 CLI 命令和 just 配方必须真的可用；改接口时同步更新 README。
 - Markdown 过 `rumdl check`，表格用对齐样式。
 
 ## 依赖

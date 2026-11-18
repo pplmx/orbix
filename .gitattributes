@@ -6,7 +6,7 @@
 #
 #   - Go sources: gofmt accepts CRLF, but every diff then shows whole-file changes when a
 #     Windows contributor touches a line, and `gofmt -l` reports clean while the file differs.
-#   - Shell snippets inside the Makefile and the Python scripts: a trailing \r is part of the
+#   - Shell snippets inside the justfile and the Python scripts: a trailing \r is part of the
 #     last argument, so a path becomes "out.gguf\r" and the tool cannot find it.
 #
 # `text=auto` asks Git to detect text and store it with LF; the explicit entries below name the
@@ -21,7 +21,7 @@
 *.toml text eol=lf
 *.py   text eol=lf
 *.sh   text eol=lf
-Makefile    text eol=lf
+justfile    text eol=lf
 .gitignore  text eol=lf
 .editorconfig text eol=lf
 

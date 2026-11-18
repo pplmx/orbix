@@ -838,11 +838,17 @@ just test-race # the suite under the race detector; needs cgo, so it is separate
 ```
 
 `just check` is what a contributor runs before pushing; it needs only the Go toolchain and
-golangci-lint. `just docs` covers the README and every `doc.go` and needs rumdl, and `just hooks`
-runs the pre-commit hooks through prek — both are separate targets rather than part of `check`
-for the same reason: neither tool is in the Go toolchain, and `check` should stay runnable with
-Go and golangci-lint alone. The three are the gates CI runs, and running them makes a green
-branch predictable rather than hoped for.
+golangci-lint. `just docs` runs `rumdl check .` over the repository's Markdown -- which here is
+the README and the pull-request template, since `.rumdl.toml` excludes `AGENTS.md` -- and needs
+rumdl. `just hooks` runs the pre-commit hooks through prek. Both are separate targets rather
+than part of `check` for the same reason: neither tool is in the Go toolchain, and `check`
+should stay runnable with Go and golangci-lint alone. The three are the gates CI runs, and
+running them makes a green branch predictable rather than hoped for.
+
+The `doc.go` files are Go, so rumdl does not see them; their prose is checked only by reading
+it. That is why every package's design notes live in a `doc.go` that a reviewer sees in the
+diff rather than behind a linter -- a broken Markdown table in the README fails `just docs`,
+and a contradictory sentence in a package doc does not fail anything.
 
 The split is not cosmetic. `just check` sees Go files only: a whitespace-only line appended to a
 file under `.github/workflows/` leaves it green, exit 0, which is what `just hooks` catches.

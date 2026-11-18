@@ -655,16 +655,6 @@ func fillNeg1() (out [256]int32) {
 	return out
 }
 
-// VocabSize returns the number of entries in the vocabulary.
-func (t *Tokenizer) VocabSize() int { return len(t.tokens) }
-
-// UnknownID returns the ID of the unknown token, or -1 when the model has
-// none.
-func (t *Tokenizer) UnknownID() int32 { return t.unknownID }
-
-// BOSID returns the beginning-of-sequence token ID, or -1 when unset.
-func (t *Tokenizer) BOSID() int32 { return t.bosID }
-
 // PreName returns tokenizer.ggml.pre verbatim, or "" when the file names no pre-tokenizer.
 func (t *Tokenizer) PreName() string { return t.preName }
 
@@ -702,9 +692,6 @@ func (t *Tokenizer) PreKnown() bool {
 func (t *Tokenizer) addsBOS() bool {
 	return t.addBOS == nil || *t.addBOS
 }
-
-// EOSID returns the end-of-sequence token ID, or -1 when unset.
-func (t *Tokenizer) EOSID() int32 { return t.eosID }
 
 // Token returns the piece stored at id.
 func (t *Tokenizer) Token(id int32) (string, bool) {

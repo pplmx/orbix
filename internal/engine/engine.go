@@ -786,9 +786,6 @@ func (e *Engine) Active() int {
 // MaxActive returns the configured concurrency cap.
 func (e *Engine) MaxActive() int { return e.maxActive }
 
-// Policy returns the admission policy.
-func (e *Engine) Policy() Priority { return e.policy }
-
 // Round returns how many Pump calls have run.
 //
 // It is a scheduling clock rather than a metric: a test that measured request latency

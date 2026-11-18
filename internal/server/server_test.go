@@ -1727,6 +1727,105 @@ func TestWriteErrorTypes(t *testing.T) {
 	}
 }
 
+// TestContextOverflowCarriesItsCode is the regression for the one validation failure a
+// client is most likely to branch on and least able to: OpenAI tells clients to match
+// error.code rather than message text, and reports an oversized context as
+// `context_length_exceeded` with a `param` naming the field. This server answered with a
+// bare message -- no code, no param -- so a client following that guidance had nothing to
+// match, and could not tell "trim the prompt and retry" from "your JSON was malformed".
+//
+// Both endpoints are checked because they name their input differently: a chat request
+// overflows `messages`, a completion overflows `prompt`. Reporting the field the caller
+// actually sent is the point of the param.
+func TestContextOverflowCarriesItsCode(t *testing.T) {
+	// A small window so a short prompt overflows it; the default fixture's 64 is reachable
+	// but this keeps the test's intent obvious.
+	srv, tok := newTestServerModel(t, gguftest.Model{ContextLen: 8, NoEOS: true})
+	cfg := srv.eng.Model().Config()
+	if cfg.ContextLen != 8 {
+		t.Fatalf("context is %d, want the fixture's small window", cfg.ContextLen)
+	}
+	// Encode a prompt that certainly exceeds the window.
+	prompt := strings.Repeat("word ", 64)
+	if n := len(tok.Encode(prompt, true)); n < cfg.ContextLen {
+		t.Fatalf("prompt is %d tokens against a %d window; raise the prompt", n, cfg.ContextLen)
+	}
+
+	cases := []struct {
+		name  string
+		path  string
+		body  string
+		param string
+	}{
+		{"completion overflow", "/v1/completions",
+			fmt.Sprintf(`{"prompt": %q, "max_tokens": 1}`, prompt), "prompt"},
+		{"chat overflow", "/v1/chat/completions",
+			fmt.Sprintf(`{"messages": [{"role": "user", "content": %q}], "max_tokens": 1}`, prompt),
+			"messages"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			var body errorBody
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Error.Code != "context_length_exceeded" {
+				t.Errorf("code = %q, want context_length_exceeded", body.Error.Code)
+			}
+			if body.Error.Param != c.param {
+				t.Errorf("param = %q, want %q", body.Error.Param, c.param)
+			}
+			// The message still has to carry the numbers: a code tells a program what
+			// happened, but the size is what a person uses to decide how much to trim.
+			if !strings.Contains(body.Error.Message, "tokens") {
+				t.Errorf("message %q does not state the sizes", body.Error.Message)
+			}
+		})
+	}
+}
+
+// TestSamplerErrorsNameTheField covers the other two validation failures that used to be
+// bare messages. A caller that sent a negative temperature and one that sent top_p = 2
+// both got an uncoded 400, so a client could not tell which field to fix -- and both are
+// per-field mistakes with an obvious answer.
+func TestSamplerErrorsNameTheField(t *testing.T) {
+	srv, _ := newTestServer(t)
+	cases := []struct {
+		name  string
+		body  string
+		param string
+	}{
+		{"negative temperature", `{"prompt": "Once upon a time", "max_tokens": 1, "temperature": -1}`,
+			"temperature"},
+		{"top_p above one", `{"prompt": "Once upon a time", "max_tokens": 1, "top_p": 2}`,
+			"top_p"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/completions", c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			var body errorBody
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Error.Param != c.param {
+				t.Errorf("param = %q, want %q", body.Error.Param, c.param)
+			}
+			if body.Error.Code != "invalid_value" {
+				t.Errorf("code = %q, want invalid_value", body.Error.Code)
+			}
+		})
+	}
+}
+
 // TestValidationErrorsNameTheField covers error.param on the two required-field checks.
 //
 // OpenAI's error object documents `param` as the field at fault for a request-validation

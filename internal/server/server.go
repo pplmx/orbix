@@ -465,7 +465,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		return
 	}
 	if len(promptTokens) >= s.cfg.ContextLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+		// A coded error, not a bare message: OpenAI's guidance to clients is to branch on
+		// `code`, and its own context overflow carries `context_length_exceeded` with a
+		// `param` naming the side that overflowed. A client that follows that guidance
+		// otherwise sees an uncoded 400 and cannot tell "shorten and retry" from "your
+		// request was malformed".
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			promptParam(p.chat), "context_length_exceeded",
 			"prompt is %d tokens, context is %d", len(promptTokens), s.cfg.ContextLen))
 		return
 	}
@@ -477,7 +483,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 
 	sampler, err := s.sampler(p.temperature, p.topK, p.topP, p.seed)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		// The sampler's errors are all about one request field, so they carry it rather
+		// than making the client infer which of temperature and top_p was wrong.
+		writeRequestError(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -786,7 +794,8 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (ll
 		topK = s.cfg.TopK
 	}
 	if t < 0 {
-		return nil, fmt.Errorf("temperature must not be negative")
+		return nil, newParamError("temperature", "invalid_value",
+			"temperature must not be negative, got %v", t)
 	}
 	// TopP defaults to the server's own value when the request omits it. A value outside
 	// (0, 1] is refused rather than clamped: 0 and 1 both mean "no limit" to some callers
@@ -796,7 +805,8 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (ll
 		p = *topP
 	}
 	if p < 0 || p > 1 {
-		return nil, fmt.Errorf("top_p must be between 0 and 1, got %v", p)
+		return nil, newParamError("top_p", "invalid_value",
+			"top_p must be between 0 and 1, got %v", p)
 	}
 	if t == 0 {
 		// Greedy is the default and the reproducible choice.
@@ -958,6 +968,19 @@ type errorBody struct {
 	} `json:"error"`
 }
 
+// promptParam names the field a context-window failure is about.
+//
+// The two endpoints name their input differently: a chat request carries `messages`, a
+// completion carries `prompt`. OpenAI reports `messages` for a chat overflow, so echoing
+// the field the caller actually sent is what lets a client highlight the right part of its
+// request instead of a field it never used.
+func promptParam(chat bool) string {
+	if chat {
+		return "messages"
+	}
+	return "prompt"
+}
+
 // writeErrorParam is writeError for a request-validation failure that can name the field at
 // fault. OpenAI's error object documents `param` for exactly this, and its clients surface it as
 // e.param, so a caller writing "--prompt" instead of "prompt" gets the field name rather than
@@ -969,6 +992,48 @@ func writeErrorParam(w http.ResponseWriter, status int, msg, param, code string)
 	body.Error.Param = param
 	body.Error.Code = code
 	writeJSON(w, status, body)
+}
+
+// paramError is a request-validation failure that knows which field it is about.
+//
+// It exists because OpenAI's own guidance is to branch on `code` rather than on message
+// text, and a handler that writes its message with writeError hands a client no code at
+// all. Two paths did exactly that -- the context-window check and the sampler checks -- so
+// a client that follows the guidance could not tell "your prompt is too long" (trim it and
+// retry) from "your temperature is negative" (fix the value and retry), or either from a
+// malformed body. Carrying param and code on the error keeps the pairing with the message
+// that produced them, rather than leaving it to whichever writer the call site happens to
+// reach for.
+//
+// error's own Error() is the message, so a caller that only wants the text can ignore the
+// rest, and errors.As recovers the fields.
+type paramError struct {
+	message string
+	param   string
+	code    string
+}
+
+func (e *paramError) Error() string { return e.message }
+
+// newParamError builds a validation failure naming the field at fault.
+func newParamError(param, code, format string, args ...any) error {
+	return &paramError{message: fmt.Sprintf(format, args...), param: param, code: code}
+}
+
+// writeRequestError writes a validation failure, adding the field and code when the error
+// carries them.
+//
+// This is the writer the request paths should use: it degrades to a plain message for an
+// error that is not a paramError, so a call site cannot lose the code by accident, and one
+// that does carry fields gets them without a second argument list to keep in step with the
+// message.
+func writeRequestError(w http.ResponseWriter, status int, err error) {
+	var pe *paramError
+	if errors.As(err, &pe) {
+		writeErrorParam(w, status, pe.message, pe.param, pe.code)
+		return
+	}
+	writeError(w, status, err.Error())
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

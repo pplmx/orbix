@@ -661,6 +661,67 @@ func TestDecodeStepRejectsBadInput(t *testing.T) {
 
 // TestDecodeStepGrowsScratch checks that a later, larger batch works: the scratch
 // grows on demand rather than staying pinned to the first batch's size.
+// TestDecodeStepScratchIsReused pins the ownership contract the doc states: the returned
+// slice is the model's buffer and the next pass overwrites it.
+//
+// The growth test above proves the scratch can get bigger; it says nothing about the reuse
+// that makes growth matter. Both halves are load-bearing. Reuse is what keeps a decode step
+// allocation-free, and the overwrite is what a caller must know about -- copying nothing and
+// holding the slice across calls yields the second pass's numbers under the first pass's
+// length, which looks like data rather than like a bug.
+//
+// Measured against the fixture: two single-token steps return the same backing array, and the
+// first element changes after the second call.
+func TestDecodeStepScratchIsReused(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	cache, err := NewKVCache(cfg, 64)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	if _, err := m.Prefill(cache, []int32{int32(cfg.BOSID), 1, 2}, 0); err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+
+	first, err := m.DecodeStep([]Cache{cache}, []int32{3})
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+	// Copy before the second pass. Comparing first to second after both calls would compare
+	// the shared buffer with itself and always agree -- which is exactly the trap the doc
+	// warns a caller about, so the test would have been reading its own mistake.
+	snapshot := append([]float32(nil), first...)
+
+	second, err := m.DecodeStep([]Cache{cache}, []int32{4})
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatal("DecodeStep returned no logits")
+	}
+	if &first[0] != &second[0] {
+		t.Error("two same-sized decode steps returned different buffers, so the scratch is not reused")
+	}
+	// And the second pass must have rewritten it, since the tokens differ. Compared against the
+	// snapshot, not against first: see above.
+	changed := false
+	for i := range snapshot {
+		if snapshot[i] != second[i] {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		t.Error("two decode steps with different tokens produced identical logits; " +
+			"the scratch is reused but the pass is not writing into it")
+	}
+}
+
 func TestDecodeStepGrowsScratch(t *testing.T) {
 	m := loadReal(t)
 	cfg := m.Config()

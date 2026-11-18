@@ -24,17 +24,20 @@ make fuzz    # 跑全部 fuzz target，FUZZTIME 控制每个的时长（默认 3
 make bench   # 基准测试
 make cross   # 交叉编译到每个声称支持的平台（CGO_ENABLED=0）
 make hooks   # 跑 prek 的 pre-commit 钩子（非 Go 文件的空白、换行、YAML/TOML/JSON 语法）
+make commits # 按 Conventional Commits 校验某段提交信息（RANGE=origin/main..HEAD）
 ```
 
 配置以单一事实源维护：Go 用 `go.mod`，lint 用 `.golangci.yml`，Markdown 用 `.rumdl.toml`，提交钩子用 `.pre-commit-config.yaml`，行尾与二进制标记用 `.gitattributes`，编辑器约定用 `.editorconfig`，CI 用 `.github/workflows/ci.yml`。
 
-CI 的 Go 相关 job 调用 Make 目标，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `make test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `make` 里的其他变量。六个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建 + 产物自报 `cgo: false`）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`make test-race` 单独覆盖）、prek（`make hooks`，补 `check` 看不见的非 Go 文件格式问题）、docs（`make docs`）。
+CI 的 Go 相关 job 调用 Make 目标，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `make test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `make` 里的其他变量。七个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建 + 产物自报 `cgo: false`）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`make test-race` 单独覆盖）、prek（`make hooks`，补 `check` 看不见的非 Go 文件格式问题）、commits（`make commits`，按提交范围校验信息格式）、docs（`make docs`）。
 
 本地跑 `make check` 绿了，CI 的 gate 就应该绿；hooks、docs、cross、test-race、test-darwin 是需要额外工具或平台的独立门槛，各自有对应的 Make 目标，动到非 Go 文件就加跑 `make hooks`，动到 Markdown 也加跑 `make docs`。
 
 这条分工是因为 rumdl 和 prek 都不在 Go 工具链里：把 `docs` 或 `hooks` 塞进 `check` 会让只装了 Go 的贡献者无法通过本地门槛。
 
 提交钩子还要 `prek install` 装一次才生效——它写 `.git/hooks/` 下的 shim，仓库里不落任何东西。装之前 `make hooks` 仍可手动跑，装之后每次 commit 自动跑，两条路径执行的是同一份 `.pre-commit-config.yaml`。
+
+提交信息格式同理但机制不同：`commitizen` 钩子只检查**写下的那一条**，而且只在装了钩子的机器上跑；`make commits` 用 `cz check --rev-range` 检查**一整段**，CI 的 commits job 用它兜底。`prek run --all-files` 不会触发 commit-msg 阶段的钩子（它需要一个 message 文件），所以这两条路不能互相替代。
 
 `make fuzz` 同理不并进 `check`：它按时间跑而不是按用例跑，默认 30 秒一个 target，全套要几分钟。但 **seed corpus 由 `make test` 跑**——`go test` 会重放 `testdata/fuzz/` 里的每个文件，所以一个修好的崩溃会一直防住回归，不需要记得跑 fuzz。
 

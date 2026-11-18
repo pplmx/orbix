@@ -664,6 +664,7 @@ make lint      # golangci-lint run
 make check     # the local gate: vet, test, lint, gofmt
 make docs      # rumdl check: Markdown is code here too
 make hooks     # prek: whitespace, final newlines, and YAML/TOML/JSON syntax
+make commits   # cz check: commit subjects across a range (RANGE=origin/main..HEAD)
 make fuzz      # run every fuzz target; FUZZTIME sets the per-target budget
 make build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix
 make bench     # run kernel and engine benchmarks

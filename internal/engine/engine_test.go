@@ -14,6 +14,99 @@ import (
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
+// TestStatsCountOnlyRoundsThatDidWork pins a distinction the struct documents and nothing
+// checked: Rounds counts Pump calls that advanced something, not calls made.
+//
+// It matters because the two are easy to conflate when reading a dashboard. An idle server
+// polled every millisecond would show a huge round count while generating nothing, and the
+// queue-versus-throughput comparison the field exists for would be meaningless. The
+// increment lives next to the work rather than at the top of Pump for exactly this reason,
+// and a later edit that moved it up would look harmless.
+func TestStatsCountOnlyRoundsThatDidWork(t *testing.T) {
+	e, _, _ := loadModelPath(t, Options{MaxActive: 2, Workers: 2})
+
+	for range 5 {
+		if n := e.Pump(); n != 0 {
+			t.Fatalf("Pump on an empty queue advanced %d sequences, want 0", n)
+		}
+	}
+	if got := e.Stats().Rounds; got != 0 {
+		t.Errorf("Rounds = %d after five empty Pumps, want 0", got)
+	}
+
+	ch, err := e.Submit(Request{Prompt: []int32{1, 2, 3}, MaxTokens: 3})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	// Rounds counts calls where a sequence was still active at the top of Pump -- the calls
+	// that had work to give a policy. The instruction budget does not land on a round
+	// boundary: the sequence is finished by a token inside a round, and the next Pump still
+	// finds it active and counts itself before noticing. So this is an ordering assertion
+	// (rounds strictly fewer than the token budget plus the finish round) rather than an
+	// equality against a count this test would have to guess at.
+	callCount := 0
+	for e.Pump() > 0 {
+		callCount++
+	}
+	for range ch {
+	}
+
+	s := e.Stats()
+	if s.Rounds == 0 {
+		t.Fatal("Rounds = 0 after a request that generated tokens")
+	}
+	if s.Rounds < uint64(callCount) {
+		t.Errorf("Rounds = %d, fewer than the %d productive Pump calls", s.Rounds, callCount)
+	}
+	if s.TokensGenerated != 3 {
+		t.Errorf("TokensGenerated = %d, want 3 (the token budget is the count a caller sees)", s.TokensGenerated)
+	}
+}
+
+// TestStatsPrefixReusedCountsPositions pins what PrefixReused measures: prompt positions
+// that came from the shared index instead of a forward pass, counted in positions rather
+// than in blocks or requests.
+//
+// The unit is the part worth pinning. A block is 16 positions by default here, so counting
+// blocks would report 2 where the documented meaning gives 32, and the number is compared
+// against prompt lengths elsewhere.
+func TestStatsPrefixReusedCountsPositions(t *testing.T) {
+	e, _, _ := loadModelPath(t, Options{
+		MaxActive: 2, Workers: 2, BlockSize: 16, Blocks: 64, PrefixCache: true,
+	})
+
+	s := e.Stats()
+	if s.PoolBlocks != 64 || s.PoolFree != 64 || s.PoolBlockSize != 16 {
+		t.Fatalf("pool = %d blocks, %d free, size %d; want 64, 64, 16", s.PoolBlocks, s.PoolFree, s.PoolBlockSize)
+	}
+
+	// Forty tokens spans two whole blocks, so the prefix index publishes them and the
+	// second request can reuse both.
+	prompt := make([]int32, 40)
+	for i := range prompt {
+		prompt[i] = int32(3 + i%10)
+	}
+	runOne := func() {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		for e.Pump() > 0 {
+		}
+		for range ch {
+		}
+	}
+
+	runOne()
+	if got := e.Stats().PrefixReused; got != 0 {
+		t.Errorf("PrefixReused = %d on the first request, want 0: nothing was there to reuse", got)
+	}
+	runOne()
+	if got, want := e.Stats().PrefixReused, uint64(32); got != want {
+		t.Errorf("PrefixReused = %d after the second request, want %d (two blocks of 16 positions)", got, want)
+	}
+}
+
 // These tests check that two sequences interleaved on one model produce the same tokens
 // they would alone. That failure mode is a shared scratch buffer, and a model has one
 // whatever its weights are -- a constructed fixture has exactly as many buffers as a

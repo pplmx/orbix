@@ -34,7 +34,14 @@ type Stats struct {
 	// larger than the pass count.
 	TokensGenerated uint64
 
-	// Rounds counts Pump calls that did work.
+	// Rounds counts Pump calls that had a sequence to advance at the moment the round
+	// began. A call that finds the queue empty and the active set empty is not counted, so
+	// polling an idle engine does not inflate the throughput reading.
+	//
+	// The boundary is not the same as "produced a token": a sequence that finished inside a
+	// round is still active at the top of the next one, which counts itself and then finds
+	// nothing to do. So this number can be one higher than the count of rounds that emitted
+	// output, and it is a round rate rather than a completion rate.
 	Rounds uint64
 
 	// Active is how many sequences are being advanced right now.

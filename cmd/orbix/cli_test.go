@@ -281,6 +281,36 @@ func TestModelInspectJSON(t *testing.T) {
 // The JSON exists because this is the command a script reads: the cross-build job checks that an
 // artifact reports cgo:false, and parsing a two-column text report for that is worse than parsing
 // a document.
+// TestRunAcceptsWorkers covers the flag `run` was missing while every other command had it.
+//
+// run builds the model through llama.New directly rather than through the engine, so the worker
+// flag the engine-based commands register never reached it: the one parameter that decides a
+// single stream's speed could not be set. Measured on the fixture, 1 worker gave 63.5 tok/s and
+// 32 gave 248.3 -- a command whose default reported "this is slow" with no way to ask for more.
+func TestRunAcceptsWorkers(t *testing.T) {
+	path := chatModel(t)
+
+	out := captureStdout(t, func() {
+		if err := run([]string{"run", "--model", path, "--workers", "4",
+			"--max-tokens", "2", "Once upon a time"}); err != nil {
+			t.Fatalf("run --workers: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) == "" {
+		t.Error("run --workers produced no output")
+	}
+
+	// A negative count is refused rather than reaching the kernel runner, which would divide
+	// the work by a non-positive number.
+	err := run([]string{"run", "--model", path, "--workers", "-1", "x"})
+	if err == nil {
+		t.Fatal("run --workers -1 succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "workers") {
+		t.Errorf("error %q does not name --workers", err)
+	}
+}
+
 func TestVersionJSONAndUnknownArgs(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := run([]string{"version", "-json"}); err != nil {

@@ -24,6 +24,7 @@ func cmdRun(args []string) error {
 	seed := fs.Int64("seed", 0, "sampling seed; 0 uses the current time. Has no effect without --temp, because greedy decoding is already deterministic")
 	contextLen := fs.Int("ctx", 0, "context length; 0 uses the model's trained amount")
 	echo := fs.Bool("echo", false, "print the prompt before the generated text")
+	workers := workersFlag(fs)
 	stats := fs.Bool("stats", false, "print timing and token counts to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -41,6 +42,9 @@ func cmdRun(args []string) error {
 	// refusing rather than interpreting.
 	if *temp < 0 {
 		return fmt.Errorf("run: --temp must not be negative (0 means greedy)")
+	}
+	if *workers < 0 {
+		return fmt.Errorf("run: --workers must not be negative")
 	}
 	if *topK < 0 {
 		return fmt.Errorf("run: --top-k must not be negative (0 disables it)")
@@ -77,7 +81,7 @@ func cmdRun(args []string) error {
 	}
 
 	t0 := time.Now()
-	m, err := llama.New(*model)
+	m, err := llama.NewWithOptions(*model, llama.Options{Workers: *workers})
 	if err != nil {
 		return err
 	}

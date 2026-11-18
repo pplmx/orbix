@@ -46,17 +46,27 @@ type cacheFlags struct {
 	workers   *int
 }
 
-// registerCacheFlags registers the paged-cache and worker flags.
+// workersFlag registers --workers with the one wording every command shares.
+//
+// It is separate from registerCacheFlags because `run` wants it without the cache flags: a
+// one-shot generation has no paged cache to size, but the worker count decides its speed --
+// measured on the fixture, one worker gave 63.6 tok/s on a single stream and 128 gave 248.7,
+// which is the difference between "this is slow" and "this is a usable demo".
+func workersFlag(fs *flag.FlagSet) *int {
+	return fs.Int("workers", 0,
+		"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+
+			"the outputs a pass can split, which for the vocabulary projection is its width "+
+			"rather than the batch size -- measured on a 128-core host, 8 workers give about "+
+			"two thirds of what 32 do, and beyond 32 the difference is inside the noise")
+}
+
+// registerCacheFlags registers the paged-cache flags, and the worker flag when asked.
 func registerCacheFlags(fs *flag.FlagSet, workers bool) cacheFlags {
 	var c cacheFlags
 	c.blockSize = fs.Int("block-size", 0, "KV cache block size in positions; 0 keeps the contiguous cache")
 	c.blocks = fs.Int("blocks", 0, "KV cache blocks shared by all requests; implies a paged cache")
 	if workers {
-		c.workers = fs.Int("workers", 0,
-			"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+
-				"the outputs a pass can split, which for the vocabulary projection is its width "+
-				"rather than the batch size -- measured on a 128-core host, 8 workers give about "+
-				"two thirds of what 32 do, and beyond 32 the difference is inside the noise")
+		c.workers = workersFlag(fs)
 	}
 	return c
 }

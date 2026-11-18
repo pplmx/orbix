@@ -676,18 +676,15 @@ Orbix is a learning project, and it is honest about where it stands:
   enough to make attention dominate per-position work would stop the trend, and this
   engine has no measurement of where that turn is.
 
-  Interleaving the two sizes matters more than the sizes themselves: taking them in
-  separate runs let load drift put a 2.5x spread on the smaller one, which is wider
-  than the effect being measured, and repeat runs of the same workload on this shared
-  machine vary by more than the improvements being measured -- a 3721-token prompt
-  once timed faster than a 3641-token one.
+  Interleaving the two sizes matters more than the sizes themselves: taken in separate
+  runs, load drift put a 2.5x spread on the smaller one, wider than the effect being
+  measured.
 
   This bullet used to say prefill was *superlinear* and give "4x the tokens for 2.78x
-  the time" as the evidence, which says the opposite; the figure was also measured
-  before attention was parallelised, when 2001 tokens took 177 s and attention was
-  135 s of it. Both halves are replaced rather than deleted, because the shape of the
-  mistake -- an adjective that outlived the measurement under it -- is the reusable
-  part.
+  the time" as evidence, which says the opposite. That figure was also measured before
+  attention was parallelised, when 2001 tokens took 177 s and attention was 135 s of
+  it. Both halves are replaced rather than deleted, because the shape of the mistake
+  -- an adjective that outlived the measurement under it -- is the reusable part.
 - **Treat the numbers above as indicative, not as a benchmark.** They were taken on
   a shared machine whose load drifted between 40 and 90 over the course of a few
   minutes, and repeat runs of the same workload varied by more than the improvements

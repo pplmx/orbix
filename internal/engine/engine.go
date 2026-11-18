@@ -430,6 +430,13 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 // order. That bound is what keeps a burst of requests from allocating a batch
 // whose scratch dwarfs the model.
 //
+// Only one goroutine may be inside Pump at a time. The engine does not serialise that
+// for the caller: the model it drives owns one set of scratch buffers, so two concurrent
+// rounds would write the same slices and produce output that is neither round's. The
+// same constraint is why Model() returns a pointer whose value is not safe to run
+// inference through while the pump is running -- the server and the REPL both keep Pump
+// on a single goroutine and call Submit from wherever.
+//
 // Panics inside the model propagate: a corrupt forward pass should not be turned
 // into a per-request error that hides a bug in the engine.
 func (e *Engine) Pump() int {

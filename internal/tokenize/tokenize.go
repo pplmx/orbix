@@ -1264,6 +1264,19 @@ func (d *StreamDecoder) Token(id int32) string {
 		return d.emit(d.drainPending(false))
 	}
 
+	// A byte-level piece is bytes, not text, and two adjacent pieces can hold the halves of
+	// one character: Qwen2's vocabulary has pieces that are a bare continuation byte such as
+	// \xa1, which is only valid once the byte before it arrives. Decode buffers every
+	// byte-level piece for exactly this reason (see the comment there); the stream decoder
+	// has to do the same or it renders each half on its own. That is what produced a
+	// replacement character as the first streamed character of a Chinese reply while the
+	// non-streaming body had the real one -- the case TestStreamDecoderMatchesDecode misses
+	// because its fixture vocabulary has no split sequences in it.
+	if d.tok.byteLevel {
+		d.pending = append(d.pending, bpeUnescapeBytes(d.tok.tokens[id])...)
+		return d.emit(d.drainPending(false))
+	}
+
 	// A non-byte token ends any byte run: whatever is left is a character that will
 	// never be completed, so it is rendered the way Decode renders it.
 	var b strings.Builder
@@ -1274,6 +1287,17 @@ func (d *StreamDecoder) Token(id int32) string {
 		b.WriteString(d.tok.renderPiece(d.tok.tokens[id]))
 	}
 	return d.emit(b.String())
+}
+
+// Flush emits whatever is left when no more tokens are coming.
+//
+// Token deliberately holds back a partial character so the next token can complete it, which
+// is what keeps a split sequence from rendering as U+FFFD. The cost is that a stream ending
+// mid-character has to say so, or those bytes are silently lost: a sequence ending on a bare
+// continuation byte produced nothing at all, where Decode renders it as one replacement
+// character. Callers must call this when generation ends.
+func (d *StreamDecoder) Flush() string {
+	return d.emit(d.drainPending(true))
 }
 
 // emit applies the leading-space rule and records that text has been produced.
@@ -1287,6 +1311,11 @@ func (d *StreamDecoder) Token(id int32) string {
 // also why Decode itself does not drop it -- a caller checking Encode/Decode round trips
 // needs the space preserved, and DecodeCompletion is the wrapper that takes it off.
 func (d *StreamDecoder) emit(out string) string {
+	// The comparison that matters is DecodeCompletion, not Decode: the streaming endpoints
+	// render completions, and DecodeCompletion trims one leading space unconditionally. It
+	// is unconditional there because a completion never starts with a space the caller wrote
+	// -- the prompt is what carried their text. Mirroring Decode's conditional trim instead
+	// left a byte-level vocabulary's output one space ahead of the non-streaming body.
 	if !d.started && strings.HasPrefix(out, " ") {
 		out = out[1:]
 		// The drop happens once, whether or not text remains afterwards. Leaving
@@ -1319,7 +1348,17 @@ func (d *StreamDecoder) drainPending(force bool) string {
 			cut = i
 			break
 		}
-		_, size := utf8.DecodeRune(d.pending[i:])
+		// FullRune is not enough on its own: a bare continuation byte such as 0xA1 reports
+		// true because Go will decode it to U+FFFD, but a byte-level vocabulary can hold
+		// one as its own piece and the next token can supply the lead byte it belongs to.
+		// Stopping here converted the two halves of one character into two replacement
+		// characters, while Decode -- which joins every pending byte before deciding --
+		// produced one. Only a valid rune advances the cut.
+		r, size := utf8.DecodeRune(d.pending[i:])
+		if r == utf8.RuneError && size <= 1 {
+			cut = i
+			break
+		}
 		i += size
 	}
 	if !force && cut < len(d.pending) {

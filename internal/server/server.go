@@ -686,6 +686,14 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 			reason = ev.FinishReason
 		}
 	}
+	// A character split across the last tokens is still held by the decoder, waiting for a
+	// byte that never arrives. Without this the stream would end one character short of what
+	// the same sequence produces without streaming, which is the contract README states.
+	if tail := dec.Flush(); tail != "" && len(stop) == 0 {
+		if !send(chunkPayload(chat, tail)) {
+			return
+		}
+	}
 	stopReason := "stop"
 	if reason == "length" || reason == "cancel" {
 		stopReason = "length"

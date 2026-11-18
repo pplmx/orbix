@@ -1,6 +1,7 @@
 package tokenize
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -236,5 +237,82 @@ func TestDecodeAndDecodeCompletionDifferOnTheLeadingSpace(t *testing.T) {
 	}
 	if got, want := spm.DecodeCompletion([]int32{0, 1}), "a b"; got != want {
 		t.Errorf("SPM DecodeCompletion = %q, want %q", got, want)
+	}
+}
+
+// TestStreamDecoderMatchesDecodeOnSplitBytes covers the case the fixture above cannot reach.
+//
+// TestStreamDecoderMatchesDecode runs on a constructed vocabulary, and its comment says a
+// synthetic model that lacks byte pieces cannot produce a byte run that never forms a
+// character. A real byte-level vocabulary can: Qwen2's has 1457 pieces that are a bare
+// continuation byte, so a single character routinely spans tokens that no fixture vocabulary
+// would pair that way. Streaming a Chinese reply from such a model emitted U+FFFD as its first
+// character while the non-streaming body had the real one -- the exact divergence the contract
+// test exists to prevent, invisible to it because the fixture has no such pieces.
+//
+// Gated on QWEN2_MODEL because the property is a fact about that vocabulary.
+func TestStreamDecoderMatchesDecodeOnSplitBytes(t *testing.T) {
+	path := os.Getenv("QWEN2_MODEL")
+	if path == "" {
+		t.Skip("set QWEN2_MODEL to a byte-level GGUF with split sequences")
+	}
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !tok.byteLevel {
+		t.Skipf("%s is not a byte-level vocabulary", path)
+	}
+
+	// Concrete token sequences first: these are the shapes that used to diverge, and they
+	// do not depend on what Encode happens to produce for a string. id 2858 ends in a lead
+	// byte and 94/95 are bare continuation bytes, which together form one character; the
+	// stream used to drop the space the first piece carried and render the rest as U+FFFD.
+	for _, seq := range [][]int32{
+		{2858, 94, 95},
+		{2858, 94},
+		{94, 95},
+	} {
+		want := tok.DecodeCompletion(seq)
+		dec := tok.Seq()
+		var got strings.Builder
+		for _, id := range seq {
+			got.WriteString(dec.Token(id))
+		}
+		got.WriteString(dec.Flush())
+		if got.String() != want {
+			t.Errorf("for ids %v streamed %q, Decode gives %q", seq, got.String(), want)
+		}
+	}
+
+	for _, text := range []string{
+		"北京是中国的首都。",
+		"请用中文写一句话介绍北京。",
+		"中文和 ASCII 混排 mixed",
+	} {
+		ids := tok.Encode(text, false)
+		if len(ids) == 0 {
+			continue
+		}
+		want := tok.Decode(ids)
+
+		dec := tok.Seq()
+		var got strings.Builder
+		for _, id := range ids {
+			got.WriteString(dec.Token(id))
+		}
+		if got.String() != want {
+			t.Errorf("streamed %q, Decode gives %q (input %q)", got.String(), want, text)
+		}
+		// The bug showed as a replacement character at the very start, so assert the
+		// stronger property too rather than only the equality: an equality that both sides
+		// got wrong would pass otherwise.
+		if strings.HasPrefix(want, "\uFFFD") && !strings.HasPrefix(text, "\uFFFD") {
+			t.Errorf("Decode of %q starts with a replacement character", text)
+		}
 	}
 }

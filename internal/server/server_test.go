@@ -1470,4 +1470,20 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	if got != want {
 		t.Errorf("streamed %q, the same tokens decode to %q", got, want)
 	}
+
+	// A stop string must not change that. The flush is about the decoder holding a partial
+	// character, which has nothing to do with stop matching, so conditioning it on the stop
+	// list was wrong: the two requests differ only in a stop that never matches, and they
+	// have to stream the same text.
+	ch2 := make(chan engine.Event, 4)
+	ch2 <- engine.Event{Token: head, HasToken: true}
+	ch2 <- engine.Event{Token: mid, HasToken: true}
+	ch2 <- engine.Event{Done: true, FinishReason: "length"}
+	close(ch2)
+	w2 := httptest.NewRecorder()
+	srv.streamResponse(w2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+		ch2, "cmpl-test", false, []string{"this stop never appears"})
+	if withStop := collectStream(t, io.NopCloser(strings.NewReader(w2.Body.String()))); withStop != want {
+		t.Errorf("with a stop configured, streamed %q, want %q", withStop, want)
+	}
 }

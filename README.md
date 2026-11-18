@@ -464,6 +464,20 @@ K-quantized file to run it. Comparing a single prompt's
 continuation across quantizations would test the model more than the decoder -- a
 4-bit rounding difference is expected to change a greedy continuation eventually.
 
+A checkpoint that exercises that path, and more of the engine than the small stories model
+does: TinyLlama 1.1B's Q2_K build is 483 MB, has 22 layers, and uses grouped-query attention
+(32 heads over 4 KV heads), so it covers GQA and the K-quant decoders together. It also
+carries a chat template, which the stories model does not:
+
+```bash
+curl -sSL -o /tmp/tinyllama-q2k.gguf \
+  https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q2_K.gguf
+```
+
+With it set, the Q6_K tensor in that file decodes to a mean of -0.0004 and a standard
+deviation of 0.0247 over 65.5M values, which is the shape a weight matrix has; the count is
+what would go wrong first if a sub-block layout were misread.
+
 `scripts/hf_to_gguf.py` converts a Qwen2.5 safetensors checkpoint to GGUF for the
 weight-level cross-check; it is deliberately independent of the Go code, because a
 converter that shared the loader's assumptions could not catch a wrong one. With

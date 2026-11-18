@@ -500,7 +500,7 @@ converter that shared the loader's assumptions could not catch a wrong one. With
 
 ```bash
 uv run --with numpy python3 scripts/hf_to_gguf.py ./Qwen2.5-0.5B-Instruct /tmp/qwen2-f32.gguf
-QWEN2_MODEL=/tmp/qwen2-f32.gguf go test ./internal/llama/ -run Qwen2
+QWEN2_MODEL=/tmp/qwen2-f32.gguf CGO_ENABLED=0 go test ./internal/llama/ -run Qwen2
 ```
 
 `scripts/jinja_diff.py` checks the chat-template subset the same way: it renders a corpus of
@@ -518,7 +518,7 @@ The mixture-of-experts path has the same treatment, on a small public MoE checkp
 Set `MIXTRAL_MODEL` to run it:
 
 ```bash
-MIXTRAL_MODEL=/tmp/tinymixtral.gguf go test ./internal/llama/ -run TestMoEReachesTheExperts
+MIXTRAL_MODEL=/tmp/tinymixtral.gguf CGO_ENABLED=0 go test ./internal/llama/ -run TestMoEReachesTheExperts
 ```
 
 The stories model is a 19 MB public download, and it is the one of the four that takes no

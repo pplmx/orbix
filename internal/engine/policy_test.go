@@ -114,6 +114,74 @@ func TestAdmitEdgeCases(t *testing.T) {
 	}
 }
 
+// TestPriorityPreemptsARunningSequence pins the semantics of "higher advances first".
+//
+// admit runs on every round against the whole ready set, so a sequence that has already
+// emitted tokens is not pinned to its slot: a higher-priority arrival takes it. The
+// alternative -- finish what you started, then take the queue in priority order -- is what
+// most callers assume a priority field means, which is why this is worth a test rather than
+// a sentence.
+//
+// The test uses the same admit the pump calls, once per round, so it reproduces the
+// decision the pump makes without a model: round 1 admits the low-priority sequence, round
+// 2 sees the same sequence as ready alongside a higher-priority one and must pick the
+// higher-priority one.
+func TestPriorityPreemptsARunningSequence(t *testing.T) {
+	long := fakeSeq(0, 100, 0, -1)
+	long.req.Priority = 0
+
+	// Round 1: only the long request is ready, so it advances -- and would keep advancing
+	// under a "finish what you started" reading.
+	round1 := admit([]*sequence{long}, 1, PriorityFIFO)
+	if len(round1) != 1 || round1[0] != long {
+		t.Fatalf("round 1 admitted %v, want just the long sequence", ids(round1))
+	}
+	// It made progress: pretend it emitted a few tokens.
+	long.out = make([]int32, 5)
+
+	// Round 2: a short high-priority request arrives while the long one is mid-flight.
+	urgent := fakeSeq(1, 4, 0, -1)
+	urgent.req.Priority = 10
+	round2 := admit([]*sequence{long, urgent}, 1, PriorityFIFO)
+	if len(round2) != 1 || round2[0] != urgent {
+		t.Errorf("round 2 admitted %v, want the high-priority sequence: a running request "+
+			"must yield its slot, not keep it until it finishes", ids(round2))
+	}
+
+	// And the preempted request is not lost: with the urgent one done, it is admitted again.
+	round3 := admit([]*sequence{long}, 1, PriorityFIFO)
+	if len(round3) != 1 || round3[0] != long {
+		t.Errorf("round 3 admitted %v, want the long sequence to resume", ids(round3))
+	}
+}
+
+// TestPriorityDoesNotStarveUnderAFiniteBurst checks the other half: preemption is not
+// starvation as long as the higher-priority arrivals stop. Each round still admits
+// maxActive sequences, and the preempted request is first among its own priority class.
+func TestPriorityDoesNotStarveUnderAFiniteBurst(t *testing.T) {
+	long := fakeSeq(0, 100, 0, -1)
+	long.req.Priority = 0
+	long.out = make([]int32, 10)
+
+	// Five rounds of a higher-priority arrival each time.
+	for round := range 5 {
+		urgent := fakeSeq(1+round, 2, 0, -1)
+		urgent.req.Priority = 5
+		admitted := admit([]*sequence{long, urgent}, 1, PriorityFIFO)
+		if len(admitted) != 1 {
+			t.Fatalf("round %d admitted %d sequences, want 1", round, len(admitted))
+		}
+		if admitted[0] != urgent {
+			t.Errorf("round %d admitted the low-priority sequence while a high-priority one waited", round)
+		}
+	}
+	// The burst ends; the long request must be admitted with no further arrivals.
+	after := admit([]*sequence{long}, 1, PriorityFIFO)
+	if len(after) != 1 || after[0] != long {
+		t.Errorf("after the burst admitted %v, want the long sequence", ids(after))
+	}
+}
+
 func TestPriorityNames(t *testing.T) {
 	for _, tc := range []struct {
 		name string

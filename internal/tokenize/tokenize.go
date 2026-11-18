@@ -355,6 +355,35 @@ type specialToken struct {
 }
 
 // New builds a Tokenizer from a parsed GGUF file.
+// looksByteLevel reports whether a vocabulary is spelled the way GPT-2's byte-level BPE
+// spells it.
+//
+// The evidence is the two marker pieces every such vocabulary carries and no SentencePiece one
+// does: U+0120 stands for a space and U+010A for a newline, where SentencePiece uses U+2581 for
+// both. A vocabulary that also carries the SentencePiece marker is not byte-level, because the
+// two families escape text differently and only one reading can be right.
+//
+// The scan is bounded. The markers are single characters and sit in the first few hundred
+// entries of every real vocabulary, so there is no reason to walk 150,000 strings.
+func looksByteLevel(tokens []string) bool {
+	const scanLimit = 4096
+	var space, newline, sentencePiece bool
+	for i, tok := range tokens {
+		if i >= scanLimit {
+			break
+		}
+		switch tok {
+		case "\u2581":
+			sentencePiece = true
+		case "\u0120":
+			space = true
+		case "\u010a":
+			newline = true
+		}
+	}
+	return space && newline && !sentencePiece
+}
+
 func New(f *gguf.File) (*Tokenizer, error) {
 	tokens, ok := f.Strings("tokenizer.ggml.tokens")
 	if !ok {
@@ -451,6 +480,15 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		default:
 			return nil, fmt.Errorf("tokenize: unsupported tokenizer.ggml.model %q (want llama or gpt2)", model)
 		}
+	} else if looksByteLevel(tokens) {
+		// The key is optional in the format, and a file that omits it is not necessarily
+		// SentencePiece. Treating it as such is what llama.cpp does, and for a byte-level
+		// vocabulary it silently produces mojibake: the pieces are spelled with the escaped
+		// runes (U+0120 for a space) and only the byte-level decoder turns them back.
+		//
+		// The vocabulary itself says which family it is, so the default is only used when
+		// the vocabulary is not recognisably byte-level either.
+		t.byteLevel = true
 	}
 
 	if name, ok := f.Get[string]("tokenizer.ggml.pre"); ok {

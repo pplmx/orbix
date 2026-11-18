@@ -83,6 +83,11 @@ type Model struct {
 	// vocabulary does and what a byte-level model without a chunking rule does.
 	Pre string
 
+	// OmitTokenizerModel writes the vocabulary without tokenizer.ggml.model, which the
+	// format allows. Used to check that a loader identifies the family from the vocabulary
+	// rather than assuming SentencePiece when the key is absent.
+	OmitTokenizerModel bool
+
 	// TokenizerModel is tokenizer.ggml.model: "llama" for SentencePiece, "gpt2" for
 	// byte-level BPE. Empty means "llama".
 	//
@@ -395,8 +400,10 @@ func (m Model) kvs() []kv {
 		scores[i] = gguf.Value{Type: gguf.TypeFloat32, Float: float64(len([]rune(tok))) / 32}
 	}
 
+	if !m.OmitTokenizerModel {
+		out = append(out, strKV("tokenizer.ggml.model", model))
+	}
 	out = append(out,
-		strKV("tokenizer.ggml.model", model),
 		arrayKV("tokenizer.ggml.tokens", gguf.TypeString, tokens),
 		arrayKV("tokenizer.ggml.token_type", gguf.TypeInt32, types),
 		arrayKV("tokenizer.ggml.scores", gguf.TypeFloat32, scores),

@@ -480,3 +480,58 @@ func TestEncodeWithSpecialsKeepsOneLeadingSpace(t *testing.T) {
 		t.Errorf("EncodeWithSpecials(%q) decodes to %q, want %q", "the<|m|> garden", got, want)
 	}
 }
+
+// TestByteLevelVocabularyWithoutModelKeyIsRecognised covers a file that omits
+// tokenizer.ggml.model.
+//
+// The key is optional in the format, and treating its absence as SentencePiece -- which is what
+// llama.cpp does -- is wrong for a byte-level vocabulary. The pieces are spelled with the
+// escaped runes, so only the byte-level decoder turns "Ġthe" back into " the"; read as
+// SentencePiece the same id decodes to the literal characters, and a model answers in a stream
+// of "Ċ" and "Ġ" instead of prose.
+//
+// Found on a real Qwen2 conversion whose metadata lost the key: it produced "ĊA.ĠTĊB.ĠFĊ"
+// where the same weights through a correct file produced "Paris. It is the largest city".
+//
+// The vocabulary identifies itself: byte-level spelling uses U+0120 for a space and U+010A for
+// a newline, and SentencePiece uses U+2581 for both.
+func TestByteLevelVocabularyWithoutModelKeyIsRecognised(t *testing.T) {
+	base := gguftest.Model{
+		TokenizerModel:     "gpt2",
+		OmitTokenizerModel: true,
+		ContextLen:         64,
+	}
+	path := base.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !tok.byteLevel {
+		t.Fatal("a byte-level vocabulary without the model key was read as SentencePiece")
+	}
+	// The decisive check is the round trip: a byte-level vocabulary decodes " the" for the
+	// piece spelling it, not the literal "Ġthe".
+	text := " the"
+	ids := tok.Encode(text, false)
+	if got := tok.Decode(ids); got != text {
+		t.Errorf("round trip %q gave %q", text, got)
+	}
+
+	// A SentencePiece vocabulary still takes the default, so the inference does not flip it.
+	spPath := gguftest.Model{OmitTokenizerModel: true, ContextLen: 64}.Write(t, t.TempDir())
+	spF, err := gguf.Open(spPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	spTok, err := New(spF)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if spTok.byteLevel {
+		t.Error("a SentencePiece vocabulary without the model key was read as byte-level")
+	}
+}

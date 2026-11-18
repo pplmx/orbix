@@ -451,18 +451,24 @@ table you produce can be compared against this one instead of taken on faith:
 
 ```text
 SCENARIO         TOKENS  ELAPSED  TOK/S  FIRST  NOTE
-single stream    8       77ms     104.3  40ms   baseline: one request, contiguous cache
-batch x4         32      261ms    122.8  159ms  batched decode, contiguous caches
-batch x16        128     993ms    128.9  644ms  where batched decode stops scaling
-paged x16        128     983ms    130.2  643ms  same batch, block cache instead of whole-context reservations
-prefix no reuse  32      261ms    122.8  159ms  four requests sharing one prompt, reuse off
-prefix reuse x4  32      192ms    166.3  95ms   the same four, reuse on
-policy shortest  63      396ms    159.0  41ms   MaxActive 1, a short request queued behind a long one
-policy fifo      63      395ms    159.5  381ms  the same queue without reordering
+single stream    8       78ms     102.3  41ms   baseline: one request, contiguous cache
+batch x4         32      266ms    120.4  159ms  batched decode, contiguous caches
+batch x16        128     1001ms   127.8  637ms  where batched decode stops scaling
+paged x16        128     1015ms   126.2  651ms  same batch, block cache instead of whole-context reservations
+prefix no reuse  32      317ms    101.0  42ms   four requests sharing one prompt, one after another, reuse off
+prefix reuse x4  32      229ms    139.5  41ms   the same four one after another, reuse on
+policy shortest  63      401ms    156.9  41ms   MaxActive 1, a short request queued behind a long one
+policy fifo      63      415ms    151.7  401ms  the same queue without reordering
 ```
 
-Two of those rows need a sentence of explanation, because their numbers look flat for a
-reason:
+Those are medians of nine interleaved runs, not one run: on this machine a single run
+moves by more than the difference between neighbouring rows, so one table taken once
+cannot separate them. The `NOTE` column in a live run is longer than the text above --
+it also reports the block pool's shape and the positions the prefix cache reused, which
+are trimmed here to fit.
+
+Three of those rows need a sentence of explanation, because their numbers look flat or
+backwards for a reason:
 
 - **Paged vs contiguous** is a memory trade, not a throughput one. The paged cache serves
   the same batch at the same speed while letting 16 sequences share one pool instead of
@@ -470,7 +476,16 @@ reason:
   rather than implied.
 - **The policy rows have the same total time on purpose.** A policy reorders a fixed
   amount of work; it cannot reduce it. What it changes is the short request's first-token
-  latency, 381 ms under FIFO against 41 ms under shortest, and that is the `FIRST` column.
+  latency, 401 ms under FIFO against 41 ms under shortest, and that is the `FIRST` column.
+- **The prefix rows run their four requests one after another, not concurrently.** A
+  concurrent burst with `MaxActive` as large as the request count prefills all four
+  together, so none arrives after another has cached its prefix and the reuse path is
+  never taken. Sequence is what makes the pair a comparison at all; the row reports the
+  positions reused so a reader can see it happened rather than infer it from throughput.
+  Both rows also repeat the prompt until it spans two cache blocks, because a block is
+  published to the prefix index only once its last position is written -- with the
+  command's default five-token prompt there is never a whole block to reuse, and the two
+  rows differ by nothing.
 
 A row can also show fewer tokens than its budget. That is not a measurement failure: the
 model emitted its end-of-sequence token, and the suite says so in the `NOTE` column
@@ -652,8 +667,15 @@ Orbix is a learning project, and it is honest about where it stands:
   that happened, because a run that asked for 128 tokens and printed 123 otherwise
   looks like the model stopped early.
 - **Parallelism is over rows, never over a reduction.** Every output row is computed by one goroutine in the same order the serial kernel uses, so float32 addition is never reassociated and the parallel result is bit-identical. That is a deliberate constraint: a split reduction would be faster on paper and would silently change every number the project compares against llama.cpp.
-- **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 it goes 237 tok/s at one stream to 571 tok/s at sixteen. Per-stream speed still drops as streams are added, because the model is one shared resource.
-- **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a request whose prompt starts with blocks the pool has already computed attaches them instead of prefilling them again. On a 96-token shared prefix, one prefill drops from 56.7 ms to 4.1 ms (14x), and four requests with the same prompt finish in 154 ms instead of 246 ms. This is the case a chat application actually has: a system prompt and earlier turns are re-sent verbatim on every call.
+- **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 with 32 generated tokens per request it goes 239 tok/s at one stream to 655 tok/s at sixteen, medians of seven interleaved runs. Per-stream speed still drops as streams are added, because the model is one shared resource.
+- **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a
+  request whose prompt starts with blocks the pool has already computed attaches them
+  instead of prefilling them again. The suite's reuse pair shows the effect end to end:
+  101.0 tok/s against 139.5 when four sequential requests share one prompt, with the row
+  reporting the 96 positions that came from the cache. Every `orbix bench` run with the
+  flag on prints how many positions were reused, so a run that shares nothing says so
+  instead of looking merely slow. This is the case a chat application actually has: a
+  system prompt and earlier turns are re-sent verbatim on every call.
 - **Benchmarks are self-run.** `orbix bench` is part of the CLI so you can measure on your own hardware, with your own model. It reports the worker count it actually used.
 
 The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it take to make LLM inference work in pure Go, and what do I learn by building it?"

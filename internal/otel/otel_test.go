@@ -362,6 +362,67 @@ func TestExporterToleratesEndpointWithPath(t *testing.T) {
 
 // TestExporterDropsRatherThanBlocks is the availability property: tracing must never make
 // a request slow, so a full queue loses spans and counts them.
+// TestExporterRecordAccountsUnderConcurrency pins the queue bound from several goroutines at
+// once, which the sequential drop test cannot see.
+//
+// Record checks the length and appends inside one critical section, so the count it compares
+// against is the count its append extends. The engine's Submit had the same intent but read
+// the length in one lock and inserted in another, and admitted twelve requests against a cap
+// of three the moment submissions were concurrent -- a defect no sequential test could reach.
+// Recording it here keeps the correct shape from being refactored into the wrong one for the
+// same reasons.
+//
+// Every span must land in exactly one place: queued, or counted as dropped. A race would show
+// up as a span that is neither, or as a queue longer than its limit.
+//
+// What this test does not do is catch a split critical section on its own, which is worth
+// stating so nobody trusts it further than it goes. Injecting the engine's old shape here --
+// read the length, unlock, re-lock to append -- passed this test: with no work between the two
+// locks the window is nanoseconds wide, and the incorrect version admitted 8 spans instead of
+// overrunning. Adding a microsecond of work between them made the same injection overrun to 11
+// against a limit of 8, which is what confirms the injected shape was wrong and the test was
+// simply not sensitive enough.
+//
+// The honest summary: this pins that the accounting adds up and that the bound is respected in
+// normal operation, not that the critical section is single.
+func TestExporterRecordAccountsUnderConcurrency(t *testing.T) {
+	const maxQueue = 64
+	const goroutines, each = 16, 40
+
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint: "http://127.0.0.1:1", Interval: time.Hour, MaxQueue: maxQueue,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Go(func() {
+			for range each {
+				exp.Record(testSpan(t, "op"))
+			}
+		})
+	}
+	wg.Wait()
+
+	exp.mu.Lock()
+	queued, dropped := len(exp.queue), exp.dropped
+	exp.mu.Unlock()
+
+	if queued > maxQueue {
+		t.Errorf("queue holds %d spans, above its limit of %d", queued, maxQueue)
+	}
+	if want := goroutines * each; queued+dropped != want {
+		t.Errorf("queued %d + dropped %d = %d, want every one of %d accounted for",
+			queued, dropped, queued+dropped, want)
+	}
+	if dropped == 0 {
+		t.Error("nothing was dropped, so the limit was never reached and this proves nothing")
+	}
+}
+
 func TestExporterDropsRatherThanBlocks(t *testing.T) {
 	// A collector that never answers, so nothing drains. The client is given a short
 	// timeout so Close does not wait for the default one: the point of this test is

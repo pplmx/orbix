@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -544,6 +545,62 @@ func TestModelsAndHealth(t *testing.T) {
 // endpoint. The SDKs' models.retrieve hits GET /v1/models/{id}, and a client may call
 // endpoints this engine does not implement (embeddings, images, responses); both now answer
 // in the API's own envelope.
+// TestModelNameSurvivesJSONAndURL covers a model name that is not a plain identifier.
+//
+// The id comes from the checkpoint's general.name, which is free-form text: a converted file
+// can carry quotes, a slash, or CJK. Two encodings have to hold up and neither was tested --
+// the JSON body must escape it (json.Encoder does) and models.retrieve must decode an escaped
+// path segment back to the same string (Go's pattern matching does, including %2F, which
+// PathValue decodes without treating it as a separator).
+//
+// Measured on the seven names below: every one round-trips through /v1/models and retrieves
+// with 200 once path-escaped. The one that would look like a failure -- a name containing "/"
+// requested unescaped -- is not: a bare slash is a different path, and a client that wants
+// that model escapes it, which is what the test does.
+func TestModelNameSurvivesJSONAndURL(t *testing.T) {
+	names := []string{
+		"plain",
+		`has"quote`,
+		"has\nnewline",
+		`back\slash`,
+		"a/b",
+		"a b",
+		"中文模型🎉",
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newTestServerConfig(t,
+				gguftest.Model{Name: name, NoEOS: true, ContextLen: 64}, Config{})
+
+			// The list endpoint must escape the name and come back as valid JSON.
+			resp := get(t, srv.Handler(), "/v1/models")
+			body := readBody(t, resp)
+			var parsed struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+				t.Fatalf("/v1/models is not valid JSON: %v", err)
+			}
+			if len(parsed.Data) != 1 || parsed.Data[0].ID != name {
+				t.Errorf("listed id = %q, want %q", parsed.Data[0].ID, name)
+			}
+
+			// And the retrieve endpoint must accept it once escaped.
+			resp = get(t, srv.Handler(), "/v1/models/"+url.PathEscape(name))
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("retrieve %q = %d, want 200", url.PathEscape(name), resp.StatusCode)
+			}
+			got := decodeBody[map[string]any](t, resp)
+			if got["id"] != name {
+				t.Errorf("retrieved id = %v, want %q", got["id"], name)
+			}
+		})
+	}
+}
+
 func TestModelRetrieveAndUnknownEndpoints(t *testing.T) {
 	srv, _ := newTestServer(t)
 	name := srv.cfg.ModelName

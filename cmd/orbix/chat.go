@@ -164,7 +164,7 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	if _, err := fmt.Fprintf(out, "orbix chat: %s\n", cfg); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(out, "Type a message and press enter. Commands: /exit, /clear, /history, /help\n\n"); err != nil {
+	if _, err := fmt.Fprintf(out, "Type a message and press enter. Commands: %s\n\n", chatCommands); err != nil {
 		return err
 	}
 
@@ -450,6 +450,28 @@ func chatTurns(system string, history []chatTurn, user string) []engine.Turn {
 // The write errors are propagated rather than ignored: a session whose terminal has
 // gone away has nothing useful left to do, and silently continuing would generate
 // tokens into a broken pipe.
+// chatHelp is the command list, and it is the only copy: the startup banner prints the
+// same names on one line rather than restating them.
+//
+// Two lists existed and drifted -- /stats was added for the prefix-reuse claim and the banner
+// never learned about it, so the one command that shows whether reuse is happening was
+// reachable only from a command the banner did not mention.
+const chatHelp = `Commands:
+  /exit, /quit, /q   end the session
+  /clear             forget the conversation
+  /history           show the conversation so far
+  /stats             tokens generated and prefix positions reused
+  /help              this message
+`
+
+// chatCommands is the one-line form of chatHelp for the startup banner.
+//
+// A const cannot be derived from chatHelp at compile time, so the two are kept in step by a
+// test that checks every name in this line appears in chatHelp (and that this line does not
+// claim one chatHelp omits). Restating the names is unavoidable; leaving the restatement
+// unchecked is not.
+const chatCommands = "/exit, /clear, /history, /stats, /help"
+
 func chatCommand(out io.Writer, line string, history *[]chatTurn, stats func() engine.Stats) (bool, error) {
 	switch line {
 	case "/exit", "/quit", "/q":
@@ -495,13 +517,7 @@ func chatCommand(out io.Writer, line string, history *[]chatTurn, stats func() e
 		}
 		return false, nil
 	case "/help":
-		_, err := fmt.Fprint(out, `Commands:
-  /exit, /quit, /q   end the session
-  /clear             forget the conversation
-  /history           show the conversation so far
-  /stats             tokens generated and prefix positions reused
-  /help              this message
-`)
+		_, err := fmt.Fprint(out, chatHelp)
 		return false, err
 	default:
 		_, err := fmt.Fprintf(out, "unknown command %q, try /help\n", line)

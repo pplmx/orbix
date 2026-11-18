@@ -153,6 +153,43 @@ func TestChatHelpAndUnknownCommand(t *testing.T) {
 	}
 }
 
+// TestChatBannerNamesEveryCommand locks the startup banner against /help.
+//
+// The banner listed four commands and /help showed six. /stats was the one that mattered: it
+// was added so a session could show whether prefix reuse was happening at all, and the only way
+// to discover it was a command the banner did not mention.
+//
+// The existing help test checked that /clear appeared, which is why the gap survived -- it
+// asserted one sample rather than the set. This one derives the set from chatHelp and requires
+// the banner to name every member of it.
+func TestChatBannerNamesEveryCommand(t *testing.T) {
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40}, "/exit\n")
+
+	// Every name chatHelp lists, in its first column, must appear in chatCommands.
+	for _, line := range strings.Split(chatHelp, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "Commands:" {
+			continue
+		}
+		names, _, _ := strings.Cut(line, " ")
+		for _, name := range strings.Split(names, ",") {
+			name = strings.TrimSpace(name)
+			if !strings.HasPrefix(name, "/") {
+				continue
+			}
+			if !strings.Contains(chatCommands, name) {
+				t.Errorf("chatHelp lists %q but the banner (%q) does not", name, chatCommands)
+			}
+		}
+	}
+
+	// And the banner that actually reached the user has to carry it too, so a future
+	// wrapper that printed a different string would fail here rather than nowhere.
+	if !strings.Contains(out, "/stats") {
+		t.Errorf("the startup banner does not mention /stats:\n%s", out)
+	}
+}
+
 func TestChatBlankLinesIgnored(t *testing.T) {
 	// A blank line must not become a turn: it would otherwise be encoded as a prompt
 	// with no user text and answered.

@@ -64,6 +64,22 @@ func NewKVCache(cfg Config, nCtx int) (*KVCache, error) {
 		return nil, fmt.Errorf("llama: a %d-position cache at %d values per position per layer"+
 			" is too large to address", nCtx, kvDim)
 	}
+	// A header can declare a context length the machine cannot hold -- 2^30 positions for a small
+	// model is hundreds of gigabytes -- and the allocation then either swaps the machine to death or
+	// is killed partway, which reads as an out-of-memory crash rather than as a bad file. Checking
+	// before allocating turns it into a message naming both the request and the budget.
+	//
+	// The comparison is against what the kernel says is available, and is skipped when that is
+	// unknown: refusing a legitimate model because the estimate was wrong would be the worse
+	// mistake of the two.
+	if budget := availableMemoryHook(); budget > 0 {
+		need := int64(nCtx) * kvDim * valueSize * 2 * int64(cfg.Layers) // keys and values, every layer
+		if need > budget {
+			return nil, fmt.Errorf("llama: a %d-position cache for this model needs %.1f GB"+
+				" but only %.1f GB is available; the context length in the file is larger than"+
+				" this machine can hold", nCtx, bytesToGB(need), bytesToGB(budget))
+		}
+	}
 	c := &KVCache{cfg: cfg, ctx: nCtx, k: make([][]float32, cfg.Layers), v: make([][]float32, cfg.Layers)}
 	// Grow: allocating every layer's block in one call would need a single
 	// slice of layers*ctx*kvDim floats, which for a 7B model is past the point
@@ -74,6 +90,14 @@ func NewKVCache(cfg Config, nCtx int) (*KVCache, error) {
 	}
 	return c, nil
 }
+
+// availableMemoryHook is availableMemory, indirected so a test can set a budget without needing a
+// machine that is actually short of memory. A nil value falls back to the real reading, which is
+// what every caller except a test sees.
+var availableMemoryHook = availableMemory
+
+// bytesToGB renders a byte count in gigabytes for an error message.
+func bytesToGB(n int64) float64 { return float64(n) / (1 << 30) }
 
 // Len returns the number of positions written.
 func (c *KVCache) Len() int { return c.len }

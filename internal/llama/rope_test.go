@@ -429,3 +429,50 @@ func TestKVCacheRejectsUnaddressableSize(t *testing.T) {
 		}
 	}
 }
+
+// TestKVCacheChecksAvailableMemory covers a context length the machine cannot hold.
+//
+// A header can declare 2^30 positions for a small model, which is hundreds of gigabytes of cache.
+// The allocation then either swaps the machine to death or is killed partway, and the second reads
+// as an out-of-memory crash rather than as a bad file. Checking before allocating turns it into a
+// message naming the request and the budget.
+//
+// The budget is injected rather than measured, because the point is the arithmetic: 2^24 positions
+// of this config is 2 GiB, and a 1 GiB budget must refuse it. Comparing against the real
+// MemAvailable would make the test pass or fail depending on what else the machine is doing.
+func TestKVCacheChecksAvailableMemory(t *testing.T) {
+	old := availableMemoryHook
+	t.Cleanup(func() { availableMemoryHook = old })
+
+	// One position is kvDim * 4 bytes * 2 tensors * layers = 8*4*2*2 = 128 bytes here.
+	cfg := testConfig()
+	const budget = 1 << 30
+	availableMemoryHook = func() int64 { return budget }
+
+	// A size that fits stays accepted: the check must not refuse ordinary models.
+	fits := cfg
+	fits.ContextLen = 1 << 16 // 8 MiB
+	if _, err := NewKVCache(fits, fits.ContextLen); err != nil {
+		t.Fatalf("a cache well under the budget was refused: %v", err)
+	}
+
+	// 2^24 positions is 2 GiB, over the budget.
+	over := cfg
+	over.ContextLen = 1 << 24
+	_, err := NewKVCache(over, over.ContextLen)
+	if err == nil {
+		t.Fatal("a 2 GiB cache was accepted against a 1 GiB budget")
+	}
+	for _, want := range []string{"2.0 GB", "1.0 GB", "context length"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// An unknown budget disables the check rather than guessing, so a platform without a memory
+	// source still runs.
+	availableMemoryHook = func() int64 { return 0 }
+	if _, err := NewKVCache(over, over.ContextLen); err != nil {
+		t.Fatalf("with an unknown budget the cache was still refused: %v", err)
+	}
+}

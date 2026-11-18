@@ -368,6 +368,14 @@ What closes it is binding to loopback or authenticating in front. The default `-
 listens on every interface; a host reachable from elsewhere is an inference API anyone can
 spend.
 
+Request bodies are bounded, which limits how much work one connection can cause: the limit is
+`ContextLen` x 48 bytes with a 1 MiB floor, so 6 MiB for the 128k-context checkpoint. That
+number is not a tuning knob so much as the same constraint the context already imposes, seen
+from the request side -- a body larger than this cannot describe a prompt the model could
+attend over. Anything over the limit is answered `413` and the connection is closed without
+reading the rest. Without the bound the cost rose with the body: a 64 MiB request spent 82
+seconds being read and tokenized before the server could say it was too long.
+
 ### Embed in a Go service
 
 ```go

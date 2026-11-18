@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/pplmx/orbix/internal/gguf"
 )
@@ -41,6 +42,14 @@ func cmdModelInspect(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
+		// A flag after the path is the common cause of an extra argument, and "got 2" does
+		// not say that: Go's flag package stops parsing at the first non-flag, so
+		// `inspect ./m.gguf --json` parses no flags at all and counts --json as a path.
+		for _, a := range fs.Args() {
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("model inspect: flags must come before the path, got %q after it", a)
+			}
+		}
 		return fmt.Errorf("model inspect: want exactly one file path, got %d", fs.NArg())
 	}
 	path := fs.Arg(0)

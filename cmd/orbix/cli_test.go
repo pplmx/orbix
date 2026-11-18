@@ -112,6 +112,39 @@ func TestModelInspectRequiresPath(t *testing.T) {
 	}
 }
 
+// TestModelInspectNamesAFlagAfterThePath covers the mistake Go's flag package invites.
+//
+// flag stops parsing at the first non-flag argument, so `inspect ./m.gguf --json` parses no
+// flags and counts --json as a second path. The old message was "want exactly one file path,
+// got 2", which is true and does not help: the caller passed one path and believes the flag was
+// honoured.
+//
+// Checked by running both orders against the same fixture: `inspect --json ./m.gguf` prints
+// JSON, `inspect ./m.gguf --json` errored. The message now names the flag and where it has to
+// go.
+func TestModelInspectNamesAFlagAfterThePath(t *testing.T) {
+	err := run([]string{"model", "inspect", "model.gguf", "--json"})
+	if err == nil {
+		t.Fatal("a flag after the path was accepted, want an error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "before the path") {
+		t.Errorf("error %q does not say where the flag belongs", msg)
+	}
+	if !strings.Contains(msg, "--json") {
+		t.Errorf("error %q does not name the flag that was misplaced", msg)
+	}
+
+	// A genuinely extra path must still report the count rather than blaming a flag.
+	err = run([]string{"model", "inspect", "a.gguf", "b.gguf"})
+	if err == nil {
+		t.Fatal("two paths were accepted, want an error")
+	}
+	if strings.Contains(err.Error(), "before the path") {
+		t.Errorf("two paths produced the flag-order message: %q", err)
+	}
+}
+
 func TestModelInspectMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent.gguf")
 	err := run([]string{"model", "inspect", path})

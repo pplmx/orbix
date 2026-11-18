@@ -790,6 +790,12 @@ func (e *Engine) Active() int {
 }
 
 // MaxActive returns the configured concurrency cap.
+//
+// No lock: the field is set in New and never written again, which is also why Pump and
+// Submit read it without one. The neighbouring accessors that do lock (Round, Stats)
+// read counters that change every round. Keeping the distinction visible is what stops
+// a later setter from turning this into a race -- a mutable field read here would need
+// the lock, and nothing in the call sites would look wrong.
 func (e *Engine) MaxActive() int { return e.maxActive }
 
 // Round returns how many Pump calls have run.

@@ -616,6 +616,79 @@ func TestTensorOffsetMustNotWrap(t *testing.T) {
 	}
 }
 
+// TestRejectsNonUTF8String covers the encoding rule GGUF states for strings and nothing
+// enforced: a string is a uint64 length followed by that many bytes of UTF-8 (doc.go repeats
+// the format spec on this point).
+//
+// Nothing downstream is written for a byte string. Measured before the check, by building a
+// metadata value of {0xff, 0xfe, 0x41} and reading it back through inspect --json: the bytes
+// came out as "��A", because encoding/json substitutes U+FFFD for an invalid byte.
+// A tool that reports a value the file does not contain is worse than one that refuses the
+// file. A vocabulary piece with a bad byte is the same defect one layer down: utf8's decoder
+// yields RuneError symbols that can never merge into the token they should be.
+func TestRejectsNonUTF8String(t *testing.T) {
+	build := func(val []byte) []byte {
+		var b bytes.Buffer
+		b.WriteString(Magic)
+		u32 := func(v uint32) {
+			var x [4]byte
+			binary.LittleEndian.PutUint32(x[:], v)
+			b.Write(x[:])
+		}
+		u64 := func(v uint64) {
+			var x [8]byte
+			binary.LittleEndian.PutUint64(x[:], v)
+			b.Write(x[:])
+		}
+		writeStr := func(s []byte) {
+			u64(uint64(len(s)))
+			b.Write(s)
+		}
+		u32(Version)
+		u64(0) // no tensors
+		u64(1) // one metadata entry
+		writeStr([]byte("k"))
+		u32(uint32(TypeString))
+		writeStr(val)
+		return b.Bytes()
+	}
+
+	// Invalid sequences of several shapes: a continuation byte alone, a truncated sequence,
+	// and a lone surrogate encoded as UTF-8 (ED A0 80), which is not valid UTF-8 either.
+	for _, val := range [][]byte{
+		{0xff},
+		{0xff, 0xfe, 0x41},
+		{0xe4, 0xb8},       // truncated 3-byte sequence
+		{0xed, 0xa0, 0x80}, // encoded surrogate half
+	} {
+		_, err := Read(bytes.NewReader(build(val)))
+		if err == nil {
+			t.Errorf("Read accepted a metadata string of %x", val)
+			continue
+		}
+		if !strings.Contains(err.Error(), "UTF-8") {
+			t.Errorf("error %q does not name the encoding as the problem", err)
+		}
+	}
+
+	// Valid UTF-8, including multi-byte and a NUL inside the string, must still parse: the
+	// check is on encoding, not on which characters the value holds.
+	for _, val := range [][]byte{
+		[]byte("plain"),
+		[]byte("中文 🎉"),
+		{'a', 0x00, 'b'},
+	} {
+		f, err := Read(bytes.NewReader(build(val)))
+		if err != nil {
+			t.Errorf("Read rejected a valid UTF-8 string %x: %v", val, err)
+			continue
+		}
+		if got, ok := f.Get[string]("k"); !ok || got != string(val) {
+			t.Errorf("Get[string](k) = %q, %v, want %q", got, ok, val)
+		}
+	}
+}
+
 // TestRefusesOversizedMetadataValue covers the allocation a corrupt length must not buy.
 //
 // A GGUF string is a u64 length followed by that many bytes, and until now the length chose

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"unicode/utf8"
 )
 
 // reader wraps an io.Reader with the little-endian primitives every GGUF
@@ -97,6 +98,17 @@ func (r *reader) str() (string, error) {
 	b, err := r.bytes(n)
 	if err != nil {
 		return "", err
+	}
+	// A GGUF string is declared UTF-8 (doc.go, and the format spec's metadata section), and
+	// nothing downstream is written for a string that is not. The damage is quiet rather than
+	// loud: encoding/json replaces an invalid byte with U+FFFD, so `orbix model inspect --json`
+	// reports a value that is not in the file, and a vocabulary piece with a bad byte splits
+	// into RuneError symbols that can never merge into the token they should be.
+	//
+	// Refused here rather than tolerated because a file that fails this is corrupt, and the
+	// alternative is a tool that silently shows a different file from the one on disk.
+	if !utf8.Valid(b) {
+		return "", fmt.Errorf("gguf: string value is not valid UTF-8")
 	}
 	return string(b), nil
 }

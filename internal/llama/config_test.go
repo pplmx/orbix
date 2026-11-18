@@ -123,6 +123,62 @@ func (c tinyConfig) kvs() []kv {
 	return out
 }
 
+// TestExpertUsedCountMustNotExceedExpertCount covers the check that the file's two expert
+// numbers agree.
+//
+// Nothing compared them, and the failure was silent: selectExperts clamps its k to the
+// router's width, so a file declaring expert_count 4 and expert_used_count 8 ran all four
+// experts for every token. That is not a crash and not garbage -- it is a mixture-of-experts
+// model evaluated in a configuration it was never trained for, producing text that reads
+// fine. Measured before the guard: the file loaded with Experts=4 ExpertUsed=8.
+//
+// used == experts is legal and must stay accepted: routing every expert is a real
+// configuration, if an expensive one.
+func TestExpertUsedCountMustNotExceedExpertCount(t *testing.T) {
+	cases := []struct {
+		name    string
+		experts int
+		used    int
+		wantErr bool
+		why     string
+	}{
+		{"sparse routing", 4, 2, false, "the ordinary case"},
+		{"all experts", 4, 4, false, "routing to every expert is legal"},
+		{"more used than exist", 4, 8, true, "the router cannot address experts the file does not hold"},
+		{"one past the count", 4, 5, true, "the boundary is exclusive"},
+		{"dense model, stray used key", 0, 3, false, "a dense FFN ignores expert_used_count entirely"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := tinyConfig{
+				hidden: 8, layers: 1, heads: 2, kvHeads: 2, ffn: 16, ctx: 32, vocab: 11,
+				experts: c.experts, used: c.used,
+			}
+			f, err := gguf.Read(bytes.NewReader(buildFile(cfg.kvs(), cfg.tensors(), nil)))
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			got, err := LoadConfig(f)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("LoadConfig accepted expert_used_count %d against expert_count %d, "+
+						"Experts=%d ExpertUsed=%d (%s)", c.used, c.experts, got.Experts, got.ExpertUsed, c.why)
+				}
+				// Both numbers have to appear, or the message does not say what to fix.
+				for _, want := range []string{"expert_used_count", "expert_count"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not mention %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfig refused a legal configuration: %v (%s)", err, c.why)
+			}
+		})
+	}
+}
+
 func (c tinyConfig) tensors() []gguf.TensorInfo {
 	h := uint64(c.hidden)
 	out := []gguf.TensorInfo{

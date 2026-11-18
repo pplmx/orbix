@@ -264,6 +264,20 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	}
 	if v, ok := f.Get[int](arch + ".expert_used_count"); ok && v > 0 {
 		cfg.ExpertUsed = v
+		// A file that routes to more experts than it has is corrupt, and the failure is
+		// silent without this check: selectExperts clamps k to the router's width, so a
+		// used_count of 8 against 4 experts runs every expert and produces plausible text
+		// from a model that was never trained to combine them all. The clamp stays -- it is
+		// what keeps the kernel from indexing past the end -- but the file is refused here,
+		// where the numbers can still be named.
+		//
+		// Checked against Experts rather than against the tensor shape because the shape is
+		// what established Experts, in validate; this runs before that and its message
+		// carries both numbers.
+		if cfg.Experts > 0 && cfg.ExpertUsed > cfg.Experts {
+			return Config{}, fmt.Errorf("llama: %s.expert_used_count %d exceeds expert_count %d",
+				arch, cfg.ExpertUsed, cfg.Experts)
+		}
 	}
 
 	// The sliding window is per-architecture, and a missing key means unbounded: a

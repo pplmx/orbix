@@ -234,12 +234,28 @@ func splitExperts(stacked []float32, experts int) [][]float32 {
 }
 
 // Params returns the number of weights the model holds.
+//
+// The expert tensors count too. A mixture-of-experts layer replaces the three dense matrices with
+// one router and a stack of per-expert ones, so summing only wGate/wUp/wDown reports a few percent
+// of the true figure for a model whose entire size is in the experts -- and this number is printed
+// by `orbix run --stats` and `orbix bench`, which makes it a claim about the model rather than an
+// internal counter.
 func (w *Weights) Params() int64 {
 	n := int64(len(w.TokenEmbedding)) + int64(len(w.OutputNorm)) + int64(len(w.Output))
 	for _, l := range w.Layers {
 		n += int64(len(l.attnNorm) + len(l.wq) + len(l.wk) + len(l.wv) + len(l.wo))
 		n += int64(len(l.qBias) + len(l.kBias) + len(l.vBias))
 		n += int64(len(l.ffnNorm) + len(l.wGate) + len(l.wUp) + len(l.wDown))
+		n += int64(len(l.router))
+		for _, e := range l.expertGate {
+			n += int64(len(e))
+		}
+		for _, e := range l.expertUp {
+			n += int64(len(e))
+		}
+		for _, e := range l.expertDown {
+			n += int64(len(e))
+		}
 	}
 	return n
 }

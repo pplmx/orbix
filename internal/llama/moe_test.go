@@ -397,3 +397,136 @@ func TestMoEReachesTheExpertsOnARealModel(t *testing.T) {
 	t.Error("zeroing every expert left the logits unchanged, so this file's experts are " +
 		"not being run")
 }
+
+// TestMoEDecodeMatchesPrefill checks the second adapter over the expert path.
+//
+// The expert feed-forward is reached through two shims: moeRowsFromBatch for a prefill, where a
+// row is a prompt position, and moeRowsFromDecode for a decode step, where a row is a sequence.
+// Both hand the same moeRows struct to feedForwardMoERows, so the two differ only in which batch
+// they read -- and that is exactly the kind of difference that survives a finite-logit check while
+// being wrong.
+//
+// This compares the logits a decode step produces against a full prefill of the same tokens. A
+// shim that copied the wrong field would route the wrong row to the experts, and routing is
+// data-dependent, so the difference shows up in the numbers rather than as an error.
+//
+// Nothing covered the decode shim before: the four MoE tests all go through Prefill, so
+// moeRowsFromDecode sat at 0% while being on the path of every generated token.
+func TestMoEDecodeMatchesPrefill(t *testing.T) {
+	path := gguftest.Model{
+		Experts:    4,
+		ExpertUsed: 2,
+		NoEOS:      true,
+		ContextLen: 128,
+	}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	tokens := fixtureTokens(cfg, 4)
+
+	// Reference: prefill the whole prompt in one pass.
+	whole, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	wantLogits, err := m.Prefill(whole, tokens, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	want := append([]float32(nil), wantLogits...)
+
+	// Same cache, built by prefilling all but the last token and then decoding it. The decode
+	// step goes through moeRowsFromDecode; the prefill above went through moeRowsFromBatch.
+	split, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	if _, err := m.Prefill(split, tokens[:len(tokens)-1], 0); err != nil {
+		t.Fatalf("Prefill prefix: %v", err)
+	}
+	gotLogits, err := m.Forward(split, int(tokens[len(tokens)-1]), split.Len())
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if len(gotLogits) != len(want) {
+		t.Fatalf("%d logits from decode, %d from prefill", len(gotLogits), len(want))
+	}
+
+	var maxDiff float64
+	for i := range want {
+		if d := math.Abs(float64(want[i] - gotLogits[i])); d > maxDiff {
+			maxDiff = d
+		}
+	}
+	t.Logf("max logit difference between decode and prefill: %.6f", maxDiff)
+	// The two paths perform the same arithmetic over the same inputs, so they should agree to
+	// within float32 accumulation order rather than merely approximately.
+	if maxDiff > 1e-3 {
+		t.Errorf("decode and prefill logits differ by %.6f", maxDiff)
+	}
+}
+
+// TestParamsCountsExpertWeights covers the weight count for a mixture-of-experts model.
+//
+// A MoE layer has no wGate/wUp/wDown: it has one router and a stack of per-expert matrices, so a
+// count that sums only the dense fields reports a few percent of the true figure for a model whose
+// entire size is in the experts. `orbix run --stats` and `orbix bench` print this number, which makes
+// it a claim about the model rather than an internal counter.
+//
+// Measured on the four-expert fixture before the fix: 31,584 reported against 49,152 expert weights
+// held, so the dense fields were being counted and the experts were not.
+func TestParamsCountsExpertWeights(t *testing.T) {
+	path := gguftest.Model{Experts: 4, ExpertUsed: 2, NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := m.W.Params()
+
+	// Sum the weights the model actually holds, independently of how Params walks them.
+	var want int64
+	want += int64(len(m.W.TokenEmbedding) + len(m.W.OutputNorm) + len(m.W.Output))
+	for i := range m.W.Layers {
+		l := m.W.Layers[i]
+		want += int64(len(l.attnNorm) + len(l.wq) + len(l.wk) + len(l.wv) + len(l.wo))
+		want += int64(len(l.qBias) + len(l.kBias) + len(l.vBias))
+		want += int64(len(l.ffnNorm))
+		want += int64(len(l.router))
+		for _, e := range l.expertGate {
+			want += int64(len(e))
+		}
+		for _, e := range l.expertUp {
+			want += int64(len(e))
+		}
+		for _, e := range l.expertDown {
+			want += int64(len(e))
+		}
+	}
+	if got != want {
+		t.Errorf("Params() = %d, want %d", got, want)
+	}
+
+	// The experts have to be a large share of it, which is what makes a count that omits them
+	// wrong rather than merely imprecise.
+	var expertWeights int64
+	for i := range m.W.Layers {
+		for _, e := range m.W.Layers[i].expertGate {
+			expertWeights += int64(len(e))
+		}
+		for _, e := range m.W.Layers[i].expertUp {
+			expertWeights += int64(len(e))
+		}
+		for _, e := range m.W.Layers[i].expertDown {
+			expertWeights += int64(len(e))
+		}
+	}
+	if expertWeights == 0 {
+		t.Fatal("fixture holds no expert weights, so this test checks nothing")
+	}
+	if share := float64(expertWeights) / float64(got); share < 0.3 {
+		t.Errorf("experts are %.1f%% of the weights, so this fixture does not exercise the omission",
+			share*100)
+	}
+}

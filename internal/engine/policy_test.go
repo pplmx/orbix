@@ -614,3 +614,75 @@ func itoa(v int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestCancelledRequestSpanIsError checks how a cancellation reaches the trace.
+//
+// The event stream reports a cancel as a plain Done with finish_reason "cancel", because the
+// caller that would receive an error is the one that left. The span is different: OTel's GenAI
+// conventions say a cancelled generation maps to error, and a span marked ok disappears from a
+// query for failed requests.
+func TestCancelledRequestSpanIsError(t *testing.T) {
+	var got struct {
+		mu   sync.Mutex
+		body []byte
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got.mu.Lock()
+		got.body = b
+		got.mu.Unlock()
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	exp, err := otel.NewExporter(otel.ExporterOptions{
+		Endpoint: srv.URL,
+		Interval: time.Hour, // flushed explicitly
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2})
+	cancel := make(chan struct{})
+	ch, err := e.Submit(Request{
+		Prompt: tok.Encode("Once upon a time", true), MaxTokens: 64,
+		Trace: exp, Cancel: cancel,
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	// Cancel before the first round so the sequence stops at the sample check rather than
+	// running its budget.
+	close(cancel)
+	for e.Pump() > 0 {
+	}
+	sawCancel := false
+	for ev := range ch {
+		if ev.Err != nil {
+			t.Fatalf("cancel must not surface as an event error: %v", ev.Err)
+		}
+		if ev.Done && ev.FinishReason == "cancel" {
+			sawCancel = true
+		}
+	}
+	if !sawCancel {
+		t.Fatal("the stream never reported finish_reason cancel")
+	}
+
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	got.mu.Lock()
+	body := string(got.body)
+	got.mu.Unlock()
+
+	if !strings.Contains(body, `gen_ai.response.finish_reason`) || !strings.Contains(body, "cancel") {
+		t.Fatalf("span does not record the cancel: %s", body)
+	}
+	// The status code is what a trace query filters on. 1 is ok, 2 is error.
+	if !strings.Contains(body, `"status":{"code":2`) {
+		t.Errorf("cancelled span is not marked error: %s", body)
+	}
+}

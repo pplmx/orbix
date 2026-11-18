@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -657,8 +658,17 @@ func (e *Engine) finish(s *sequence, last Event) {
 			otel.IntAttr("gen_ai.usage.output_tokens", int64(len(s.out))),
 			otel.StringAttr("gen_ai.response.finish_reason", last.FinishReason),
 		)
+		// A cancelled request is an error on the span even though it is not an error
+		// event: the caller went away before the model finished, and OTel's GenAI
+		// conventions map a cancelled generation to error. The event stream keeps
+		// reporting it as a plain Done with finish_reason "cancel", because the caller
+		// that would receive an error is the one that left.
+		spanErr := last.Err
+		if spanErr == nil && last.FinishReason == "cancel" {
+			spanErr = context.Canceled
+		}
 		// Finish first, so the span has an end time to measure the decode phase against.
-		span = span.Finish(last.Err)
+		span = span.Finish(spanErr)
 		if !s.prefilled.IsZero() {
 			// Milliseconds as integers: a trace viewer can plot them and a reader can
 			// compare them against the bench suite's numbers.

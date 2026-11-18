@@ -239,12 +239,17 @@ engine stays visible while that layer is built.
 ### Serve a GGUF model
 
 ```bash
-go install github.com/pplmx/orbix/cmd/orbix@latest
+CGO_ENABLED=0 go install github.com/pplmx/orbix/cmd/orbix@latest
 
 orbix serve \
   --model ./models/qwen2.5-7b-instruct-q4_0.gguf \
   --addr :8080
 ```
+
+The prefix is not decoration. `go install` uses whatever CGO_ENABLED the environment has, which
+is 1 on a machine with a C compiler, and a binary built that way reports `cgo: true` in
+`orbix version` — at odds with the only configuration this project supports. The code contains no
+`import "C"`, so such a build works, but it is not the artifact the project claims to ship.
 
 The server implements `/v1/chat/completions`, `/v1/completions` (both streaming
 and not), `/v1/models`, `/healthz`, and `/metrics`. Two things about the chat
@@ -327,10 +332,14 @@ func main() {
 ### Cross-compile
 
 ```bash
-GOOS=linux GOARCH=arm64 go build -o orbix-arm64 ./cmd/orbix
-GOOS=windows GOARCH=amd64 go build -o orbix.exe ./cmd/orbix
-GOOS=linux GOARCH=riscv64 go build -o orbix-riscv64 ./cmd/orbix
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o orbix-arm64 ./cmd/orbix
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o orbix.exe ./cmd/orbix
+GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build -o orbix-riscv64 ./cmd/orbix
 ```
+
+`CGO_ENABLED=0` is repeated on each line rather than exported once above them, because these are
+lines a reader copies one at a time and a forgotten export is invisible until the binary reports
+`cgo: true`.
 
 No toolchain setup beyond Go itself. The version is not incidental: `go.mod` declares `go 1.27.0`,
 and the code uses generic methods and `strings.CutLast`, both of which arrived in that release, so
@@ -532,8 +541,11 @@ MODEL=/tmp/stories15M-q4_0.gguf \
 QWEN2_MODEL=/tmp/qwen2-f32.gguf \
 MIXTRAL_MODEL=/tmp/tinymixtral.gguf \
 MODEL_KQUANT=/tmp/tinymixtral.gguf \
-go test ./...
+CGO_ENABLED=0 go test ./...
 ```
+
+`just test` sets the same variable; it is written here because this block is a copyable command
+rather than a reference to the recipe.
 
 Worth knowing before judging that run: a file whose weights were never trained produces
 a flat next-token distribution -- one measured at p(argmax) = 0.0003 against 0.26 for a

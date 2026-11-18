@@ -656,7 +656,10 @@ func (e *Engine) finish(s *sequence, last Event) {
 		span := s.reqSpan
 		span.Attributes = append(span.Attributes,
 			otel.IntAttr("gen_ai.usage.output_tokens", int64(len(s.out))),
-			otel.StringAttr("gen_ai.response.finish_reason", last.FinishReason),
+			// The convention names this in the plural and types it string[], one entry per
+			// choice. A scalar under the singular name is invisible to a backend querying
+			// the documented attribute.
+			otel.StringsAttr("gen_ai.response.finish_reasons", last.FinishReason),
 		)
 		// A cancelled request is an error on the span even though it is not an error
 		// event: the caller went away before the model finished, and OTel's GenAI

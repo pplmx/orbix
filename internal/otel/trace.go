@@ -73,10 +73,19 @@ type Attribute struct {
 	// Int reports whether Value holds an integer, which OTLP marks with a different
 	// field name than a string.
 	Int bool
+	// Strings, when non-nil, makes this a string[] attribute and Value is ignored. Some
+	// convention attributes are arrays rather than scalars, and a backend queries them by
+	// that shape.
+	Strings []string
 }
 
 // StringAttr returns a string attribute.
 func StringAttr(key, value string) Attribute { return Attribute{Key: key, Value: value} }
+
+// StringsAttr returns a string[] attribute.
+func StringsAttr(key string, values ...string) Attribute {
+	return Attribute{Key: key, Strings: values}
+}
 
 // IntAttr returns an integer attribute.
 func IntAttr(key string, value int64) Attribute {

@@ -66,8 +66,15 @@ type keyValue struct {
 
 // anyValue is OTLP's typed value union: exactly one field is set.
 type anyValue struct {
-	StringValue *string `json:"stringValue,omitempty"`
-	IntValue    *string `json:"intValue,omitempty"`
+	StringValue *string     `json:"stringValue,omitempty"`
+	IntValue    *string     `json:"intValue,omitempty"`
+	ArrayValue  *arrayValue `json:"arrayValue,omitempty"`
+}
+
+// arrayValue wraps a repeated field. OTLP uses it for attributes typed as string[],
+// such as gen_ai.response.finish_reasons.
+type arrayValue struct {
+	Values []anyValue `json:"values"`
 }
 
 // status is a span's outcome.
@@ -145,6 +152,15 @@ func encodeAttrs(attrs []Attribute) []keyValue {
 		if a.Int {
 			v := a.Value
 			out = append(out, keyValue{Key: a.Key, Value: anyValue{IntValue: &v}})
+			continue
+		}
+		if a.Strings != nil {
+			vals := make([]anyValue, len(a.Strings))
+			for i := range a.Strings {
+				s := a.Strings[i]
+				vals[i] = anyValue{StringValue: &s}
+			}
+			out = append(out, keyValue{Key: a.Key, Value: anyValue{ArrayValue: &arrayValue{Values: vals}}})
 			continue
 		}
 		v := a.Value

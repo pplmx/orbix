@@ -562,3 +562,47 @@ func TestExporterRecordsFromManyGoroutines(t *testing.T) {
 		t.Errorf("collector received %d spans, want %d", n, total)
 	}
 }
+
+// TestEncodeStringArrayAttribute covers the arrayValue branch of the value union.
+//
+// gen_ai.response.finish_reasons is typed string[] by the convention, so it has to go out as
+// an array rather than a scalar under the singular name -- a backend queries the documented
+// shape, and a scalar is invisible to it.
+func TestEncodeStringArrayAttribute(t *testing.T) {
+	span := testSpan(t, "chat")
+	span.Attributes = append(span.Attributes,
+		StringsAttr("gen_ai.response.finish_reasons", "stop", "length"))
+	body, err := Encode(nil, []Span{span})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	req := unmarshalRequest(t, body)
+	attrs := req.ResourceSpans[0].ScopeSpans[0].Spans[0].Attributes
+
+	var found *keyValue
+	for i := range attrs {
+		if attrs[i].Key == "gen_ai.response.finish_reasons" {
+			found = &attrs[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("finish_reasons attribute is missing: %+v", attrs)
+	}
+	if found.Value.ArrayValue == nil {
+		t.Fatalf("finish_reasons is not an array: %+v", found.Value)
+	}
+	vals := found.Value.ArrayValue.Values
+	if len(vals) != 2 {
+		t.Fatalf("%d values, want 2", len(vals))
+	}
+	for i, want := range []string{"stop", "length"} {
+		if vals[i].StringValue == nil || *vals[i].StringValue != want {
+			t.Errorf("values[%d] = %+v, want %q", i, vals[i], want)
+		}
+	}
+	// An array attribute must not also carry a scalar, or a reader that checks for one
+	// gets a value the convention says is not there.
+	if found.Value.StringValue != nil {
+		t.Error("array attribute also has stringValue set")
+	}
+}

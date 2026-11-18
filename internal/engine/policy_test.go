@@ -556,7 +556,7 @@ func TestTracingRecordsRequestSpans(t *testing.T) {
 			`"gen_ai.request.model"`,
 			`"gen_ai.usage.input_tokens"`,
 			`"gen_ai.usage.output_tokens"`,
-			`"gen_ai.response.finish_reason"`,
+			`"gen_ai.response.finish_reasons"`,
 			`"orbix.prefill_ms"`,
 			`"orbix.decode_ms"`,
 			`"service.name"`,
@@ -678,7 +678,7 @@ func TestCancelledRequestSpanIsError(t *testing.T) {
 	body := string(got.body)
 	got.mu.Unlock()
 
-	if !strings.Contains(body, `gen_ai.response.finish_reason`) || !strings.Contains(body, "cancel") {
+	if !strings.Contains(body, `gen_ai.response.finish_reasons`) || !strings.Contains(body, "cancel") {
 		t.Fatalf("span does not record the cancel: %s", body)
 	}
 	// The status code is what a trace query filters on. 1 is ok, 2 is error.

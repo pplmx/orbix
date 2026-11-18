@@ -1,8 +1,10 @@
 package kernel
 
 import (
+	"fmt"
 	"math/rand"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -246,5 +248,50 @@ func BenchmarkBatchAmortizes(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// TestParallelCoversEveryIndexExactlyOnce covers the contract Parallel exists to provide.
+//
+// It is the concurrency primitive behind attention, where each position writes its own slice of the
+// output and reads only the cache. Two properties make that safe, and neither had a test: every
+// index runs exactly once, and the slots handed to workers stay distinct so two workers cannot
+// write the same scratch array. A chunking bug shows up as a skipped index or a doubled one, both of
+// which produce wrong output rather than a crash.
+//
+// The grid covers the cases the ceil division has to get right: count below the worker count (fewer
+// parts than indices), count not divisible by the parts, and the degenerate zero.
+func TestParallelCoversEveryIndexExactlyOnce(t *testing.T) {
+	for _, workers := range []int{0, 1, 2, 3, 8} {
+		for _, count := range []int{0, 1, 2, 5, 7, 16} {
+			t.Run(fmt.Sprintf("workers=%d/count=%d", workers, count), func(t *testing.T) {
+				r := NewRunner(workers)
+				var mu sync.Mutex
+				seen := make(map[int]int, count)
+				slots := make(map[int]struct{})
+				r.Parallel(count, func(i, slot int) {
+					mu.Lock()
+					seen[i]++
+					slots[slot] = struct{}{}
+					mu.Unlock()
+				})
+
+				for i := range count {
+					switch seen[i] {
+					case 1:
+					case 0:
+						t.Errorf("index %d never visited", i)
+					default:
+						t.Errorf("index %d visited %d times", i, seen[i])
+					}
+				}
+				// A slot beyond the worker count means the chunking produced more parts than
+				// workers, which would let two of them share scratch.
+				maxSlots := min(max(workers, 1), count)
+				if len(slots) > maxSlots {
+					t.Errorf("%d distinct slots for %d workers and %d indices", len(slots), workers, count)
+				}
+			})
+		}
 	}
 }

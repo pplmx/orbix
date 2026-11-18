@@ -355,7 +355,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Messages) == 0 {
-		writeError(w, http.StatusBadRequest, "messages is required")
+		writeErrorParam(w, http.StatusBadRequest, "messages is required", "messages", "missing_required_parameter")
 		return
 	}
 	prompt := s.renderChat(req.Messages)
@@ -390,7 +390,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
-		writeError(w, http.StatusBadRequest, "prompt is required")
+		writeErrorParam(w, http.StatusBadRequest, "prompt is required", "prompt", "missing_required_parameter")
 		return
 	}
 	s.generate(w, r, generateParams{
@@ -916,6 +916,19 @@ type errorBody struct {
 		// OpenAI libraries surface it as e.code and a 404 as a model-not-found error.
 		Code string `json:"code,omitempty"`
 	} `json:"error"`
+}
+
+// writeErrorParam is writeError for a request-validation failure that can name the field at
+// fault. OpenAI's error object documents `param` for exactly this, and its clients surface it as
+// e.param, so a caller writing "--prompt" instead of "prompt" gets the field name rather than
+// having to parse it out of the message.
+func writeErrorParam(w http.ResponseWriter, status int, msg, param, code string) {
+	var body errorBody
+	body.Error.Message = msg
+	body.Error.Type = "invalid_request_error"
+	body.Error.Param = param
+	body.Error.Code = code
+	writeJSON(w, status, body)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

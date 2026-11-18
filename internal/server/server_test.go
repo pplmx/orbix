@@ -1607,3 +1607,43 @@ func TestWriteErrorTypes(t *testing.T) {
 		}
 	}
 }
+
+// TestValidationErrorsNameTheField covers error.param on the two required-field checks.
+//
+// OpenAI's error object documents `param` as the field at fault for a request-validation
+// failure, and its clients surface it as e.param. Without it a caller has to parse the field
+// name out of the message string, which is what this server was making them do.
+func TestValidationErrorsNameTheField(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	cases := []struct {
+		name  string
+		path  string
+		body  string
+		param string
+	}{
+		{"completions without prompt", "/v1/completions",
+			`{"max_tokens":1}`, "prompt"},
+		{"chat without messages", "/v1/chat/completions",
+			`{"max_tokens":1}`, "messages"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			var body errorBody
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Error.Param != c.param {
+				t.Errorf("param = %q, want %q", body.Error.Param, c.param)
+			}
+			if body.Error.Code != "missing_required_parameter" {
+				t.Errorf("code = %q, want missing_required_parameter", body.Error.Code)
+			}
+		})
+	}
+}

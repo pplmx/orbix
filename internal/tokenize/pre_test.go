@@ -927,14 +927,15 @@ func TestEveryHandledNameIsAKnownName(t *testing.T) {
 	}
 }
 
-// TestImplementedNameCountPinsTheReadmeNumber keeps the README's "covering 63 of the 100
-// names" checkable.
+// TestImplementedNameCountPinsTheReadmeNumber keeps the README's "covering all 100 names"
+// checkable.
 //
 // It is a number a reader can compare against llama.cpp, and it changes by one every time a
 // family is added -- which is exactly the kind of figure that goes stale silently, since
 // nothing fails when it drifts. The two figures are separate assertions because they move
 // for different reasons: the table grows when llama.cpp adds a family, the implemented count
-// when one is written here.
+// when one is written here. Both read 100 today; the comment said "covering 63 of the 100"
+// until every family was written, and that is the drift this test exists to catch.
 func TestImplementedNameCountPinsTheReadmeNumber(t *testing.T) {
 	// A real tokenizer per name, so the lookup under test is the one a file goes through:
 	// PreImplemented reads the parsed rule, not the name.

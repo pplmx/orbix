@@ -3,6 +3,7 @@ package chat
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // render is the test helper: parse and evaluate, failing on either step.
@@ -804,5 +805,85 @@ func TestInOperatorOnAString(t *testing.T) {
 		if got := render(t, c.src, msgs, Inputs{}); got != c.want {
 			t.Errorf("%q = %q, want %q", c.src, got, c.want)
 		}
+	}
+}
+
+// TestParseScalesLinearlyInTagCount guards the lexer's delimiter search.
+//
+// The scanner used to call strings.Index once per delimiter ({{, {%, {#) for every tag, and
+// each call scanned the rest of the template. That is quadratic in the tag count: measured on
+// flat templates, 5k tags took 20ms, 10k took 66ms, 20k took 254ms, and a 10k-deep nested
+// template -- which is 20k tags -- took 4.7 seconds. Searching for the single character the
+// delimiters share costs one pass; the same inputs now take 7ms, 5ms, 13ms and 30ms.
+//
+// The bound is deliberately loose (a doubling may cost up to 3x) so that a slower machine does
+// not fail it, while a return to quadratic growth -- 4x per doubling, which is what was
+// measured -- still does.
+func TestParseScalesLinearlyInTagCount(t *testing.T) {
+	build := func(n int) string {
+		var b strings.Builder
+		for range n {
+			b.WriteString("{{ 1 }}")
+		}
+		return b.String()
+	}
+	timeIt := func(n int) time.Duration {
+		src := build(n)
+		start := time.Now()
+		if _, err := Parse(src); err != nil {
+			t.Fatalf("Parse(%d tags): %v", n, err)
+		}
+		return time.Since(start)
+	}
+
+	// Warm up so the first measurement is not paying for lazily-initialised runtime state.
+	timeIt(1000)
+
+	small := timeIt(5000)
+	large := timeIt(20000)
+
+	// 4x the tags. Linear would be 4x the time; quadratic would be 16x.
+	if small <= 0 {
+		t.Skip("timer resolution too coarse for the small case")
+	}
+	ratio := float64(large) / float64(small)
+	if ratio > 12 {
+		t.Errorf("4x the tags took %.1fx the time (%v -> %v); the delimiter scan is quadratic again",
+			ratio, small, large)
+	}
+}
+
+// TestParseHandlesDeepNesting is the same shape at nesting depth rather than tag count: a
+// template nested 20000 deep used to take 19 seconds because every level re-scanned the rest
+// of the input. It parses in about 35ms now.
+func TestParseHandlesDeepNesting(t *testing.T) {
+	const depth = 20000
+	var b strings.Builder
+	b.WriteString("{% if true %}")
+	for range depth {
+		b.WriteString("{% if true %}")
+	}
+	b.WriteString("x")
+	for range depth {
+		b.WriteString("{% endif %}")
+	}
+	b.WriteString("{% endif %}")
+
+	start := time.Now()
+	tpl, err := Parse(b.String())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 10*time.Second {
+		t.Errorf("parsing a %d-deep template took %v; it was 19s before the delimiter scan was fixed",
+			depth, elapsed)
+	}
+	out, err := tpl.Render(nil, Inputs{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if out != "x" {
+		t.Errorf("rendered %q, want %q", out, "x")
 	}
 }

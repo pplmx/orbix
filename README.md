@@ -845,6 +845,14 @@ than part of `check` for the same reason: neither tool is in the Go toolchain, a
 should stay runnable with Go and golangci-lint alone. The three are the gates CI runs, and
 running them makes a green branch predictable rather than hoped for.
 
+The two differ in what they do when they find a problem, which is worth knowing before running
+either: `just docs` reports and leaves the file alone, while `just hooks` **rewrites** it --
+its `rumdl` and `rumdl-fmt` hooks pass `--fix`, and `end-of-file-fixer` and
+`mixed-line-ending` edit in place too. A hook that changed something exits non-zero and says
+`files were modified by this hook`; re-stage the file and look at what it did rather than
+assuming the edit was cosmetic, since the Markdown fixer also reflows list spacing and table
+alignment.
+
 The `doc.go` files are Go, so rumdl does not see them; their prose is checked only by reading
 it. That is why every package's design notes live in a `doc.go` that a reviewer sees in the
 diff rather than behind a linter -- a broken Markdown table in the README fails `just docs`,

@@ -39,6 +39,8 @@ CI 的 Go 相关 job 调用 just 配方，不另写 `go build` 命令；两处�
 
 提交钩子还要 `prek install` 装一次才生效——它写 `.git/hooks/` 下的 shim，仓库里不落任何东西。装之前 `just hooks` 仍可手动跑，装之后每次 commit 自动跑，两条路径执行的是同一份 `.pre-commit-config.yaml`。
 
+**`just hooks` 会改写文件。** 其中的 `rumdl` 与 `rumdl-fmt` 带 `--fix`，`end-of-file-fixer` 补末尾换行，`mixed-line-ending` 统一成 LF：发现问题时它们直接改工作区，然后以非零码退出，并打印 `files were modified by this hook`。这与 `just docs` 相反——后者跑的是 `rumdl check .`，只报告不改文件。所以「`just docs` 红了」之后跑 `just hooks`，文件可能已经被改好，需要重新 `git add` 再看。把改动逐条看一眼再决定要不要，比盲信自动修复安全：`rumdl fmt` 会重排标题空行和表格对齐，不全是纯格式的小事。
+
 提交信息格式同理但机制不同：`commitizen` 钩子只检查**写下的那一条**，而且只在装了钩子的机器上跑；`just commits` 用 `cz check --rev-range` 检查**一整段**，CI 的 commits job 用它兜底。`prek run --all-files` 不会触发 commit-msg 阶段的钩子（它需要一个 message 文件），所以这两条路不能互相替代。
 
 `just fuzz` 同理不并进 `check`：它按时间跑而不是按用例跑，默认 30 秒一个 target，全套要几分钟。但 **seed corpus 由 `just test` 跑**——`go test` 会重放 `testdata/fuzz/` 里的每个文件，所以一个修好的崩溃会一直防住回归，不需要记得跑 fuzz。

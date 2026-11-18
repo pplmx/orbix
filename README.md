@@ -821,6 +821,16 @@ orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --pr
 A config file is on the roadmap, not in the code: the interface block at the top of
 this file describes the target, and this table describes what exists.
 
+`--policy` is the flag most likely to need a reason rather than a definition, so: `fifo` is the
+default because submission order is the easiest thing to reason about and every other policy is a
+visible departure from it. `shortest` serves the sequences with the least remaining work first,
+which is what keeps a queue of mixed-size requests from being dominated by its longest member --
+it reorders without bounding anything. `fair` serves whichever sequence has gone longest without a
+turn, and that is the one with a bound to quote: no sequence waits more than about
+`len(active)/MaxActive` rounds in a row, which makes it the choice for a long-running server where
+starving a request is the failure to avoid. `fair` is not the default for the same reason `fifo`
+is: a policy that bounds wait time is only useful if the operator asked for it.
+
 The two cache layouts differ in what they reserve, and the difference is large enough to
 decide the flag. A contiguous cache reserves the whole context for every accepted request
 when it arrives, so the cost is `context x KV width x layers`, multiplied by the active

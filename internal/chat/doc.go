@@ -13,7 +13,7 @@
 //
 //   - {% if %} / {% elif %} / {% else %} / {% endif %} with ==, !=, not, and, or,
 //     in, and is defined
-//   - {% for %} with loop.index0, loop.index, loop.first, and loop.last
+//   - {% for %} with loop.index0, loop.index, loop.first, loop.last, and loop.length
 //   - {% set %}, including assigning to a name another statement reads
 //   - {{ expression }} with string and variable operands, + concatenation, and the
 //     trim and tojson filters
@@ -25,6 +25,19 @@
 // which is exactly the failure mode this package exists to remove. Callers fall back to
 // a neutral transcript when a template cannot be parsed, so an unsupported checkpoint
 // degrades to the old behaviour rather than to a broken prompt.
+//
+// One gap in that guarantee is worth stating. A field read from a mapping that is not
+// there evaluates to empty rather than to an error, because templates disagree about how
+// to ask: Qwen2 writes `not message.tool_calls` and Llama 3 writes `'tool_calls' in
+// message`, and both mean "no tool calls" only if a missing field is empty *and* absent.
+// The rule is right for message fields and it also covers the loop object, so
+// `{{ loop.depth }}` -- a Jinja field this package does not implement -- renders as the
+// empty string instead of failing. The loop fields that do exist are the five listed
+// above; a template using another one produces output one token short rather than an
+// error, which is the failure mode the paragraph above promises not to have. It has not
+// come up in a published template yet, which is why it is documented rather than fixed:
+// rejecting unknown loop fields specifically would mean the loop object is validated
+// while message mappings are not.
 //
 // The evaluation is deliberately eager and side-effect free: rendering walks the parsed
 // tree once, with no user-visible state and no loops beyond for, so the cost is

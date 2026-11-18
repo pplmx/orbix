@@ -325,6 +325,18 @@ Two things remain the deployment's job, because no application header can expres
 - **Keep the connection open.** nginx's `proxy_read_timeout` defaults to 60 seconds and bounds
   the gap between reads, not the whole response, so a long model load or a stalled generation
   can exceed it. Raise it for the inference location.
+- **Keep reading.** A stream nobody reads is abandoned, not paused, once the backpressure
+  reaches the engine. The engine buffers 64 events per sequence and, when that fills, waits 2
+  seconds for it to drain before retiring the sequence; its output is then discarded and its
+  slot goes to someone else. A client that opens the stream, does something slow, and comes
+  back finds a closed connection rather than the tokens it was owed.
+  How soon this bites depends on a size the server does not control: kernel socket buffers
+  absorb a surprising amount, so a short response finishes into them even with nobody reading
+  (measured: 120 tokens, about 20 KB, completed into the buffer with the reader stopped for
+  five seconds). The bound is on the *engine's* queue, not on the network, so a long generation
+  or a small receive window reaches it and a short one may not. The guarantee is therefore
+  "drain as you go", which every SSE client does by default and a hand-rolled one may not --
+  not "you have 2 seconds".
 - **The upstream connection has to be HTTP/1.1 for chunked transfer.** nginx proxies HTTP/1.1
   by default from 1.29.7; before that the default was 1.0, where ending a stream means closing
   the connection. Set `proxy_http_version 1.1` with an empty `Connection` header on older

@@ -109,6 +109,19 @@ func (r *ChatRenderer) UsesModelTemplate() bool {
 	return r.renderReason == ""
 }
 
+// HasTemplate reports whether the model declared a template this project could parse.
+//
+// It is not the same question as UsesModelTemplate, and the REPL needs both. A model with no
+// template at all is in the fallback from the first turn and said so in the banner; a model
+// whose template parses but fails to render *this conversation* starts in the model's format
+// and changes to the fallback partway through. Reporting the second case as if it were the
+// first is what the REPL did: it printed "the model's template could not render this
+// conversation" after the very first successful turn on a model that declares no template,
+// contradicting the banner above it.
+func (r *ChatRenderer) HasTemplate() bool {
+	return r != nil && r.tmpl != nil
+}
+
 // FallbackReason explains why the model's format is not in use, or is empty when it is.
 func (r *ChatRenderer) FallbackReason() string {
 	if r == nil {

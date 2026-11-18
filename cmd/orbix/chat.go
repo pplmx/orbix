@@ -224,7 +224,13 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 		// renderer, so the banner printed above cannot know about it; say it once, the
 		// first time it happens, rather than leaving the session silently on the neutral
 		// transcript.
-		if !notedFallback && opts.renderer != nil && !opts.renderer.UsesModelTemplate() {
+		// Only a template that parsed and then failed to render *this* conversation is news.
+		// A model with no template was already explained by the banner, and checking only
+		// UsesModelTemplate made the REPL announce a render-time fallback on the first
+		// successful turn of every such session -- contradicting the banner it had just
+		// printed, and describing a failure that never happened.
+		if !notedFallback && opts.renderer != nil && opts.renderer.HasTemplate() &&
+			!opts.renderer.UsesModelTemplate() {
 			notedFallback = true
 			if _, werr := fmt.Fprintf(out, "(the model's template could not render this "+
 				"conversation: %s; using a neutral transcript)\n",

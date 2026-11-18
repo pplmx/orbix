@@ -35,6 +35,61 @@ func runChat(t *testing.T, opts chatOptions, input string) string {
 	return out.String()
 }
 
+// TestChatDoesNotInventARenderFailure covers a message the REPL printed when nothing had
+// gone wrong.
+//
+// A model that declares no chat template is in the neutral transcript from the first turn,
+// and the banner says so before the first prompt. The post-turn check then asked
+// UsesModelTemplate, which is false both for "no template" and for "the template failed to
+// render", so every such session announced a render-time fallback after its first successful
+// turn -- contradicting the banner directly above it and describing a failure that never
+// happened. On a model with no template the message is not merely redundant: it suggests
+// something broke mid-conversation when nothing changed at all.
+//
+// The two cases are now distinguished by HasTemplate, and this test pins the "no template"
+// half. A fixture with no ChatTemplate is exactly that model.
+func TestChatDoesNotInventARenderFailure(t *testing.T) {
+	out := runChat(t, chatOptions{
+		model:     chatModel(t),
+		maxTokens: 4,
+		topK:      40,
+	}, "Once upon a time\n/exit\n")
+
+	// The banner must still say which format is in use -- that is the honest statement.
+	if !strings.Contains(out, "neutral transcript") {
+		t.Errorf("the banner no longer names the fallback:\n%s", out)
+	}
+	// And the per-turn message must not appear, because no render failed.
+	if strings.Contains(out, "could not render this conversation") {
+		t.Errorf("the REPL reported a render failure for a model with no template:\n%s", out)
+	}
+}
+
+// TestChatReportsARealRenderTimeFallback is the other half of the pair: a template that
+// parses and then fails to render a particular conversation must still be reported once.
+//
+// Without this, the fix for the phantom message above could be "never print it", which would
+// silence the case the message exists for -- a conversation that silently changed format
+// partway through.
+func TestChatReportsARealRenderTimeFallback(t *testing.T) {
+	// A template that parses but indexes past the conversation, so rendering fails only when
+	// a request arrives; Parse succeeds.
+	path := gguftest.Model{
+		NoEOS: true, ContextLen: 512,
+		ChatTemplate: `{{ messages[9].content }}`,
+	}.Write(t, t.TempDir())
+
+	out := runChat(t, chatOptions{
+		model:     path,
+		maxTokens: 4,
+		topK:      40,
+	}, "Once upon a time\n/exit\n")
+
+	if !strings.Contains(out, "could not render this conversation") {
+		t.Errorf("a template that failed at render time was not reported:\n%s", out)
+	}
+}
+
 func TestChatRepliesAndExits(t *testing.T) {
 	out := runChat(t, chatOptions{
 		model:     chatModel(t),

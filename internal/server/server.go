@@ -43,8 +43,15 @@ type Config struct {
 	// Empty means "orbix".
 	ModelName string
 
-	// MaxTokens is the default generation budget when a request omits one. Zero
+	// MaxTokens is the generation budget for a request that does not name one. Zero
 	// means 256.
+	//
+	// A request cannot ask for zero tokens: max_tokens is an int rather than a pointer, so
+	// an explicit 0 is indistinguishable from the field being absent and both take this
+	// default. Measured: {"max_tokens": 0} and a body with no max_tokens both generated 123
+	// tokens against a 128-position context. The engine itself treats 0 as "no tokens" and
+	// finishes immediately, which is why the CLI's --max-tokens 0 does produce nothing --
+	// the two layers disagree, and the server is the one that cannot express the request.
 	MaxTokens int
 
 	// ContextLen caps prompt+output tokens for one request. It comes from the

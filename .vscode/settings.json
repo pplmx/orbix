@@ -1,0 +1,36 @@
+{
+  "// note": "Settings that follow this repo's constraints, not personal preferences. The build is CGO_ENABLED=0 only (see AGENTS.md), so the Go tooling here is told not to offer cgo-based diagnostics, and commands go through the Makefile rather than being reimplemented.",
+  "go.toolsEnvVars": {
+    "CGO_ENABLED": "0"
+  },
+  "go.buildTags": "",
+  "go.testFlags": ["-count=1"],
+  "go.lintTool": "golangci-lint",
+  "go.lintFlags": ["--fast"],
+  "go.formatTool": "gofmt",
+  "go.useLanguageServer": true,
+  "gopls": {
+    "ui.semanticTokens": true,
+    "formatting.gofumpt": false
+  },
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "[markdown]": {
+    "files.trimTrailingWhitespace": false
+  },
+  "[go]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "[yaml]": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  },
+  "[json]": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  }
+}

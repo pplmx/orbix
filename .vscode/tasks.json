@@ -1,0 +1,63 @@
+{
+  "// note": "Every task calls a Makefile target. AGENTS.md says commands go through the Makefile rather than being reimplemented, and a task that ran `go test ./...` directly would drift from `make test` the first time the target changed.",
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "check",
+      "detail": "vet + test + lint + gofmt (the gate CI runs)",
+      "type": "shell",
+      "command": "make check",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "test",
+      "detail": "go test -count=1 ./...",
+      "type": "shell",
+      "command": "make test",
+      "group": "test",
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "build",
+      "detail": "compile to bin/orbix",
+      "type": "shell",
+      "command": "make build",
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "lint",
+      "type": "shell",
+      "command": "make lint",
+      "problemMatcher": []
+    },
+    {
+      "label": "docs",
+      "detail": "rumdl over the Markdown",
+      "type": "shell",
+      "command": "make docs",
+      "problemMatcher": []
+    },
+    {
+      "label": "test-race",
+      "detail": "race detector; needs cgo, so it is a separate target",
+      "type": "shell",
+      "command": "make test-race",
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "fuzz",
+      "detail": "every fuzz target for FUZZTIME each (slow)",
+      "type": "shell",
+      "command": "make fuzz",
+      "problemMatcher": []
+    },
+    {
+      "label": "cross",
+      "detail": "build all five platforms",
+      "type": "shell",
+      "command": "make cross",
+      "problemMatcher": ["$go"]
+    }
+  ]
+}

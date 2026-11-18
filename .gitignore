@@ -13,8 +13,14 @@ coverage.*
 # Editor and OS noise
 .DS_Store
 .idea/
-.vscode/
 *.swp
+
+# VS Code: keep the parts that describe how to work in this repo, ignore per-person state.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
 
 # rumdl's markdown lint cache
 .rumdl_cache/

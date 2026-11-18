@@ -693,14 +693,6 @@ func (t *Tokenizer) addsBOS() bool {
 	return t.addBOS == nil || *t.addBOS
 }
 
-// Token returns the piece stored at id.
-func (t *Tokenizer) Token(id int32) (string, bool) {
-	if id < 0 || int(id) >= len(t.tokens) {
-		return "", false
-	}
-	return t.tokens[id], true
-}
-
 // TokenType returns the role of the token at id.
 func (t *Tokenizer) TokenType(id int32) TokenType {
 	if id < 0 || int(id) >= len(t.types) {

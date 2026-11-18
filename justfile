@@ -103,7 +103,7 @@ fuzz:
             # without the check the recipe exits "ok" having fuzzed nothing -- which is how
             # the `$$` bug above survived: every run reported success.
             if printf '%s' "$out" | grep -q 'no fuzz tests to fuzz'; then
-                echo "\$t matched no fuzz target in \$pkg" >&2
+                echo "$t matched no fuzz target in $pkg" >&2
                 exit 1
             fi
             printf '%s\n' "$out" | tail -2

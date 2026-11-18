@@ -83,6 +83,8 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - 测试依赖执行时长时用等待时间的比值，不用「谁先返回」：短请求即使排队也必然先完成，用完成顺序会把正常调度判成失败。
 - 确实要真实权重的测试（例如与 llama.cpp 逐 token 比对 logits）保留 `MODEL` 门禁，只用于本地交叉验证。
 - 解析器的错误路径要测：截断、幻数错误、版本不符、越界张量。
+- 覆盖率按**包**看，不按仓库看：`go test -cover ./pkg/` 只 instrument `pkg` 自己，所以别的包的测试调用过来的代码在这个数字里仍然是 0%。`Float32s` 显示 0% 而实际被 `tokenize` 的测试大量调用，追这个数字会浪费一轮。判断真缺口要问「这个函数有没有生产调用方」，不是「这个数字是不是 0」。
+- 验证一条回归测试有没有判别力，要靠改动被测代码后重跑，不是靠读代码推断。改动时注意**同文本多处出现**：`moeRowsFromBatch` 和 `moeRowsFromDecode` 的构造体逐字相同，用 Python `str.replace` 不加限定会打到第一个，于是测出来「注入不生效」而实际是没打到目标。改完用 `git diff` 确认命中位置。
 - 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。
 - `make test-race` 只覆盖测试里出现的并发。手动验证用 `CGO_ENABLED=1 go build -race` 出一个竞态版二进制，跑 `serve --max-active N`（配 `--blocks --block-size --prefix-cache` 开共享缓存），再打并发混合负载：非流式、SSE 流式、以及用 `timeout` 中途取消的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`，且 `orbix_requests_active` 归零——队列泄漏和竞态一样会让这个数停在非零。
 

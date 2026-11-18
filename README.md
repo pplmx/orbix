@@ -451,7 +451,7 @@ orbix bench --model ./model.gguf --concurrency 4 --max-tokens 32
 orbix bench --model ./model.gguf --suite     # every scenario in one table
 
 orbix model inspect ./model.gguf
-orbix model inspect --json ./model.gguf   # machine-readable
+orbix model inspect --json ./model.gguf   # machine-readable; values keep their GGUF type
 ```
 
 `orbix model inspect` is also a learning tool: it prints the GGUF layout in a

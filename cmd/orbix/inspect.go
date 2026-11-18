@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -207,6 +208,18 @@ func printTensors(tw *tabwriter.Writer, ew *errWriter, f *gguf.File) error {
 }
 
 // writeJSON prints the metadata and tensor directory as JSON, for scripts.
+//
+// Metadata values keep their GGUF type: an integer is a JSON number, a bool is a JSON bool, a
+// string is a JSON string. Rendering every value with Value.String made the output a map of
+// strings, so a script reading llama.context_length had to parse "128" back out of it -- which
+// is the work a machine-readable flag exists to remove. The scalar projection below is the one
+// place the mapping is decided.
+//
+// Arrays stay a summary -- "[32000 string]" -- rather than being expanded. A tokenizer carries
+// three arrays of 32000 entries, and inlining them would turn a 200-line document into
+// hundreds of thousands with no one reading them; the type and length are what a script needs
+// to know the array is there, and a script that needs the contents reads the file with the
+// loader.
 func writeJSON(w io.Writer, f *gguf.File) error {
 	type tensor struct {
 		Name   string   `json:"name"`
@@ -216,20 +229,20 @@ func writeJSON(w io.Writer, f *gguf.File) error {
 		Bytes  *int64   `json:"bytes,omitempty"`
 	}
 	out := struct {
-		Version       uint32            `json:"version"`
-		Alignment     int64             `json:"alignment"`
-		TensorDataLoc int64             `json:"tensor_data_offset"`
-		Metadata      map[string]string `json:"metadata"`
-		Tensors       []tensor          `json:"tensors"`
+		Version       uint32         `json:"version"`
+		Alignment     int64          `json:"alignment"`
+		TensorDataLoc int64          `json:"tensor_data_offset"`
+		Metadata      map[string]any `json:"metadata"`
+		Tensors       []tensor       `json:"tensors"`
 	}{
 		Version:       f.Version,
 		Alignment:     f.Alignment,
 		TensorDataLoc: f.TensorDataLoc,
-		Metadata:      map[string]string{},
+		Metadata:      make(map[string]any, f.MetadataCount()),
 		Tensors:       make([]tensor, 0, f.TensorCount()),
 	}
 	for k, v := range f.Metadata {
-		out.Metadata[k] = v.String()
+		out.Metadata[k] = jsonValue(v)
 	}
 	for ti := range f.Tensors() {
 		t := tensor{Name: ti.Name, Dims: ti.Dims, Type: ti.Type.String(), Offset: ti.Offset}
@@ -241,6 +254,37 @@ func writeJSON(w io.Writer, f *gguf.File) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// jsonValue projects one GGUF metadata value onto the JSON type that matches it.
+//
+// The switch is on the GGUF type rather than on the populated field, because the type is what
+// the file records: a uint64 that happens to hold a small number is still an unsigned integer,
+// and a caller comparing against a Go int should see the same width the file declares.
+func jsonValue(v gguf.Value) any {
+	switch v.Type {
+	case gguf.TypeString:
+		return v.Str
+	case gguf.TypeBool:
+		return v.Bool
+	case gguf.TypeUint8, gguf.TypeUint16, gguf.TypeUint32, gguf.TypeUint64:
+		return v.Uint
+	case gguf.TypeInt8, gguf.TypeInt16, gguf.TypeInt32, gguf.TypeInt64:
+		return v.Int
+	case gguf.TypeFloat32, gguf.TypeFloat64:
+		// The float's own precision, as a number rather than the string FormatFloat builds.
+		// A float32 cannot represent more than its type's digits, and encoding/json would
+		// otherwise print the widened float64 in full -- 9.999999747378752e-06 for 1e-5.
+		f, err := strconv.ParseFloat(gguf.FormatFloat(v.Type, v.Float), 64)
+		if err != nil {
+			return v.Float
+		}
+		return f
+	default:
+		// Arrays and anything unknown keep the summary form, which is what the text output
+		// shows and what a script needs to know an array is there.
+		return v.String()
+	}
 }
 
 // errWriter remembers the first write error, so a sequence of prints can be

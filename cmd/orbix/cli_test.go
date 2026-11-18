@@ -167,10 +167,10 @@ func TestModelInspectJSON(t *testing.T) {
 	})
 
 	var got struct {
-		Version       uint32            `json:"version"`
-		Alignment     int64             `json:"alignment"`
-		TensorDataLoc int64             `json:"tensor_data_offset"`
-		Metadata      map[string]string `json:"metadata"`
+		Version       uint32         `json:"version"`
+		Alignment     int64          `json:"alignment"`
+		TensorDataLoc int64          `json:"tensor_data_offset"`
+		Metadata      map[string]any `json:"metadata"`
 		Tensors       []struct {
 			Name   string   `json:"name"`
 			Dims   []uint64 `json:"dims"`
@@ -201,8 +201,40 @@ func TestModelInspectJSON(t *testing.T) {
 	if got.Tensors[0].Bytes == nil || *got.Tensors[0].Bytes != 32 {
 		t.Errorf("tensor[0].bytes = %v, want 32", got.Tensors[0].Bytes)
 	}
-	if _, ok := got.Metadata["general.architecture"]; !ok {
+	// The values keep their GGUF type. This is the assertion whose absence let the output ship
+	// as a map of strings: a script reading a numeric field had to parse "128" back out, which
+	// is the work a --json flag exists to remove.
+	if v, ok := got.Metadata["general.architecture"]; !ok {
 		t.Error("metadata missing general.architecture")
+	} else if _, isStr := v.(string); !isStr {
+		t.Errorf("a GGUF string decoded as %T, want string", v)
+	}
+	// An integer field is a JSON number, and the value is checked as well as the type:
+	// encoding/json decodes any JSON number into float64, so a type check alone would pass
+	// for a field whose string form happened to be numeric.
+	if v, ok := got.Metadata["llama.block_count"]; !ok {
+		t.Error("metadata missing llama.block_count")
+	} else if f, isNum := v.(float64); !isNum {
+		t.Errorf("llama.block_count decoded as %T (%v), want a number", v, v)
+	} else if f != 1 {
+		t.Errorf("llama.block_count = %v, want 1", f)
+	}
+	// A float field is a number at its own precision, not the widened float64 spelled out in
+	// full: 1e-5 as a float32 is 9.999999747378752e-06, and printing that is noise the file
+	// cannot justify.
+	if v, ok := got.Metadata["llama.attention.layer_norm_rms_epsilon"]; !ok {
+		t.Error("metadata missing llama.attention.layer_norm_rms_epsilon")
+	} else if f, isNum := v.(float64); !isNum {
+		t.Errorf("the epsilon decoded as %T (%v), want a number", v, v)
+	} else if f != 1e-5 {
+		t.Errorf("epsilon = %v, want 1e-5 (float32 precision, not the widened double)", f)
+	}
+	// An array stays a summary: a tokenizer carries three arrays of tens of thousands of
+	// entries, and inlining them would bury the rest of the document.
+	if v, ok := got.Metadata["tokenizer.ggml.tokens"]; ok {
+		if _, isStr := v.(string); !isStr {
+			t.Errorf("an array decoded as %T (%v), want the summary string", v, v)
+		}
 	}
 }
 

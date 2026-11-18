@@ -2,7 +2,6 @@ package otel
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"sync"
 	"time"
@@ -24,16 +23,20 @@ func (t TraceID) IsValid() bool { return t != TraceID{} }
 // IsValid reports whether the id is non-zero.
 func (s SpanID) IsValid() bool { return s != SpanID{} }
 
-// String renders the id as base64, the encoding OTLP/JSON uses for a bytes field.
-func (t TraceID) String() string { return base64.StdEncoding.EncodeToString(t[:]) }
+// String renders the id as lowercase hex.
+//
+// OTLP's JSON encoding deviates from proto3's standard mapping here: the spec says traceId and
+// spanId are "case-insensitive hex-encoded strings; they are not base64-encoded as is defined in
+// the standard Protobuf JSON Mapping". This is the wire form.
+func (t TraceID) String() string { return t.Hex() }
 
-// String renders the id as base64.
-func (s SpanID) String() string { return base64.StdEncoding.EncodeToString(s[:]) }
+// String renders the id as lowercase hex; see TraceID.String.
+func (s SpanID) String() string { return s.Hex() }
 
-// Hex renders the id as hex, for logs. It is not the wire encoding.
+// Hex renders the id as lowercase hex, which is both the wire encoding and what logs show.
 func (t TraceID) Hex() string { return fmt.Sprintf("%x", t[:]) }
 
-// Hex renders the id as hex, for logs.
+// Hex renders the id as lowercase hex.
 func (s SpanID) Hex() string { return fmt.Sprintf("%x", s[:]) }
 
 // NewTraceID returns a random trace id.

@@ -47,9 +47,13 @@ func unmarshalRequest(t *testing.T, body []byte) exportRequest {
 	return req
 }
 
-// TestEncodeIdsAreBase64 is the detail most hand-written exporters get wrong: OTLP/JSON
-// follows proto3's mapping, where a bytes field is base64, not hex.
-func TestEncodeIdsAreBase64(t *testing.T) {
+// TestEncodeIdsAreHex is the one place OTLP/JSON departs from proto3's standard mapping.
+//
+// proto3 would put a bytes field in base64, and this exporter did exactly that until the
+// specification was read: "The traceId and spanId byte arrays are represented as
+// case-insensitive hex-encoded strings; they are not base64-encoded as is defined in the
+// standard Protobuf JSON Mapping."
+func TestEncodeIdsAreHex(t *testing.T) {
 	span := testSpan(t, "chat")
 	body, err := Encode(nil, []Span{span})
 	if err != nil {
@@ -61,28 +65,25 @@ func TestEncodeIdsAreBase64(t *testing.T) {
 		t.Fatalf("%d spans, want 1", len(spans))
 	}
 
-	wantTrace := base64.StdEncoding.EncodeToString(span.TraceID[:])
-	if spans[0].TraceID != wantTrace {
-		t.Errorf("traceId = %q, want base64 %q (hex would be %s)",
-			spans[0].TraceID, wantTrace, span.TraceID.Hex())
+	if want := span.TraceID.Hex(); spans[0].TraceID != want {
+		t.Errorf("traceId = %q, want hex %q", spans[0].TraceID, want)
 	}
-	wantSpan := base64.StdEncoding.EncodeToString(span.SpanID[:])
-	if spans[0].SpanID != wantSpan {
-		t.Errorf("spanId = %q, want base64 %q", spans[0].SpanID, wantSpan)
+	if want := span.SpanID.Hex(); spans[0].SpanID != want {
+		t.Errorf("spanId = %q, want hex %q", spans[0].SpanID, want)
 	}
 
-	// The decoded id must be the right length: a collector rejects anything that is not
-	// 16 bytes for a trace and 8 for a span.
-	raw, err := base64.StdEncoding.DecodeString(spans[0].TraceID)
-	if err != nil {
-		t.Fatalf("traceId is not base64: %v", err)
+	// Hex has a fixed length per id width, and a collector rejects anything else: 32
+	// characters for a 16-byte trace id, 16 for an 8-byte span id.
+	if got := len(spans[0].TraceID); got != 32 {
+		t.Errorf("traceId is %d characters, want 32", got)
 	}
-	if len(raw) != 16 {
-		t.Errorf("trace id decodes to %d bytes, want 16", len(raw))
+	if got := len(spans[0].SpanID); got != 16 {
+		t.Errorf("spanId is %d characters, want 16", got)
 	}
-	rawSpan, _ := base64.StdEncoding.DecodeString(spans[0].SpanID)
-	if len(rawSpan) != 8 {
-		t.Errorf("span id decodes to %d bytes, want 8", len(rawSpan))
+	// A base64 id would decode here, which is the mistake being guarded against.
+	if _, err := base64.StdEncoding.DecodeString(spans[0].TraceID); err == nil &&
+		len(spans[0].TraceID) != 32 {
+		t.Errorf("traceId %q looks base64-encoded", spans[0].TraceID)
 	}
 }
 

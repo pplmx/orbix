@@ -12,10 +12,11 @@
 //
 // The protocol details that are easy to get wrong, and that this package pins:
 //
-//   - Trace and span ids are base64 in OTLP/HTTP+JSON, not hex. Most hand-written
-//     exporters in the wild emit hex and are silently rejected or mis-joined by a
-//     collector; the specification is explicit that JSON follows proto3's mapping, where
-//     a bytes field is base64.
+//   - Trace and span ids are lowercase hex in OTLP/HTTP+JSON, not base64. This is the
+//     one place OTLP departs from proto3's standard JSON mapping, which would put a bytes
+//     field in base64: the specification says the ids "are represented as case-insensitive
+//     hex-encoded strings; they are not base64-encoded". An exporter that emits base64 is
+//     the one a collector rejects or mis-joins.
 //   - Timestamps are strings holding nanoseconds since the epoch, because a JSON number
 //     cannot represent them exactly.
 //   - The body is an ExportTraceServiceRequest: resourceSpans, then scopeSpans, then

@@ -45,8 +45,8 @@ type instrumentationScope struct {
 
 // spanIn is one span on the wire.
 type spanIn struct {
-	// TraceID and SpanID are base64 of the raw bytes, which is what proto3's JSON
-	// mapping prescribes for a bytes field.
+	// TraceID and SpanID are lowercase hex, which OTLP's JSON encoding requires and
+	// which explicitly overrides proto3's base64 rule for bytes fields.
 	TraceID           string     `json:"traceId"`
 	SpanID            string     `json:"spanId"`
 	ParentSpanID      string     `json:"parentSpanId,omitempty"`

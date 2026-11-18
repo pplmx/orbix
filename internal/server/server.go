@@ -685,7 +685,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	// Encode with BOS only when the model defines one: a model without a BOS id
 	// encodes the prompt as-is.
 	cfg := s.eng.Model().Config()
-	//
+
 	// A chat prompt is markup, so its control markers are matched whole; a completions
 	// prompt is text the caller wrote, so a literal "<|im_start|>" there stays text.
 	// The same distinction the CLI's chat command makes, for the same reason.

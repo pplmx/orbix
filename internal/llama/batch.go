@@ -338,7 +338,6 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 		}
 	}
 
-	//
 	// The positions are independent once the keys and values are stored, so they run in
 	// parallel. Each worker needs its own score buffer: scores is per head and per
 	// position, and sharing one would let two workers interleave writes into the same

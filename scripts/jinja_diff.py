@@ -9,7 +9,7 @@ inputs through both and reports the disagreements.
 Run it with uv, which provides Jinja2 without touching the system Python:
 
     uv run --with jinja2 python3 scripts/jinja_diff.py            # built-in corpus
-    uv run --with jinja2 python3 scripts/jinja_diff.py --verbose  # show agreements too
+    uv run --with jinja2 python3 scripts/jinja_diff.py --verbose  # list every case and its verdict
 
 It builds a small Go program that renders each case through the package under test, runs
 both sides, and diffs the text. Exit status is 1 if anything disagrees, so it can be used as
@@ -297,7 +297,7 @@ def run_go(cases, repo_root):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--verbose", action="store_true", help="also list cases that agree")
+    ap.add_argument("--verbose", action="store_true", help="list every case and its verdict")
     ap.add_argument("--repo", default=".", help="repository root (default: .)")
     args = ap.parse_args()
 
@@ -352,6 +352,15 @@ def main():
         for c, r in zip(cases, results):
             if c["kind"] != "unsupported" and not r["error"] and r["text"] == c["oracle"]:
                 print(f"  {c['name']}")
+        # The summary line says nine constructs were refused as designed, and without this
+        # list a reader can only take that number on trust: a template that was refused for
+        # the wrong reason -- a typo in the case, an unrelated parse error -- would be
+        # counted in the same nine. Naming them makes "as designed" checkable.
+        print("\nrefused (unsupported constructs, expected):")
+        for c, r in zip(cases, results):
+            if c["kind"] == "unsupported" and r["error"]:
+                print(f"  {c['name']}")
+                print(f"    {r['error'].splitlines()[0]}")
 
     return 1 if failed else 0
 

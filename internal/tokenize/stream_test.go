@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -313,6 +314,65 @@ func TestStreamDecoderMatchesDecodeOnSplitBytes(t *testing.T) {
 		// got wrong would pass otherwise.
 		if strings.HasPrefix(want, "\uFFFD") && !strings.HasPrefix(text, "\uFFFD") {
 			t.Errorf("Decode of %q starts with a replacement character", text)
+		}
+	}
+}
+
+// TestStreamDecoderSplitBytesBuiltVocab covers the split-sequence defect on a vocabulary that
+// is constructed rather than downloaded, so it runs in CI.
+//
+// TestStreamDecoderMatchesDecodeOnSplitBytes above needs QWEN2_MODEL because it asserts against
+// a real model's pieces, and a skipped test protects nothing: the defect it guards shipped
+// despite that test existing. A byte-level vocabulary only has to spell a character's bytes as
+// separate pieces to reach the same code path, and gguftest can do that.
+//
+// The failure this catches is worse than the one on the real model. With the byte-level pieces
+// rendered one at a time, a truncated character reached the client as its raw bytes -- "ä" for
+// 中's first byte -- instead of as U+FFFD. That is invalid UTF-8 in a JSON body.
+func TestStreamDecoderSplitBytesBuiltVocab(t *testing.T) {
+	// 中 is e4 b8 ad. These pieces are those bytes: ä is rune 0xE4, ¸ is rune 0xB8, and
+	// Ń is rune 0x143, which GPT-2's table maps to byte 0xAD.
+	path := gguftest.Model{
+		Vocab:          []string{"<unk>", "<s>", "</s>", "ä", "¸", "Ń"},
+		TokenizerModel: "gpt2",
+		NoBytes:        false,
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !tok.byteLevel {
+		t.Fatal("the fixture is not a byte-level vocabulary, so it cannot split a character")
+	}
+
+	cases := []struct {
+		ids []int32
+		why string
+	}{
+		{[]int32{3}, "one byte of a three-byte character"},
+		{[]int32{3, 4}, "two bytes, still short"},
+		{[]int32{3, 4, 5}, "all three, which must read as the character"},
+	}
+	for _, c := range cases {
+		want := tok.DecodeCompletion(c.ids)
+		dec := tok.Seq()
+		var got strings.Builder
+		for _, id := range c.ids {
+			got.WriteString(dec.Token(id))
+		}
+		got.WriteString(dec.Flush())
+		if got.String() != want {
+			t.Errorf("%s: ids %v streamed %q, DecodeCompletion gives %q",
+				c.why, c.ids, got.String(), want)
+		}
+		// The streamed text is assembled into a JSON body, so it has to be valid UTF-8 on
+		// its own. The defect's signature was raw bytes reaching this point.
+		if !utf8.ValidString(got.String()) {
+			t.Errorf("%s: streamed %q is not valid UTF-8", c.why, got.String())
 		}
 	}
 }

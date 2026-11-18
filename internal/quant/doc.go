@@ -32,6 +32,29 @@
 // from a known block rather than a round trip, because a round trip through an encoder
 // written alongside the decoder agrees with whatever misreading both share.
 //
+// The last sentence of that paragraph is a claim about method, and it has been carried
+// out rather than assumed. Six checkpoints were parsed twice -- once here and once by
+// the independent Python gguf package -- and every tensor's bytes were compared by
+// SHA-256: stories15M (Q4_0, Q8_0, F32), tinyllama-q2k (Q2_K, Q3_K, Q6_K, F32),
+// qwen2-0.5b (Q8_0, F32), a Mixtral-format MoE model whose expert weights are 3-D
+// tensors (Q2_K, Q3_K, Q5_K, Q6_K, Q8_0, F32), llama3.2 (Q2_K, Q3_K, Q4_K, Q6_K, F32),
+// and a 1.9 GB all-F32 checkpoint. That is 1009 tensors across eight formats, all
+// byte-identical. The comparison is not a test in this package: it needs the
+// third-party reader and a multi-gigabyte checkpoint, and a unit test may depend on
+// neither. It is a check a person runs, which is why the result is written down here --
+// otherwise the next reader has only the claim.
+//
+// The per-format tests in this package are a different kind of evidence, and worth
+// distinguishing. TestKQuantRoundTrip pins exact values from a known block. The
+// MODEL_KQUANT-gated test decodes a real tensor and checks that its spread is a weight
+// matrix's rather than a garbage decode's -- deliberately wide bounds, so it catches a
+// scale field read from the wrong offset and not a bit-plane off by one. The SHA-256
+// comparison above is what covers the finer errors, which is why both exist.
+//
+// The one format this did not reach is F16: none of the available checkpoints is stored
+// in it. Its conversion has unit tests over the boundaries and subnormals, but no
+// external cross-check, and saying so is more useful than implying the coverage is total.
+//
 // IQ4_NL uses a lookup table, not arithmetic. Its 4-bit values are a non-linear
 // codebook of sixteen signed values, so decoding is a table lookup. Deriving the values
 // from a formula would be a reimplementation of the table, and the table is the format.

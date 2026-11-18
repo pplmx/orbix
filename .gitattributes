@@ -1,0 +1,35 @@
+# Line endings, pinned so a Windows checkout does not change the bytes.
+#
+# The repository builds for windows/amd64, so contributors on Windows are expected. Git's own
+# default there (core.autocrlf=true) rewrites text to CRLF on checkout, which is wrong for two
+# kinds of file here:
+#
+#   - Go sources: gofmt accepts CRLF, but every diff then shows whole-file changes when a
+#     Windows contributor touches a line, and `gofmt -l` reports clean while the file differs.
+#   - Shell snippets inside the Makefile and the Python scripts: a trailing \r is part of the
+#     last argument, so a path becomes "out.gguf\r" and the tool cannot find it.
+#
+# `text=auto` asks Git to detect text and store it with LF; the explicit entries below name the
+# types where that detection is worth being certain about.
+* text=auto eol=lf
+
+*.go   text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.py   text eol=lf
+*.sh   text eol=lf
+Makefile    text eol=lf
+.gitignore  text eol=lf
+.editorconfig text eol=lf
+
+# Model files are large binaries a contributor may keep beside the tree; nothing here should
+# ever try to diff or merge them.
+*.gguf binary
+
+# Test executables and archives are binary by nature.
+*.test   binary
+*.out    binary
+*.prof   binary

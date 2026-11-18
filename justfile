@@ -191,6 +191,11 @@ release:
 # leaves 7 MiB of rumdl cache and stray test binaries is a clean that surprises the next person
 # to look at the working tree.
 #
+# `coverage.*` is listed separately from `*.out` because it is a different name, not a different
+# extension: `go test -coverprofile=coverage.out` is caught by the `*.out` pattern, but the same
+# run redirected to coverage.html or coverage.txt -- which is what producing a browsable report
+# looks like -- was left behind while .gitignore called it ignored.
+#
 # remove everything the build and the tools leave behind
 clean:
     @# The compiler's own cache is shared across projects and lives outside the tree; removing
@@ -199,4 +204,5 @@ clean:
     @find . -name '*.test' -type f -delete
     @find . -name '*.out' -type f -delete
     @find . -name '*.prof' -type f -delete
+    @find . -name 'coverage.*' -type f -delete
     @echo "clean: removed bin/, caches, and test/profiling artifacts"

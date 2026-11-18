@@ -458,6 +458,86 @@ func TestModelsAndHealth(t *testing.T) {
 	}
 }
 
+// TestModelRetrieveAndUnknownEndpoints covers the two paths an OpenAI SDK takes that this
+// server used to answer with Go's plain-text 404.
+//
+// Both matter for the same reason: the client libraries decode the response body as JSON
+// before they raise. A text/plain "404 page not found" is not a not-found error to them, it
+// is a parse failure, so the failure a caller sees names the decoder rather than the
+// endpoint. The SDKs' models.retrieve hits GET /v1/models/{id}, and a client may call
+// endpoints this engine does not implement (embeddings, images, responses); both now answer
+// in the API's own envelope.
+func TestModelRetrieveAndUnknownEndpoints(t *testing.T) {
+	srv, _ := newTestServer(t)
+	name := srv.cfg.ModelName
+
+	// models.retrieve by the served name returns the same object the list contains.
+	t.Run("retrieve a served model", func(t *testing.T) {
+		resp := get(t, srv.Handler(), "/v1/models/"+name)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		got := decodeBody[map[string]any](t, resp)
+		if got["id"] != name {
+			t.Errorf("id = %v, want %q", got["id"], name)
+		}
+		if got["object"] != "model" {
+			t.Errorf("object = %v, want model", got["object"])
+		}
+	})
+
+	// An unknown id is the same model_not_found the completion endpoints use, so a client
+	// that retrieves before sending gets the answer it would have got from the send.
+	t.Run("retrieve an unknown model", func(t *testing.T) {
+		resp := get(t, srv.Handler(), "/v1/models/does-not-exist")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+		body := decodeBody[errorBody](t, resp)
+		if body.Error.Code != "model_not_found" {
+			t.Errorf("code = %q, want model_not_found", body.Error.Code)
+		}
+		if body.Error.Param != "model" {
+			t.Errorf("param = %q, want model", body.Error.Param)
+		}
+	})
+
+	// An endpoint this server does not implement answers in the envelope, with a code that
+	// says so rather than a generic not-found.
+	t.Run("unimplemented endpoint", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/embeddings", `{}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Errorf("Content-Type = %q, want application/json (an SDK decodes this)", ct)
+		}
+		body := decodeBody[errorBody](t, resp)
+		if body.Error.Code != "unknown_endpoint" {
+			t.Errorf("code = %q, want unknown_endpoint", body.Error.Code)
+		}
+		if !strings.Contains(body.Error.Message, "/v1/embeddings") {
+			t.Errorf("message %q does not name the path", body.Error.Message)
+		}
+	})
+
+	// A path outside the API keeps the plain-text 404: it is not an API route, and a probe
+	// or a browser hitting it should not be told JSON it never asked for.
+	t.Run("path outside the api", func(t *testing.T) {
+		resp := get(t, srv.Handler(), "/not-an-api-path")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "application/json") {
+			t.Errorf("Content-Type = %q; a non-API path should not claim to be JSON", ct)
+		}
+	})
+}
+
 func TestStopStringStops(t *testing.T) {
 	srv, _ := newTestServer(t)
 

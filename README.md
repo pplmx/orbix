@@ -252,7 +252,11 @@ is 1 on a machine with a C compiler, and a binary built that way reports `cgo: t
 `import "C"`, so such a build works, but it is not the artifact the project claims to ship.
 
 The server implements `/v1/chat/completions`, `/v1/completions` (both streaming
-and not), `/v1/models`, `/healthz`, and `/metrics`. Two things about the chat
+and not), `/v1/models` (and `/v1/models/{id}`, which the SDKs' `models.retrieve` calls),
+`/healthz`, and `/metrics`. A path under `/v1` this server does not implement answers 404 in
+the API's JSON error envelope rather than Go's plain-text one, because the SDKs decode the body
+before they raise: a text 404 reaches the caller as a parse failure, not as a not-found.
+Two things about the chat
 endpoint are worth knowing before pointing a client at it:
 
 - **The chat template is the model's own, when it can be evaluated.** GGUF stores a

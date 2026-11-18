@@ -131,8 +131,18 @@ func New(eng *engine.Engine, tok *tokenize.Tokenizer, cfg Config) (*Server, erro
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
 	mux.HandleFunc("POST /v1/completions", s.handleCompletion)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
+	// The SDKs' models.retrieve calls this path, so a client that validates a model by id
+	// rather than by listing gets an answer instead of a 404.
+	mux.HandleFunc("GET /v1/models/{model}", s.handleModel)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	// Everything else under /v1 answers in the API's own error envelope. Without this, a Go
+	// mux writes its plain-text "404 page not found", and the SDKs decode the body as JSON
+	// before they raise: a request to an endpoint this server does not implement fails with a
+	// JSON parse error inside the client rather than with the not-found error the API
+	// documents. The plain-text body stays right for a probe at a path outside the API,
+	// which is why this is scoped to /v1.
+	mux.HandleFunc("/v1/", s.handleUnimplemented)
 	s.mux = mux
 	return s, nil
 }
@@ -315,17 +325,55 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "model": s.cfg.ModelName})
 }
 
+// modelObject is one entry of the models list, and the body models.retrieve returns.
+//
+// It is built in one place because the list and the retrieve endpoint must not disagree: an
+// SDK that lists a model and then retrieves it compares the two, and a field present in one
+// and absent from the other reads as a server that changed underneath it.
+func (s *Server) modelObject() map[string]any {
+	return map[string]any{
+		"id":       s.cfg.ModelName,
+		"object":   "model",
+		"created":  0,
+		"owned_by": "orbix",
+	}
+}
+
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 	// The OpenAI client libraries fetch this to validate a model name.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data": []map[string]any{{
-			"id":       s.cfg.ModelName,
-			"object":   "model",
-			"created":  0,
-			"owned_by": "orbix",
-		}},
+		"data":   []map[string]any{s.modelObject()},
 	})
+}
+
+// handleModel answers GET /v1/models/{model}, which the SDKs' models.retrieve calls.
+//
+// The id is matched the way checkModel matches a request: an unknown name is a 404 with the
+// same `model_not_found` code the completion endpoints use, rather than a bare 404, so a
+// client that retrieves before sending a request gets the answer it would have got from the
+// request itself.
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("model")
+	if !s.checkModel(w, name) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.modelObject())
+}
+
+// handleUnimplemented answers any other path under /v1 in the API's error envelope.
+//
+// A missing endpoint is not a client bug to be silently ignored: the SDKs call endpoints this
+// engine deliberately does not implement (embeddings, images, responses), and the honest
+// answer is a JSON 404 naming the path rather than Go's plain-text "404 page not found",
+// which the SDK cannot decode and reports as a parse failure.
+func (s *Server) handleUnimplemented(w http.ResponseWriter, r *http.Request) {
+	var body errorBody
+	body.Error.Message = fmt.Sprintf("The endpoint %s %s is not implemented by this server",
+		r.Method, r.URL.Path)
+	body.Error.Type = "invalid_request_error"
+	body.Error.Code = "unknown_endpoint"
+	writeJSON(w, http.StatusNotFound, body)
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {

@@ -243,3 +243,39 @@ func TestServeAcceptsTheFlagCombinationsThatDoWork(t *testing.T) {
 		}
 	}
 }
+
+// TestHumanBytes pins the formatter at each scale and at both boundaries between them.
+//
+// It had no test of its own. The startup banner's test asserted that a number appeared in the
+// string, which passed while the unit label was wrong, and the formatter itself was reached only
+// through the three messages that call it -- none of which checked the unit. A formatter is the
+// easiest thing in a CLI to leave untested and the easiest to get wrong by one word.
+func TestHumanBytes(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+		why  string
+	}{
+		{1024, "1 KiB", "the first whole kibibyte"},
+		{1536, "1 KiB", "below a mebibyte, truncated to whole KiB"},
+		{(1 << 20) - 1, "1023 KiB", "the last byte before the scale changes"},
+		{1 << 20, "1.0 MiB", "the boundary itself belongs to the larger unit"},
+		{3 * (1 << 20) / 2, "1.5 MiB", "one decimal above a mebibyte"},
+		{(1 << 30) - 1, "1024.0 MiB", "the last byte before gibibytes"},
+		{1 << 30, "1.0 GiB", "the boundary again"},
+		{20 << 30, "20.0 GiB", "one decimal at a large scale too, not a whole number"},
+	}
+	for _, c := range cases {
+		if got := humanBytes(c.in); got != c.want {
+			t.Errorf("humanBytes(%d) = %q, want %q (%s)", c.in, got, c.want, c.why)
+		}
+	}
+
+	// The values that reach this function are pool sizes, so anything below a kibibyte is
+	// unreachable -- but it must not panic or print something that is not a byte count.
+	for _, n := range []int64{0, 1, 1023} {
+		if got := humanBytes(n); !strings.HasSuffix(got, "KiB") {
+			t.Errorf("humanBytes(%d) = %q, want a KiB figure", n, got)
+		}
+	}
+}

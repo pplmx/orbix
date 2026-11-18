@@ -281,8 +281,10 @@ func poolReservationWarning(reserved int64) string {
 		"until the pool fills.", humanBytes(reserved))
 }
 
-// humanBytes renders a byte count the way an operator reads it: one decimal above a
-// megabyte, whole megabytes above a gigabyte.
+// humanBytes renders a byte count the way an operator reads it: whole kibibytes below a
+// mebibyte, one decimal place above that. The one-decimal rule applies at every scale above a
+// mebibyte including gibibytes -- an earlier version of this comment said "whole megabytes above a
+// gigabyte", which the code has never done.
 func humanBytes(n int64) string {
 	// The divisors are powers of 1024 and the labels say so: MiB, not MB. bench.go already
 	// labels the same arithmetic with MiB, and calling a binary megabyte a megabyte makes two

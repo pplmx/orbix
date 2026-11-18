@@ -36,4 +36,23 @@
 // data section starts at the next multiple after the directory. Treating it as a constant
 // would misread any file that chose a different value, and the failure would look like
 // corrupt weights rather than a header mistake.
+//
+// # The file is untrusted input
+//
+// A GGUF file is usually downloaded, so its length fields cannot be believed. Every count
+// that a naive parser would turn into an allocation is bounded here: one string or byte run
+// at 64 MiB, one metadata array at 64 Mi elements, array elements at 64 Mi too. Without
+// those bounds a sixteen-byte header claims a gibibyte and the parser allocates it before
+// discovering there is no such data -- measured at 1024 MiB for one string claim and 6144
+// MiB for an array claim, both from a file under a kilobyte.
+//
+// The same reasoning covers arithmetic rather than sizes. A tensor offset above MaxInt64
+// wraps negative when cast to int64, and `start + n > size` then passes for a range that
+// begins before the file; both are checked in an order that cannot overflow. Strings must
+// be valid UTF-8, because the alternative is a replacement character appearing silently in
+// metadata the caller reads.
+//
+// None of this is reachable from a well-formed file. The point is that the parser is the
+// boundary between a network download and the rest of the program, and a failure here is
+// supposed to be an error naming the field rather than a panic or an allocation.
 package gguf

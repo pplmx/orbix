@@ -84,6 +84,7 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - 确实要真实权重的测试（例如与 llama.cpp 逐 token 比对 logits）保留 `MODEL` 门禁，只用于本地交叉验证。
 - 解析器的错误路径要测：截断、幻数错误、版本不符、越界张量。
 - 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。
+- `make test-race` 只覆盖测试里出现的并发。手动验证用 `CGO_ENABLED=1 go build -race` 出一个竞态版二进制，跑 `serve --max-active N`（配 `--blocks --block-size --prefix-cache` 开共享缓存），再打并发混合负载：非流式、SSE 流式、以及用 `timeout` 中途取消的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`，且 `orbix_requests_active` 归零——队列泄漏和竞态一样会让这个数停在非零。
 
 ## 文档
 

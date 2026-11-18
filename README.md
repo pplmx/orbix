@@ -661,13 +661,33 @@ the file.
 Orbix is a learning project, and it is honest about where it stands:
 
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
-- **Prefill is superlinear, and attention is why.** On Llama 3.2 1B Q2_K with 128
-  workers, interleaved runs of two sizes gave 4x the tokens for 2.78x the time (501
-  tokens in 8.7-14.5 s, 2001 in 32 s). Interleaving matters here: taking the two
-  sizes in separate runs let load drift put a 2.5x spread on the smaller one, which
-  is wider than the effect being measured. Attention is the term that grows: before
-  it was parallelized across workers, 2001 tokens took 177 s and 16 layers of
-  attention were 135 s of that.
+- **Prefill throughput improves with prompt length, within the window.** On Llama 3.2
+  1B Q2_K with 32 workers, medians of five interleaved runs gave 3.96x the tokens for
+  3.04x the time (155 tokens in 8.1 s, 614 in 24.5 s), so the per-token cost fell from
+  52 ms to 40 ms as the prompt lengthened. With 128 workers the same interleave gave
+  2.76x, so the effect is larger when there are fewer workers to go round. That is the
+  direction the arithmetic predicts:
+  attention is O(n^2) in total but parallelises over positions, one goroutine per
+  position scoring against the cache, while the projections are O(n) and are spread
+  over output columns that do not grow with the prompt. So the growing term is the
+  one that gets more workers as it grows. [INFERENCE] the rest of the explanation --
+  that a longer prompt also amortises a round's fixed cost -- is arithmetic rather
+  than measurement; what was measured is the per-token cost falling. A prompt long
+  enough to make attention dominate per-position work would stop the trend, and this
+  engine has no measurement of where that turn is.
+
+  Interleaving the two sizes matters more than the sizes themselves: taking them in
+  separate runs let load drift put a 2.5x spread on the smaller one, which is wider
+  than the effect being measured, and repeat runs of the same workload on this shared
+  machine vary by more than the improvements being measured -- a 3721-token prompt
+  once timed faster than a 3641-token one.
+
+  This bullet used to say prefill was *superlinear* and give "4x the tokens for 2.78x
+  the time" as the evidence, which says the opposite; the figure was also measured
+  before attention was parallelised, when 2001 tokens took 177 s and attention was
+  135 s of it. Both halves are replaced rather than deleted, because the shape of the
+  mistake -- an adjective that outlived the measurement under it -- is the reusable
+  part.
 - **Treat the numbers above as indicative, not as a benchmark.** They were taken on
   a shared machine whose load drifted between 40 and 90 over the course of a few
   minutes, and repeat runs of the same workload varied by more than the improvements

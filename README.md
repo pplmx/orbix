@@ -649,6 +649,7 @@ make test      # CGO_ENABLED=0 go test ./...
 make lint      # golangci-lint run
 make check     # the local gate: vet, test, lint, gofmt
 make docs      # rumdl check: Markdown is code here too
+make fuzz      # run every fuzz target; FUZZTIME sets the per-target budget
 make build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix
 make bench     # run kernel and engine benchmarks
 ```
@@ -657,6 +658,16 @@ make bench     # run kernel and engine benchmarks
 golangci-lint. `make docs` covers the README and every `doc.go` and needs rumdl, so it is a
 separate target rather than part of `check` — the two are the gates CI runs, and running both
 makes a green branch predictable rather than hoped for.
+
+`make fuzz` searches rather than gates, which is why it is separate too. Six targets cover the
+paths that read untrusted bytes: the GGUF container, the quantization decoders, the chat template
+parser, and the tokenizer's pre-split and decode. Each keeps a seed corpus that `go test` replays
+on every run, so a crash that was found once stays fixed without anyone remembering to fuzz; the
+target itself is what finds the next one, and costs a few minutes.
+
+Reading a file is the one thing here that runs on an arbitrary input — a model someone else
+produced — and a panic or an allocator kill during it takes the process down rather than
+returning an error. That is what the targets exist to rule out.
 
 CI enforces `CGO_ENABLED=0` on every platform. A build that requires CGo is a build that fails.
 

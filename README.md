@@ -256,6 +256,19 @@ and not), `/v1/models` (and `/v1/models/{id}`, which the SDKs' `models.retrieve`
 `/healthz`, and `/metrics`. A path under `/v1` this server does not implement answers 404 in
 the API's JSON error envelope rather than Go's plain-text one, because the SDKs decode the body
 before they raise: a text 404 reaches the caller as a parse failure, not as a not-found.
+
+Unsupported request fields are handled by what a client does with the answer. A field that
+only tunes sampling -- `logit_bias`, `presence_penalty`, `response_format` -- is ignored,
+because the SDKs send such fields whether or not the engine can use them and refusing them
+would make the server unusable from that SDK; the text is not what was asked for, but it is
+the shape the client reads. A field that describes the *response* is refused with a 400 that
+names it and `code: unsupported_parameter`: `n`, `logprobs`, `top_logprobs`, `echo`, `suffix`,
+and `best_of`. A client that sent `n: 3` indexes `choices[2]`, and one that sent `logprobs`
+reads `choice.logprobs`, so answering with one choice and no logprobs is not a smaller
+response but a different one -- the failure would surface as an `IndexError` or `KeyError` in
+the caller, far from the request that caused it. Several at once are all named, so one round
+trip fixes the request.
+
 Two things about the chat
 endpoint are worth knowing before pointing a client at it:
 

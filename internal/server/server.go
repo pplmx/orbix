@@ -236,10 +236,35 @@ func (s *Server) Shutdown() {
 // Unknown fields are ignored rather than rejected: clients send fields like
 // logit_bias and response_format that a local engine has no use for, and refusing
 // them would make the server unusable from an SDK that always sends them.
+//
+// The fields below that change the *shape* of the response are declared so they can be
+// refused instead. There are two kinds of unsupported field and they differ in what a
+// client does when the server pretends not to see one:
+//
+//   - A field that only tunes sampling (logit_bias, presence_penalty) leaves the response a
+//     client can still read: it is the wrong text, but choices[0].text is where it expected
+//     it. Ignoring it costs quality and keeps working.
+//   - A field that describes the response (n, logprobs, echo, suffix) is a contract about
+//     the body. A client that sent n=3 indexes choices[2]; one that sent logprobs reads
+//     choice.logprobs. Answering with one choice and no logprobs is not a smaller answer but
+//     a different one, and the client fails with an IndexError or a KeyError somewhere far
+//     from the request that caused it.
+//
+// So the second kind is refused with a 400 naming the field, which is a failure the caller
+// can see and act on at the call site, and the first kind stays ignored.
 type chatRequest struct {
 	Model     string        `json:"model"`
 	Messages  []chatMessage `json:"messages"`
 	MaxTokens int           `json:"max_tokens"`
+
+	// N, Logprobs, TopLogprobs and Echo change the response body, so they are refused
+	// rather than ignored; see the type comment. Their types are loose on purpose: the
+	// only thing read is whether the client asked for something, and a value this struct
+	// would reject as malformed is still a value the caller meant to send.
+	N           int   `json:"n"`
+	Logprobs    *bool `json:"logprobs"`
+	TopLogprobs *int  `json:"top_logprobs"`
+	Echo        *bool `json:"echo"`
 
 	// Priority ranks this request against others waiting for a slot; higher advances
 	// first, and an omitted value means "with the rest". It is Orbix's own extension:
@@ -267,6 +292,13 @@ type completionRequest struct {
 	Model     string `json:"model"`
 	Prompt    string `json:"prompt"`
 	MaxTokens int    `json:"max_tokens"`
+
+	// The response-shape fields, refused rather than ignored; see chatRequest.
+	N        int     `json:"n"`
+	Logprobs *int    `json:"logprobs"`
+	Echo     *bool   `json:"echo"`
+	Suffix   *string `json:"suffix"`
+	BestOf   int     `json:"best_of"`
 
 	// Priority ranks this request against others waiting for a slot; see chatRequest.
 	Priority int `json:"priority"`
@@ -424,6 +456,77 @@ func (s *Server) handleUnimplemented(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNotFound, body)
 }
 
+// shapeField is one request field that describes the response body rather than tuning the
+// sampling, with the reason this server cannot honour it.
+type shapeField struct {
+	name string
+	// asked reports whether the decoded request set this field. It takes the request by
+	// pointer through any because the two endpoints have different structs and the field
+	// names do not line up exactly (chat has top_logprobs, completions has best_of and
+	// suffix), so a shared name list would have to say which endpoint each belongs to.
+	asked func(any) bool
+	why   string
+}
+
+// chatShapeFields are the response-shape fields the chat endpoint refuses.
+var chatShapeFields = []shapeField{
+	{"n", func(v any) bool { return v.(*chatRequest).N != 0 },
+		"n>1 needs several sequences per request, and this server generates one"},
+	{"logprobs", func(v any) bool { return v.(*chatRequest).Logprobs != nil },
+		"token log-probabilities are not computed or returned"},
+	{"top_logprobs", func(v any) bool { return v.(*chatRequest).TopLogprobs != nil },
+		"alternative-token log-probabilities are not computed or returned"},
+	{"echo", func(v any) bool { return v.(*chatRequest).Echo != nil },
+		"the response never includes the prompt, and a silent omission is worse than a refusal"},
+}
+
+// completionShapeFields are the response-shape fields the completions endpoint refuses.
+var completionShapeFields = []shapeField{
+	{"n", func(v any) bool { return v.(*completionRequest).N != 0 },
+		"n>1 needs several sequences per request, and this server generates one"},
+	{"logprobs", func(v any) bool { return v.(*completionRequest).Logprobs != nil },
+		"token log-probabilities are not computed or returned"},
+	{"echo", func(v any) bool { return v.(*completionRequest).Echo != nil },
+		"the response never includes the prompt, and a silent omission is worse than a refusal"},
+	{"suffix", func(v any) bool { return v.(*completionRequest).Suffix != nil },
+		"suffix generation is not implemented, so the reply would silently lack it"},
+	{"best_of", func(v any) bool { return v.(*completionRequest).BestOf != 0 },
+		"best_of needs several candidates per request, and this server samples one"},
+}
+
+// rejectShapeFields writes a 400 naming every response-shape field the request asked for,
+// and reports whether it wrote one.
+//
+// These are refused rather than ignored, which is the opposite of how this server treats an
+// unknown field like logit_bias, and the difference is what the client does with the answer.
+// A sampling knob that is ignored produces text that is not what was asked for but is still
+// the shape the client reads. A response-shape field that is ignored produces a body the
+// client cannot parse: one that sent n=3 indexes choices[1] and gets an IndexError, one that
+// sent logprobs reads choice.logprobs and gets a KeyError. In both cases the failure surfaces
+// in the caller's code, far from the request that caused it, and the 400 here is the same
+// fact said at the call site.
+//
+// Every field is named rather than the first: a caller fixing these should not need one
+// round trip per field. That is the rule cmd/orbix's bench follows for the flags --suite
+// measures over, and the reason is the same -- one request, one complete list of what to fix.
+func (s *Server) rejectShapeFields(w http.ResponseWriter, fields []shapeField, req any) bool {
+	var names, whys []string
+	for _, f := range fields {
+		if f.asked(req) {
+			names = append(names, f.name)
+			whys = append(whys, f.why)
+		}
+	}
+	if len(names) == 0 {
+		return false
+	}
+	writeRequestError(w, http.StatusBadRequest, newParamError(
+		names[0], "unsupported_parameter",
+		"this server does not implement %s; %s",
+		strings.Join(names, ", "), strings.Join(whys, "; ")))
+	return true
+}
+
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -438,6 +541,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.checkModel(w, req.Model) {
+		return
+	}
+	if s.rejectShapeFields(w, chatShapeFields, &req) {
 		return
 	}
 	if len(req.Messages) == 0 {
@@ -473,6 +579,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.checkModel(w, req.Model) {
+		return
+	}
+	if s.rejectShapeFields(w, completionShapeFields, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Prompt) == "" {

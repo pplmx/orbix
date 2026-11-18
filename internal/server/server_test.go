@@ -1930,6 +1930,100 @@ func TestSamplerErrorsNameTheField(t *testing.T) {
 	}
 }
 
+// TestResponseShapeFieldsAreRefused covers the one kind of unsupported request field this
+// server cannot ignore.
+//
+// It ignores unknown fields on purpose -- an SDK sends logit_bias whether or not the engine
+// can use it, and refusing it would make the server unusable from that SDK. A field that
+// describes the *response* is different: a client that sent n=3 reads choices[2], and one
+// that sent logprobs reads choice.logprobs. Answering with neither is not a smaller response,
+// it is a different one, and the client fails with an IndexError or a KeyError far from the
+// request that caused it.
+//
+// So these are refused with a 400 that names the field, which is the same fact said where the
+// caller can act on it. The sampling knobs stay ignored, and that half is asserted too --
+// otherwise "refuse unsupported fields" could drift into refusing everything, which is the
+// behaviour the ignore-everything rule was chosen to avoid.
+func TestResponseShapeFieldsAreRefused(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// Each case names the field the error must carry. The last sends three at once: a caller
+	// fixing these should not need one round trip per field.
+	tooLoud := []struct {
+		name  string
+		path  string
+		body  string
+		field string
+		all   []string
+	}{
+		{"n on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "n": 3}`, "n", nil},
+		{"logprobs on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1}`, "logprobs", nil},
+		{"echo on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "echo": true}`, "echo", nil},
+		{"suffix on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix", nil},
+		{"best_of on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of", nil},
+		{"n on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "n": 2}`, "n", nil},
+		{"top_logprobs on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": 2}`,
+			"top_logprobs", nil},
+		{"three at once", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "n": 2, "logprobs": 1, "echo": true}`,
+			"n", []string{"n", "logprobs", "echo"}},
+	}
+	for _, c := range tooLoud {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			body := decodeBody[errorBody](t, resp)
+			if body.Error.Param != c.field {
+				t.Errorf("param = %q, want %q", body.Error.Param, c.field)
+			}
+			if body.Error.Code != "unsupported_parameter" {
+				t.Errorf("code = %q, want unsupported_parameter", body.Error.Code)
+			}
+			// Every field is named in the message, so one round trip fixes the request.
+			for _, want := range append([]string{c.field}, c.all...) {
+				if !strings.Contains(body.Error.Message, want) {
+					t.Errorf("message %q does not name %q", body.Error.Message, want)
+				}
+			}
+		})
+	}
+
+	// The sampling knobs must stay ignored. If refusing grows to cover these, an SDK that
+	// always sends them stops working, which is the outcome the ignore rule exists to prevent.
+	quiet := []struct{ name, path, body string }{
+		{"logit_bias", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "logit_bias": {"1": -100}}`},
+		{"presence_penalty", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "presence_penalty": 0.5}`},
+		{"frequency_penalty", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "frequency_penalty": 0.5}`},
+		{"response_format", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "response_format": {"type": "json_object"}}`},
+		{"logit_bias on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logit_bias": {"1": -100}}`},
+	}
+	for _, c := range quiet {
+		t.Run(c.name+" is ignored", func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				body := decodeBody[errorBody](t, resp)
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body.Error.Message)
+			}
+		})
+	}
+}
+
 // TestValidationErrorsNameTheField covers error.param on the two required-field checks.
 //
 // OpenAI's error object documents `param` as the field at fault for a request-validation

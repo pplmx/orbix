@@ -119,6 +119,96 @@ func TestRunnerRejectsShortBuffers(t *testing.T) {
 	}
 }
 
+// TestRunnerEdgeCases covers the two branches in Runner that a workload with real
+// shapes never reaches: a nil Runner, and a split asked for more parts than it has
+// rows to divide.
+//
+// The nil case is the documented way to say "one worker", so it is a supported input
+// rather than an accident, and a method that panicked on it would break every caller
+// that leaves concurrency unset. The oversubscribed split is what happens when a
+// caller sizes parts from a worker count instead of from the work, which is the normal
+// case for a small decode step.
+func TestRunnerEdgeCases(t *testing.T) {
+	var nilRunner *Runner
+	if got := nilRunner.Workers(); got != 1 {
+		t.Errorf("nil Runner reports %d workers, want 1", got)
+	}
+	// The non-nil path reports what it was constructed with -- the half of the accessor
+	// that actually answers a caller's question.
+	if got := NewRunner(3).Workers(); got != 3 {
+		t.Errorf("NewRunner(3).Workers() = %d, want 3", got)
+	}
+	// A nil Runner must still compute, not just report a count.
+	dst := make([]float32, 2)
+	if err := nilRunner.MatVec(dst, []float32{1, 0, 0, 1}, []float32{1, 2}, 2, 2); err != nil {
+		t.Fatalf("nil Runner.MatVec: %v", err)
+	}
+	if dst[0] != 1 || dst[1] != 2 {
+		t.Errorf("nil Runner.MatVec = %v, want [1 2]", dst)
+	}
+
+	// More parts than rows: 16 workers over a 2-row product must still finish and give
+	// the serial answer, not deadlock or skip rows. Exercised on MatMulTransposed too,
+	// because that is the one that splits columns -- a different call site, so the
+	// "more parts than there is work" clamp is reached from both.
+	busy := NewRunner(16)
+	dst2 := make([]float32, 2)
+	if err := busy.MatVec(dst2, []float32{1, 0, 0, 1}, []float32{3, 4}, 2, 2); err != nil {
+		t.Fatalf("oversubscribed MatVec: %v", err)
+	}
+	if dst2[0] != 3 || dst2[1] != 4 {
+		t.Errorf("oversubscribed MatVec = %v, want [3 4]", dst2)
+	}
+	// 1 row x 2 columns x 1 reduction with 16 workers: two columns, far fewer parts than
+	// workers, so the column split clamps as well.
+	dst3 := make([]float32, 2)
+	if err := busy.MatMulTransposed(dst3, []float32{2}, []float32{3, 4}, 1, 2, 1); err != nil {
+		t.Fatalf("oversubscribed MatMulTransposed: %v", err)
+	}
+	if dst3[0] != 6 || dst3[1] != 8 {
+		t.Errorf("oversubscribed MatMulTransposed = %v, want [6 8]", dst3)
+	}
+}
+
+// TestSplitRowsClampsMorePartsThanRows covers the clamp in splitRows, which is reachable
+// with a legal shape rather than only as a guard: parts comes from parts(work), work is
+// m*n*k, and splitOverRows picks the row split when m > n. A tall, narrow, deep product
+// therefore asks for more row chunks than there are rows.
+//
+// Shape chosen from those rules: m=4, n=2, k=20000 gives work=160000, so 16 workers
+// become parts=9, and splitOverRows(4, 2, 9) is true because m > n -- nine chunks of a
+// four-row range. Without the clamp the chunk arithmetic would produce empty and
+// out-of-range slices for five of them.
+func TestSplitRowsClampsMorePartsThanRows(t *testing.T) {
+	const m, n, k = 4, 2, 20000
+	r := NewRunner(16)
+	if parts := r.parts(m * n * k); parts <= m {
+		t.Fatalf("parts(%d) = %d, need more than m=%d to reach the clamp", m*n*k, parts, m)
+	}
+	if !splitOverRows(m, n, r.parts(m*n*k)) {
+		t.Fatal("this shape does not take the row split, so it does not reach splitRows")
+	}
+
+	dst := make([]float32, m*n)
+	a := make([]float32, m*k)
+	b := make([]float32, n*k)
+	for i := range a {
+		a[i] = 1
+	}
+	for i := range b {
+		b[i] = 1
+	}
+	if err := r.MatMulTransposed(dst, a, b, m, n, k); err != nil {
+		t.Fatalf("MatMulTransposed: %v", err)
+	}
+	// Every column of b is all ones over k terms, so each output is exactly k.
+	for i, v := range dst {
+		if v != float32(k) {
+			t.Errorf("dst[%d] = %v, want %d: a clamped-but-wrong split would leave some rows short", i, v, k)
+		}
+	}
+}
+
 // BenchmarkRunnerCrossover reports the parallel and serial forms at several
 // sizes. It is the evidence for minParallelWork: the parallel form loses below
 // the threshold because spawning goroutines and joining them costs more than the

@@ -3,6 +3,7 @@ package kernel
 import (
 	"math"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -128,6 +129,120 @@ func TestMatMulRejectsShortBuffers(t *testing.T) {
 	}
 }
 
+// TestMatVecRejectsShortBuffers covers the serial MatVec's validation, which no test
+// reached: every short-buffer case above is MatMul, and the Runner tests cover the
+// parallel entry point. The serial function is what the Runner falls back to below
+// minParallelWork, so a missing check there is reachable by any small decode step.
+func TestMatVecRejectsShortBuffers(t *testing.T) {
+	// 2x3 weights, a 3-vector, 2 outputs: the smallest shape that has every buffer
+	// distinct, so a short one is unambiguous.
+	const n, k = 2, 3
+	tests := []struct {
+		name      string
+		dst, a, v int
+		wantMsg   string
+	}{
+		{"short dst", 1, n * k, k, "dst has"},
+		{"short weight matrix", n, n*k - 1, k, "a has"},
+		{"short vector", n, n * k, k - 1, "v has"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := MatVec(make([]float32, tc.dst), make([]float32, tc.a), make([]float32, tc.v), n, k)
+			if err == nil {
+				t.Fatal("MatVec succeeded with a short buffer")
+			}
+			// The message has to name the buffer: with four of them, "invalid shape"
+			// would leave the caller guessing which slice to resize.
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not name %q", err, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// TestMatMulTransposedRejectsShortBuffers covers the serial MatMulTransposed's
+// validation. Its b buffer is the transposed weight matrix, the largest slice in a
+// vocab projection, and a short one would otherwise index past the end.
+func TestMatMulTransposedRejectsShortBuffers(t *testing.T) {
+	const m, n, k = 2, 3, 2
+	tests := []struct {
+		name      string
+		dst, a, b int
+		wantMsg   string
+	}{
+		{"short dst", m*n - 1, m * k, n * k, "dst has"},
+		{"short a", m * n, m*k - 1, n * k, "a has"},
+		{"short b", m * n, m * k, n*k - 1, "b has"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := MatMulTransposed(make([]float32, tc.dst), make([]float32, tc.a), make([]float32, tc.b), m, n, k)
+			if err == nil {
+				t.Fatal("MatMulTransposed succeeded with a short buffer")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not name %q", err, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// TestRMSNormRejectsShortBuffers covers RMSNorm's two length checks and its empty
+// input. The empty case is not an error -- a zero-width row normalizes to nothing --
+// but it must return before dividing by n, which is the reason it is a separate branch
+// rather than a condition on the loop.
+func TestRMSNormRejectsShortBuffers(t *testing.T) {
+	const n = 4
+	src := make([]float32, n)
+	if err := RMSNorm(make([]float32, n-1), src, make([]float32, n), 1e-6); err == nil {
+		t.Error("RMSNorm accepted a short destination")
+	} else if !strings.Contains(err.Error(), "dst has") {
+		t.Errorf("error %q does not name the destination", err)
+	}
+	if err := RMSNorm(make([]float32, n), src, make([]float32, n-1), 1e-6); err == nil {
+		t.Error("RMSNorm accepted a short weight")
+	} else if !strings.Contains(err.Error(), "weight has") {
+		t.Errorf("error %q does not name the weight", err)
+	}
+	// An empty row must succeed without touching anything or dividing by zero.
+	if err := RMSNorm(nil, nil, nil, 1e-6); err != nil {
+		t.Errorf("RMSNorm on an empty row: %v", err)
+	}
+}
+
+// TestKernelsRejectNegativeDimensions covers the guard that runs before any length
+// check. A negative dimension makes n*k negative, so the length checks all pass and the
+// loop bounds are empty -- the call would silently do nothing and return success, which
+// is the failure mode a caller would never notice.
+func TestKernelsRejectNegativeDimensions(t *testing.T) {
+	// Buffers long enough that only the sign check can reject these.
+	buf := make([]float32, 16)
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"MatVec n<0", MatVec(buf, buf, buf, -1, 2)},
+		{"MatVec k<0", MatVec(buf, buf, buf, 2, -1)},
+		{"MatMul m<0", MatMul(buf, buf, buf, -1, 2, 2)},
+		{"MatMul n<0", MatMul(buf, buf, buf, 2, -1, 2)},
+		{"MatMul k<0", MatMul(buf, buf, buf, 2, 2, -1)},
+		{"MatMulTransposed m<0", MatMulTransposed(buf, buf, buf, -1, 2, 2)},
+		{"MatMulTransposed n<0", MatMulTransposed(buf, buf, buf, 2, -1, 2)},
+		{"MatMulTransposed k<0", MatMulTransposed(buf, buf, buf, 2, 2, -1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.err == nil {
+				t.Fatal("negative dimension was accepted; the call did nothing and reported success")
+			}
+			if !strings.Contains(tc.err.Error(), "negative") {
+				t.Errorf("error %q does not say the dimension is negative", tc.err)
+			}
+		})
+	}
+}
+
 func TestRMSNorm(t *testing.T) {
 	src := []float32{1, 2, 3, 4}
 	weight := []float32{1, 1, 1, 1}
@@ -231,6 +346,64 @@ func TestSoftmax(t *testing.T) {
 	}
 	if math.Abs(total-1) > 1e-6 {
 		t.Errorf("sum = %v, want 1", total)
+	}
+}
+
+// TestSoftmaxEmpty covers the empty slice, which is a legal input: a batch with no rows
+// reaches the kernel as a zero-length slice rather than being special-cased by callers.
+// The alternative is slices.Max panicking on an empty slice, so the early return is
+// load-bearing even though the arithmetic below it never runs.
+func TestSoftmaxEmpty(t *testing.T) {
+	Softmax(nil)
+	Softmax([]float32{})
+}
+
+// TestMatMulZeroTermsDoNotChangeTheAnswer covers the sparse shortcut in MatMul's inner
+// loop, which skips a row of b when the matching element of a is zero. That branch is
+// for the mixture-of-experts path, where an unselected expert contributes an all-zero
+// activation row.
+//
+// What this test does and does not prove is worth being precise about. It proves the
+// shortcut is invisible: a zero term among nonzero ones yields the same product as the
+// naive triple loop. It cannot prove the skip happens, because skipping a zero and
+// multiplying by it are, by definition, the same computation -- removing the branch
+// leaves this test passing, which was checked. The branch's own justification is that
+// it is a speed optimization whose result must not change, and that is what is asserted
+// here; the coverage number is what records that the line is reached.
+func TestMatMulZeroTermsDoNotChangeTheAnswer(t *testing.T) {
+	// a is 2x3 with a zero in the middle of row 0; b is 3x2.
+	a := []float32{1, 0, 2}
+	b := []float32{
+		3, 4, // row 0 of b, multiplied by a[0]=1
+		5, 6, // row 1, skipped because a[1]=0
+		7, 8, // row 2, multiplied by a[2]=2
+	}
+	dst := make([]float32, 2)
+	if err := MatMul(dst, a, b, 1, 2, 3); err != nil {
+		t.Fatalf("MatMul: %v", err)
+	}
+	// Independent arithmetic: [1*3 + 0*5 + 2*7, 1*4 + 0*6 + 2*8] = [17, 20].
+	want := []float32{3 + 2*7, 4 + 2*8}
+	for i := range want {
+		if dst[i] != want[i] {
+			t.Errorf("dst[%d] = %v, want %v", i, dst[i], want[i])
+		}
+	}
+}
+
+// TestMatMulAccumulatesFromZero covers the row-clearing loop: MatMul assigns its output
+// rather than accumulating into whatever the destination held, so a destination
+// pre-filled with garbage must come back with the product alone.
+func TestMatMulAccumulatesFromZero(t *testing.T) {
+	a := []float32{1, 2}
+	b := []float32{3, 4}
+	dst := []float32{1000, -1000}
+	if err := MatMul(dst, a, b, 1, 1, 2); err != nil {
+		t.Fatalf("MatMul: %v", err)
+	}
+	// 1*3 + 2*4 = 11, with neither pre-existing value surviving.
+	if dst[0] != 11 {
+		t.Errorf("dst[0] = %v, want 11: MatMul added to the old value instead of assigning", dst[0])
 	}
 }
 

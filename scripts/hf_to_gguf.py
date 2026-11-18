@@ -60,8 +60,14 @@ WEIGHTS = f"{SRC}/model.safetensors"
 if not os.path.exists(WEIGHTS):
     shards = sorted(f for f in os.listdir(SRC) if f.endswith(".safetensors"))
     if shards:
-        sys.exit(f"hf_to_gguf: {SRC} is sharded ({len(shards)} .safetensors files, e.g. "
-                 f"{shards[0]}); this converter reads the single-file form only")
+        # "1 .safetensors files" reads as a bug in the message rather than in the input. A
+        # sharded checkpoint has at least two, so the singular only appears for a directory
+        # holding a single oddly-named file -- which is still not model.safetensors, and is
+        # worth reporting as what it is rather than as a shard count.
+        n = len(shards)
+        what = f"{n} .safetensors files, e.g. {shards[0]}" if n > 1 else f"one .safetensors file named {shards[0]}"
+        sys.exit(f"hf_to_gguf: {SRC} has no model.safetensors ({what}); "
+                 f"this converter reads the single-file form only")
     sys.exit(f"hf_to_gguf: {SRC} has no model.safetensors; the checkpoint directory must hold "
              f"the weights alongside config.json")
 

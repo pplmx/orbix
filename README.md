@@ -507,8 +507,12 @@ backwards for a reason:
   the same batch at the same speed while letting 16 sequences share one pool instead of
   each reserving a whole context. The suite prints the pool shape so the trade is visible
   rather than implied.
-- **The policy rows do the same amount of work.** A policy reorders a fixed quantity of
-  work; it cannot reduce it, which is why the two rows' `ELAPSED` figures are close here.
+- **The policy rows do the same amount of work, and they generate more than `--max-tokens`
+  asks for.** A policy reorders a fixed quantity of work; it cannot reduce it, which is why
+  the two rows' `ELAPSED` figures are close here. The 63 tokens in both rows are a 60-token
+  long request plus a 3-token short one: the rows raise anything below 60, because two
+  requests that both finish in three tokens measure the scheduler's startup rather than its
+  ordering, and the note in a live run says so when it happens.
   Treat that as the design and not as a measurement of the scheduler, though: over six
   interleaved runs of this pair the `TOK/S` ratio ranged from 0.92 to 2.78, and `FIRST`
   ranged from 18 to 66 ms under shortest against 314 to 961 ms under FIFO -- all of it

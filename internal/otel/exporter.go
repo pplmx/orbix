@@ -97,8 +97,14 @@ func NewExporter(opts ExporterOptions) (*Exporter, error) {
 }
 
 // normalizeEndpoint strips a trailing /v1/traces so both spellings work.
+//
+// The slash comes off first. Stripping the path first leaves "http://host:4318/v1/traces/" with
+// its suffix unmatched, and the trailing-slash trim that follows then produces
+// "http://host:4318/v1/traces", to which the caller appends the path again -- a request to
+// /v1/traces/v1/traces.
 func normalizeEndpoint(s string) string {
-	for len(s) > len(tracesPath) && s[len(s)-len(tracesPath):] == tracesPath {
+	s = trimTrailingSlash(s)
+	if len(s) >= len(tracesPath) && s[len(s)-len(tracesPath):] == tracesPath {
 		s = s[:len(s)-len(tracesPath)]
 	}
 	return trimTrailingSlash(s)

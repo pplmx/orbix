@@ -265,9 +265,29 @@ func TestExporterPostsToTracesPath(t *testing.T) {
 // TestExporterToleratesEndpointWithPath accepts both spellings of the endpoint, which
 // appear interchangeably in collector documentation.
 func TestExporterToleratesEndpointWithPath(t *testing.T) {
-	for _, in := range []string{"http://host:4318", "http://host:4318/", "http://host:4318/v1/traces"} {
-		if got := normalizeEndpoint(in); got != "http://host:4318" {
-			t.Errorf("normalizeEndpoint(%q) = %q, want http://host:4318", in, got)
+	// The trailing-slash spelling of the full path is the one that used to break: the path
+	// was stripped before the slash, so the suffix did not match, the trim left the path in
+	// place, and the caller appended it a second time.
+	for _, in := range []string{
+		"http://host:4318",
+		"http://host:4318/",
+		"http://host:4318/v1/traces",
+		"http://host:4318/v1/traces/",
+		"http://host:4318//",
+		// A collector mounted under a prefix keeps it.
+		"http://host:4318/otlp/",
+	} {
+		want := "http://host:4318"
+		if strings.Contains(in, "/otlp") {
+			want = "http://host:4318/otlp"
+		}
+		if got := normalizeEndpoint(in); got != want {
+			t.Errorf("normalizeEndpoint(%q) = %q, want %q", in, got, want)
+		}
+		// The property that actually matters: appending the path once yields exactly one
+		// copy of it.
+		if got := normalizeEndpoint(in) + tracesPath; strings.Count(got, tracesPath) != 1 {
+			t.Errorf("%q normalizes to %q, which has the path twice", in, got)
 		}
 	}
 }

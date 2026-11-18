@@ -651,6 +651,13 @@ func (e *Engine) decode(batch []pending) {
 // from advancing -- so it must never block on a per-request channel.
 //
 // Returning false means the events were not delivered and the sequence is finished with.
+//
+// Only the goroutine driving Pump may call this. Its abandoned flag is written here and
+// read by reapAbandoned in the same round with no lock between them, which is safe exactly
+// because both happen on that one goroutine -- the same single-goroutine rule Pump
+// documents. A caller that emitted from an HTTP handler would introduce a data race on one
+// bool and a much worse bug: two goroutines could both decide a sequence is finished and
+// close its channel twice.
 func (s *sequence) emit(ev Event) bool {
 	if s.abandoned {
 		return false

@@ -265,7 +265,12 @@ def run_go(cases, repo_root):
     The program is written inside the module, because internal/chat is an internal package:
     a file outside the module tree may not import it.
     """
-    tmp = tempfile.mkdtemp(prefix="jinja-diff-", dir=os.path.join(repo_root, ".cache"))
+    # The parent has to exist: mkdtemp creates one level and raises FileNotFoundError if
+    # .cache/ is missing. It is ignored scratch space, so `just clean` removes it -- which
+    # would otherwise leave this script unable to run until someone recreated the directory.
+    cache_dir = os.path.join(repo_root, ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="jinja-diff-", dir=cache_dir)
     try:
         prog = os.path.join(tmp, "main.go")
         with open(prog, "w") as f:

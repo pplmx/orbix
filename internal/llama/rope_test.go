@@ -3,6 +3,7 @@ package llama
 import (
 	"math"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -386,6 +387,45 @@ func TestRopeFactorsAreNotCarriedForward(t *testing.T) {
 		if onlySecond.cos[pos][k] != none.cos[pos][k] {
 			t.Errorf("dimension %d changed although only dimension 1 has a factor; "+
 				"the factor is being carried forward", k)
+		}
+	}
+}
+
+// TestKVCacheRejectsUnaddressableSize covers the overflow in the per-layer allocation.
+//
+// The context length and the per-position width both come from the file, and their product is
+// what sizes each layer's block. On a 64-bit build that product can still exceed what make() will
+// accept for a slice, and a wrapped negative length panics rather than returning an error -- which
+// is the difference between "this file is corrupt" and "orbix crashed".
+//
+// The values here are absurd on purpose: a model with a two-billion-position window is not a model
+// anyone has, and the point is that it is refused rather than attempted.
+func TestKVCacheRejectsUnaddressableSize(t *testing.T) {
+	cfg := testConfig()
+	cfg.ContextLen = math.MaxInt32
+
+	// kvDim is small, so MaxInt32 positions are addressable and this exercises the guard's
+	// boundary rather than tripping it. Push the width up instead, which is the other factor.
+	cfg.KVHeads = math.MaxInt32 / 4
+	cfg.HeadDim = 4
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("NewKVCache panicked instead of returning an error: %v", r)
+		}
+	}()
+	_, err := NewKVCache(cfg, cfg.ContextLen)
+	if err == nil {
+		t.Fatal("NewKVCache accepted a size that cannot be allocated")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error %q does not say the size is too large", err)
+	}
+	// The message must not contain a negative number: the byte count is the value that overflowed,
+	// and formatting it produced -42949672944 in an earlier version of this guard.
+	for _, field := range strings.Fields(err.Error()) {
+		if strings.HasPrefix(field, "-") {
+			t.Errorf("error %q contains a negative number", err)
 		}
 	}
 }

@@ -1,6 +1,9 @@
 package llama
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // KVCache holds the attention keys and values for one sequence.
 //
@@ -37,6 +40,29 @@ func NewKVCache(cfg Config, nCtx int) (*KVCache, error) {
 	}
 	if cfg.Layers <= 0 || cfg.KVHeads <= 0 || cfg.HeadDim <= 0 {
 		return nil, fmt.Errorf("llama: cache needs a valid config, got %s", cfg)
+	}
+	// Every value below comes from the file, and the products of them size the allocations, so the
+	// arithmetic is done in int64 before anything is handed to make(). cfg.kvDim() multiplies two
+	// ints and can overflow on its own, which would let an already-wrapped width through the
+	// product check; computing it here from the parts keeps the guard honest.
+	//
+	// A wrapped negative length does not return an error -- make() panics on it -- so the failure
+	// this prevents is a crash on a corrupt file rather than a message about one.
+	kvDim := int64(cfg.KVHeads) * int64(cfg.HeadDim)
+	if kvDim <= 0 {
+		return nil, fmt.Errorf("llama: cache needs a valid config, got %s", cfg)
+	}
+	// The bound is on bytes rather than on elements: make() refuses a length whose size overflows,
+	// and a float32 slice of 2^62 elements is four times that in bytes. Checking the element count
+	// alone lets a length through that the runtime then panics on, which is the outcome this is
+	// meant to replace.
+	const valueSize = 4 // bytes per float32
+	if int64(nCtx) > math.MaxInt64/kvDim/valueSize {
+		// The byte count itself is not printed: it is the value that would overflow, so
+		// formatting it would put a negative number in the message. The two factors are what a
+		// reader needs to see what the file claimed, and the wording says what is wrong with it.
+		return nil, fmt.Errorf("llama: a %d-position cache at %d values per position per layer"+
+			" is too large to address", nCtx, kvDim)
 	}
 	c := &KVCache{cfg: cfg, ctx: nCtx, k: make([][]float32, cfg.Layers), v: make([][]float32, cfg.Layers)}
 	// Grow: allocating every layer's block in one call would need a single

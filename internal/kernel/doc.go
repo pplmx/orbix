@@ -11,8 +11,12 @@
 //
 // # Decisions worth knowing about
 //
-// Parallelism is over output rows, never over a reduction. Every output element is
-// computed start to finish by one goroutine, in the same order the serial version uses.
+// Parallelism is over independent outputs, never over a reduction. Every output element is
+// computed start to finish by one goroutine, in the same order the serial version uses. The
+// split decides which goroutine computes which element -- rows of the output for MatVec,
+// columns for MatMulTransposed, where a decode step is one row against the whole vocabulary
+// and a row split would leave the machine idle -- and never splits the dot product itself.
+//
 // A split reduction would be faster on paper -- more cores on the same sum -- and would
 // silently change every number, because float32 addition is not associative. The rule
 // that follows is the one this project leans on everywhere: a batched or parallel run

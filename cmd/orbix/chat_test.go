@@ -252,3 +252,37 @@ func TestExplainChatError(t *testing.T) {
 		}
 	}
 }
+
+// TestChatStatsCommand covers /stats, which exists because the REPL's central claim -- that a
+// later turn re-attaches the previous turn's KV blocks instead of prefilling them again -- had no
+// way to be observed from inside a session. Until it did, a session where reuse was happening and
+// one where the prompt was too short to reuse anything printed the same thing: nothing.
+func TestChatStatsCommand(t *testing.T) {
+	model := chatModel(t)
+
+	// Before any turn: the counters are zero and still have to be reported, because "0 reused"
+	// is an answer and silence is not.
+	out := runChat(t, chatOptions{model: model, maxTokens: 2, prefixCache: true}, "/stats\n/exit\n")
+	if !strings.Contains(out, "/stats") && !strings.Contains(out, "reused:") {
+		t.Errorf("/stats printed nothing recognisable:\n%s", out)
+	}
+	if !strings.Contains(out, "reused:") || !strings.Contains(out, "0 prompt positions") {
+		t.Errorf("a fresh session did not report zero reuse:\n%s", out)
+	}
+
+	// After a conversation long enough to span whole blocks, reuse has to be visible as a
+	// positive count -- that is the number this command was added to expose.
+	long := "Please tell me a long story about a dragon and a knight who became friends " +
+		"despite everything that happened between their families over many years of conflict"
+	out = runChat(t, chatOptions{model: model, maxTokens: 2, prefixCache: true},
+		long+"\nThat was interesting, please continue the story with more detail\n/stats\n/exit\n")
+	if !strings.Contains(out, "reused:") {
+		t.Fatalf("/stats printed no reuse line:\n%s", out)
+	}
+	// The second turn re-sends the first turn's history, so something must have been reused.
+	// Asserted as "not zero" rather than an exact tally: the figure depends on the block size
+	// and how the tokenizer splits this particular prompt.
+	if strings.Contains(out, "reused:      0 prompt positions") {
+		t.Errorf("a two-turn conversation reused nothing:\n%s", out)
+	}
+}

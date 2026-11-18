@@ -196,7 +196,7 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			done, err := chatCommand(out, line, &history)
+			done, err := chatCommand(out, line, &history, eng.Stats)
 			if err != nil {
 				return err
 			}
@@ -413,7 +413,7 @@ func chatTurns(system string, history []chatTurn, user string) []engine.Turn {
 // The write errors are propagated rather than ignored: a session whose terminal has
 // gone away has nothing useful left to do, and silently continuing would generate
 // tokens into a broken pipe.
-func chatCommand(out io.Writer, line string, history *[]chatTurn) (bool, error) {
+func chatCommand(out io.Writer, line string, history *[]chatTurn, stats func() engine.Stats) (bool, error) {
 	switch line {
 	case "/exit", "/quit", "/q":
 		return true, nil
@@ -437,11 +437,32 @@ func chatCommand(out io.Writer, line string, history *[]chatTurn) (bool, error) 
 			}
 		}
 		return false, nil
+	case "/stats":
+		// The REPL's whole design claim is that later turns re-attach the previous turn's
+		// blocks instead of prefilling them again, and until now nothing in the session let a
+		// reader see whether that was happening. On a model whose prompt is shorter than one
+		// block it cannot happen at all, and that looked exactly like it working.
+		if stats == nil {
+			_, err := fmt.Fprintln(out, "stats are not available in this session")
+			return false, err
+		}
+		st := stats()
+		if _, err := fmt.Fprintf(out, "  turns:      %d\n", len(*history)/2); err != nil {
+			return false, err
+		}
+		if _, err := fmt.Fprintf(out, "  tokens:     %d generated\n", st.TokensGenerated); err != nil {
+			return false, err
+		}
+		if _, err := fmt.Fprintf(out, "  reused:     %d prompt positions from shared prefixes\n", st.PrefixReused); err != nil {
+			return false, err
+		}
+		return false, nil
 	case "/help":
 		_, err := fmt.Fprint(out, `Commands:
   /exit, /quit, /q   end the session
   /clear             forget the conversation
   /history           show the conversation so far
+  /stats             tokens generated and prefix positions reused
   /help              this message
 `)
 		return false, err

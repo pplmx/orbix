@@ -491,6 +491,157 @@ func TestGetRejectsNarrowingOverflow(t *testing.T) {
 	}
 }
 
+// TestScalarAsFloatToInteger covers the conversion branch nothing reached: a float source
+// read as an integer target. Every other case in that function is integral-to-integral or
+// integral-to-float, and this one decides whether metadata stored as 3.0 can be read as an
+// int without a caller knowing which spelling a writer chose.
+//
+// The rule is that a float converts only when it is exactly integral: 3.0 becomes 3, while
+// 3.5 is reported unrepresentable instead of truncated. Truncation here would be the quiet
+// kind of wrong -- an alignment of 33 read as 32 still divides, and the file's tensors are
+// then read from the wrong offsets.
+func TestScalarAsFloatToInteger(t *testing.T) {
+	cases := []struct {
+		name   string
+		src    Value
+		want   int
+		wantOK bool
+	}{
+		{"integral float32", Value{Type: TypeFloat32, Float: 3}, 3, true},
+		{"negative integral", Value{Type: TypeFloat32, Float: -7}, -7, true},
+		{"zero", Value{Type: TypeFloat32, Float: 0}, 0, true},
+		{"fractional float32", Value{Type: TypeFloat32, Float: 3.5}, 0, false},
+		{"fractional float64", Value{Type: TypeFloat64, Float: 0.1}, 0, false},
+		{"positive infinity", Value{Type: TypeFloat64, Float: math.Inf(1)}, 0, false},
+		{"negative infinity", Value{Type: TypeFloat64, Float: math.Inf(-1)}, 0, false},
+		{"NaN", Value{Type: TypeFloat64, Float: math.NaN()}, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := scalarAs[int](c.src)
+			if ok != c.wantOK {
+				t.Fatalf("scalarAs[int](%s) ok = %v, want %v", c.name, ok, c.wantOK)
+			}
+			if ok && got != c.want {
+				t.Errorf("scalarAs[int](%s) = %d, want %d", c.name, got, c.want)
+			}
+		})
+	}
+
+	// A float too large for the target must not wrap. 1e300 is integral and finite, so it
+	// passes the truncation check and has to be caught by the wide-int path instead.
+	if _, ok := scalarAs[int32](Value{Type: TypeFloat64, Float: 1e300}); ok {
+		t.Error("scalarAs[int32](1e300) reported ok")
+	}
+}
+
+// TestScalarAsIntegerToFloat covers the signed-integer-to-float direction. Only the
+// unsigned case was reached before, because the fixture's large value happens to be
+// unsigned; a negative metadata value is the interesting one, since a conversion that
+// routed signed values through the unsigned field would turn -7 into a huge positive.
+func TestScalarAsIntegerToFloat(t *testing.T) {
+	cases := []struct {
+		name string
+		src  Value
+		want float64
+	}{
+		{"negative int32", Value{Type: TypeInt32, Int: -7}, -7},
+		{"negative int8", Value{Type: TypeInt8, Int: -128}, -128},
+		{"positive int64", Value{Type: TypeInt64, Int: 1 << 40}, 1 << 40},
+		{"unsigned uint16", Value{Type: TypeUint16, Uint: 65535}, 65535},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := scalarAs[float64](c.src)
+			if !ok {
+				t.Fatalf("scalarAs[float64](%s) reported not ok", c.name)
+			}
+			if got != c.want {
+				t.Errorf("scalarAs[float64](%s) = %v, want %v", c.name, got, c.want)
+			}
+		})
+	}
+}
+
+// TestScalarAsUnsignedTooLargeForInt64 covers the guard that keeps a uint64 above
+// MaxInt64 from becoming a negative number on the way to an integer target.
+func TestScalarAsUnsignedTooLargeForInt64(t *testing.T) {
+	// 1<<63 is exactly one past MaxInt64; as an int64 it would read as MinInt64.
+	if _, ok := scalarAs[int64](Value{Type: TypeUint64, Uint: 1 << 63}); ok {
+		t.Error("scalarAs[int64](1<<63) reported ok; it would come back negative")
+	}
+	// Just below the limit must still convert.
+	if got, ok := scalarAs[int64](Value{Type: TypeUint64, Uint: 1<<63 - 1}); !ok || got != math.MaxInt64 {
+		t.Errorf("scalarAs[int64](MaxInt64) = %d, %v", got, ok)
+	}
+}
+
+// TestFloatAsNarrowingOverflow covers floatAs's one checked conversion: a float64 that
+// becomes +Inf when narrowed to float32.
+//
+// The check exists because the alternative is worse than absence. Replacing a real number
+// with infinity makes every downstream comparison involving it true, and a model loaded
+// with an infinite epsilon normalizes to zero rows rather than failing to load.
+func TestFloatAsNarrowingOverflow(t *testing.T) {
+	// MaxFloat32 is representable; twice it is not. Both are finite float64 values.
+	if got, ok := floatAs[float32](math.MaxFloat32); !ok || got != math.MaxFloat32 {
+		t.Errorf("floatAs[float32](MaxFloat32) = %v, %v", got, ok)
+	}
+	if _, ok := floatAs[float32](2 * math.MaxFloat32); ok {
+		t.Error("floatAs[float32](2*MaxFloat32) reported ok; the value became +Inf")
+	}
+	// A genuine infinity must still convert: the guard is about narrowing, not about Inf.
+	if got, ok := floatAs[float32](math.Inf(1)); !ok || !math.IsInf(float64(got), 1) {
+		t.Errorf("floatAs[float32](+Inf) = %v, %v; the source was already infinite", got, ok)
+	}
+	// float64 to float64 is exact and must never fail.
+	if got, ok := floatAs[float64](1e308); !ok || got != 1e308 {
+		t.Errorf("floatAs[float64](1e308) = %v, %v", got, ok)
+	}
+}
+
+// TestIntAsEveryTargetWidth drives intAs's per-width range checks, which is a branch for
+// each integer type in the Scalar union and no test reached more than a few.
+//
+// The boundaries are the point: each check is `n < min || n > max` for that width, and an
+// off-by-one there would let one specific value wrap into a plausible small number.
+func TestIntAsEveryTargetWidth(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func() bool
+	}{
+		{"int8 max ok", func() bool { _, ok := intAs[int8](math.MaxInt8); return ok }},
+		{"int8 over", func() bool { _, ok := intAs[int8](math.MaxInt8 + 1); return !ok }},
+		{"int8 min ok", func() bool { _, ok := intAs[int8](math.MinInt8); return ok }},
+		{"int8 under", func() bool { _, ok := intAs[int8](math.MinInt8 - 1); return !ok }},
+		{"uint8 max ok", func() bool { _, ok := intAs[uint8](math.MaxUint8); return ok }},
+		{"uint8 over", func() bool { _, ok := intAs[uint8](math.MaxUint8 + 1); return !ok }},
+		{"uint8 negative", func() bool { _, ok := intAs[uint8](-1); return !ok }},
+		{"int16 max ok", func() bool { _, ok := intAs[int16](math.MaxInt16); return ok }},
+		{"int16 over", func() bool { _, ok := intAs[int16](math.MaxInt16 + 1); return !ok }},
+		{"uint16 max ok", func() bool { _, ok := intAs[uint16](math.MaxUint16); return ok }},
+		{"uint16 over", func() bool { _, ok := intAs[uint16](math.MaxUint16 + 1); return !ok }},
+		{"int32 max ok", func() bool { _, ok := intAs[int32](math.MaxInt32); return ok }},
+		{"int32 over", func() bool { _, ok := intAs[int32](math.MaxInt32 + 1); return !ok }},
+		{"uint32 max ok", func() bool { _, ok := intAs[uint32](math.MaxUint32); return ok }},
+		{"uint32 over", func() bool { _, ok := intAs[uint32](math.MaxUint32 + 1); return !ok }},
+		{"uint32 negative", func() bool { _, ok := intAs[uint32](-1); return !ok }},
+		{"int64 any", func() bool { _, ok := intAs[int64](math.MinInt64); return ok }},
+		{"uint64 negative", func() bool { _, ok := intAs[uint64](-1); return !ok }},
+		{"uint64 max ok", func() bool { got, ok := intAs[uint64](math.MaxInt64); return ok && got == math.MaxInt64 }},
+		{"float32 target", func() bool { got, ok := intAs[float32](7); return ok && got == 7 }},
+		{"float64 target", func() bool { got, ok := intAs[float64](7); return ok && got == 7 }},
+		{"int target", func() bool { got, ok := intAs[int](7); return ok && got == 7 }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if !c.run() {
+				t.Errorf("%s: the conversion did not behave as the boundary requires", c.name)
+			}
+		})
+	}
+}
+
 func TestGetArray(t *testing.T) {
 	f, err := Read(bytes.NewReader(sampleModel()))
 	if err != nil {

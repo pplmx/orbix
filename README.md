@@ -332,7 +332,9 @@ GOOS=windows GOARCH=amd64 go build -o orbix.exe ./cmd/orbix
 GOOS=linux GOARCH=riscv64 go build -o orbix-riscv64 ./cmd/orbix
 ```
 
-No toolchain setup beyond Go itself.
+No toolchain setup beyond Go itself. The version is not incidental: `go.mod` declares `go 1.27.0`,
+and the code uses generic methods and `strings.CutLast`, both of which arrived in that release, so
+an older toolchain fails to build rather than degrading quietly.
 
 ## CLI
 

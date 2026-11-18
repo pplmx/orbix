@@ -1098,6 +1098,84 @@ func TestQueueFullIsRefused(t *testing.T) {
 // The second is not a defect to fix, it is what abandonment means -- emit refuses everything
 // once the caller is judged gone -- but a consumer that assumed otherwise would wait for an
 // event that never comes.
+// TestFinishReasonStringsRoundTrip binds the two mappings that have to agree.
+//
+// FinishReason.String produces the label /metrics uses, and reasonIndex accepts the string
+// finish is called with. They are written as two switches rather than one table, so a reason
+// added to the enum without a matching case in reasonIndex would be counted in the total and
+// silently missing from the split -- the sum test in internal/server would catch it, but only
+// for traffic that actually reaches that reason, which for "error" is rare.
+//
+// Round-tripping every enum value is the property that makes the pair safe: string -> index ->
+// string must return the input, and index -> string -> index must too.
+func TestFinishReasonStringsRoundTrip(t *testing.T) {
+	all := []FinishReason{
+		FinishStop, FinishLength, FinishCancel, FinishAbandoned, FinishError,
+	}
+	if len(all) != int(FinishReasonCount) {
+		t.Fatalf("FinishReasonCount is %d but this test lists %d reasons; add the new one here",
+			FinishReasonCount, len(all))
+	}
+
+	seen := map[string]bool{}
+	for _, r := range all {
+		name := r.String()
+		if name == "unknown" {
+			t.Errorf("FinishReason(%d).String() = %q; every value below FinishReasonCount needs a name", r, name)
+			continue
+		}
+		if seen[name] {
+			t.Errorf("two reasons share the name %q", name)
+		}
+		seen[name] = true
+
+		back, ok := reasonIndex(name)
+		if !ok {
+			t.Errorf("reasonIndex(%q) does not accept the name FinishReason(%d).String() produces", name, r)
+			continue
+		}
+		if back != r {
+			t.Errorf("%q maps back to FinishReason(%d), want (%d)", name, back, r)
+		}
+	}
+
+	// And the other direction: a string that is not one of the names must not be accepted,
+	// since finish would then count it nowhere.
+	for _, bad := range []string{"", "stop ", "Stop", "content_filter", "unknown"} {
+		if _, ok := reasonIndex(bad); ok {
+			t.Errorf("reasonIndex(%q) accepted a name the enum does not define", bad)
+		}
+	}
+}
+
+// TestFinishReasonsMatchTheEventStream keeps the enum and the events in step.
+//
+// It restates the five strings rather than reading them out of engine.go, which is worth being
+// honest about: the map below is a second copy, so a rename in finish does not fail this test
+// on its own. What it does catch is the enum growing a reason the events never produce, or
+// losing one they do -- the case where /metrics would report a label that no traffic reaches,
+// or silently under-count. Pairing it with the round-trip test, which fails if the two switches
+// disagree, covers the rename case indirectly: a renamed string in reasonIndex would stop
+// matching String(), and that is the test that fires.
+func TestFinishReasonsMatchTheEventStream(t *testing.T) {
+	// Copied from the FinishReason values in engine.go; see the note above on what that costs.
+	want := map[string]bool{"stop": true, "length": true, "cancel": true, "abandoned": true, "error": true}
+	got := map[string]bool{}
+	for r := FinishStop; r < FinishReasonCount; r++ {
+		got[r.String()] = true
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("the event stream uses %q but the enum has no such reason", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("the enum defines %q but no event carries it", name)
+		}
+	}
+}
+
 func TestTerminalEventReportsGeneratedTotal(t *testing.T) {
 	path := gguftest.Model{NoEOS: true, ContextLen: 200}.Write(t, t.TempDir())
 

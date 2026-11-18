@@ -433,6 +433,59 @@ func TestPreTokenizerStates(t *testing.T) {
 	}
 }
 
+// TestKnownPreNamesAllReachAFamily checks the two name lists against each other: every
+// name knownPreNames claims is a name the mapping switch actually recognises.
+//
+// The two can disagree in the direction that hides a bug. PreKnown falls back to
+// knownPreNames when preFamilyOf fails, so a name added to that list without a case in the
+// switch reports itself as known while the file is split as one chunk -- the exact silent
+// degradation the family rules exist to avoid, arriving through the field meant to detect
+// it. The reverse direction matters too: a case added without a knownPreNames entry makes
+// inspect report a name it does not recognise as known.
+//
+// This drives the real constructor for all 100 names rather than comparing the lists
+// textually, because the switch is the authority and static extraction would have to
+// reimplement it -- my first attempt at that picked up "clean_up_tokenization_spaces" out
+// of a comment and reported a mismatch that did not exist.
+func TestKnownPreNamesAllReachAFamily(t *testing.T) {
+	for _, name := range knownPreNames {
+		t.Run(name, func(t *testing.T) {
+			path := gguftest.Model{
+				Vocab:          []string{"<unk>", "<s>", "</s>", "\u2581", "a"},
+				Merges:         []string{"a a"},
+				TokenizerModel: "gpt2",
+				NoBytes:        true,
+				Pre:            name,
+				ContextLen:     64,
+			}.Write(t, t.TempDir())
+			f, err := gguf.Open(path)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			tok, err := New(f)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if !tok.PreImplemented() {
+				t.Errorf("%q is in knownPreNames but has no rule: it would split the file as one chunk", name)
+			}
+			// "default" is the one name whose correct answer is preNone: it means llama.cpp
+			// applies no regex to this file, which is what not splitting does, and
+			// PreImplemented says so explicitly. Every other known name must reach a family
+			// with a rule, or the name is in the list without being wired up.
+			if name == "default" {
+				if tok.pre != preNone {
+					t.Errorf(`"default" resolved to %v, want preNone`, tok.pre)
+				}
+				return
+			}
+			if _, ok := preFamilyOf(tok.pre); !ok {
+				t.Errorf("%q resolved to %v, which has no preRule", name, tok.pre)
+			}
+		})
+	}
+}
+
 // TestKnownPreNamesHasNoDuplicates keeps the table a set: a duplicate would mean a name was
 // added twice while implementing two families, which hides that one of them is not actually
 // reachable.

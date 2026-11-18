@@ -1101,6 +1101,7 @@ func TestFullBufferWithLiveCancelDoesNotStallPump(t *testing.T) {
 	}
 	_ = ch // never drained, so the 64-slot buffer fills
 
+	start := time.Now()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1114,8 +1115,65 @@ func TestFullBufferWithLiveCancelDoesNotStallPump(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("Pump never returned: a full buffer with a live cancel channel stalled the engine")
 	}
+	elapsed := time.Since(start)
 	if got := e.Stats().Active; got != 0 {
 		t.Errorf("engine still reports %d active sequences after the round finished", got)
+	}
+
+	// The run has to have gone through the deadline, not merely finished quickly. A fixture
+	// that generated fewer than 64 tokens would never fill the buffer, so this test would pass
+	// on broken code -- exactly how my first two attempts at reproducing the stall failed to
+	// reproduce anything. Requiring at least one abandonGrace makes the fixture's size part of
+	// the assertion instead of an undocumented hope.
+	if elapsed < abandonGrace {
+		t.Fatalf("Pump finished in %v, before abandonGrace (%v): the buffer never filled, "+
+			"so this run did not exercise the deadline and proves nothing", elapsed, abandonGrace)
+	}
+	// It also has to retire the sequence *because it was abandoned*, not because the budget
+	// ran out. This is what the first version of this assertion missed: deleting the
+	// reapAbandoned call still passed, because sample keeps counting tokens (out grows before
+	// emit refuses them) and the request then ends on its own MaxTokens limit. With a budget
+	// of 900 that happened 902 rounds later in the same 2.004s the reaped run took, so no
+	// elapsed-time bound can tell them apart.
+	//
+	// The distinguishing fact is the token count: a reaped sequence stops where it was
+	// abandoned, while an unreaped one runs to its whole budget. Measured without the reap,
+	// that is 900 tokens against roughly 64 with it -- the buffer's own size plus the round
+	// that filled it.
+	acct := e.Stats()
+	if acct.RequestsFinished != 1 {
+		t.Errorf("finished = %d after abandoning one request, want 1", acct.RequestsFinished)
+	}
+	const budget = 900
+	if acct.TokensGenerated >= budget/2 {
+		t.Errorf("TokensGenerated = %d of a %d-token budget: the sequence ran on after being "+
+			"abandoned instead of being reaped, so its slot was held for the whole run",
+			acct.TokensGenerated, budget)
+	}
+
+	// And the engine must still serve after abandoning: an abandoned sequence that is reaped
+	// but left holding its active slot turns a deadlock into a leak, which looks identical
+	// from the outside -- requests stop completing.
+	e2ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+	if err != nil {
+		t.Fatalf("Submit after abandon: %v", err)
+	}
+	// Pump first, then read: the engine produces events only while Pump runs, so ranging
+	// before pumping blocks forever -- which is what my first version of this did.
+	for e.Pump() > 0 {
+	}
+	for ev := range e2ch {
+		if ev.Err != nil {
+			t.Fatalf("follow-up request failed: %v", ev.Err)
+		}
+	}
+	st := e.Stats()
+	if st.Active != 0 {
+		t.Errorf("Active = %d after the follow-up finished", st.Active)
+	}
+	if st.RequestsSubmitted != st.RequestsFinished {
+		t.Errorf("submitted %d but finished %d: the abandoned sequence was never accounted for",
+			st.RequestsSubmitted, st.RequestsFinished)
 	}
 }
 

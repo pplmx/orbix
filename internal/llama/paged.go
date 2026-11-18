@@ -3,6 +3,7 @@ package llama
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // ErrPoolExhausted is returned when a sequence needs a block and the pool has none left,
@@ -126,6 +127,36 @@ func NewBlockPool(cfg Config, opts BlockPoolOptions) (*BlockPool, error) {
 		return nil, fmt.Errorf("llama: block pool needs a valid config, got %s", cfg)
 	}
 
+	// Every value that sizes the allocations comes from either the caller or the file, and the
+	// products are computed in int64 before anything is handed to make(). Two ways this goes wrong
+	// otherwise, both of which kill the process rather than returning an error: the multiplication
+	// wraps to a negative length, which make() panics on, and a large-but-addressable length is
+	// granted as virtual memory the caller then cannot touch.
+	kvDim := int64(cfg.KVHeads) * int64(cfg.HeadDim)
+	if kvDim <= 0 {
+		return nil, fmt.Errorf("llama: block pool needs a valid config, got %s", cfg)
+	}
+	positions := int64(opts.Blocks) * int64(block)
+	perLayer := positions * kvDim
+	if int64(opts.Blocks) > math.MaxInt64/2/int64(block)/kvDim/4 {
+		return nil, fmt.Errorf("llama: a pool of %d blocks of %d positions at %d values per"+
+			" position is too large to address", opts.Blocks, block, kvDim)
+	}
+	// The cache holds keys and values for every layer, so the budget check uses the whole figure
+	// rather than one layer's share. Skipped when the budget is unknown, for the same reason as in
+	// NewKVCache: refusing a legitimate pool over a bad estimate is the worse mistake.
+	const valueSize = 4
+	// The block bookkeeping is charged too: the free list and the reference counts are each one
+	// int32 per block, and for a pool whose blocks are small those arrays outweigh the KV data.
+	// Leaving them out of the budget let a 2^34-block pool through and it spent 34 seconds filling
+	// them, which is the same failure one allocation later.
+	total := int64(cfg.Layers)*2*perLayer*valueSize + 2*8*int64(opts.Blocks)
+	if budget := availableMemoryHook(); budget > 0 && total > budget {
+		return nil, fmt.Errorf("llama: a pool of %d blocks of %d positions needs %.1f GB"+
+			" but only %.1f GB is available", opts.Blocks, block,
+			bytesToGB(total), bytesToGB(budget))
+	}
+
 	p := &BlockPool{
 		cfg:   cfg,
 		block: block,
@@ -140,7 +171,6 @@ func NewBlockPool(cfg Config, opts BlockPoolOptions) (*BlockPool, error) {
 	for i := range p.free {
 		p.free[i] = int32(opts.Blocks - 1 - i)
 	}
-	perLayer := opts.Blocks * block * cfg.kvDim()
 	for i := range p.k {
 		p.k[i] = make([]float32, perLayer)
 		p.v[i] = make([]float32, perLayer)

@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -349,5 +350,88 @@ func TestPoolAccountingStaysBalanced(t *testing.T) {
 			t.Fatalf("cycle %d after Reset: %d free + %d held != %d blocks",
 				i, pool.Free(), held(), pool.Blocks())
 		}
+	}
+}
+
+// TestNewBlockPoolRejectsUntenableSizes covers the sizes a pool cannot be built for.
+//
+// The block count comes from --blocks, the block size and the per-position width from the caller
+// and the file, and every allocation is a product of them. Two failures this rules out, both of
+// which kill the process rather than returning an error:
+//
+//   - The product wraps int64. Measured with 2^40 blocks of 2^20 positions: the old code died with
+//     "fatal error: runtime: out of memory" before any error could be returned.
+//   - The product is addressable but larger than the machine. The allocation is granted as virtual
+//     memory the caller then cannot touch, which on a smaller host means swapping until it is
+//     killed.
+//
+// The budget is injected so the arithmetic is what is tested, not the size of the machine running
+// the suite.
+func TestNewBlockPoolRejectsUntenableSizes(t *testing.T) {
+	old := availableMemoryHook
+	t.Cleanup(func() { availableMemoryHook = old })
+	availableMemoryHook = func() int64 { return 1 << 30 } // 1 GiB
+	cfg := testConfig()
+
+	// Overflow: the answer has to be an error, not a crash.
+	overflow := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("NewBlockPool panicked instead of returning an error: %v", r)
+			}
+		}()
+		_, err = NewBlockPool(cfg, BlockPoolOptions{Blocks: 1 << 40, BlockSize: 1 << 20})
+		return err
+	}
+	if err := overflow(); err == nil {
+		t.Fatal("an unaddressable pool was accepted")
+	} else if !strings.Contains(err.Error(), "too large to address") {
+		t.Errorf("error %q does not say the size is too large", err)
+	}
+
+	// Over budget: this config needs 8 bytes of KV per block and 16 of bookkeeping, so 2^26
+	// blocks is 1.5 GiB against a 1 GiB budget.
+	small := cfg
+	small.Layers, small.KVHeads, small.HeadDim = 1, 1, 1
+	_, err := NewBlockPool(small, BlockPoolOptions{Blocks: 1 << 26, BlockSize: 1})
+	if err == nil {
+		t.Fatal("a pool larger than the budget was accepted")
+	}
+	for _, want := range []string{"1.5 GB", "1.0 GB"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// A pool that fits is still built, and an unknown budget disables the check rather than
+	// rejecting a legitimate pool.
+	availableMemoryHook = availableMemory
+	if _, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 8, BlockSize: 4}); err != nil {
+		t.Fatalf("an ordinary pool was refused: %v", err)
+	}
+}
+
+// TestNewBlockPoolChargesBookkeeping covers the cheap block whose arrays outweigh the KV data.
+//
+// A pool's free list and reference counts are one int32 each per block, which is nothing when a
+// block holds a thousand positions and everything when it holds one. Charging only the KV data let
+// a 2^34-block pool through and it spent 34 seconds filling the two arrays -- the same failure one
+// allocation later, and the reason the budget counts them.
+func TestNewBlockPoolChargesBookkeeping(t *testing.T) {
+	old := availableMemoryHook
+	t.Cleanup(func() { availableMemoryHook = old })
+	availableMemoryHook = func() int64 { return 1 << 30 }
+
+	cfg := testConfig()
+	cfg.Layers, cfg.KVHeads, cfg.HeadDim = 1, 1, 1 // 8 bytes of KV per block-position
+
+	// 16 bytes of bookkeeping per block against 8 of KV: at 2^26 blocks the arrays are twice the
+	// data, and the pair is over budget while the KV alone would fit.
+	_, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 1 << 26, BlockSize: 1})
+	if err == nil {
+		t.Fatal("a pool whose bookkeeping exceeds the budget was accepted")
+	}
+	if !strings.Contains(err.Error(), "1.5 GB") {
+		t.Errorf("error %q does not charge the bookkeeping (512 MiB KV + 1 GiB arrays)", err)
 	}
 }

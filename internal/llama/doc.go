@@ -22,9 +22,14 @@
 //
 // Two RoPE layouts, because the models disagree on how dimensions pair. RopeNormal
 // pairs dimension i with i+1, as Llama does; RopeNeox pairs i with i+dims/2, as the
-// Qwen family does. Getting this wrong rotates the wrong pairs and the model still emits
-// plausible token ids, so the layout is a property of the architecture spec rather than a
-// default.
+// Qwen family does. Getting this wrong rotates the wrong pairs, which is silent: nothing
+// errors, the run completes, and every id it produces is a valid id. What comes out is
+// not plausible text, though -- measured on Qwen2.5 with the layout swapped, "The capital
+// of France is" continued as "1000000000000000000" where the right layout gives "Paris. It
+// is the largest city in Europe...". A degenerate repetition rather than noise is what
+// makes it worth stating: the output looks like a model that went wrong, not like a
+// program that did, so there is no crash to search for. That is why the layout is a
+// property of the architecture spec rather than a default.
 //
 // The KV cache is an interface with two implementations. A contiguous cache is one
 // arena per sequence; a paged cache is blocks shared from a pool, which is what makes

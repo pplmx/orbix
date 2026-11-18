@@ -768,14 +768,23 @@ and queued slots. A paged cache takes blocks as a sequence generates, so memory 
 what is actually in flight. The server prints the figure it computed at startup, and warns
 when a contiguous reservation passes a gibibyte.
 
-`--workers` divides one batched pass across goroutines, so the useful setting is bounded by
-what a pass contains: a round advances at most `--max-active` sequences, and a prefill has
-one position row per prompt token in the batch. Above that the extra workers have nothing to
-split. Measured on a 128-core host with eight concurrent requests, medians of five interleaved runs
-gave 324.9 tokens per second at 8 workers and 327.6 at 128 -- the same within noise, so the
-count is not a throughput knob once it passes the batch, and the default of one per CPU is
-already more than an eight-way batch can use. A single run of either setting varies by more
-than that difference, which is why the numbers here are medians of interleaved runs.
+`--workers` divides one batched pass across goroutines. What bounds its usefulness is the
+number of independent outputs in a pass, not the number of sequences: a matvec splits by
+output row, so a batch has one row per sequence, but the transposed product behind the output
+projection and the attention value/output projections splits by output *column*, and a decode
+step has thousands of those whatever the batch size. Measured on a 128-core host with eight
+concurrent requests, medians of seven interleaved runs gave 349.6 tokens per second at 8
+workers, 536.6 at 32, and 543.9 at 128. The count is therefore a real knob below 32 and flat
+above it -- 32 and 128 differ by about 1%, which is inside the run-to-run spread, while 8 is
+half again slower. The default of one per CPU sits at the flat end, which is the safe place
+for it.
+
+This measurement was 324.9 and 327.6 (8 against 128, "the same within noise") before the
+transposed matmul moved to a column split. The old figure was right for the old split: a
+row-partitioned product could not use more workers than the batch had rows. The paragraph is
+here rather than deleted because the way it went stale is worth knowing -- the split axis
+decides which bound applies, and changing one silently invalidated the measurement of the
+other.
 
 For scale: the 128k-window Llama 3.2 checkpoint in this repository's test set reserves
 about 8 GB per request that way, while the small test fixture reserves 1.7 MB. Any model

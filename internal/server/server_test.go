@@ -1367,3 +1367,61 @@ func TestTopPRejectsOutOfRange(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 }
+
+// TestCompressedBodyIsRefusedWith415 covers a client that compresses its request.
+//
+// HTTP allows a request body to carry a Content-Encoding, and a client library that enables
+// compression will send one. Decoding such a body as JSON produced
+//
+//	invalid JSON: invalid character '\x1f' looking for beginning of value
+//
+// which names a byte of the gzip header rather than the header that asked for it -- a 400 that
+// blames the payload for something the encoding did.
+//
+// The answer is 415 and a sentence, not decompression: this server takes prompts measured in
+// kilobytes, so the bytes saved are worth less than the decompression-bomb surface. 415 is also the
+// status that tells a client to change what it sends, where 400 says what arrived was malformed.
+func TestCompressedBodyIsRefusedWith415(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	send := func(encoding string) *http.Response {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+			strings.NewReader(`{"prompt":"hi","max_tokens":2}`))
+		req.Header.Set("Content-Type", "application/json")
+		if encoding != "" {
+			req.Header.Set("Content-Encoding", encoding)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Result()
+	}
+
+	for _, enc := range []string{"gzip", "br", "deflate"} {
+		t.Run(enc, func(t *testing.T) {
+			resp := send(enc)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusUnsupportedMediaType {
+				t.Errorf("status = %d, want 415", resp.StatusCode)
+			}
+			var body errorBody
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if !strings.Contains(body.Error.Message, enc) {
+				t.Errorf("message %q does not name the encoding", body.Error.Message)
+			}
+		})
+	}
+
+	// The paths that must keep working: no header at all, and the identity encoding a client may
+	// send to say so explicitly. Both are ordinary requests and must reach the handler.
+	for _, enc := range []string{"", "identity", "IDENTITY"} {
+		resp := send(enc)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Content-Encoding %q gave %d, want 200", enc, resp.StatusCode)
+		}
+	}
+}

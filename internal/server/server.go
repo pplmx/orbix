@@ -341,7 +341,14 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		// 415 for a body this server will not decode, 400 for one it tried to. The difference
+		// matters to a client: the first says "change what you send", the second says "what you
+		// sent was malformed".
+		status := http.StatusBadRequest
+		if errors.Is(err, errUnsupportedEncoding) {
+			status = http.StatusUnsupportedMediaType
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	if !s.checkModel(w, req.Model) {
@@ -369,7 +376,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	var req completionRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		// 415 for a body this server will not decode, 400 for one it tried to. The difference
+		// matters to a client: the first says "change what you send", the second says "what you
+		// sent was malformed".
+		status := http.StatusBadRequest
+		if errors.Is(err, errUnsupportedEncoding) {
+			status = http.StatusUnsupportedMediaType
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	if !s.checkModel(w, req.Model) {
@@ -795,8 +809,22 @@ func (s *Server) stopTokenIDs(stop []string) []int32 {
 	return ids
 }
 
+// errUnsupportedEncoding marks a request whose body is compressed in a way this server does not
+// decode, so the handler can answer 415 rather than a 400 that blames the JSON.
+var errUnsupportedEncoding = errors.New("unsupported content encoding")
+
 func decodeJSON(r *http.Request, dst any) error {
 	defer func() { _ = r.Body.Close() }()
+	// A client may compress its request body, and the only thing that must happen here is that
+	// the result is not a JSON error: reading a gzip stream as text yields "invalid character
+	// '\x1f'", which points at the bytes rather than at the encoding that produced them.
+	//
+	// The body is not decompressed. A local engine serves prompts measured in kilobytes, so the
+	// bytes saved are worth less than the dependency and the decompression-bomb surface that
+	// would come with handling them.
+	if enc := r.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		return fmt.Errorf("%w: %s; send the body uncompressed", errUnsupportedEncoding, enc)
+	}
 	dec := json.NewDecoder(r.Body)
 	// Unknown fields are ignored on purpose: see chatRequest.
 	if err := dec.Decode(dst); err != nil {

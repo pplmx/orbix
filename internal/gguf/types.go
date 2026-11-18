@@ -1,6 +1,9 @@
 package gguf
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Magic is the four-byte file signature that starts every GGUF file.
 const Magic = "GGUF"
@@ -204,7 +207,15 @@ func (q QuantType) Size(n int64) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return n / int64(info.block) * int64(info.size), true
+	blocks := n / int64(info.block)
+	// n comes from a product of dimensions read out of the file, so it can be enormous. The
+	// multiplication below would wrap to a negative byte count, and a negative length is worse
+	// than an unavailable one: a bounds check like "start + nbytes > file size" passes for it.
+	// Reporting the size as unknown is what the second return value is for.
+	if blocks > math.MaxInt64/int64(info.size) {
+		return 0, false
+	}
+	return blocks * int64(info.size), true
 }
 
 // BlockSize returns the number of weights in one encoded block.

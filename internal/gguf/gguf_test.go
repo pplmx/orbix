@@ -594,3 +594,43 @@ func TestGetSignedness(t *testing.T) {
 		}
 	}
 }
+
+// TestHugeDimensionsDoNotWrap covers tensor shapes whose element count overflows int64.
+//
+// Dims come straight from the file, so hostile or corrupt values must not be trusted to produce
+// a sensible product. The failure this guards against is specific: a product that wraps to a
+// negative number is worse than one reported as unavailable, because a bounds check written as
+// "start + nbytes > fileSize" is satisfied by a negative length and the read then goes through.
+//
+// N() therefore saturates, and Size reports the byte count as unknown rather than computing it.
+func TestHugeDimensionsDoNotWrap(t *testing.T) {
+	cases := [][]uint64{
+		{1 << 62, 4},
+		{1 << 40, 1 << 40},
+		{math.MaxUint64, 2},
+		{1 << 63},
+		{2, 3}, // a real shape still counts normally
+	}
+	for _, dims := range cases {
+		ti := TensorInfo{Dims: dims, Type: F32}
+		if n := ti.N(); n <= 0 {
+			t.Errorf("dims %v: N() = %d, want a positive count", dims, n)
+		}
+		// For the shapes that overflow, the byte count must be reported as unavailable. A
+		// saturated N() times four would wrap, which is exactly what the second return value
+		// exists to prevent.
+		n, ok := ti.Bytes()
+		if ok && n <= 0 {
+			t.Errorf("dims %v: Bytes() = %d with ok, want a positive byte count", dims, n)
+		}
+	}
+
+	// The ordinary case is unaffected.
+	small := TensorInfo{Dims: []uint64{6}, Type: F32}
+	if n := small.N(); n != 6 {
+		t.Errorf("N() = %d, want 6", n)
+	}
+	if b, ok := small.Bytes(); !ok || b != 24 {
+		t.Errorf("Bytes() = %d, %v, want 24, true", b, ok)
+	}
+}

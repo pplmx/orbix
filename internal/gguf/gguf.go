@@ -6,6 +6,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -58,6 +59,14 @@ type TensorInfo struct {
 func (t TensorInfo) N() int64 {
 	n := int64(1)
 	for _, d := range t.Dims {
+		// The dimensions come from the file, so the product can overflow. Saturating at
+		// math.MaxInt64 keeps the result monotonic and positive, which is what callers rely
+		// on: a tensor larger than that cannot exist on disk, and returning a wrapped negative
+		// instead would make a "too big" tensor look like a small one -- or, in a slice
+		// expression, like a valid length.
+		if d != 0 && n > math.MaxInt64/int64(d) {
+			return math.MaxInt64
+		}
 		n *= int64(d)
 	}
 	return n

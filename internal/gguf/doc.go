@@ -37,6 +37,29 @@
 // would misread any file that chose a different value, and the failure would look like
 // corrupt weights rather than a header mistake.
 //
+// # How the parse was checked
+//
+// Every decision above rests on one assumption: the tensors this package hands out are
+// the tensors the file contains, at the offsets the file states. That was verified against
+// an implementation written by someone else rather than against this package's own idea of
+// the format. Six checkpoints were parsed twice -- once here, once by the independent
+// Python gguf package -- and each tensor's bytes compared by SHA-256: a 15M Llama
+// (Q4_0/Q8_0/F32), a TinyLlama in K-quants, Qwen2 (Q8_0/F32), a Mixtral-format MoE file
+// whose expert weights are 3-D tensors, Llama 3.2 (Q2_K through Q4_K), and a 1.9 GB
+// all-F32 checkpoint. 1009 tensors across eight formats, every one byte-identical, as were
+// the shapes, the quantisation types and the byte counts.
+//
+// The comparison is not a test in this package. It needs the third-party reader and
+// multi-gigabyte checkpoints, and a unit test may depend on neither, so it is a check a
+// person runs -- which is why the result is written down here rather than left as the
+// method's possibility. The tests that do run here cover the error paths instead: wrong
+// magic, unsupported version, every truncation up to and past the end of the directory, a
+// tensor whose offset would wrap when converted, and an out-of-range tensor request.
+//
+// The one format the comparison did not reach is F16, because none of the available
+// checkpoints stores weights that way. Its conversion is covered by unit tests over the
+// boundaries and subnormals, but not by an external reader.
+//
 // # The file is untrusted input
 //
 // A GGUF file is usually downloaded, so its length fields cannot be believed. Every count

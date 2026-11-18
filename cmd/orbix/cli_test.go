@@ -543,6 +543,51 @@ func TestRunRefusesContextPastTheTrainedWindow(t *testing.T) {
 	}
 }
 
+// TestRunSeedOnlyMattersWithTemperature pins the condition the --seed help text states.
+//
+// A seed without --temp does nothing: greedy decoding is already deterministic, so every run
+// prints the same text and the seed is unread. That is documented in the flag's help and in
+// the server's request struct, but nothing tested it, and "seed=42 gives the same answer
+// twice" reads like the seed working when it is the decoder ignoring it.
+//
+// The test drives the command rather than the sampler so it covers the wiring: a seed with
+// no temperature must be byte-identical across runs, and with a temperature the same seed
+// must still reproduce while different seeds diverge.
+func TestRunSeedOnlyMattersWithTemperature(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+
+	run := func(args ...string) string {
+		t.Helper()
+		return captureStdout(t, func() {
+			base := []string{"--model", path, "--max-tokens", "12", "Once upon a time"}
+			if err := cmdRun(append(args, base...)); err != nil {
+				t.Fatalf("cmdRun(%v): %v", args, err)
+			}
+		})
+	}
+
+	// Without --temp: greedy, so the seed changes nothing and every run matches.
+	greedyA := run("--seed", "42")
+	greedyB := run("--seed", "99")
+	if greedyA != greedyB {
+		t.Errorf("greedy output differed across seeds:\n%q\n%q", greedyA, greedyB)
+	}
+
+	// With --temp: the same seed reproduces, and a different seed is expected to diverge.
+	sampledA := run("--temp", "1.5", "--seed", "42")
+	sampledB := run("--temp", "1.5", "--seed", "42")
+	if sampledA != sampledB {
+		t.Errorf("the same seed and temperature produced different text:\n%q\n%q", sampledA, sampledB)
+	}
+	// A different seed on random weights should differ; if it does not, the run is so short
+	// or the distribution so flat that the test cannot tell, which is worth knowing rather
+	// than asserting.
+	if other := run("--temp", "1.5", "--seed", "7"); other == sampledA {
+		t.Logf("seed 7 and seed 42 gave the same %d-token text; "+
+			"this run cannot distinguish seeds, but reproducibility held", len(sampledA))
+	}
+}
+
 // TestBenchReportsPrefixReuse covers the line that tells an operator whether turning on
 // --prefix-cache did anything.
 //

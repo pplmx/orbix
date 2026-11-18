@@ -21,7 +21,7 @@ func cmdRun(args []string) error {
 	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
 	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it")
 	topP := fs.Float64("top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it")
-	seed := fs.Int64("seed", 0, "sampling seed; 0 uses the current time")
+	seed := fs.Int64("seed", 0, "sampling seed; 0 uses the current time. Has no effect without --temp, because greedy decoding is already deterministic")
 	contextLen := fs.Int("ctx", 0, "context length; 0 uses the model's trained amount")
 	echo := fs.Bool("echo", false, "print the prompt before the generated text")
 	stats := fs.Bool("stats", false, "print timing and token counts to stderr")

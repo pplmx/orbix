@@ -324,6 +324,12 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 	if opts.temp > 0 {
 		// math/rand's generator, not crypto/rand: sampling quality does not depend on
 		// unpredictability, and a REPL benefits from the cheap path.
+		//
+		// There is no --seed here, unlike `orbix run`, and it is a decision rather than an
+		// omission: a session's prompt depends on every previous turn, so reproducing one
+		// would mean replaying the whole conversation against the same generator draws. A
+		// single-run seed gives the impression of reproducibility it cannot deliver. `run`
+		// has one because there the prompt is fixed and the seed is the only variable.
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		sampler = llama.Temperature{
 			Temp: float32(opts.temp), TopK: opts.topK, TopP: float32(opts.topP),

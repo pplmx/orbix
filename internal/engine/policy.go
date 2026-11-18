@@ -29,8 +29,10 @@ const (
 	// "Remaining work" is the tokens the sequence still has to produce, which is known
 	// once the prompt is prefilled and is a good proxy for how long the request will
 	// hold its slot. Serving the smallest first is what keeps a queue of mixed-size
-	// requests from being dominated by its longest member, and it is the policy the
-	// test above was written to fail under FIFO.
+	// requests from being dominated by its longest member.
+	//
+	// TestAdmitShortestPicksLeastRemaining pins this on a queue FIFO would have ordered
+	// the other way.
 	PriorityShortest
 
 	// PriorityFair advances the sequence that has gone longest without a turn.

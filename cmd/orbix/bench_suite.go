@@ -41,10 +41,13 @@ type result struct {
 	tokens int
 	// elapsed is wall time to finish every request in the scenario.
 	elapsed time.Duration
-	// firstToken is how long until *any* request produced a token. For a scenario with
-	// nothing to reorder it is just the prefill time; for the policy rows it is the
-	// number the policies exist to change, since they reorder a fixed amount of work
-	// rather than reduce it.
+	// firstToken is the FIRST column: a latency, but of a different request depending on
+	// the row. For a throughput row it is how long until *any* request produced a token,
+	// which is essentially the prefill time. For the policy rows it is the short
+	// request's own first token -- not "any", because the long request that runs first
+	// would supply that number under every policy and the column would say nothing. The
+	// policies reorder a fixed amount of work, so where the short request lands is the
+	// only thing they change.
 	firstToken time.Duration
 	// prefixReused is how many prompt positions came from a shared prefix rather than a
 	// forward pass, so a row can say whether its cache setting had anything to reuse

@@ -499,9 +499,14 @@ backwards for a reason:
   the same batch at the same speed while letting 16 sequences share one pool instead of
   each reserving a whole context. The suite prints the pool shape so the trade is visible
   rather than implied.
-- **The policy rows have the same total time on purpose.** A policy reorders a fixed
-  amount of work; it cannot reduce it. What it changes is the short request's first-token
-  latency, 401 ms under FIFO against 41 ms under shortest, and that is the `FIRST` column.
+- **The policy rows do the same amount of work.** A policy reorders a fixed quantity of
+  work; it cannot reduce it, which is why the two rows' `ELAPSED` figures are close here.
+  Treat that as the design and not as a measurement of the scheduler, though: over six
+  interleaved runs of this pair the `TOK/S` ratio ranged from 0.92 to 2.78, and `FIRST`
+  ranged from 18 to 66 ms under shortest against 314 to 961 ms under FIFO -- all of it
+  machine load, none of it the policy. The number that is a property of the scheduler is
+  the round in the `NOTE` column, and it was 2 under shortest and 63 under FIFO in every
+  one of those runs. That is why the engine counts rounds and the suite reports them.
 - **The prefix rows run their four requests one after another, not concurrently.** A
   concurrent burst with `MaxActive` as large as the request count prefills all four
   together, so none arrives after another has cached its prefix and the reuse path is

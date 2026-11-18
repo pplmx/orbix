@@ -275,8 +275,20 @@ func (f *File) TensorData(path, name string) (io.ReadCloser, error) {
 	if !ok {
 		return nil, fmt.Errorf("gguf: tensor %q has unsupported type %s", name, ti.Type)
 	}
+	// Both operands come from the file, so neither the cast nor the sum can be trusted to
+	// stay in range. A tensor offset above MaxInt64 becomes negative when cast, and a large
+	// start plus a large n wraps to a negative sum -- in both cases the naive
+	// `start < 0 || start+n > size` test passes and the reader is handed bytes from the wrong
+	// place. Measured before this check: an offset of 2^64-1 produced a tensor that "read"
+	// 16 bytes successfully from before the data section.
+	//
+	// The checks are ordered so that nothing is added before both addends are known to be
+	// non-negative, which is what makes the sum's overflow impossible rather than unlikely.
+	if ti.Offset > math.MaxInt64 {
+		return nil, fmt.Errorf("gguf: tensor %q offset %d is too large", name, ti.Offset)
+	}
 	start := f.TensorDataLoc + int64(ti.Offset)
-	if start < 0 || start+n > size {
+	if start < 0 || start > size || n < 0 || n > size-start {
 		return nil, fmt.Errorf("gguf: tensor %q extends past end of file", name)
 	}
 	if _, err := fh.Seek(start, io.SeekStart); err != nil {

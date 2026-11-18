@@ -513,6 +513,109 @@ func TestGetRejectsNarrowingOverflow(t *testing.T) {
 //
 // The guard is on the element type rather than on a recursion depth, because the format
 // allows one level: there is no depth to count once an array element cannot be an array.
+// TestTensorOffsetMustNotWrap covers the arithmetic that decides whether a tensor's bytes are
+// inside the file.
+//
+// The offset is a uint64 from the file, and the check was
+//
+//	start := f.TensorDataLoc + int64(ti.Offset)
+//	if start < 0 || start+n > size { refuse }
+//
+// Both halves can be defeated. An offset above MaxInt64 casts to a negative int64, and a
+// large start plus a large n wraps the sum negative -- in either case the test passes and
+// TensorData returns a reader positioned before the data section. Measured before the fix: an
+// offset of 2^64-1 yielded a tensor that read 16 bytes with no error, from the wrong place in
+// the file.
+//
+// The fix checks the offset against MaxInt64 before casting, and rewrites the remaining test
+// as `start > size || n > size-start` so no addition can overflow after that point.
+func TestTensorOffsetMustNotWrap(t *testing.T) {
+	build := func(off uint64) []byte {
+		var b bytes.Buffer
+		b.WriteString(Magic)
+		u32 := func(v uint32) {
+			var x [4]byte
+			binary.LittleEndian.PutUint32(x[:], v)
+			b.Write(x[:])
+		}
+		u64 := func(v uint64) {
+			var x [8]byte
+			binary.LittleEndian.PutUint64(x[:], v)
+			b.Write(x[:])
+		}
+		u32(Version)
+		u64(1) // one tensor
+		u64(0) // no metadata
+		u64(uint64(len("w")))
+		b.WriteString("w")
+		u32(1)
+		u64(4) // four f32 values
+		u32(uint32(F32))
+		u64(off)
+		for b.Len()%32 != 0 {
+			b.WriteByte(0)
+		}
+		b.Write(make([]byte, 256))
+		return b.Bytes()
+	}
+
+	// Offsets that cast negative: refused as too large, so the message names the offset
+	// rather than blaming the file length.
+	for _, off := range []uint64{1 << 63, math.MaxUint64, math.MaxUint64 - 8} {
+		data := build(off)
+		path := filepath.Join(t.TempDir(), "wrap.gguf")
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := Read(bytes.NewReader(data))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if _, err := f.TensorData(path, "w"); err == nil {
+			t.Fatalf("TensorData accepted offset %d, which wraps to %d as int64", off, int64(off))
+		} else if !strings.Contains(err.Error(), "too large") {
+			t.Errorf("offset %d: error %q does not say the offset is the problem", off, err)
+		}
+	}
+
+	// A large but representable offset is a different failure: it simply is not in the file,
+	// and must be refused by the bounds check rather than by the cast guard.
+	data := build(1 << 62)
+	path := filepath.Join(t.TempDir(), "far.gguf")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if _, err := f.TensorData(path, "w"); err == nil {
+		t.Fatal("TensorData accepted an offset past the end of the file")
+	} else if !strings.Contains(err.Error(), "past end") {
+		t.Errorf("error %q does not say the tensor is past the end", err)
+	}
+
+	// And a legal offset still reads.
+	data = build(0)
+	path = filepath.Join(t.TempDir(), "ok.gguf")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err = Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	rc, err := f.TensorData(path, "w")
+	if err != nil {
+		t.Fatalf("TensorData at offset 0: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil || len(got) != 16 {
+		t.Errorf("read %d bytes, %v; want 16", len(got), err)
+	}
+}
+
 // TestRefusesOversizedMetadataValue covers the allocation a corrupt length must not buy.
 //
 // A GGUF string is a u64 length followed by that many bytes, and until now the length chose

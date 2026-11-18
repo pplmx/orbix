@@ -757,3 +757,92 @@ func TestSpanCarriesTheRequiredGenAIAttributes(t *testing.T) {
 		})
 	}
 }
+
+// TestErrorTypeOnFailedSpans covers error.type, which is Conditionally Required: present when the
+// operation failed and absent when it did not. A backend filters failures by its presence, so a
+// missing value means failed requests that look successful in a dashboard.
+func TestErrorTypeOnFailedSpans(t *testing.T) {
+	type run struct {
+		name    string
+		setup   func(cancel chan struct{}) (Request, func())
+		want    string
+		wantErr bool
+	}
+	// A cancelled request is the one failure a fixture can produce deterministically.
+	cancelled := run{
+		name: "cancelled",
+		setup: func(cancel chan struct{}) (Request, func()) {
+			return Request{Cancel: cancel}, func() { close(cancel) }
+		},
+		want:    "canceled",
+		wantErr: true,
+	}
+
+	var mu sync.Mutex
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = b
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	exp, err := otel.NewExporter(otel.ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2})
+	cancel := make(chan struct{})
+	req, fire := cancelled.setup(cancel)
+	req.Prompt = tok.Encode("Once upon a time", true)
+	req.MaxTokens = 64
+	req.Trace = exp
+	ch, err := e.Submit(req)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	fire()
+	for e.Pump() > 0 {
+	}
+	for range ch {
+	}
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	mu.Lock()
+	got := string(body)
+	mu.Unlock()
+	if !strings.Contains(got, `"error.type"`) {
+		t.Fatalf("failed span has no error.type: %s", got)
+	}
+	if !strings.Contains(got, `"`+cancelled.want+`"`) {
+		t.Errorf("error.type is not %q: %s", cancelled.want, got)
+	}
+
+	// A successful request must not carry it at all.
+	mu.Lock()
+	body = nil
+	mu.Unlock()
+	ch, err = e.Submit(Request{Prompt: tok.Encode("Once", true), MaxTokens: 2, Trace: exp})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	for range ch {
+	}
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	mu.Lock()
+	okBody := string(body)
+	mu.Unlock()
+	if strings.Contains(okBody, `"error.type"`) {
+		t.Errorf("successful span carries error.type: %s", okBody)
+	}
+}

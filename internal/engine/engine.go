@@ -18,6 +18,11 @@ import (
 // the request was well formed, and retrying later or shedding load is the right answer.
 var ErrQueueFull = errors.New("engine: too many requests waiting")
 
+// errCallerGone reports that the caller stopped reading events before the sequence finished.
+// It is a sentinel rather than an inline fmt.Errorf so the span can classify it: error.type must
+// be a stable, low-cardinality string, which an error that carries the sequence id could not be.
+var errCallerGone = errors.New("engine: caller stopped reading events")
+
 // Event is one step of a sequence's output.
 type Event struct {
 	// Token is the generated token. HasToken says whether it is meaningful:
@@ -481,8 +486,7 @@ func (e *Engine) reapAbandoned() {
 	}
 	e.mu.Unlock()
 	for _, s := range gone {
-		e.finish(s, Event{Done: true, FinishReason: "abandoned",
-			Err: fmt.Errorf("engine: caller stopped reading events")})
+		e.finish(s, Event{Done: true, FinishReason: "abandoned", Err: errCallerGone})
 	}
 }
 
@@ -664,6 +668,25 @@ func (s *sequence) cancelled() bool {
 	}
 }
 
+// classifyError maps an error to the low-cardinality class that goes in error.type.
+//
+// The conventions require error.type to be predictable and low cardinality, so this returns one
+// of a small fixed set rather than the error's message. Unwrapping is deliberate: a wrapped
+// error's own type is usually the wrapper (*fmt.wrapError), which classifies nothing.
+func classifyError(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, llama.ErrPoolExhausted):
+		return "pool_exhausted"
+	case errors.Is(err, errCallerGone):
+		return "caller_gone"
+	}
+	// Anything else is a model-side failure: a prefill or decode that could not run. The
+	// distinct causes are many and all mean the same thing to a reader of the trace.
+	return "inference_failed"
+}
+
 // finish closes a sequence's channel and drops it from the active set.
 //
 // A paged sequence returns its blocks here. Released blocks go back to the pool
@@ -694,6 +717,14 @@ func (e *Engine) finish(s *sequence, last Event) {
 		spanErr := last.Err
 		if spanErr == nil && last.FinishReason == "cancel" {
 			spanErr = context.Canceled
+		}
+		// error.type is Conditionally Required: present exactly when the operation failed, and
+		// absent when it did not, so a backend can filter failures by its presence. The value
+		// is a low-cardinality class rather than the error message, which would be unbounded
+		// -- one series per distinct prompt length.
+		if spanErr != nil {
+			span.Attributes = append(span.Attributes,
+				otel.StringAttr("error.type", classifyError(spanErr)))
 		}
 		// Finish first, so the span has an end time to measure the decode phase against.
 		span = span.Finish(spanErr)

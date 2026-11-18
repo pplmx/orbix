@@ -65,6 +65,52 @@ func writeModel(t *testing.T, tensors []gguf.TensorInfo, data []byte) string {
 	return path
 }
 
+// TestLoaderRejectsWrappingOffset covers the arithmetic that decides whether a tensor's
+// bytes are inside the file.
+//
+// All three entry points computed the start as `TensorDataLoc + int64(ti.Offset)` and then
+// tested `start < 0 || start+nbytes > size`. Both halves can be defeated by a value the file
+// supplies: an offset above MaxInt64 casts to a negative int64, so the sum is merely shifted
+// and stays positive, and a large start plus a large length wraps the sum negative. The
+// reader is then handed a position before the data section and reads the wrong bytes with no
+// error. This is the same defect gguf.TensorData had, fixed there first; the three copies here
+// were missed because the fix went to the site the investigation named.
+//
+// They now share dataStart, which checks the offset against MaxInt64 before casting and
+// rewrites the remaining test so no addition can overflow after that point.
+func TestLoaderRejectsWrappingOffset(t *testing.T) {
+	l := &Loader{size: 1000}
+	l.file = &gguf.File{TensorDataLoc: 100}
+	const nbytes = 16
+
+	// Offsets that cast negative: refused as too large, so the message names the offset
+	// rather than blaming the file length.
+	for _, off := range []uint64{1 << 63, math.MaxUint64, math.MaxUint64 - 8} {
+		ti := gguf.TensorInfo{Name: "w", Offset: off, Dims: []uint64{4}, Type: gguf.F32}
+		if _, err := l.dataStart(ti, nbytes); err == nil {
+			t.Errorf("dataStart accepted offset %d, which wraps to %d as int64", off, int64(off))
+		} else if !strings.Contains(err.Error(), "too large") {
+			t.Errorf("offset %d: error %q does not say the offset is the problem", off, err)
+		}
+	}
+
+	// A representable offset that is simply past the end is a different failure, and must be
+	// reported as such rather than as a range problem with the offset.
+	ti := gguf.TensorInfo{Name: "w", Offset: 5000, Dims: []uint64{4}, Type: gguf.F32}
+	if _, err := l.dataStart(ti, nbytes); err == nil {
+		t.Error("dataStart accepted an offset past the end of the file")
+	} else if !strings.Contains(err.Error(), "past end") {
+		t.Errorf("error %q does not say the tensor is past the end", err)
+	}
+
+	// A tensor that exactly fills the file must still be accepted, so the new test cannot be
+	// satisfied by rejecting everything near the boundary.
+	ti = gguf.TensorInfo{Name: "w", Offset: 884, Dims: []uint64{4}, Type: gguf.F32}
+	if start, err := l.dataStart(ti, nbytes); err != nil || start != 984 {
+		t.Errorf("dataStart at the last whole tensor = %d, %v; want 984, nil", start, err)
+	}
+}
+
 // TestLoaderRejectsBadTensor covers the loader's refusal paths.
 //
 // Each is a check that exists so a corrupt or unsupported file produces a message naming

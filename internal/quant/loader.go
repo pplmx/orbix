@@ -3,6 +3,7 @@ package quant
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 
@@ -70,9 +71,9 @@ func (l *Loader) Tensor(name string) ([]float32, error) {
 	if !ok {
 		return nil, fmt.Errorf("quant: tensor %q has unsupported type %s", name, ti.Type)
 	}
-	start := l.file.TensorDataLoc + int64(ti.Offset)
-	if start < 0 || start+nbytes > l.size {
-		return nil, fmt.Errorf("quant: tensor %q extends past end of file", name)
+	start, rerr := l.dataStart(ti, nbytes)
+	if rerr != nil {
+		return nil, fmt.Errorf("quant: tensor %q %w", name, rerr)
 	}
 
 	raw := make([]byte, nbytes)
@@ -104,15 +105,36 @@ func (l *Loader) TensorInto(name string, dst []float32) error {
 	if !ok {
 		return fmt.Errorf("quant: tensor %q has unsupported type %s", name, ti.Type)
 	}
-	start := l.file.TensorDataLoc + int64(ti.Offset)
-	if start < 0 || start+nbytes > l.size {
-		return fmt.Errorf("quant: tensor %q extends past end of file", name)
+	start, rerr := l.dataStart(ti, nbytes)
+	if rerr != nil {
+		return fmt.Errorf("quant: tensor %q %w", name, rerr)
 	}
 	raw := make([]byte, nbytes)
 	if _, err := l.fh.ReadAt(raw, start); err != nil {
 		return fmt.Errorf("quant: read tensor %q: %w", name, err)
 	}
 	return Decode(ti.Type, raw, dst)
+}
+
+// dataStart returns the absolute file offset of a tensor's encoded bytes, or an error
+// describing why it is not inside the file.
+//
+// Both operands come from the file, so neither the cast nor the sum can be trusted to stay
+// in range. An offset above MaxInt64 becomes negative when cast, and a large start plus a
+// large length wraps the sum negative -- in both cases a naive
+// `start < 0 || start+nbytes > size` test passes and the reader is handed bytes from the
+// wrong place. The shared helper is what keeps the three call sites from drifting apart:
+// they had the identical bug three times, and gguf.TensorData had it too until it was fixed
+// with this same ordering.
+func (l *Loader) dataStart(ti gguf.TensorInfo, nbytes int64) (int64, error) {
+	if ti.Offset > math.MaxInt64 {
+		return 0, fmt.Errorf("offset %d is too large", ti.Offset)
+	}
+	start := l.file.TensorDataLoc + int64(ti.Offset)
+	if start < 0 || start > l.size || nbytes < 0 || nbytes > l.size-start {
+		return 0, fmt.Errorf("extends past end of file")
+	}
+	return start, nil
 }
 
 // Preload reads and dequantizes several tensors concurrently and returns them
@@ -183,9 +205,9 @@ func (l *Loader) TensorReader(name string) (io.Reader, error) {
 	if !ok {
 		return nil, fmt.Errorf("quant: tensor %q has unsupported type %s", name, ti.Type)
 	}
-	start := l.file.TensorDataLoc + int64(ti.Offset)
-	if start < 0 || start+nbytes > l.size {
-		return nil, fmt.Errorf("quant: tensor %q extends past end of file", name)
+	start, rerr := l.dataStart(ti, nbytes)
+	if rerr != nil {
+		return nil, fmt.Errorf("quant: tensor %q %w", name, rerr)
 	}
 	return io.NewSectionReader(l.fh, start, nbytes), nil
 }

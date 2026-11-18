@@ -586,6 +586,22 @@ func (b *decodeBatch) embed(m *Model, row, token int) error {
 }
 
 // attention runs one block's attention for every sequence in the batch.
+//
+// This loop is serial, unlike the prefill path which parallelises over positions. The
+// reason is that there is nothing to parallelise over: a decode step advances each
+// sequence by exactly one position, so the position axis has n entries where n is the
+// batch size, and with a single sequence in flight that is one worker. The head axis
+// exists, but attention is a small share of a decode step: on stories15M (6 layers, 288
+// hidden, 6 heads of 48) at a 64-token context it is about 1.4% of the multiply-adds,
+// 0.22 MFLOP against the projections' 15.2 -- of which the output projection alone is
+// 9.2. Parallelising it would buy that percent while adding a spawn-and-join per layer.
+//
+// Measured, medians of five interleaved runs over 64 tokens: 3.031 s at --workers 1 and
+// 2.513 s at --workers 128, 17% faster. That is the projections using the workers rather
+// than this loop, since 17% is far more than attention's 1.4% share. The 17% is also far
+// less than a perfect split would give, which is the expected shape: the projections are
+// ~98% of the work, but only the ones large enough to clear minParallelWork can be split,
+// and 128 workers on a 288-wide row still leaves the reduction serial by design.
 func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 	cfg := m.W.Config
 	layer := &m.W.Layers[l]

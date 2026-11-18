@@ -286,6 +286,57 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+### Behind a reverse proxy
+
+The server sets `X-Accel-Buffering: no` on streaming responses, which is the one thing it can
+do from its side of the connection. nginx buffers proxied responses by default
+(`proxy_buffering on`), so without that header an SSE stream still arrives complete but all at
+once, which for a token stream is the same as not streaming. nginx reads the header and turns
+buffering off for that response only; every other endpoint keeps the buffering that a proxy
+default is actually for. Proxies that do not understand the header ignore it.
+
+Two things remain the deployment's job, because no application header can express them:
+
+- **Keep the connection open.** nginx's `proxy_read_timeout` defaults to 60 seconds and bounds
+  the gap between reads, not the whole response, so a long model load or a stalled generation
+  can exceed it. Raise it for the inference location.
+- **The upstream connection has to be HTTP/1.1 for chunked transfer.** nginx proxies HTTP/1.1
+  by default from 1.29.7; before that the default was 1.0, where ending a stream means closing
+  the connection. Set `proxy_http_version 1.1` with an empty `Connection` header on older
+  versions, or where a higher-level block set something else.
+
+`X-Accel-Buffering` is nginx-specific, and nginx consumes it rather than forwarding it: it is
+in nginx's default hidden-header set, so it never reaches the client. A two-tier nginx chain
+therefore needs `proxy_pass_header X-Accel-Buffering` on the inner tier, or the outer tier
+never sees it.
+
+The other proxies do not need it, for different reasons. HAProxy and Envoy forward response
+bytes as they arrive and have no whole-message buffering to turn off. Caddy buffers partially
+by default, but its documentation lists `Content-Type: text/event-stream` among the cases where
+it flushes immediately regardless. All three still need timeouts sized for a response that can
+outlive the default -- which is the part no application header can fix.
+
+### No CORS and no authentication
+
+The server sends no `Access-Control-Allow-*` headers, so a browser page on another origin
+cannot read a response -- and because the request body is JSON decoded without a Content-Type
+check, a page can still *send* one. `POST` with `Content-Type: text/plain` is a CORS "simple
+request", which the browser delivers without a preflight, and the server parses the body
+whatever the header says. The page cannot see the reply, but the request runs:
+
+```bash
+# Accepted from any origin, without a preflight, from a page the user merely visited.
+curl http://127.0.0.1:8080/v1/completions \
+  -H 'Content-Type: text/plain' -H 'Origin: http://example.invalid' \
+  -d '{"prompt": "...", "max_tokens": 256}'
+```
+
+This is a property of an unauthenticated API that also performs work, not a bug in the CORS
+decision: adding CORS would not close it, because CORS governs who may read a response, not who
+may cause one. What closes it is binding to loopback or putting authentication in front. The
+default `--addr :8080` listens on every interface; a host reachable from elsewhere is an
+inference API anyone can spend.
+
 ### Embed in a Go service
 
 ```go

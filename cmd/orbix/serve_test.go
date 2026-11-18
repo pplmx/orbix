@@ -279,3 +279,36 @@ func TestHumanBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestOTelResourceHasNoSpanAttributes checks the boundary between the two attribute levels.
+//
+// gen_ai.request.model was on the resource, where it says every span from this process was made
+// to that model. The span already carries it, and the resource claim is a different statement:
+// true while one checkpoint is loaded, wrong the moment two processes serve different models and
+// are grouped by service.name.
+func TestOTelResourceHasNoSpanAttributes(t *testing.T) {
+	attrs := otelResource("v1.2.3", "llama-3")
+
+	var names []string
+	seen := map[string]string{}
+	for _, a := range attrs {
+		names = append(names, a.Key)
+		seen[a.Key] = a.Value
+	}
+
+	// Required by the resource conventions.
+	if seen["service.name"] == "" {
+		t.Errorf("service.name is required on the resource; got %v", names)
+	}
+	for _, key := range names {
+		if strings.HasPrefix(key, "gen_ai.") {
+			t.Errorf("%q is a span attribute and must not be on the resource", key)
+		}
+	}
+	if got := seen["orbix.model"]; got != "llama-3" {
+		t.Errorf("orbix.model = %q, want llama-3", got)
+	}
+	if got := seen["service.version"]; got != "v1.2.3" {
+		t.Errorf("service.version = %q, want v1.2.3", got)
+	}
+}

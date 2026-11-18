@@ -23,6 +23,20 @@ import (
 )
 
 // cmdServe implements "orbix serve": the OpenAI-compatible HTTP server.
+// otelResource is the set of attributes describing the process, as opposed to the work it does.
+//
+// service.name is Required by the resource conventions. Nothing from gen_ai.* belongs here: those
+// describe one operation and are set on the span. The model is still recorded, under this
+// repository's own prefix, because a collector separating two deployments by checkpoint needs it
+// at the process level and no semantic convention offers a resource attribute for it.
+func otelResource(version, model string) []otel.Attribute {
+	return []otel.Attribute{
+		otel.StringAttr("service.name", "orbix"),
+		otel.StringAttr("service.version", version),
+		otel.StringAttr("orbix.model", model),
+	}
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -121,11 +135,7 @@ func cmdServe(args []string) error {
 	if *otlpEndpoint != "" {
 		traceExporter, err = otel.NewExporter(otel.ExporterOptions{
 			Endpoint: *otlpEndpoint,
-			Resource: []otel.Attribute{
-				otel.StringAttr("service.name", "orbix"),
-				otel.StringAttr("service.version", version),
-				otel.StringAttr("gen_ai.request.model", cfg.Name),
-			},
+			Resource: otelResource(version, cfg.Name),
 		})
 		if err != nil {
 			return err

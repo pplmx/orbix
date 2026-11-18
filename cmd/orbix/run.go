@@ -20,6 +20,7 @@ func cmdRun(args []string) error {
 	maxTokens := maxTokensFlag(fs, 128)
 	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
 	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it")
+	topP := fs.Float64("top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it")
 	seed := fs.Int64("seed", 0, "sampling seed; 0 uses the current time")
 	contextLen := fs.Int("ctx", 0, "context length; 0 uses the model's trained amount")
 	echo := fs.Bool("echo", false, "print the prompt before the generated text")
@@ -43,6 +44,12 @@ func cmdRun(args []string) error {
 	}
 	if *topK < 0 {
 		return fmt.Errorf("run: --top-k must not be negative (0 disables it)")
+	}
+	// A probability outside (0, 1] is refused rather than clamped, for the same reason as
+	// --top-k: 0 and 1 both read as "no limit" to some callers and "only the best token" to
+	// others, so interpreting either would change the output without saying so.
+	if *topP < 0 || *topP > 1 {
+		return fmt.Errorf("run: --top-p must be between 0 and 1 (0 disables it)")
 	}
 	// The library rejects this too, but only once the model is loaded and Generate is
 	// reached. Reporting it here means a typo costs nothing and does not depend on which
@@ -105,6 +112,7 @@ func cmdRun(args []string) error {
 		sampler = llama.Temperature{
 			Temp:      float32(*temp),
 			TopK:      *topK,
+			TopP:      float32(*topP),
 			NextFloat: s.Float64,
 		}
 	}

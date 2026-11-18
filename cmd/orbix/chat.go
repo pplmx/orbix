@@ -32,6 +32,7 @@ func cmdChat(args []string) error {
 	maxTokens := maxTokensFlag(fs, 128)
 	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
 	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it")
+	topP := fs.Float64("top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it")
 	cache := registerCacheFlags(fs, true)
 	noPrefix := fs.Bool("no-prefix-cache", false, "disable prefix reuse between turns")
 	if err := fs.Parse(args); err != nil {
@@ -51,6 +52,9 @@ func cmdChat(args []string) error {
 	if *topK < 0 {
 		return fmt.Errorf("chat: --top-k must not be negative (0 disables it)")
 	}
+	if *topP < 0 || *topP > 1 {
+		return fmt.Errorf("chat: --top-p must be between 0 and 1 (0 disables it)")
+	}
 	// The engine refuses this too, but only when a turn is submitted -- so the user typed a
 	// question, waited for the model to load, and then read an error about the flag. Checking
 	// it here reports it before the session starts.
@@ -64,6 +68,7 @@ func cmdChat(args []string) error {
 		maxTokens:   *maxTokens,
 		temp:        *temp,
 		topK:        *topK,
+		topP:        *topP,
 		workers:     *cache.workers,
 		blockSize:   *cache.blockSize,
 		blocks:      *cache.blocks,
@@ -78,6 +83,7 @@ type chatOptions struct {
 	maxTokens   int
 	temp        float64
 	topK        int
+	topP        float64
 	workers     int
 	blockSize   int
 	blocks      int
@@ -282,7 +288,10 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 		// math/rand's generator, not crypto/rand: sampling quality does not depend on
 		// unpredictability, and a REPL benefits from the cheap path.
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		sampler = llama.Temperature{Temp: float32(opts.temp), TopK: opts.topK, NextFloat: r.Float64}
+		sampler = llama.Temperature{
+			Temp: float32(opts.temp), TopK: opts.topK, TopP: float32(opts.topP),
+			NextFloat: r.Float64,
+		}
 	}
 
 	maxTokens := opts.maxTokens

@@ -227,12 +227,14 @@ func hasField(out, label, want string) bool {
 	return false
 }
 
-// TestNegativeSamplingFlagsAreRejected checks the flags that read as "sample less" but were
-// silently the same as zero.
+// TestNegativeSamplingFlagsAreRejected checks the sampling flags that have no sensible value
+// outside their range.
 //
 // Both --temp and --top-k are tested with "> 0" to decide whether they apply, so a negative
-// value means greedy decoding and no top-k cut -- the opposite of turning sampling down. The
-// flags are checked before the model is opened, so this needs no checkpoint.
+// value means greedy decoding and no top-k cut -- the opposite of turning sampling down.
+// --top-p is a probability and is out of range at both ends.
+//
+// The flags are checked before the model is opened, so this needs no checkpoint.
 func TestNegativeSamplingFlagsAreRejected(t *testing.T) {
 	cases := []struct {
 		cmd  string
@@ -241,8 +243,15 @@ func TestNegativeSamplingFlagsAreRejected(t *testing.T) {
 	}{
 		{"run", []string{"--model", "unused.gguf", "--temp", "-1", "hi"}, "--temp"},
 		{"run", []string{"--model", "unused.gguf", "--top-k", "-1", "hi"}, "--top-k"},
+		// --top-p is a probability, so both ends are meaningless: below 0 and above 1. It
+		// is refused rather than clamped because 0 and 1 both read as "no limit" to some
+		// callers and "only the best token" to others.
+		{"run", []string{"--model", "unused.gguf", "--top-p", "-0.5", "hi"}, "--top-p"},
+		{"run", []string{"--model", "unused.gguf", "--top-p", "1.5", "hi"}, "--top-p"},
 		{"chat", []string{"--model", "unused.gguf", "--temp", "-1"}, "--temp"},
 		{"chat", []string{"--model", "unused.gguf", "--top-k", "-1"}, "--top-k"},
+		{"chat", []string{"--model", "unused.gguf", "--top-p", "-0.5"}, "--top-p"},
+		{"chat", []string{"--model", "unused.gguf", "--top-p", "1.5"}, "--top-p"},
 	}
 	for _, c := range cases {
 		t.Run(c.cmd+" "+c.want, func(t *testing.T) {

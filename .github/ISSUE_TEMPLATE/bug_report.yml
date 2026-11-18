@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in Orbix behaves differently from what the README or a doc.go says
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The project's standard for a defect is that it is observable: a command that
+        prints the wrong thing, a number that does not match, a promise in the docs that
+        does not hold. What follows is the minimum needed to see it.
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happens
+      description: The command and its actual output, pasted rather than described.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen
+      description: |
+        If a document says this should behave differently, quote it and name the file --
+        a mismatch between the README and the code is a defect in one of them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: |
+        The smallest sequence that shows it. A model is not required: `internal/gguftest`
+        builds a few-kilobyte GGUF, and many defects reproduce with one.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Output of `orbix version`
+      description: Includes the commit, the Go toolchain, and whether CGo was enabled.
+      placeholder: orbix 1a2b3c4 / commit 1a2b3c4 / go1.27.3 / linux/amd64 / cgo false
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it shows up
+      multiple: true
+      options:
+        - GGUF parsing
+        - Quantization
+        - Kernels
+        - Tokenizer
+        - Model architecture / forward pass
+        - Engine / scheduling
+        - Server (/v1/completions, /v1/chat/completions)
+        - CLI
+        - Documentation

@@ -1,0 +1,29 @@
+# Who reviews what. A single maintainer today, written as the specific areas rather than a
+# blanket rule so the file stays useful when that changes: the patterns describe the
+# repository's own layering, not one person's availability.
+#
+# The order matters -- GitHub reads the last matching pattern, so the specific entries come
+# after the general one.
+
+*                           @pplmx
+
+# The engine's layers, in README order. A change here is a change to what the project claims
+# about inference, so it wants the closer read.
+/internal/gguf/             @pplmx
+/internal/quant/            @pplmx
+/internal/kernel/           @pplmx
+/internal/tokenize/         @pplmx
+/internal/llama/            @pplmx
+/internal/engine/           @pplmx
+
+# The public surface: the server's OpenAI compatibility and the CLI's rendering. Both are
+# what a user sees, and both are where the README's promises are kept or broken.
+/internal/server/           @pplmx
+/cmd/orbix/                 @pplmx
+
+# The gates themselves. A change here changes what "green" means.
+/.github/                   @pplmx
+/justfile                   @pplmx
+/.golangci.yml              @pplmx
+/.pre-commit-config.yaml    @pplmx
+/.rumdl.toml                @pplmx

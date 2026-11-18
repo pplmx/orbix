@@ -1503,3 +1503,73 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 		t.Errorf("one-byte stream gave %q, the same token decodes to %q", got, wantSingle)
 	}
 }
+
+// TestSafePrefixLen covers the computation that decides how much streamed text is safe to send
+// when a stop list is configured.
+//
+// The value is the length of text that cannot be the beginning of a stop string; everything
+// after it is held back until the next chunk decides whether it is a match. Getting this wrong
+// in either direction is a defect a client can see: too large and a stop string leaks a
+// character before it truncates, too small and ordinary output arrives in more chunks than it
+// needs to.
+func TestSafePrefixLen(t *testing.T) {
+	cases := []struct {
+		text string
+		stop []string
+		want int
+		why  string
+	}{
+		// The result is a byte offset, because it indexes a string: a three-byte character
+		// counts as three. Written as byte counts here so the test states the unit rather
+		// than leaving it to be inferred.
+		{"北", []string{"北京"}, 0, "all of it may begin a match"},
+		{"京", []string{"北京"}, 3, "京 alone does not begin the match, only continue it"},
+		{"是京", []string{"北京"}, 6, "京 is not a prefix of 北京, so nothing is held"},
+		{"北京是", []string{"北京"}, 9, "nothing here starts a match any more"},
+		{"abc", []string{"xyz"}, 3, "no suffix can start a match, so all of it is safe"},
+		{"ab", []string{"abc", "abd"}, 0, "ab begins both"},
+		{"xab", []string{"abc"}, 1, "ab is held, x is safe"},
+		{"", []string{"abc"}, 0, "empty text holds nothing back"},
+		{"abc", nil, 3, "no stop list holds nothing back"},
+		{"a中", []string{"a中X"}, 0, "a multi-byte suffix is held the same way"},
+	}
+	for _, c := range cases {
+		if got := safePrefixLen(c.text, c.stop); got != c.want {
+			t.Errorf("safePrefixLen(%q, %v) = %d, want %d (%s)", c.text, c.stop, got, c.want, c.why)
+		}
+	}
+}
+
+// TestStreamReleasesHeldTextWhenNoStopMatches covers the other half of the stop hold-back: text
+// withheld because it might begin a stop string has to be sent anyway once generation ends
+// without a match.
+//
+// Holding it back is what makes stop=["北京"] agree with the non-streaming body; releasing it
+// is what keeps a stop list that never matches from silently truncating the response. Both
+// need the same test to be honest about, since each looks correct alone.
+func TestStreamReleasesHeldTextWhenNoStopMatches(t *testing.T) {
+	srv, tok := newTestServerModel(t, gguftest.Model{
+		Vocab:          []string{"<unk>", "<s>", "</s>", "ä", "¸", "Ń"},
+		TokenizerModel: "gpt2",
+		NoBytes:        false,
+	})
+	// 中 is e4 b8 ad: ids 3,4,5. A stop of "中X" holds back the whole character until
+	// generation ends, where it must be flushed even though no match was found.
+	ids := []int32{3, 4, 5}
+	want := tok.DecodeCompletion(ids)
+
+	ch := make(chan engine.Event, len(ids)+1)
+	for _, id := range ids {
+		ch <- engine.Event{Token: id, HasToken: true}
+	}
+	ch <- engine.Event{Done: true, FinishReason: "length"}
+	close(ch)
+
+	w := httptest.NewRecorder()
+	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+		ch, "cmpl-test", false, []string{"中X"})
+	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
+	if got != want {
+		t.Errorf("streamed %q with an unmatched stop, want %q", got, want)
+	}
+}

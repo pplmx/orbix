@@ -637,6 +637,9 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	// seen is the text already handed to the client, kept only when a stop string has to
 	// be matched against it.
 	seen := ""
+	// sent is how much of seen the client already has. With a stop list the tail is held
+	// back until it cannot be the start of a match, so this trails seen.
+	sent := 0
 	for ev := range ch {
 		if ev.Err != nil {
 			// The response has already started, so a status code is no longer
@@ -657,13 +660,12 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 			// accumulated so far: it can only be recognised once the rune that completes it
 			// arrives, which is exactly when the client should stop seeing output.
 			if len(stop) > 0 {
-				before := seen
 				seen += text
 				if kept, found := cutAtStop(seen, stop); found {
-					// Output up to the stop string is still the client's; the stop and
-					// anything after it are not. Only the part that arrived with this chunk
-					// is unsent, so it is what may still need sending.
-					if tail := kept[min(len(kept), len(before)):]; tail != "" {
+					// Output up to the stop string is the client's; the stop and anything
+					// after it are not. `sent` is what the client already has, so only the
+					// part between them still needs sending.
+					if tail := kept[min(len(kept), sent):]; tail != "" {
 						if !send(chunkPayload(chat, tail)) {
 							return
 						}
@@ -674,6 +676,19 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 					reason = "stop"
 					break
 				}
+				// Nothing matched yet, but the tail may be the beginning of a stop string,
+				// and a stop string only becomes recognisable once its last character
+				// arrives -- by which time a character already sent cannot be taken back.
+				// Hold back the longest tail that is a prefix of some stop string, and send
+				// everything before it. Without this, stop=["北京"] streamed "北" where the
+				// non-streaming body returned nothing.
+				if safe := safePrefixLen(seen, stop); safe > sent {
+					if !send(chunkPayload(chat, seen[sent:safe])) {
+						return
+					}
+					sent = safe
+				}
+				continue
 			}
 			if !send(chunkPayload(chat, text)) {
 				// The client went away. Its context is cancelled, so the engine
@@ -691,6 +706,14 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	// the same sequence produces without streaming, which is the contract README states.
 	if tail := dec.Flush(); tail != "" {
 		if !send(chunkPayload(chat, tail)) {
+			return
+		}
+	}
+	// Text held back in case it began a stop string is the client's after all: no match was
+	// found, so the tail was ordinary output. Sending it is what makes a stop list that never
+	// matches cost nothing but a later chunk.
+	if reason != "stop" && sent < len(seen) {
+		if !send(chunkPayload(chat, seen[sent:])) {
 			return
 		}
 	}
@@ -781,6 +804,34 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (ll
 //
 // The earliest match wins: a client passing several stop strings expects generation to end
 // at whichever appears first in the output, not at whichever was listed first.
+// safePrefixLen reports how much of text can be sent without risking a stop string that is
+// still only partly matched.
+//
+// A stop string becomes recognisable only once its final character has arrived, and by then
+// anything already sent cannot be taken back. The caller therefore holds back the longest tail
+// of text that could still turn into a match and sends the rest.
+//
+// Only the suffixes of text matter: a stop string starting earlier would already have been
+// found by cutAtStop. So the tail to hold is the longest suffix that is a proper prefix of some
+// stop string -- "北" when the stop list holds "北京" and text ends with "北".
+func safePrefixLen(text string, stop []string) int {
+	hold := 0
+	for _, s := range stop {
+		if s == "" {
+			continue
+		}
+		// A suffix of text that is a prefix of s has to be shorter than s; equal length would
+		// be a complete match, which cutAtStop already handled.
+		for n := min(len(s)-1, len(text)); n > hold; n-- {
+			if strings.HasPrefix(s, text[len(text)-n:]) {
+				hold = n
+				break
+			}
+		}
+	}
+	return len(text) - hold
+}
+
 func cutAtStop(text string, stop []string) (string, bool) {
 	cut := -1
 	for _, s := range stop {

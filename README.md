@@ -290,9 +290,10 @@ endpoint are worth knowing before pointing a client at it:
 - **The chat template is the model's own, when it can be evaluated.** GGUF stores a
   checkpoint's format as a Jinja2 string under `tokenizer.chat_template`, and
   `internal/chat` evaluates a subset of it: `if`/`elif`/`else`, `for` with the `loop`
-  variables, `set`, `+` concatenation, comparisons and `is defined`, and the `trim` and
-  `tojson` filters. That covers the published templates for Qwen2.5 and Llama 3.1
-  exactly, and both are tested against their real source.
+  variables, `set`, `+` concatenation, comparisons, the `is` tests `defined`, `none`,
+  `mapping` and `iterable`, and the `trim`, `tojson` and `length` filters. That covers the
+  published templates for Qwen2.5 and Llama 3.1 exactly, and both are tested against their
+  real source.
   A template using anything outside the subset is reported at parse time and the server
   falls back to a neutral `Role: content` transcript, printing which of the two it is
   using at startup. The fallback matters: a half-rendered template would produce a

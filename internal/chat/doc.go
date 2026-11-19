@@ -12,7 +12,7 @@
 // published templates actually use:
 //
 //   - {% if %} / {% elif %} / {% else %} / {% endif %} with ==, !=, not, and, or,
-//     in, and is defined
+//     in, and the is-tests defined, none, mapping and iterable
 //   - {% for %} with loop.index0, loop.index, loop.first, loop.last, loop.length,
 //     loop.revindex, and loop.revindex0
 //   - {% set %}, including assigning to a name another statement reads
@@ -26,6 +26,12 @@
 // which is exactly the failure mode this package exists to remove. Callers fall back to
 // a neutral transcript when a template cannot be parsed, so an unsupported checkpoint
 // degrades to the old behaviour rather than to a broken prompt.
+//
+// The is-tests cover four of Jinja2's, and three of them answer differently from it. A dict
+// and a string are both iterable in Jinja2; here only a sequence is, because that is the only
+// thing {% for %} can walk. And an absent field reads as empty rather than as Undefined, so
+// `field is none` is true here where Jinja2 says false. No published template uses any of the
+// three, and the answers are pinned by tests rather than left to drift.
 //
 // One gap in that guarantee is worth stating. A field read from a mapping that is not
 // there evaluates to empty rather than to an error, because templates disagree about how

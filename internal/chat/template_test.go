@@ -305,7 +305,7 @@ func TestRenderToJSONShape(t *testing.T) {
 // The existing rejection test covers a representative sample. This one adds the
 // constructs real chat templates actually reach for -- filter blocks, raw blocks, inline
 // conditionals, tuple unpacking in for, for-else, the cycle helper, string concatenation
-// with ~, and the is-tests other than "is defined" -- because "we report what we do not
+// with ~, and the is-tests outside the supported four -- because "we report what we do not
 // support" is only true of the constructs someone thought to list.
 //
 // "is defined" itself is supported, and "x is not defined" is how Jinja spells the

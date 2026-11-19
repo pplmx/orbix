@@ -392,7 +392,8 @@ func (p *exprParser) parseCompare() (expr, error) {
 				return nil, fmt.Errorf("chat: only 'is not none' is supported after 'is not'")
 			}
 			if !p.accept("defined") {
-				return nil, fmt.Errorf("chat: only 'is defined' and 'is none' are supported after 'is'")
+				return nil, fmt.Errorf("chat: only 'is defined', 'is none', 'is mapping' and " +
+					"'is iterable' are supported after 'is'")
 			}
 			// "x is defined" and "x.y is defined" are both used: the first asks
 			// whether a name is bound, the second whether a mapping has a key.

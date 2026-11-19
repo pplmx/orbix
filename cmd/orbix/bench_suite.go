@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"sync"
@@ -196,36 +197,21 @@ func runSuite(o suiteOptions) error {
 	return runScenarios(o, scenarioList())
 }
 
-// runScenarios runs an explicit list and reports which entries failed.
+// suiteRow is one measured scenario, kept with the error it produced so a failed scenario can be
+// reported beside the ones that ran.
+type suiteRow struct {
+	scenario scenario
+	res      result
+	err      error
+}
+
+// writeTable prints the result table and reports whether writing it worked.
 //
-// Split from runSuite so the failure aggregation can be driven from a test: runSuite writes to
-// os.Stdout and always uses scenarioList, so a suite where one scenario fails and another succeeds
-// could not be constructed at all.
-func runScenarios(o suiteOptions, scenarios []scenario) error {
-	fmt.Printf("model:       %s\n", o.model)
-	fmt.Printf("prompt:      %d tokens\n", len(o.prompt))
-	fmt.Printf("generating:  %d tokens per request\n", o.maxTok)
-	// The machine and the worker count belong with the numbers, not left to whoever
-	// copies the table into a document: a throughput figure without them cannot be
-	// compared against anything, and a reader has no way to tell whether two runs
-	// differed because of the code or because of the hardware.
-	workers := resolveWorkers(o.workers)
-	fmt.Printf("machine:     %s/%s, %d CPUs, %d kernel workers\n",
-		runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), workers)
-	fmt.Printf("go:          %s\n\n", runtime.Version())
-
-	type row struct {
-		scenario scenario
-		res      result
-		err      error
-	}
-	rows := make([]row, 0, len(scenarios))
-	for _, sc := range scenarios {
-		res, err := sc.run(o)
-		rows = append(rows, row{scenario: sc, res: res, err: err})
-	}
-
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+// Split out so the write-failure path is reachable from a test: the suite writes to os.Stdout, and
+// nothing in a test can make that fail. The first error wins and later writes are skipped, because a
+// table that has already lost a row should not keep appending to a broken stream.
+func writeTable(w io.Writer, rows []suiteRow) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	var werr error
 	writef := func(format string, args ...any) {
 		if werr != nil {
@@ -244,6 +230,36 @@ func runScenarios(o suiteOptions, scenarios []scenario) error {
 	}
 	if werr != nil {
 		return fmt.Errorf("bench: write table: %w", werr)
+	}
+	return nil
+}
+
+// runScenarios runs an explicit list and reports which entries failed.
+//
+// Split from runSuite so the failure aggregation can be driven from a test: runSuite writes to
+// os.Stdout and always uses scenarioList, so a suite where one scenario fails and another succeeds
+// could not be constructed at all.
+func runScenarios(o suiteOptions, scenarios []scenario) error {
+	fmt.Printf("model:       %s\n", o.model)
+	fmt.Printf("prompt:      %d tokens\n", len(o.prompt))
+	fmt.Printf("generating:  %d tokens per request\n", o.maxTok)
+	// The machine and the worker count belong with the numbers, not left to whoever
+	// copies the table into a document: a throughput figure without them cannot be
+	// compared against anything, and a reader has no way to tell whether two runs
+	// differed because of the code or because of the hardware.
+	workers := resolveWorkers(o.workers)
+	fmt.Printf("machine:     %s/%s, %d CPUs, %d kernel workers\n",
+		runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), workers)
+	fmt.Printf("go:          %s\n\n", runtime.Version())
+
+	rows := make([]suiteRow, 0, len(scenarios))
+	for _, sc := range scenarios {
+		res, err := sc.run(o)
+		rows = append(rows, suiteRow{scenario: sc, res: res, err: err})
+	}
+
+	if err := writeTable(os.Stdout, rows); err != nil {
+		return err
 	}
 
 	// A scenario failing should not hide the ones that ran, but it must not read as

@@ -873,3 +873,82 @@ func TestRunSeedZeroIsNotSeedZero(t *testing.T) {
 		t.Errorf("two --seed 0 runs produced identical text, so the sentinel did not reach the clock: %q", a)
 	}
 }
+
+// writeFailer accepts writes until it has taken limit of them, then fails.
+//
+// A writer that always fails cannot show whether later writes are skipped: the first failure already
+// ends the table, so the skip guard never gets a chance to matter.
+type writeFailer struct {
+	limit int
+	took  int // successful writes
+	calls int // every write, including the failing ones
+	err   error
+}
+
+func (w *writeFailer) Write(p []byte) (int, error) {
+	w.calls++
+	if w.took >= w.limit {
+		return 0, w.err
+	}
+	w.took++
+	return len(p), nil
+}
+
+// TestWriteTableReportsAWriteFailure covers the path the suite takes when its output is gone.
+//
+// Nothing could reach it: the table is written to os.Stdout, which a test cannot make fail. It matters
+// because a broken pipe is an ordinary outcome -- a benchmark piped into head does it -- and the caller
+// needs to be told rather than getting a truncated table reported as success.
+func TestWriteTableReportsAWriteFailure(t *testing.T) {
+	wantErr := errors.New("broken pipe")
+	rows := []suiteRow{
+		{scenario: scenario{name: "first"}},
+		{scenario: scenario{name: "second"}},
+	}
+
+	// Fails on the very first write: the header never lands.
+	err := writeTable(&writeFailer{limit: 0, err: wantErr}, rows)
+	if err == nil {
+		t.Fatal("writeTable reported success with a failing writer")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("error %v does not carry the writer's error %v", err, wantErr)
+	}
+	if !strings.Contains(err.Error(), "write table") {
+		t.Errorf("error %q does not say the table is what could not be written", err)
+	}
+
+	// Fails after the header: the rows are what goes missing, and the error is the same shape.
+	err = writeTable(&writeFailer{limit: 1, err: wantErr}, rows)
+	if err == nil {
+		t.Fatal("writeTable reported success when the rows could not be written")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("error %v does not carry the writer's error %v", err, wantErr)
+	}
+}
+
+// TestWriteTableSkipsWritesAfterTheFirstFailure covers the guard that stops appending to a broken
+// stream.
+//
+// The first error is the one reported, and later rows must not each pay another failing write. The
+// count is what distinguishes the guard from its absence: without it the writer sees one call per row.
+func TestWriteTableSkipsWritesAfterTheFirstFailure(t *testing.T) {
+	rows := make([]suiteRow, 0, 20)
+	for i := range 20 {
+		rows = append(rows, suiteRow{scenario: scenario{name: strings.Repeat("x", i)}})
+	}
+	// tabwriter buffers, so a failing Write only surfaces once a line is flushed. Two successful
+	// writes then a failure is enough to make the guard observable: with it, no further Write happens.
+	w := &writeFailer{limit: 2, err: errors.New("gone")}
+	if err := writeTable(w, rows); err == nil {
+		t.Fatal("writeTable reported success with a failing writer")
+	}
+	// The count of every write is what distinguishes the guard from its absence. Without it the
+	// writer is called once per flushed line -- measured at 20 for ten rows -- so a bound of 4 sits
+	// well clear of both outcomes.
+	if w.calls > 4 {
+		t.Errorf("the writer was called %d times; writes after the first failure were not skipped",
+			w.calls)
+	}
+}

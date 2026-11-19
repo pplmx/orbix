@@ -957,3 +957,107 @@ func TestExporterDropsWhenTheCollectorIsDown(t *testing.T) {
 		t.Errorf("the second flush still had work: %v", err)
 	}
 }
+
+// TestMaxBatchSplitsTheQueue covers the option that bounds one request's size.
+//
+// A stalled collector must not be given arbitrarily much at once, so a flush sends the queue in
+// chunks of MaxBatch. Nothing asserted it: changing the default from 512 to 1 passed every test, and
+// so did making the interval an hour, because the tests that need a flush call it themselves.
+//
+// The count of requests is what distinguishes the two: six spans with MaxBatch 2 must arrive as three
+// posts of two, not one of six.
+func TestMaxBatchSplitsTheQueue(t *testing.T) {
+	var mu sync.Mutex
+	var sizes []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		// Count the spans in the export request rather than trusting the client's own accounting.
+		spans := unmarshalRequest(t, body).ResourceSpans[0].ScopeSpans[0].Spans
+		mu.Lock()
+		sizes = append(sizes, len(spans))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint: srv.URL,
+		Interval: time.Hour, // flushed by hand
+		MaxBatch: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	for i := range 6 {
+		exp.Record(testSpan(t, fmt.Sprintf("span-%d", i)))
+	}
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sizes) != 3 {
+		t.Fatalf("the flush sent %d requests for 6 spans at MaxBatch 2, want 3: %v", len(sizes), sizes)
+	}
+	for i, n := range sizes {
+		if n != 2 {
+			t.Errorf("request %d carried %d spans, want 2", i, n)
+		}
+	}
+}
+
+// TestMaxBatchDefaultIsUsed covers the branch that picks 512 when the option is unset.
+//
+// The explicit-value case above cannot see it: with MaxBatch 2 in the options, the default is never
+// consulted, so changing 512 to 1 passed. This records 512 spans -- one more than the default -- and
+// expects the default rather than a request per span.
+func TestMaxBatchDefaultIsUsed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("512 spans through a real server")
+	}
+	var mu sync.Mutex
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		posts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint: srv.URL,
+		Interval: time.Hour,
+		// MaxBatch left unset on purpose.
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	spans := make([]Span, 0, 512)
+	for i := range 512 {
+		spans = append(spans, testSpan(t, fmt.Sprintf("s-%d", i)))
+	}
+	for _, s := range spans {
+		exp.Record(s)
+	}
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// 512 spans fit exactly one default batch; a smaller default would need more than one post.
+	if posts != 1 {
+		t.Errorf("512 spans took %d requests with the default batch, want 1", posts)
+	}
+}

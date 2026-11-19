@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // buildFile assembles a GGUF file in memory. The llama tests need files whose
@@ -1134,5 +1135,45 @@ func TestBlockCountBoundaryIsTheTensorCount(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "missing tensor") {
 		t.Errorf("the guard did not run first: %v", err)
+	}
+}
+
+// TestQwen2WithoutBiasTensorsIsRefused covers the shape check the AttnBias flag drives.
+//
+// The architecture table says qwen2 has attention bias, so LoadConfig requires the three bias
+// tensors. A file that names qwen2 and omits them is not a file this engine can serve -- the
+// projections would silently run without vectors the checkpoint was trained with, which changes
+// every number and fails nothing.
+//
+// The missing-tensor test above removes ffn_down.weight, which the arch table requires for every
+// architecture; this one is specific to the bias list, and neutering that list's shape checks left
+// the suite green.
+func TestQwen2WithoutBiasTensorsIsRefused(t *testing.T) {
+	// AttnBias false writes a qwen2 file with no bias tensors at all.
+	path := gguftest.Model{
+		Arch:       "qwen2",
+		AttnBias:   false,
+		NoEOS:      true,
+		ContextLen: 128,
+	}.Write(t, t.TempDir())
+
+	_, err := New(path)
+	if err == nil {
+		t.Fatal("a qwen2 file with no attention bias was accepted")
+	}
+	if !strings.Contains(err.Error(), "attn_q.bias") {
+		t.Errorf("error %q does not name the missing bias tensor", err)
+	}
+
+	// The same file with the tensors present loads, so the refusal is about the omission rather
+	// than about qwen2 being unsupported.
+	ok := gguftest.Model{
+		Arch:       "qwen2",
+		AttnBias:   true,
+		NoEOS:      true,
+		ContextLen: 128,
+	}.Write(t, t.TempDir())
+	if _, err := New(ok); err != nil {
+		t.Fatalf("a qwen2 file with attention bias did not load: %v", err)
 	}
 }

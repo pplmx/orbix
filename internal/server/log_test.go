@@ -136,3 +136,65 @@ func TestStreamingProducesARecord(t *testing.T) {
 		t.Errorf("record does not name the path: %s", buf.String())
 	}
 }
+
+// TestLoggerReturnsTheConfiguredOne covers the non-nil arm of Logger.
+//
+// The nil arm is tested because a server with no logger must not panic;
+// the arm that returns the configured logger was not, and it is the one a caller who asks
+// for the server's logger actually gets. Worth pinning since Logger is exported: its
+// contract is "never nil, and mine when I supplied one".
+func TestLoggerReturnsTheConfiguredOne(t *testing.T) {
+	var buf bytes.Buffer
+	want := slog.New(slog.NewJSONHandler(&buf, nil))
+	srv, _ := newTestServerConfig(t, gguftest.Default(), Config{Logger: want})
+	if got := srv.Logger(); got != want {
+		t.Errorf("Logger() = %p, want the configured %p", got, want)
+	}
+	// And it is the same logger the request wrapper writes through, which is what makes
+	// returning it useful rather than cosmetic.
+	srv.Handler().ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if buf.Len() == 0 {
+		t.Error("no record was written through the logger Logger returned")
+	}
+}
+
+// TestServerErrorIsLoggedAsWarning covers the 5xx level split.
+//
+// Only a 5xx is a server-side failure worth a warning; a 4xx is the client's mistake, and
+// logging those as warnings trains a reader to ignore the level. Both arms had the 4xx half
+// covered.
+func TestServerErrorIsLoggedAsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	h := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	srv, _ := newTestServerConfig(t, gguftest.Default(), Config{Logger: slog.New(h)})
+
+	// A route that exists with the wrong method: handleUnimplemented answers 405, which is
+	// below 500, so drive a real 5xx instead through the handler that writes one.
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
+		http.MethodPost, "/v1/completions", strings.NewReader(`{"prompt":`)))
+	var rec map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
+		t.Fatalf("log record is not JSON: %v (%q)", err, buf.String())
+	}
+	// A malformed body is a 400, so this asserts the *other* arm: it must be Info.
+	if lvl, _ := rec["level"].(string); lvl != "INFO" {
+		t.Errorf("level = %v, want INFO for a 400", rec["level"])
+	}
+
+	buf.Reset()
+	// Drive the 5xx arm directly through the wrapper: a handler that answers 500 is the
+	// smallest way to reach it, and it does not depend on a particular engine state.
+	srv.logRequest(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
+		t.Fatalf("log record is not JSON: %v (%q)", err, buf.String())
+	}
+	if lvl, _ := rec["level"].(string); lvl != "WARN" {
+		t.Errorf("level = %v, want WARN for a 5xx", rec["level"])
+	}
+	if msg, _ := rec["msg"].(string); msg != "request failed" {
+		t.Errorf("msg = %v, want request failed", rec["msg"])
+	}
+}

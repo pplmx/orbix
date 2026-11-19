@@ -200,7 +200,31 @@ func TestDecodeIsInverseOfEncodeForLeadingSpace(t *testing.T) {
 // SentencePiece vocabulary showed it -- the byte-level models were fine, which is what made
 // the bug look like a table problem rather than a routing one.
 func TestNonASCIILatinSurvivesDecode(t *testing.T) {
-	tok := realTokenizer(t)
+	latin1SurvivesDecode(t, realTokenizer(t))
+}
+
+// TestNonASCIILatinSurvivesDecodeByteLevel is the same block against a byte-level vocabulary.
+//
+// The bug the test above was written for ran the other way -- a SentencePiece piece read as
+// escaped bytes -- so the byte-level models were "fine" and only the SentencePiece round trip
+// caught it. The block still covers the byte table from the other direction, and measured with
+// the table's 0xC3 and 0xC4 entries swapped this passes on a SentencePiece checkpoint while
+// reporting 68 mismatches on a byte-level one.
+func TestNonASCIILatinSurvivesDecodeByteLevel(t *testing.T) {
+	path := os.Getenv("QWEN2_MODEL")
+	tok := realTokenizerAt(t, path)
+	if !tok.byteLevel {
+		t.Skipf("%s is not a byte-level vocabulary", path)
+	}
+	if path == os.Getenv("MODEL") {
+		t.Skip("MODEL and QWEN2_MODEL are the same file; TestNonASCIILatinSurvivesDecode covers it")
+	}
+	latin1SurvivesDecode(t, tok)
+}
+
+// latin1SurvivesDecode is the U+00A1..U+00FF block both vocabulary families check.
+func latin1SurvivesDecode(t *testing.T, tok *Tokenizer) {
+	t.Helper()
 	// U+00A1..U+00AC is where the two byte ranges meet, so a piece's own character is most
 	// likely to be mistaken for an escape there.
 	for r := rune(0xA1); r <= 0xFF; r++ {

@@ -1037,3 +1037,49 @@ func TestPriorityStringNamesUnknownValues(t *testing.T) {
 		}
 	}
 }
+
+// TestRemainingClampsAtZero covers a sequence that has emitted past its budget.
+//
+// The engine stops a sequence when the budget is spent, so this state should not arise in a normal
+// run -- but the comparison reads it, and without the clamp a negative "remaining" would sort an
+// over-budget sequence ahead of every other. A shortest-first policy that ranks a stuck sequence first
+// would give it the slot on every round.
+//
+// The state is constructible through the same helper the other policy tests use, which is why it is
+// tested rather than argued unreachable.
+func TestRemainingClampsAtZero(t *testing.T) {
+	cases := []struct {
+		name               string
+		maxTokens, emitted int
+		want               int
+	}{
+		{"untouched", 5, 0, 5},
+		{"partly done", 5, 2, 3},
+		{"exactly spent", 5, 5, 0},
+		{"one past the budget", 5, 6, 0},
+		{"well past the budget", 2, 7, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := fakeSeq(0, c.maxTokens, c.emitted, -1)
+			if got := s.remaining(); got != c.want {
+				t.Errorf("remaining() = %d for %d of %d emitted, want %d",
+					got, c.emitted, c.maxTokens, c.want)
+			}
+		})
+	}
+
+	// And the clamp has to hold through the comparison a policy uses, not only on its own: an
+	// over-budget sequence and one with exactly nothing left are equal work, so the id breaks the tie.
+	// Three sequences and a limit of two, so the policy actually runs: admit returns its input
+	// unchanged when everything fits, which is what made the first version of this assertion wrong.
+	over := fakeSeq(2, 5, 9, -1)
+	spent := fakeSeq(0, 5, 5, -1)
+	other := fakeSeq(1, 5, 1, -1) // four left, so it goes last
+	got := admit([]*sequence{over, spent, other}, 2, PriorityShortest)
+	// ids 0 and 2 are the two with no budget left, ordered by id; id 1 has four tokens to go.
+	if want := []int{0, 2}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Errorf("shortest admitted %v, want %v -- an over-budget sequence is not less work than a "+
+			"spent one", ids(got), want)
+	}
+}

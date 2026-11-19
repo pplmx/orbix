@@ -243,6 +243,15 @@ func TestParseRejectsUnsupportedConstructs(t *testing.T) {
 		`{{ }}`,                             // empty expression
 		`{{ 'unterminated }}`,               // unterminated string
 		`{% if x %}{% endfor %}{% endif %}`, // mismatched pair
+		// Constructs the cross-check corpus also probes, each refused with its own message
+		// rather than a bare "syntax error": the point of refusing at parse time is that the
+		// caller learns which construct and can decide, so the five below are pinned here as
+		// well as in scripts/jinja_diff.py.
+		`{{ 'a' if x else 'b' }}`,                       // inline if-expression
+		`{% filter upper %}x{% endfilter %}`,            // filter block
+		`{% set ns = namespace(x=1) %}`,                 // namespace()
+		`{% for m in messages %}{% else %}{% endfor %}`, // for-else
+		`{% for a, b in pairs %}{% endfor %}`,           // tuple unpacking
 	}
 	for _, src := range cases {
 		if _, err := Parse(src); err == nil {

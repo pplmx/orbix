@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -174,8 +175,17 @@ func TestSubmitRejectsBadRequests(t *testing.T) {
 		t.Error("Submit accepted an empty prompt")
 	}
 	long := make([]int32, cfg.ContextLen+1)
-	if _, err := e.Submit(Request{Prompt: long, MaxTokens: 1}); err == nil {
+	_, err := e.Submit(Request{Prompt: long, MaxTokens: 1})
+	if err == nil {
 		t.Error("Submit accepted a prompt longer than the context")
+	} else {
+		// Both sizes belong in the message: the caller has to know how far over it is, and the
+		// context length is not something it can read from here. Dropping either passed.
+		for _, want := range []string{strconv.Itoa(len(long)), strconv.Itoa(cfg.ContextLen)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %s", err, want)
+			}
+		}
 	}
 	if _, err := e.Submit(Request{Prompt: tok.Encode("x", true), MaxTokens: -1}); err == nil {
 		t.Error("Submit accepted a negative token budget")

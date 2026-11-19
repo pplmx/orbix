@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -253,4 +256,66 @@ func TestModelSubcommandDispatch(t *testing.T) {
 			t.Errorf("error %q does not explain the ordering", err)
 		}
 	})
+}
+
+// TestInspectSurvivesAFileWithNoMetadata covers the two degraded paths of the inspect report.
+//
+// A GGUF file may carry no metadata at all: the format allows it, and a converter writing a bare
+// tensor directory produces one. The report still has to describe what it can rather than stopping,
+// because the reader's question -- "what is this file?" -- is answered by the tensor list and the
+// version even when the architecture and tokenizer are absent.
+//
+// Both lines were uncovered: the architecture printed "(unknown)" and the tokenizer printed
+// "(unusable: ...)". They matter because the alternative is an error that hides the tensor
+// directory, which is the only part of such a file that is informative.
+func TestInspectSurvivesAFileWithNoMetadata(t *testing.T) {
+	// GGUF v3 with no key/value pairs and no tensors, which is the smallest valid file.
+	var b []byte
+	b = append(b, []byte("GGUF")...)
+	var u32 [4]byte
+	binary.LittleEndian.PutUint32(u32[:], 3)
+	b = append(b, u32[:]...)
+	var u64 [8]byte
+	binary.LittleEndian.PutUint64(u64[:], 0) // no tensors
+	b = append(b, u64[:]...)
+	binary.LittleEndian.PutUint64(u64[:], 0) // no metadata
+	b = append(b, u64[:]...)
+
+	path := filepath.Join(t.TempDir(), "bare.gguf")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = run([]string{"model", "inspect", path}) })
+	if runErr != nil {
+		t.Fatalf("inspect refused a file with no metadata: %v", runErr)
+	}
+	// The writer is a tabwriter, so the fields are separated by runs of spaces rather than by
+	// tabs; the assertions match the label and value without assuming a separator.
+	for _, want := range []string{
+		"Architecture",
+		"(unknown)",
+		"(unusable:",
+		"GGUF version",
+		"Tensors",
+		// The name falls back to the file's base name, which is the only identifier such a
+		// file has.
+		"bare",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report does not contain %q:\n%s", want, out)
+		}
+	}
+
+	// A file that names an unknown architecture still reports it rather than the fallback, so the
+	// two cases are distinguishable to a reader.
+	named := gguftest.Model{Arch: "gemma", NoEOS: true}.Write(t, t.TempDir())
+	out = captureStdout(t, func() { runErr = run([]string{"model", "inspect", named}) })
+	if runErr != nil {
+		t.Fatalf("inspect refused an unknown architecture: %v", runErr)
+	}
+	if !strings.Contains(out, "gemma") {
+		t.Errorf("an unknown-but-named architecture did not print its name:\n%s", out)
+	}
 }

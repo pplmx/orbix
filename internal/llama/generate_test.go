@@ -94,3 +94,31 @@ func TestTopPOffWhenDisabled(t *testing.T) {
 		}
 	}
 }
+
+// TestNucleusSortsUnsortedCandidates pins the sort that the tests above cannot see.
+//
+// Every other nucleus test passes logits in descending order, which is also the order
+// candidates starts in, so removing the TopP sort leaves them green: nucleus takes its
+// max from candidates[0], and with sorted input that happens to be the true maximum. A
+// real logits vector has no such order. This test shuffles the same four probabilities, so
+// the answer must be identical to the sorted case and a missing sort changes it.
+func TestNucleusSortsUnsortedCandidates(t *testing.T) {
+	// Same probabilities as TestNucleusTrimsToTheMassCoveringSet, permuted: the 0.5 token
+	// is now at index 1, the 0.05 one at index 3.
+	logits := []float32{
+		float32(math.Log(0.15)),
+		float32(math.Log(0.5)),
+		float32(math.Log(0.3)),
+		float32(math.Log(0.05)),
+	}
+	// p=0.6 is chosen to separate the two orders rather than merely to pass. Sorted, the
+	// cumulative sums are 0.5, 0.8 and the run stops at index 2. Unsorted they are 0.15,
+	// 0.65 and it stops at index 1 -- the same position but a different token. A threshold
+	// like 0.7 does not distinguish them, which is how the first version of this test
+	// passed with the sort removed.
+	s := Temperature{Temp: 1, TopP: 0.6, NextFloat: func() float64 { return 0.99 }}
+	if got := s.Next(logits); got != 2 {
+		t.Errorf("chose token %d, want 2: the nucleus must be found by probability, "+
+			"not by the order the logits happen to arrive in", got)
+	}
+}

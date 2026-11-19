@@ -1083,3 +1083,70 @@ func TestRemainingClampsAtZero(t *testing.T) {
 			"spent one", ids(got), want)
 	}
 }
+
+// TestStreamRequestSetsTheStreamAttribute covers the one attribute engine adds conditionally for
+// streaming.
+//
+// otel's encoding of a boolean is tested; what was not is the decision to add the attribute at all. A
+// span for a streaming request that omits gen_ai.request.stream looks identical to a non-streaming one,
+// and a backend computing time-to-first-token from these spans would include both.
+func TestStreamRequestSetsTheStreamAttribute(t *testing.T) {
+	cases := []struct {
+		name   string
+		stream bool
+	}{
+		{"streaming", true},
+		{"not streaming", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var body []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				body = b
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			exp, err := otel.NewExporter(otel.ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+			if err != nil {
+				t.Fatalf("NewExporter: %v", err)
+			}
+			defer func() { _ = exp.Close() }()
+
+			e, tok := loadEngine(t, Options{MaxActive: 1, Workers: 2})
+			ch, err := e.Submit(Request{
+				Prompt: tok.Encode("Once", true), MaxTokens: 2,
+				Trace: exp, Operation: "chat", ResponseID: "id", Stream: c.stream,
+			})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			for e.Pump() > 0 {
+			}
+			for range ch {
+			}
+			if err := exp.Flush(context.Background()); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+
+			mu.Lock()
+			got := string(body)
+			mu.Unlock()
+			has := strings.Contains(got, `"gen_ai.request.stream"`)
+			if c.stream && !has {
+				t.Errorf("a streaming request's span has no gen_ai.request.stream: %s", got)
+			}
+			if !c.stream && has {
+				t.Errorf("a non-streaming request's span carries gen_ai.request.stream: %s", got)
+			}
+			// And when present it must be a boolean, which is otel's half of the contract.
+			if c.stream && !strings.Contains(got, `"boolValue":true`) {
+				t.Errorf("the stream attribute is not a true boolean: %s", got)
+			}
+		})
+	}
+}

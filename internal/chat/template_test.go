@@ -2470,3 +2470,47 @@ func TestLexerErrorsLocateTheProblem(t *testing.T) {
 		}
 	}
 }
+
+// TestUnclosedCallNamesTheFunction covers the message for a call whose parenthesis never closes.
+//
+// The name is what a reader needs: `range(` and `tojson(` fail the same way and are fixed in
+// different places, and a template with both would otherwise send them to the wrong one. Removing
+// the name from the format string passed every test.
+func TestUnclosedCallNamesTheFunction(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{{ range(1, 2 }}`, `call to "range" is not closed`},
+		{`{{ dict(1, 2 }}`, `call to "dict" is not closed`},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted an unclosed call", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+		}
+	}
+}
+
+// TestTrailingTokensShowWhatWasParsed covers the message for an expression followed by more tokens.
+//
+// It prints the token it stopped at and the whole expression, which is what makes a typo visible:
+// "unexpected token" alone leaves the author comparing their text against the grammar. The two
+// together read as "this is where I stopped, and this is the span I had consumed".
+func TestTrailingTokensShowWhatWasParsed(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{{ 1 2 }}`, `unexpected "2" after expression "1 2"`},
+		{`{{ x y }}`, `unexpected "y" after expression "x y"`},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted trailing tokens", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+		}
+	}
+}

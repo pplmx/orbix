@@ -2366,3 +2366,46 @@ func TestNodeEvaluationErrorsPropagate(t *testing.T) {
 		t.Errorf("set with a good operand = %q, %v", got, err)
 	}
 }
+
+// TestTojsonMatchesPythonsEscaping pins the escaping to what Jinja2's filter produces.
+//
+// A chat template interpolates a tool definition or a message straight into the prompt, so the
+// spelling of every non-ASCII character is part of the prompt the model sees. Python's
+// json.dumps defaults to ensure_ascii=True and Jinja2 inherits that, so a Chinese description
+// arrives as \uXXXX and an emoji as a surrogate pair -- where Go's json.Marshal would leave the
+// UTF-8 in place and spell the same text differently.
+//
+// The expected strings below were taken from jinja2 3.1.6, one rendering per case, not derived
+// from this package's own helper:
+//
+//   - "中文"    -> "\u4e2d\u6587"
+//   - "🎉"     -> "\ud83c\udf89"   (a surrogate pair, not \U0001f389)
+//   - "a\tb"   -> "a\tb"          (short escapes stay short)
+//
+// Both arms of the switch fail when broken: removing the BMP escape leaves the UTF-8 in place,
+// and off-by-one in the surrogate pair changes the emoji.
+func TestTojsonMatchesPythonsEscaping(t *testing.T) {
+	tpl, err := Parse(`{{ messages[0].content|tojson }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cases := []struct{ in, want string }{
+		{"中文", `"\u4e2d\u6587"`},
+		{"🎉", `"\ud83c\udf89"`},
+		{"a\tb", `"a\tb"`},
+		{`quote"x`, `"quote\"x"`},
+		{`back\slash`, `"back\\slash"`},
+		{"nl\nx", `"nl\nx"`},
+		// ASCII stays literal: escaping it would be valid JSON and wrong for this filter.
+		{"plain", `"plain"`},
+	}
+	for _, c := range cases {
+		got, err := tpl.Render([]Message{{Role: "user", Content: c.in}}, Inputs{})
+		if err != nil {
+			t.Fatalf("Render(%q): %v", c.in, err)
+		}
+		if got != c.want {
+			t.Errorf("tojson(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+}

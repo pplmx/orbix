@@ -1582,3 +1582,62 @@ func TestReadMissingFieldIsEmpty(t *testing.T) {
 		t.Error("a bracket read of an absent key was accepted; the two forms differ by design")
 	}
 }
+
+// TestRenderSliceEdges covers the two clamps and the negative start in the slice expression.
+//
+// Llama 3's template uses `messages[1:]`, which is the case already tested above. The rest of
+// the branch was not: dropping the negative-start conversion, the floor at zero, or the check
+// that the operand is a sequence each passed the whole chat, server and cmd suites. The clamps
+// exist because a template that guards `messages | length` should not also have to guard its
+// slice bound, so both directions have to be tolerated rather than erroring.
+func TestRenderSliceEdges(t *testing.T) {
+	msgs := []Message{
+		{Role: "a", Content: "1"},
+		{Role: "b", Content: "2"},
+		{Role: "c", Content: "3"},
+	}
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		// A negative start counts from the end, the same way a negative index does. -1 is the
+		// case that separates the conversion from an off-by-one in it: with the guard written
+		// as `start < -1`, -1 is not converted, survives to the floor below, and yields the
+		// whole list instead of the last element.
+		{"start at -1", `{% for m in messages[-1:] %}{{ m.role }}{% endfor %}`, "c"},
+		{"negative start", `{% for m in messages[-2:] %}{{ m.role }}{% endfor %}`, "bc"},
+		{"start before the start", `{% for m in messages[-9:] %}{{ m.role }}{% endfor %}`, "abc"},
+		// An out-of-range start is empty rather than an error, in both directions.
+		{"start at zero", `{% for m in messages[0:] %}{{ m.role }}{% endfor %}`, "abc"},
+		{"start past the end", `{% for m in messages[9:] %}{{ m.role }}{% endfor %}`, ""},
+		{"start at the length", `{% for m in messages[3:] %}{{ m.role }}{% endfor %}`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, err := tpl.Render(msgs, Inputs{})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("Render = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	// Slicing something that is not a sequence is an error, not a silent empty result: the
+	// operand names a mapping here, and a template that got this far has a bug worth naming.
+	tpl, err := Parse(`{{ messages[0][1:] }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := tpl.Render(msgs, Inputs{}); err == nil {
+		t.Error("slicing a mapping was accepted")
+	} else if !strings.Contains(err.Error(), "non-sequence") {
+		t.Errorf("error %q does not say the operand is not a sequence", err)
+	}
+}

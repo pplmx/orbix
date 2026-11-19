@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2494,4 +2495,50 @@ func TestSingleTokenStopReachesTheEngine(t *testing.T) {
 			t.Errorf("stopTokenIDs of a multi-token string = %v, want nil", got)
 		}
 	}
+}
+
+// TestWriteRequestErrorFallback covers the non-paramError path of writeRequestError.
+//
+// Every current call site passes a *paramError -- sampler's two validation failures and the
+// two direct newParamError calls -- so the fallback has never run. It exists so a future call
+// site that hands over an ordinary error still produces a well-formed OpenAI error body
+// instead of losing the error, and that contract is worth stating in a test rather than
+// leaving to the comment.
+//
+// Not a contrived state: writeRequestError takes an error, and an ordinary one is a value the
+// function is documented to accept.
+func TestWriteRequestErrorFallback(t *testing.T) {
+	t.Run("paramError carries param and code", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		writeRequestError(rec, http.StatusBadRequest,
+			newParamError("temperature", "invalid_value", "temperature must not be negative, got %v", -1))
+		body := decodeBody[errorBody](t, rec.Result())
+		if body.Error.Message != "temperature must not be negative, got -1" {
+			t.Errorf("message = %q", body.Error.Message)
+		}
+		if body.Error.Param != "temperature" {
+			t.Errorf("param = %q, want temperature", body.Error.Param)
+		}
+		if body.Error.Code != "invalid_value" {
+			t.Errorf("code = %q, want invalid_value", body.Error.Code)
+		}
+	})
+
+	t.Run("plain error degrades to message and type", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		writeRequestError(rec, http.StatusBadRequest, errors.New("something else went wrong"))
+		body := decodeBody[errorBody](t, rec.Result())
+		if body.Error.Message != "something else went wrong" {
+			t.Errorf("message = %q, want the error's text", body.Error.Message)
+		}
+		if body.Error.Type != "invalid_request_error" {
+			t.Errorf("type = %q, want invalid_request_error", body.Error.Type)
+		}
+		// Omitted rather than empty-but-present: omitempty is what tells a client the field
+		// is not about a request parameter at all.
+		if body.Error.Param != "" || body.Error.Code != "" {
+			t.Errorf("param=%q code=%q, want both empty for a plain error",
+				body.Error.Param, body.Error.Code)
+		}
+	})
 }

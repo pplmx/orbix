@@ -527,3 +527,81 @@ func TestTrimSpansOffsetsByStride(t *testing.T) {
 		t.Errorf("trimSpans modified its input: %+v", spans)
 	}
 }
+
+// TestPrefillWithPrefixFallbacks covers the three ways a caller reaches this function without the
+// prefix machinery, and the one it must refuse.
+//
+// The function serves two kinds of caller: one with a paged cache whose pool has a prefix index,
+// and one that configured neither. The fallback is what lets the second kind exist -- it forwards
+// to Prefill, so the batched pass is shared rather than duplicated -- and nothing exercised it:
+// every existing call passes a cache that takes the prefix path.
+//
+// A non-zero startPos is refused rather than forwarded, because prefix matching is only
+// meaningful from position zero: a resumable prefill would have to match against a suffix.
+func TestPrefillWithPrefixFallbacks(t *testing.T) {
+	c := defaultTiny()
+	c.ctx = 32
+	m, err := New(buildTinyWeights(t, c))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	tokens := []int32{0, 1, 2, 3}
+
+	t.Run("a contiguous cache takes the plain path", func(t *testing.T) {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := m.PrefillWithPrefix(cache, tokens, 0)
+		if err != nil {
+			t.Fatalf("PrefillWithPrefix: %v", err)
+		}
+		if len(got) == 0 {
+			t.Fatal("no logits returned")
+		}
+		// The plain path must advance the cache exactly like Prefill does.
+		if n := cache.Len(); n != len(tokens) {
+			t.Errorf("cache holds %d positions after the fallback, want %d", n, len(tokens))
+		}
+	})
+
+	t.Run("a paged cache without an index takes the plain path", func(t *testing.T) {
+		pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 8})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Deliberately not EnablePrefixCache: a paged cache with no index is the second
+		// fallback, and it must not try to match.
+		cache := pool.New()
+		got, err := m.PrefillWithPrefix(cache, tokens, 0)
+		if err != nil {
+			t.Fatalf("PrefillWithPrefix: %v", err)
+		}
+		if len(got) == 0 {
+			t.Fatal("no logits returned")
+		}
+		if n := cache.Len(); n != len(tokens) {
+			t.Errorf("paged cache holds %d positions, want %d", n, len(tokens))
+		}
+		if reused := cache.ReusedPositions(); reused != 0 {
+			t.Errorf("a pool without an index reported %d reused positions", reused)
+		}
+	})
+
+	t.Run("a non-zero start is refused even with an index", func(t *testing.T) {
+		pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 8})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool.EnablePrefixCache()
+		cache := pool.New()
+		_, err = m.PrefillWithPrefix(cache, tokens, 2)
+		if err == nil {
+			t.Fatal("PrefillWithPrefix accepted a non-zero start")
+		}
+		if !strings.Contains(err.Error(), "position 0") {
+			t.Errorf("error %q does not say position 0 is required", err)
+		}
+	})
+}

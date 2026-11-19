@@ -1757,3 +1757,50 @@ func TestListNeverEqualsAString(t *testing.T) {
 		t.Errorf("a list did not equal itself: %q", got)
 	}
 }
+
+// TestPrintingAContainerIsRefused covers the error a template gets when it prints a mapping or
+// a sequence directly.
+//
+// A dict prints in Jinja2 as Python's repr -- "{'role': 'user'}" -- which has no place in a
+// chat prompt and is not implemented here. Emitting the empty string instead would be exactly
+// the quiet half-rendering this package exists to avoid, so it is an error, and the error names
+// the shape so the template author knows which construct to remove.
+//
+// The three names shapeName can return had no test: a message saying "cannot print a map" or
+// "cannot print a value" passed the whole chat suite.
+func TestPrintingAContainerIsRefused(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "a"}}
+
+	for _, c := range []struct{ name, src, wantShape string }{
+		{"a message mapping", `{{ messages[0] }}`, "mapping"},
+		{"the sequence itself", `{{ messages }}`, "sequence"},
+		{"a slice", `{{ messages[0:] }}`, "sequence"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := tpl.Render(msgs, Inputs{})
+			if err == nil {
+				t.Fatalf("%q rendered %q, want an error: printing a container has no meaning "+
+					"in a prompt", c.src, out)
+			}
+			if !strings.Contains(err.Error(), "cannot print") {
+				t.Errorf("error %q does not say printing is refused", err)
+			}
+			if !strings.Contains(err.Error(), c.wantShape) {
+				t.Errorf("error %q does not name the shape %q", err, c.wantShape)
+			}
+			// Printing nothing is the failure mode this error exists to prevent.
+			if out != "" {
+				t.Errorf("%q produced %q alongside its error", c.src, out)
+			}
+		})
+	}
+
+	// A scalar still prints, so the refusal is about containers rather than about printing.
+	if got := render(t, `{{ messages[0].content }}`, msgs, Inputs{}); got != "a" {
+		t.Errorf("printing a scalar gave %q, want a", got)
+	}
+}

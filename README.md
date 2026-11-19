@@ -438,8 +438,11 @@ an older toolchain fails to build rather than degrading quietly.
 ## CLI
 
 Every command below marked with a version works today. `orbix chat` runs on the
-engine with a paged cache and prefix reuse, so each turn re-attaches the previous
-turn's KV blocks instead of prefilling the whole conversation again.
+engine with a paged cache and prefix reuse, so a turn's prompt starts with the previous
+turn's and the blocks already computed are re-attached instead of prefilled again. Reuse is
+whole-block only, so a conversation shorter than one block (the REPL's default is 16
+positions) has nothing to attach: `/stats` reports the positions actually reused, which is
+0 until the history outgrows a block and 32 once it does on a 30-word message.
 
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |

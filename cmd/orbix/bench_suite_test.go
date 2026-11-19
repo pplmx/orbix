@@ -1,8 +1,10 @@
 package main
 
 import (
+	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
@@ -424,5 +426,48 @@ func TestBenchRefusesABlockBiggerThanTheContext(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
+	}
+}
+
+// TestTokPerSec covers the arithmetic behind the table's TOK/S column.
+//
+// The column is the reason anyone reads the suite, and tokPerSec had no test: inverting the
+// division, or moving the zero guard from `<= 0` to `< 0`, both passed the cmd suite. The
+// second is the one worth guarding -- an elapsed of exactly zero divides by zero, and a
+// float64 division by zero yields +Inf or NaN rather than panicking, so the table would print
+// "Inf" in a cell an operator reads as a measurement.
+//
+// A duration of exactly zero is not hypothetical: a scenario whose requests all fail
+// immediately, or a clock at coarse resolution on a fast machine, produces one.
+func TestTokPerSec(t *testing.T) {
+	cases := []struct {
+		name    string
+		tokens  int
+		elapsed time.Duration
+		want    float64
+	}{
+		{"one second", 100, time.Second, 100},
+		{"half a second", 50, 500 * time.Millisecond, 100},
+		{"two seconds", 100, 2 * time.Second, 50},
+		{"no tokens", 0, time.Second, 0},
+		// The two states that must not divide: a zero duration and a negative one. Negative
+		// is not producible by a monotonic clock, but the field is a plain Duration and the
+		// guard exists for both.
+		{"zero elapsed", 10, 0, 0},
+		{"negative elapsed", 10, -time.Second, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := result{tokens: c.tokens, elapsed: c.elapsed}
+			got := r.tokPerSec()
+			if math.IsNaN(got) || math.IsInf(got, 0) {
+				t.Fatalf("tokPerSec(%d tokens, %v) = %v, which is not a number a table can print",
+					c.tokens, c.elapsed, got)
+			}
+			if got != c.want {
+				t.Errorf("tokPerSec(%d tokens, %v) = %v, want %v",
+					c.tokens, c.elapsed, got, c.want)
+			}
+		})
 	}
 }

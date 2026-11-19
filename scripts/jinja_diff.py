@@ -50,6 +50,14 @@ MESSAGES = {
         {"role": "user", "content": "third"},
     ],
     "trimmy": [{"role": "user", "content": "  spaced  "}],
+    # Content the ASCII corpora above cannot catch. The length filter returned a byte
+    # count for two years' worth of these cases because every message was ASCII; a
+    # template that branches on a length, or a renderer that slices text, shows it here.
+    "cjk": [{"role": "user", "content": "\u4f60\u597d\u4e16\u754c"}],
+    "emoji": [{"role": "user", "content": "hi \U0001f389"}],
+    "empty": [{"role": "user", "content": ""}],
+    "newline": [{"role": "user", "content": "a\nb"}],
+    "quoted": [{"role": "user", "content": 'he said "hi"'}],
 }
 
 TOOLS = [
@@ -182,7 +190,10 @@ def build_cases():
             "bos_token": "<s>", "eos_token": "</s>", "kind": "template",
         })
     for name, tmpl in SUBSET.items():
-        for msgname in ("user", "multi"):
+        # Every message shape, not just the two ASCII ones: the length filter counted bytes
+        # instead of characters, and the only case that shows it is 'expr_len' over a
+        # non-ASCII message -- which the two-shape loop never built.
+        for msgname in ("user", "multi", "cjk", "emoji", "empty", "newline", "quoted"):
             cases.append({
                 "name": f"subset/{name}/{msgname}", "template": tmpl,
                 "messages": MESSAGES[msgname], "add_generation_prompt": True,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Message is one conversation turn, as a template sees it.
@@ -251,6 +252,15 @@ func writeJSONDepth(b *strings.Builder, v value, st jsonStyle, depth int) {
 }
 
 // writeJSONString writes a quoted, escaped JSON string.
+//
+// Everything above U+007F is written as a \uXXXX escape, which is what Python's json.dumps
+// does by default (ensure_ascii=True) and therefore what Jinja2's tojson filter produces.
+// Go's json.Marshal leaves the text as UTF-8 instead, so a tool definition with a Chinese
+// description reached the model spelled differently from the one its template was written
+// against -- the separators were already matched for the same reason.
+//
+// A code point above U+FFFF becomes a surrogate pair, again as Python writes it: "🎉" is
+// \ud83c\udf89 and not \U0001f389.
 func writeJSONString(b *strings.Builder, s string) {
 	raw, err := json.Marshal(s)
 	if err != nil {
@@ -258,7 +268,19 @@ func writeJSONString(b *strings.Builder, s string) {
 		b.WriteString(`""`)
 		return
 	}
-	b.Write(raw)
+	for _, r := range string(raw) {
+		switch {
+		case r < utf8.RuneSelf:
+			b.WriteRune(r)
+		case r <= 0xFFFF:
+			fmt.Fprintf(b, `\u%04x`, r)
+		default:
+			r -= 0x10000
+			hi := 0xD800 + (r >> 10)
+			lo := 0xDC00 + (r & 0x3FF)
+			fmt.Fprintf(b, `\u%04x\u%04x`, hi, lo)
+		}
+	}
 }
 
 // sortStrings sorts in place; kept local so the file needs no import for one call.

@@ -659,3 +659,76 @@ func TestPagedSpansRejectsPositionsBeyondTheAllocatedBlocks(t *testing.T) {
 		t.Error("spans accepted a third block's worth of positions")
 	}
 }
+
+// TestBlockPoolRefCountErrors covers the four guards on retain, release and RefCount.
+//
+// They are refcount invariants, and the operations are exported enough to break them from a test
+// without fabricating internal state: releasing a block nobody retained, retaining a free one, and
+// naming an id outside the pool are all mistakes a caller can make. Each returns an error rather than
+// corrupting the free list, which is the property being pinned.
+func TestBlockPoolRefCountErrors(t *testing.T) {
+	c := defaultTiny()
+	// A real model for its Config: NewBlockPool sizes itself from the KV geometry, and defaultTiny
+	// alone does not carry a validated one.
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pool, err := NewBlockPool(m.Config(), BlockPoolOptions{BlockSize: 2, Blocks: 4})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+
+	t.Run("releasing a block nobody retained", func(t *testing.T) {
+		err := pool.release(0)
+		if err == nil {
+			t.Fatal("release accepted a block with no holders")
+		}
+		if !strings.Contains(err.Error(), "release of unreferenced block 0") {
+			t.Errorf("error %q does not name the block", err)
+		}
+	})
+
+	t.Run("retaining a free block", func(t *testing.T) {
+		if err := pool.retain(0); err == nil {
+			t.Fatal("retain accepted a block with no holders")
+		} else if !strings.Contains(err.Error(), "retain of unreferenced block 0") {
+			t.Errorf("error %q does not name the block", err)
+		}
+	})
+
+	t.Run("an id outside the pool", func(t *testing.T) {
+		// Both refcount paths check the bound, and both print the id and the pool size.
+		for _, c := range []struct {
+			name string
+			err  error
+		}{
+			{"release", pool.release(99)},
+			{"retain", pool.retain(99)},
+		} {
+			if c.err == nil {
+				t.Errorf("%s accepted block 99 of a 4-block pool", c.name)
+				continue
+			}
+			if !strings.Contains(c.err.Error(), "outside the pool") {
+				t.Errorf("%s error %q does not say the block is out of range", c.name, c.err)
+			}
+			for _, want := range []string{"99", "4"} {
+				if !strings.Contains(c.err.Error(), want) {
+					t.Errorf("%s error %q does not state %s", c.name, c.err, want)
+				}
+			}
+		}
+	})
+
+	t.Run("an id outside the pool reports zero holders", func(t *testing.T) {
+		// RefCount is a diagnostic rather than a checked path, so it answers 0 instead of erroring.
+		if got := pool.RefCount(99); got != 0 {
+			t.Errorf("RefCount(99) = %d, want 0", got)
+		}
+		if got := pool.RefCount(-1); got != 0 {
+			t.Errorf("RefCount(-1) = %d, want 0", got)
+		}
+	})
+}

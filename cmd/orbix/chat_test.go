@@ -816,3 +816,60 @@ func TestChatRefusesABadModelBeforePrompting(t *testing.T) {
 		}
 	})
 }
+
+// TestChatRefusesABlockWiderThanTheContext covers the same check serve makes, on the REPL's path.
+//
+// A block larger than the context never fills, so the prefix cache never fires. The REPL would run
+// and answer, just never remembering anything between turns -- and the banner still says the cache is
+// on, which is the kind of silence that costs an afternoon.
+//
+// serve's copy is tested; this one was not, so its message could lose either number without a
+// failure. Both are asserted, and so is the suggestion, since "use 512 or less" is the actionable
+// half.
+func TestChatRefusesABlockWiderThanTheContext(t *testing.T) {
+	model := chatModel(t)
+
+	var out bytes.Buffer
+	err := chatSession(strings.NewReader(""), &out, chatOptions{
+		model:       model,
+		blockSize:   1000,
+		prefixCache: true,
+	})
+	if err == nil {
+		t.Fatal("chatSession accepted a block wider than the context")
+	}
+	for _, want := range []string{"1000", "512", "or less"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not state %q", err, want)
+		}
+	}
+	// The banner comes first and the refusal after it, so the output is not empty -- but no prompt
+	// was written, which is what would leave a caller typing into a session that cannot answer.
+	if strings.Contains(out.String(), "you> ") {
+		t.Errorf("the session prompted before failing: %q", out.String())
+	}
+
+	// The boundary itself: a block exactly as wide as the context fills on every turn, so it is
+	// legal, and one more is not. Measured -- 512 runs, 513 is refused. Without this pair the check
+	// could be relaxed by one and still pass, because 1000 is far past either comparison.
+	for _, c := range []struct {
+		blockSize int
+		wantErr   bool
+	}{
+		{512, false},
+		{513, true},
+	} {
+		out.Reset()
+		err := chatSession(strings.NewReader(""), &out, chatOptions{
+			model:       model,
+			blockSize:   c.blockSize,
+			prefixCache: true,
+		})
+		if c.wantErr && err == nil {
+			t.Errorf("--block-size %d was accepted, want a refusal", c.blockSize)
+		}
+		if !c.wantErr && err != nil {
+			t.Errorf("--block-size %d was refused: %v", c.blockSize, err)
+		}
+	}
+}

@@ -197,14 +197,27 @@ func TestQwen2GreedyContinues(t *testing.T) {
 	}
 	// Token ids for the Qwen chat template's opening, then the prompt text.
 	// The tokenizer is a different package, so the ids are spelled out here from
-	// the checkpoint's vocabulary.
-	prompt := []int32{151644, 872, 198, 11847, 84321, 151645, 198, 151644, 77091, 198}
+	// the checkpoint's vocabulary. Decoded, this is
+	// "<|im_start|>user\nThe capital of France is<|im_end|>\n<|im_start|>assistant\n".
+	//
+	// These were wrong for a while: the ids in the middle spelled "_category skys", so the
+	// test asked a different question from the one its comment described and still passed,
+	// because it only checked that something was generated.
+	prompt := []int32{151644, 872, 198, 785, 6722, 315, 9625, 374, 151645, 198, 151644, 77091, 198}
 	out, err := m.Generate(cache, prompt, Greedy{}, GenerateOptions{MaxTokens: 6})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	if len(out) <= len(prompt) {
 		t.Fatalf("generated nothing: %v", out)
+	}
+	// The first generated token is "Paris" (id 59604), which is what makes this an
+	// end-to-end check rather than a liveness check. A swapped RoPE layout on this
+	// checkpoint produced a degenerate digit run instead, so pinning the answer is what
+	// distinguishes the two.
+	const paris = int32(59604)
+	if got := out[len(prompt)]; got != paris {
+		t.Errorf("first generated token = %d, want %d (\"Paris\")", got, paris)
 	}
 	// Every id must be inside the vocabulary, which a rotation or bias mistake
 	// would violate only rarely -- but an out-of-range id would panic the decoder.

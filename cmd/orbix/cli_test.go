@@ -1501,3 +1501,56 @@ func TestBenchReportsWhetherPrefixReuseHappened(t *testing.T) {
 		}
 	})
 }
+
+// TestBenchSuiteReportsWhichScenariosFailed covers the aggregation at the end of a suite.
+//
+// A scenario failing prints "failed:" in its NOTE column, and the whole run must also return an
+// error. Without that the exit status is zero for a table that visibly contains a failure, which a
+// script checking $? would read as a successful benchmark -- the numbers it captured would be the
+// ones that did run, silently missing a row.
+//
+// The suite always uses scenarioList, so this drives runScenarios with an explicit pair: one entry
+// that returns a result and one that fails. The names in the message are what a reader uses to find
+// the row.
+func TestBenchSuiteReportsWhichScenariosFailed(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	opts := suiteOptions{model: path, prompt: []int32{1, 2, 3}, maxTok: 1, workers: 1}
+
+	scenarios := []scenario{
+		{name: "working", run: func(suiteOptions) (result, error) {
+			return result{tokens: 1, elapsed: time.Millisecond}, nil
+		}},
+		{name: "broken", run: func(suiteOptions) (result, error) {
+			return result{}, errors.New("simulated failure")
+		}},
+	}
+
+	var err error
+	out := captureStdout(t, func() { err = runScenarios(opts, scenarios) })
+	if err == nil {
+		t.Fatalf("a suite with a failing scenario returned nil:\n%s", out)
+	}
+	// The message has to say how many failed and name them, which is what locates the row.
+	if !strings.Contains(err.Error(), "1 scenario(s) failed") {
+		t.Errorf("error %q does not count the failures", err)
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Errorf("error %q does not name the failed scenario", err)
+	}
+	if strings.Contains(err.Error(), "working") {
+		t.Errorf("error %q names a scenario that succeeded", err)
+	}
+	// Both rows still appear in the table, so the successful one's numbers are not lost.
+	for _, want := range []string{"working", "broken", "failed: simulated failure"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+
+	// The all-good case returns nil, so the error means something.
+	scenarios = scenarios[:1]
+	out = captureStdout(t, func() { err = runScenarios(opts, scenarios) })
+	if err != nil {
+		t.Errorf("a suite with no failures returned %v:\n%s", err, out)
+	}
+}

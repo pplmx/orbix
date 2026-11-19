@@ -762,3 +762,58 @@ func TestResolveWorkersIsWhatTheHeaderPrints(t *testing.T) {
 		t.Error("the suite still uses the raw option for its header")
 	}
 }
+
+// TestBenchPropagatesSetupErrors covers the failures that happen before any measurement.
+//
+// Each is a flag the operator got wrong, and each must reach the caller rather than being defaulted
+// over: a bad --policy silently replaced by fifo would run the wrong experiment and print a table that
+// looks right.
+//
+// The assertions are on what the error says, because a caller sees only the message; the policy
+// error's own text comes from internal/engine, so the check is that it survives the trip unchanged.
+func TestBenchPropagatesSetupErrors(t *testing.T) {
+	model := suiteModel(t)
+
+	t.Run("an unknown scheduling policy", func(t *testing.T) {
+		err := cmdBench([]string{"--model", model, "--policy", "bogus", "--max-tokens", "1", "--concurrency", "1"})
+		if err == nil {
+			t.Fatal("bench ran with an unknown policy")
+		}
+		// The value the operator typed and the accepted set, both from the engine's message.
+		for _, want := range []string{"bogus", "fifo", "shortest", "fair"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("a prompt that fills the context", func(t *testing.T) {
+		// The fixture's context is 512 positions; "a " is one token per repeat and the fixture's two
+		// special tokens add two more, so this is 522 and comfortably past the limit.
+		long := strings.Repeat("a ", 520)
+		err := cmdBench([]string{"--model", model, "--prompt", long, "--max-tokens", "1", "--concurrency", "1"})
+		if err == nil {
+			t.Fatal("bench accepted a prompt longer than the context")
+		}
+		if !strings.Contains(err.Error(), "context is") {
+			t.Errorf("error %q does not state the context limit", err)
+		}
+		// The two counts, since the message carries both and a reader compares them.
+		if !strings.Contains(err.Error(), "512") {
+			t.Errorf("error %q does not state the context size", err)
+		}
+	})
+
+	// The boundary: 510 repeats encode to exactly 512 tokens, filling the context with no room to
+	// generate. This is what pins `>=`; a 513-token prompt is refused either way.
+	t.Run("a prompt that exactly fills the context", func(t *testing.T) {
+		full := strings.Repeat("a ", 510)
+		err := cmdBench([]string{"--model", model, "--prompt", full, "--max-tokens", "1", "--concurrency", "1"})
+		if err == nil {
+			t.Fatal("bench accepted a prompt with no room left to generate")
+		}
+		if !strings.Contains(err.Error(), "context is 512") {
+			t.Errorf("error %q does not state the context size", err)
+		}
+	})
+}

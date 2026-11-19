@@ -1418,3 +1418,62 @@ func TestBoolMetadataDecodesAnyNonZeroByte(t *testing.T) {
 		t.Error("bool byte 0 decoded as true")
 	}
 }
+
+// TestGetArrayDistinguishesEmptyFromAbsent covers the three cases a caller has to tell apart.
+//
+// A zero-length array and a failed lookup both produce a zero-length slice, so the accessor
+// reports success explicitly through a non-nil empty slice. A caller writing
+// `if v, ok := f.GetArray[string](k); ok` and one writing `if v != nil` then agree, which is
+// what makes the distinction usable; without it an empty `tokenizer.ggml.merges` reads as a
+// missing key, and the two want different errors.
+//
+// The element-type check was also unguarded: a mixed array converted every element it could and
+// silently dropped the rest, so a vocabulary whose tokens were partly integers would load as a
+// shorter vocabulary rather than failing. Both now fail when broken.
+func TestGetArrayDistinguishesEmptyFromAbsent(t *testing.T) {
+	f := &File{Metadata: map[string]Value{
+		"empty":   {Type: TypeArray, ElemType: TypeString, Array: []Value{}},
+		"mixed":   {Type: TypeArray, ElemType: TypeString, Array: []Value{{Type: TypeString, Str: "a"}, {Type: TypeInt32, Int: 1}}},
+		"strings": {Type: TypeArray, ElemType: TypeString, Array: []Value{{Type: TypeString, Str: "a"}, {Type: TypeString, Str: "b"}}},
+		"scalar":  {Type: TypeString, Str: "x"},
+	}}
+
+	// Present but empty: success, and a slice that is not nil so the two cases stay separable.
+	// The accessor also has an explicit `if len(out) == 0 { out = []T{} }` for this, which is
+	// redundant -- make([]T, 0, 0) already returns a non-nil empty slice, measured -- and no
+	// mutation of it is detectable here. The assertion is on the behaviour a caller depends on,
+	// not on which line produces it.
+	empty, ok := f.GetArray[string]("empty")
+	if !ok {
+		t.Error("an empty array reported failure")
+	}
+	if empty == nil {
+		t.Error("an empty array returned a nil slice, which is indistinguishable from absence")
+	}
+	if len(empty) != 0 {
+		t.Errorf("an empty array has %d elements", len(empty))
+	}
+
+	// Absent, and present with the wrong type: both failures, both nil.
+	for _, key := range []string{"absent", "scalar"} {
+		got, ok := f.GetArray[string](key)
+		if ok {
+			t.Errorf("%q reported success", key)
+		}
+		if got != nil {
+			t.Errorf("%q returned a non-nil slice on failure", key)
+		}
+	}
+
+	// A mixed array is a failure, not a filtered result: dropping the elements of the wrong
+	// type would hand back a shorter list than the file holds.
+	if got, ok := f.GetArray[string]("mixed"); ok {
+		t.Errorf("a mixed-type array reported success with %v", got)
+	}
+
+	// And an ordinary array still converts.
+	got, ok := f.GetArray[string]("strings")
+	if !ok || len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("GetArray(strings) = %v, %v", got, ok)
+	}
+}

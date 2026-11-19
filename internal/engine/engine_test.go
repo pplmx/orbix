@@ -1400,6 +1400,13 @@ func TestFullBufferWithLiveCancelDoesNotStallPump(t *testing.T) {
 		t.Fatalf("Pump finished in %v, before abandonGrace (%v): the buffer never filled, "+
 			"so this run did not exercise the deadline and proves nothing", elapsed, abandonGrace)
 	}
+	// The deadline's own value, checked against a literal. Comparing elapsed to abandonGrace cannot
+	// see the constant change, because both sides move together -- shortening it to 50ms passed every
+	// test. Two seconds is the documented grace and the number the README quotes for how long a
+	// stalled send waits, so a silent change would make both wrong without failing anything.
+	if abandonGrace != 2*time.Second {
+		t.Errorf("abandonGrace is %v, want the documented 2s", abandonGrace)
+	}
 	// It also has to retire the sequence *because it was abandoned*, not because the budget
 	// ran out. This is what the first version of this assertion missed: deleting the
 	// reapAbandoned call still passed, because sample keeps counting tokens (out grows before

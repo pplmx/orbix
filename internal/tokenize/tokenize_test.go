@@ -1,6 +1,7 @@
 package tokenize
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -626,6 +627,81 @@ func TestBigramQueueTieBreaks(t *testing.T) {
 		}
 		if !q2.less(1, 0) {
 			t.Error("score 2 did not sort before score 1")
+		}
+	})
+}
+
+// TestNewRejectsParallelArraysOfTheWrongLength covers the two length checks between the vocabulary
+// and the arrays stored beside it.
+//
+// A file whose scores or token types do not line up with the tokens describes a vocabulary it cannot
+// mean: index i would carry one piece's text and another piece's score. Both checks report the two
+// counts, which is what makes the file diagnosable -- "mismatch" alone leaves the reader counting
+// arrays by hand.
+//
+// The fixture builder always writes arrays of the right length, so these are constructed as a File
+// directly.
+func TestNewRejectsParallelArraysOfTheWrongLength(t *testing.T) {
+	vocab := func() []gguf.Value {
+		return []gguf.Value{
+			{Type: gguf.TypeString, Str: "a"},
+			{Type: gguf.TypeString, Str: "b"},
+			{Type: gguf.TypeString, Str: "c"},
+		}
+	}
+	base := func() map[string]gguf.Value {
+		return map[string]gguf.Value{
+			"tokenizer.ggml.tokens": {Type: gguf.TypeArray, Array: vocab()},
+		}
+	}
+
+	t.Run("short scores", func(t *testing.T) {
+		md := base()
+		md["tokenizer.ggml.scores"] = gguf.Value{Type: gguf.TypeArray, Array: []gguf.Value{
+			{Type: gguf.TypeFloat32, Float: 1},
+		}}
+		_, err := New(&gguf.File{Metadata: md})
+		if err == nil {
+			t.Fatal("New accepted one score for three tokens")
+		}
+		// Both counts belong in the message: the reader has to know which array is short.
+		for _, want := range []string{"1", "3"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %s", err, want)
+			}
+		}
+	})
+
+	t.Run("short token types", func(t *testing.T) {
+		md := base()
+		md["tokenizer.ggml.token_type"] = gguf.Value{Type: gguf.TypeArray, Array: []gguf.Value{
+			{Type: gguf.TypeInt32, Int: 1},
+			{Type: gguf.TypeInt32, Int: 1},
+		}}
+		_, err := New(&gguf.File{Metadata: md})
+		if err == nil {
+			t.Fatal("New accepted two token types for three tokens")
+		}
+		for _, want := range []string{"2", "3"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %s", err, want)
+			}
+		}
+	})
+
+	// The same file with matching arrays builds, so the refusals are about the lengths.
+	t.Run("matching arrays are accepted", func(t *testing.T) {
+		md := base()
+		scores := make([]gguf.Value, 3)
+		types := make([]gguf.Value, 3)
+		for i := range 3 {
+			scores[i] = gguf.Value{Type: gguf.TypeFloat32, Float: float64(i)}
+			types[i] = gguf.Value{Type: gguf.TypeInt32, Int: 1}
+		}
+		md["tokenizer.ggml.scores"] = gguf.Value{Type: gguf.TypeArray, Array: scores}
+		md["tokenizer.ggml.token_type"] = gguf.Value{Type: gguf.TypeArray, Array: types}
+		if _, err := New(&gguf.File{Metadata: md}); err != nil {
+			t.Fatalf("New refused a matching file: %v", err)
 		}
 	})
 }

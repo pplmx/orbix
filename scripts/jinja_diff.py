@@ -129,6 +129,10 @@ SUBSET = {
     "expr_tojson_msg": """{{ messages[0] | tojson }}""",
     "expr_tojson_list": """{{ messages | tojson }}""",
     "expr_tojson_scalar": """{{ 'a' | tojson }}""",
+    # Both spellings of the indent argument. Jinja2 renders them identically, and the Go side
+    # dropped the positional one for a while: it was parsed and then ignored.
+    "expr_tojson_indent_kw": """{{ messages[0] | tojson(indent=2) }}""",
+    "expr_tojson_indent_pos": """{{ messages[0] | tojson(2) }}""",
     "expr_len": """{{ messages | length }}""",
     "expr_nl": """{{ 'a\\nb' }}""",
     "ws_control": """a  {{- 'b' -}}  c""",

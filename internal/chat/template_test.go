@@ -1018,3 +1018,88 @@ func TestBooleanComparisonMatchesJinja2(t *testing.T) {
 		t.Errorf("render = %q, want %q (Jinja2 3.1 agrees)", got, want)
 	}
 }
+
+// TestTojsonPositionalIndent covers the positional form of tojson's indent argument.
+//
+// The keyword form was tested by parsing only -- TestFilterKeywordArgument checks that
+// "tojson(indent=4)" compiles, with a comment saying the argument is parsed and ignored, which
+// stopped being true when toJSONIndent was added. The positional form, which the parser also
+// accepts and Jinja2 also honors, was not executed at all: every expression in the branch that
+// reads f.arg was unexecuted.
+//
+// Measured against Jinja2 3.1: tojson(2) and tojson(indent=2) produce the same indented JSON,
+// so the two spellings have to agree here too, and the output has to differ from the compact
+// form or the argument is being dropped again.
+func TestTojsonPositionalIndent(t *testing.T) {
+	in := Inputs{Tools: []Tool{{Name: "f", Description: "d"}}}
+	compact := render(t, `{{- tools | tojson }}`, nil, in)
+	keyword := render(t, `{{- tools | tojson(indent=2) }}`, nil, in)
+	positional := render(t, `{{- tools | tojson(2) }}`, nil, in)
+
+	if keyword != positional {
+		t.Errorf("tojson(2) = %q, tojson(indent=2) = %q; Jinja2 renders them identically",
+			positional, keyword)
+	}
+	if keyword == compact {
+		t.Errorf("tojson(indent=2) = the compact form %q; the argument was ignored", compact)
+	}
+	if !strings.Contains(keyword, "\n  ") {
+		t.Errorf("tojson(indent=2) = %q, want newline-and-two-space indentation", keyword)
+	}
+	// And the result still parses as JSON, so indenting changed the spelling rather than
+	// the value.
+	var back []map[string]any
+	if err := json.Unmarshal([]byte(positional), &back); err != nil {
+		t.Fatalf("tojson(2) produced unparseable JSON %q: %v", positional, err)
+	}
+	// The tools list renders in OpenAI's shape, so the name sits under "function".
+	if len(back) != 1 {
+		t.Fatalf("round trip of tojson(2) = %v, want one tool", back)
+	}
+	fn, _ := back[0]["function"].(map[string]any)
+	if fn["name"] != "f" {
+		t.Errorf("round trip of tojson(2) = %v, want function.name == \"f\"", back)
+	}
+}
+
+// TestFilterErrors covers the two error paths in evalFilter.
+//
+// A non-numeric indent and an unknown filter both have to be reported rather than silently
+// producing something: the first because the template asked for a formatting this package cannot
+// give, the second because the template uses a filter the subset does not implement and rendering
+// it as if the filter were absent would produce a prompt the model never saw.
+func TestFilterErrors(t *testing.T) {
+	t.Run("non-numeric indent", func(t *testing.T) {
+		for _, src := range []string{
+			`{{- tools | tojson('x') }}`,
+			`{{- tools | tojson(indent='x') }}`,
+		} {
+			tpl, err := Parse(src)
+			if err != nil {
+				continue // A parse-time refusal is also acceptable; it is not the arm under test.
+			}
+			_, err = tpl.Render(nil, Inputs{Tools: []Tool{{Name: "f"}}})
+			if err == nil {
+				t.Errorf("Render(%q) accepted a non-numeric indent", src)
+			} else if !strings.Contains(err.Error(), "not a number") {
+				t.Errorf("Render(%q) error = %q, want it to say the indent is not a number", src, err)
+			}
+		}
+	})
+
+	t.Run("unknown filter", func(t *testing.T) {
+		tpl, err := Parse(`{{- tools | nosuchfilter }}`)
+		if err != nil {
+			// Refusing at parse time is the documented behaviour for constructs outside the
+			// subset; that is a different arm and not what this asserts.
+			return
+		}
+		_, err = tpl.Render(nil, Inputs{Tools: []Tool{{Name: "f"}}})
+		if err == nil {
+			t.Fatal("an unknown filter rendered without an error")
+		}
+		if !strings.Contains(err.Error(), "unsupported template filter") {
+			t.Errorf("error = %q, want it to name the filter as unsupported", err)
+		}
+	})
+}

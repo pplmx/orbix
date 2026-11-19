@@ -2209,3 +2209,65 @@ func TestFilterNameMustBeAnIdentifier(t *testing.T) {
 		t.Errorf("an unknown filter name was not reported by name: %v", err)
 	}
 }
+
+// TestKwargNameMustBeAnIdentifier covers the lookahead that decides between a keyword argument
+// and a positional one.
+//
+// The lookahead has three conditions and the identifier check is the one that stops `1=2` from
+// being read as a keyword argument named "1". Without it that call parses successfully --
+// measured -- and the argument is stored under a key nothing reads, so the template renders as
+// if the argument had not been written. A refusal that names the missing ')' is the honest
+// answer to a call the subset cannot express.
+//
+// The other two conditions are already guarded: a bare name with no '=' is positional, and a
+// keyword whose value fails to parse is reported.
+func TestKwargNameMustBeAnIdentifier(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+
+	// A well-formed keyword argument and a positional one both parse. `tojson(indent)` is the
+	// case that separates the two lookahead conditions: `indent` is a legal name, so only the
+	// '=' test stops it being read as a keyword whose value is whatever follows.
+	for _, src := range []string{
+		`{{ messages|tojson(indent=2) }}`,
+		`{{ messages|tojson(2) }}`,
+		`{{ messages|tojson(indent) }}`,
+		`{{ messages|tojson }}`,
+	} {
+		if _, err := Parse(src); err != nil {
+			t.Errorf("Parse(%q): %v", src, err)
+		}
+	}
+
+	// A numeric name is not a keyword argument. The call is then unclosed, and the message that
+	// reports it depends on where the operand search stopped: a plain number leaves the parser
+	// looking for ')' or ',', while "1.5" is lexed as 1 . 5 and fails as a field access. Both
+	// are refusals; what the test insists on is that neither parses.
+	for _, src := range []string{`{{ messages|tojson(1=2) }}`, `{{ messages|tojson(1.5=2) }}`} {
+		if _, err := Parse(src); err == nil {
+			t.Errorf("Parse(%q) accepted a numeric keyword name", src)
+		}
+	}
+
+	// A keyword with no value fails, and the message names the expression rather than the
+	// argument list: `indent=` is a truncated expression, and saying so points at the token to
+	// fix. Swallowing that error gives "missing ')' in filter arguments" instead, which sends
+	// the reader looking for a bracket.
+	if _, err := Parse(`{{ messages|tojson(indent=) }}`); err == nil {
+		t.Error("Parse accepted a keyword with no value")
+	} else if !strings.Contains(err.Error(), "expression") {
+		t.Errorf("error %q does not point at the truncated expression", err)
+	}
+
+	// The rendered keyword still reaches the filter, so the positive case is not vacuous.
+	tpl, err := Parse(`{{ messages|tojson(indent=2) }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := tpl.Render(msgs, Inputs{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(out, "\n") {
+		t.Errorf("indent=2 did not indent: %q", out)
+	}
+}

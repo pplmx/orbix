@@ -3365,3 +3365,50 @@ func TestPreReferenceCases(t *testing.T) {
 		}
 	}
 }
+
+// TestStartsLetterRunMarkBranch covers the arm of startsLetterRun that lets a combining mark
+// begin a letter run.
+//
+// A family whose class is "[\p{L}\p{M}]+" accepts a mark at the start, so "\u0301abc" is one
+// chunk. The families that spell the run as "(?:\p{L}\p{M}*(?: \p{L}\p{M}*)*)+" need a letter
+// first and set wordSpaces, which returns before the mark test. Both readings are in preRule,
+// and the mark arm had no coverage: every test string began with a letter.
+//
+// Called on the predicate directly rather than through preSplit. preSplit reaches it only via
+// its leadAnyNonLetter branch, and a fixture change there would make this test pass for a
+// reason that has nothing to do with the arm under test.
+func TestStartsLetterRunMarkBranch(t *testing.T) {
+	const mark = "\u0301" // COMBINING ACUTE ACCENT
+	// The ordinary arm: a letter begins the run under any family.
+	if !startsLetterRun("abc", preRule{}) {
+		t.Error(`startsLetterRun("abc") = false, want true`)
+	}
+	withMarks := preRule{letterMarks: true}
+	if !startsLetterRun(mark+"abc", withMarks) {
+		t.Errorf("startsLetterRun(%q, letterMarks) = false, want true: a mark may begin the run",
+			mark+"abc")
+	}
+	// The same text under a family that requires a letter first: wordSpaces returns false
+	// before the mark test runs, which is the arm this one is distinguished from.
+	letterFirst := preRule{letterMarks: true, wordSpaces: true}
+	if startsLetterRun(mark+"abc", letterFirst) {
+		t.Errorf("startsLetterRun(%q, wordSpaces) = true, want false", mark+"abc")
+	}
+	// And without letterMarks the mark is not part of any run.
+	if startsLetterRun(mark+"abc", preRule{}) {
+		t.Errorf("startsLetterRun(%q, plain) = true, want false", mark+"abc")
+	}
+
+	// The joiner arm: k2-horizon writes "(?:\p{L}|\p{M}|\u200C|\u200D)+", so a run may
+	// begin with a zero-width joiner. Neither character is a letter or a mark, so without the
+	// flag it falls to the punctuation alternative and the word is split at it.
+	withJoiners := preRule{joiners: true}
+	for _, joiner := range []string{"\u200c", "\u200d"} {
+		if !startsLetterRun(joiner+"abc", withJoiners) {
+			t.Errorf("startsLetterRun(%q, joiners) = false, want true", joiner+"abc")
+		}
+	}
+	if startsLetterRun("\u200cabc", preRule{}) {
+		t.Error("a joiner began a run without the joiners flag")
+	}
+}

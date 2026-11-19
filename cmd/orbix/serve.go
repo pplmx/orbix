@@ -55,6 +55,14 @@ func newHTTPServer(h http.Handler, idle, readHeader time.Duration) *http.Server 
 	}
 }
 
+// The log format is a switch whose default arm is an error, so the flag's initial value has to
+// be one of the accepted spellings. Both are named here rather than at the two sites, so the
+// help text, the default, and the error cannot drift apart.
+const (
+	defaultLogFormat = "text"
+	logFormatChoices = "text, json, or off"
+)
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -67,7 +75,7 @@ func cmdServe(args []string) error {
 	cache := registerCacheFlags(fs, true)
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
 	otlpEndpoint := fs.String("otlp-endpoint", "", "OTLP/HTTP collector for traces, e.g. http://localhost:4318; empty disables tracing")
-	logFormat := fs.String("log-format", "text", "access log format: text, json, or off")
+	logFormat := fs.String("log-format", defaultLogFormat, "access log format: "+logFormatChoices)
 	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --max-active: fifo, shortest, or fair")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -191,7 +199,7 @@ func cmdServe(args []string) error {
 	case "json":
 		accessLog = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	default:
-		return fmt.Errorf("serve: --log-format must be text, json, or off, not %q", *logFormat)
+		return fmt.Errorf("serve: --log-format must be %s, not %q", logFormatChoices, *logFormat)
 	}
 
 	srv, err := server.New(eng, tok, server.Config{

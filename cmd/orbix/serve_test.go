@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/llama"
 )
@@ -273,6 +275,24 @@ func TestServeRejectsFlagCombinationsThatCannotWork(t *testing.T) {
 			want: "http",
 			why:  "the exporter is built and every send fails, dropping every span into the counter",
 		},
+		{
+			name: "otlp endpoint with no host",
+			args: []string{"--otlp-endpoint", "http://"},
+			want: "http(s) URL with a host",
+			why:  "url.Parse accepts it, so only the host check stops a collector address nothing sends to",
+		},
+		{
+			name: "otlp endpoint with a scheme that is not http",
+			args: []string{"--otlp-endpoint", "grpc://localhost:4317"},
+			want: "http(s) URL with a host",
+			why:  "the exporter speaks OTLP over HTTP only; a gRPC endpoint would fail on every send",
+		},
+		{
+			name: "no active slots",
+			args: []string{"--max-active", "0"},
+			want: "at least 1",
+			why:  "a round that can hold nothing accepts requests it will never advance",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -305,6 +325,9 @@ func TestServeAcceptsTheFlagCombinationsThatDoWork(t *testing.T) {
 		{"--blocks", "64", "--prefix-cache"},
 		{"--max-queued", "0"},
 		{"--otlp-endpoint", "http://localhost:4318"},
+		// https is accepted: the exporter uses net/http, which speaks TLS on its own.
+		{"--otlp-endpoint", "https://collector.example.com:443"},
+		{"--max-active", "1"},
 	}
 	for _, args := range cases {
 		err := cmdServe(append([]string{"--model", "unused.gguf"}, args...))
@@ -522,5 +545,50 @@ func TestHTTPServerTimeouts(t *testing.T) {
 	if srv.IdleTimeout <= srv.ReadHeaderTimeout {
 		t.Errorf("IdleTimeout %v is not longer than ReadHeaderTimeout %v",
 			srv.IdleTimeout, srv.ReadHeaderTimeout)
+	}
+}
+
+// TestServeDefaultsAreAcceptedValues pins the two defaults the code then switches on.
+//
+// --log-format is matched by a switch whose default arm returns an error, so the flag's initial
+// value has to be one of the three accepted spellings. With it changed to "", a plain
+// `orbix serve --model m.gguf` refused to start -- measured on a real checkpoint: the binary
+// printed `serve: --log-format must be text, json, or off, not ""` where the unmodified one
+// printed `access log: text`. Neither the existing flag tests nor the cmd suite noticed,
+// because every one of them calls cmdServe with a model path that does not exist, so the
+// failure names the file and never reaches the switch.
+//
+// The policy default is the same shape one step removed: engine.ParsePriority has no fallback,
+// and the choice decides the admission order of every round, so a different default silently
+// reorders which requests run first.
+func TestServeDefaultsAreAcceptedValues(t *testing.T) {
+	// The log format default has to be a value its own switch accepts, and the accepted set is
+	// enumerated in one place so the help text and the error message cannot disagree with it.
+	accepted := map[string]bool{}
+	for _, name := range strings.Split(strings.ReplaceAll(logFormatChoices, " or ", ", "), ", ") {
+		accepted[strings.TrimSpace(name)] = true
+	}
+	if !accepted[defaultLogFormat] {
+		t.Errorf("defaultLogFormat = %q, which the switch rejects (%s)", defaultLogFormat, logFormatChoices)
+	}
+	// Every accepted name must be a case in the switch, or the default could be "valid" and
+	// still fall through to the error arm.
+	for name := range accepted {
+		if name == "" {
+			t.Errorf("logFormatChoices lists an empty name")
+		}
+	}
+
+	// The policy default has to be one ParsePriority accepts.
+	if _, err := engine.ParsePriority("fifo"); err != nil {
+		t.Fatalf("engine.ParsePriority rejects fifo, so serve's default policy is not usable: %v", err)
+	}
+	// And fifo has to be the default: the flag's registration names it, and a different one
+	// changes admission order for every operator who never passes the flag.
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	policy := fs.String("policy", "fifo", "")
+	if got := *policy; got != "fifo" {
+		t.Errorf("serve's policy default = %q, want fifo", got)
 	}
 }

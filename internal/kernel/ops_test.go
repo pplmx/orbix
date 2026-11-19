@@ -838,3 +838,83 @@ func TestSiLUBeyondTheClampIsZeroEitherWay(t *testing.T) {
 	}
 
 }
+
+// TestKernelShapeErrorsStateTheNumbers covers the lengths in the shape-refusal messages.
+//
+// Each message already named the buffer, and the existing tests assert that much -- which of four
+// buffers is short is the first question. The second is by how much, and that is what the numbers
+// say: "dst has 1 values, need 2" is a one-element fix, while "dst has the wrong length" sends the
+// reader back to the call site to count.
+//
+// Three functions, chosen because their messages print different shapes: a single pair, two resolved
+// lengths and a row count, and the three-buffer MatMulTransposed.
+func TestKernelShapeErrorsStateTheNumbers(t *testing.T) {
+	const n, k = 2, 3
+
+	t.Run("MatVec", func(t *testing.T) {
+		err := MatVec(make([]float32, 1), make([]float32, n*k), make([]float32, k), n, k)
+		if err == nil {
+			t.Fatal("MatVec accepted a short destination")
+		}
+		// Both the length found and the length needed.
+		for _, want := range []string{"has 1 values", "need 2"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("MatMulTransposed", func(t *testing.T) {
+		const m, nn, kk = 2, 3, 2
+		err := MatMulTransposed(make([]float32, m*nn-1), make([]float32, m*kk), make([]float32, nn*kk), m, nn, kk)
+		if err == nil {
+			t.Fatal("MatMulTransposed accepted a short destination")
+		}
+		// The length found and the length needed. MatMulTransposed prints the product rather than
+		// its factors, unlike MatVec's rows-times-width form.
+		for _, want := range []string{"has 5 values", "need 6"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("Dot", func(t *testing.T) {
+		if _, err := Dot(make([]float32, 3), make([]float32, 5)); err == nil {
+			t.Fatal("Dot accepted vectors of different lengths")
+		} else if !strings.Contains(err.Error(), "3 and 5") {
+			t.Errorf("error %q does not state both lengths", err)
+		}
+	})
+
+	t.Run("AddBias", func(t *testing.T) {
+		err := AddBias(make([]float32, 6), make([]float32, 2), 2, 3)
+		if err == nil {
+			t.Fatal("AddBias accepted a short bias")
+		}
+		if !strings.Contains(err.Error(), "has 2 values, need 3") {
+			t.Errorf("error %q does not state both lengths", err)
+		}
+
+		// The destination check prints the row count and the row width, because the size it needs
+		// is their product. Rows is the argument no slice bounds, which is why this check divides
+		// rather than multiplies.
+		err = AddBias(make([]float32, 5), make([]float32, 3), 2, 3)
+		if err == nil {
+			t.Fatal("AddBias accepted a short destination")
+		}
+		if !strings.Contains(err.Error(), "has 5 values, need 2 rows of 3") {
+			t.Errorf("error %q does not state the size it needs", err)
+		}
+	})
+
+	t.Run("RMSNorm", func(t *testing.T) {
+		err := RMSNorm(make([]float32, 3), make([]float32, 4), make([]float32, 4), 1e-6)
+		if err == nil {
+			t.Fatal("RMSNorm accepted a short destination")
+		}
+		if !strings.Contains(err.Error(), "has 3 values, need 4") {
+			t.Errorf("error %q does not state both lengths", err)
+		}
+	})
+}

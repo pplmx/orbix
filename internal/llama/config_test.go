@@ -1007,3 +1007,132 @@ func TestRopeLayoutString(t *testing.T) {
 		t.Errorf("String() = %q, want it to name the neox layout", s)
 	}
 }
+
+// TestLoadConfigRejectsWrongTensorShape covers the two shape checks in Config.validate.
+//
+// The missing-tensor test next to this one covers the third: a name that is absent entirely.
+// A tensor that is present with the wrong shape is the more likely corruption -- a truncated
+// conversion, a converter that wrote 7B dimensions into a 1B file -- and neither the dimension
+// count nor the dimension values had a test. Downgrading the count check to `<` and the value
+// check to `<` both passed the llama and engine suites.
+//
+// Both failures are worth naming precisely: a loader that accepted a narrow attn_q would run a
+// forward pass over a matrix whose width does not match the activation row, which reads the
+// wrong memory rather than failing.
+func TestLoadConfigRejectsWrongTensorShape(t *testing.T) {
+	c := defaultTiny()
+	cases := []struct {
+		name   string
+		mutate func([]gguf.TensorInfo) []gguf.TensorInfo
+		want   []string
+	}{
+		{
+			name: "a dimension value is wrong",
+			mutate: func(ts []gguf.TensorInfo) []gguf.TensorInfo {
+				out := append([]gguf.TensorInfo(nil), ts...)
+				for i := range out {
+					if out[i].Name == "blk.0.attn_q.weight" {
+						// A fresh slice: the helper's dims are shared with the fixture.
+						out[i].Dims = []uint64{out[i].Dims[0] + 1, out[i].Dims[1]}
+					}
+				}
+				return out
+			},
+			want: []string{"blk.0.attn_q.weight", "has shape"},
+		},
+		{
+			name: "the dimension count is wrong",
+			mutate: func(ts []gguf.TensorInfo) []gguf.TensorInfo {
+				out := append([]gguf.TensorInfo(nil), ts...)
+				for i := range out {
+					if out[i].Name == "blk.0.attn_q.weight" {
+						out[i].Dims = []uint64{out[i].Dims[0], out[i].Dims[1], 1}
+					}
+				}
+				return out
+			},
+			want: []string{"blk.0.attn_q.weight", "dims"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), tc.mutate(c.tensors()), nil)))
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			_, err = LoadConfig(f)
+			if err == nil {
+				t.Fatal("LoadConfig accepted a tensor with the wrong shape")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not mention %q", err, w)
+				}
+			}
+		})
+	}
+}
+
+// TestBlockCountBoundaryIsTheTensorCount pins the comparison, not just the refusal.
+//
+// The existing test uses 1<<20 layers against a handful of tensors, which any threshold in that
+// neighbourhood catches -- doubling the bound to TensorCount()*2 passed the whole llama and
+// engine suites. The boundary only matters where the two differ: a file whose block count is
+// just past its tensor count.
+//
+// At exactly TensorCount() layers the guard must NOT fire, because the count is satisfiable in
+// principle and the per-tensor check is what reports the real problem; at one past it the guard
+// must fire, and before allocating the expectation list. The allocation is the reason the guard
+// exists -- building the list for a header claiming 2^30 layers spends minutes and gigabytes
+// before the first missing-tensor error can be produced.
+func TestBlockCountBoundaryIsTheTensorCount(t *testing.T) {
+	// Five tensors: two global weight tensors plus a couple of unrelated names, so the file
+	// declares no block tensors at all and every single-layer expectation is missing.
+	tensors := []gguf.TensorInfo{
+		{Name: "token_embd.weight", Dims: []uint64{8, 8}, Type: gguf.F32},
+		{Name: "output_norm.weight", Dims: []uint64{8}, Type: gguf.F32},
+		{Name: "output.weight", Dims: []uint64{8, 8}, Type: gguf.F32},
+		{Name: "unrelated_a", Dims: []uint64{8}, Type: gguf.F32},
+		{Name: "unrelated_b", Dims: []uint64{8}, Type: gguf.F32},
+	}
+	const count = 5
+
+	load := func(layers int) error {
+		t.Helper()
+		c := tinyConfig{hidden: 8, layers: layers, heads: 2, kvHeads: 2, ffn: 16, ctx: 64, vocab: 8}
+		f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), tensors, nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if got := f.TensorCount(); got != count {
+			t.Fatalf("fixture has %d tensors, want %d", got, count)
+		}
+		_, err = LoadConfig(f)
+		return err
+	}
+
+	// Equal to the tensor count: the bound does not fire, so the failure is the per-tensor
+	// check naming a block tensor.
+	err := load(count)
+	if err == nil {
+		t.Fatal("a file with no block tensors was accepted")
+	}
+	if strings.Contains(err.Error(), "block_count") {
+		t.Errorf("at exactly %d layers the block_count guard fired: %v", count, err)
+	}
+	if !strings.Contains(err.Error(), "missing tensor") {
+		t.Errorf("error %q is not the missing-tensor report the guard is meant to leave room for", err)
+	}
+
+	// One past it: the guard fires, and does so before asking for any block tensor.
+	err = load(count + 1)
+	if err == nil {
+		t.Fatal("a block count larger than the tensor count was accepted")
+	}
+	if !strings.Contains(err.Error(), "block_count") {
+		t.Errorf("error %q does not name block_count", err)
+	}
+	if strings.Contains(err.Error(), "missing tensor") {
+		t.Errorf("the guard did not run first: %v", err)
+	}
+}

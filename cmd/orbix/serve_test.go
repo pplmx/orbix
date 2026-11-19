@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -591,4 +594,59 @@ func TestServeDefaultsAreAcceptedValues(t *testing.T) {
 	if got := *policy; got != "fifo" {
 		t.Errorf("serve's policy default = %q, want fifo", got)
 	}
+}
+
+// TestServeRefusesABadModelBeforeListening covers the startup checks between opening the file and
+// binding the port.
+//
+// Each of them runs before a listener exists, so the failure is an ordinary returned error rather
+// than a server that comes up and then misbehaves. None was covered: the existing serve tests
+// exercise flag validation, which happens before the file is opened at all.
+//
+// The order matters as much as the refusal. A server that bound the port first would accept a
+// connection and then fail, which a client sees as a dropped connection rather than as the message
+// explaining what is wrong.
+func TestServeRefusesABadModelBeforeListening(t *testing.T) {
+	t.Run("no tokenizer", func(t *testing.T) {
+		// A valid header with no metadata carries no vocabulary.
+		var b []byte
+		b = append(b, []byte("GGUF")...)
+		var u32 [4]byte
+		binary.LittleEndian.PutUint32(u32[:], 3)
+		b = append(b, u32[:]...)
+		var u64 [8]byte
+		binary.LittleEndian.PutUint64(u64[:], 0) // no tensors
+		b = append(b, u64[:]...)
+		binary.LittleEndian.PutUint64(u64[:], 0) // no metadata
+		b = append(b, u64[:]...)
+		path := filepath.Join(t.TempDir(), "bare.gguf")
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatalf("writing the file: %v", err)
+		}
+
+		err := cmdServe([]string{"--model", path, "--addr", "127.0.0.1:0"})
+		if err == nil {
+			t.Fatal("serve started a model with no tokenizer")
+		}
+		if !strings.Contains(err.Error(), "tokenizer") {
+			t.Errorf("error %q does not name the tokenizer", err)
+		}
+	})
+
+	t.Run("unknown policy", func(t *testing.T) {
+		path := gguftest.Model{NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+		err := cmdServe([]string{"--model", path, "--addr", "127.0.0.1:0", "--policy", "bogus"})
+		if err == nil {
+			t.Fatal("serve accepted an unknown scheduling policy")
+		}
+		if !strings.Contains(err.Error(), "bogus") {
+			t.Errorf("error %q does not quote the policy name", err)
+		}
+		// The message names the alternatives, which is what makes it actionable.
+		for _, want := range []string{"fifo", "shortest", "fair"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not list %q", err, want)
+			}
+		}
+	})
 }

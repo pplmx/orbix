@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -766,4 +768,51 @@ func TestChatRefusesAConversationThatFillsTheContext(t *testing.T) {
 	if !strings.Contains(out2.String(), "history is empty") {
 		t.Errorf("a refused turn left something in the history:\n%s", out2.String())
 	}
+}
+
+// TestChatRefusesABadModelBeforePrompting covers chat's two startup failures.
+//
+// Both return before the first prompt is printed, which is the property worth asserting: a session
+// that printed "you> " and then failed would leave a caller typing into a dead REPL. Neither path had
+// a test -- every chat test starts from a working fixture -- so removing either error check passed.
+func TestChatRefusesABadModelBeforePrompting(t *testing.T) {
+	t.Run("a missing file", func(t *testing.T) {
+		var out bytes.Buffer
+		err := chatSession(strings.NewReader(""), &out, chatOptions{
+			model: filepath.Join(t.TempDir(), "absent.gguf"),
+		})
+		if err == nil {
+			t.Fatal("chatSession opened a missing model")
+		}
+		// The path is what a reader needs to see, since it came from a flag or the environment.
+		if !strings.Contains(err.Error(), "absent.gguf") {
+			t.Errorf("error %q does not name the file", err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("the session printed %q before failing", out.String())
+		}
+	})
+
+	t.Run("a file with no tokenizer", func(t *testing.T) {
+		// A valid header with no metadata: the same shape run and serve are tested with.
+		b := []byte("GGUF")
+		b = append(b, 3, 0, 0, 0)
+		b = append(b, make([]byte, 16)...)
+		path := filepath.Join(t.TempDir(), "bare.gguf")
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatalf("writing the file: %v", err)
+		}
+
+		var out bytes.Buffer
+		err := chatSession(strings.NewReader(""), &out, chatOptions{model: path})
+		if err == nil {
+			t.Fatal("chatSession accepted a file with no tokenizer")
+		}
+		if !strings.Contains(err.Error(), "tokenizer") {
+			t.Errorf("error %q does not name the tokenizer", err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("the session printed %q before failing", out.String())
+		}
+	})
 }

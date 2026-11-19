@@ -150,6 +150,36 @@ func scenarioList() []scenario {
 }
 
 // runSuite runs every scenario and prints one table.
+// rowNote builds a row's NOTE cell from its scenario and its measurement.
+//
+// It is a function rather than a few lines inside runSuite so the explanations can be tested:
+// runSuite writes to os.Stdout, so nothing about the table it prints is reachable from a test.
+// Three of these clauses were unverifiable that way -- raising the early-stop threshold, the
+// reuse threshold, or the failure threshold by one left the cmd suite green, and each clause
+// exists precisely because its number looks like a bug when it is not explained.
+//
+// The order is fixed because the cell is read as a sentence: the scenario's own description,
+// then anything the run discovered about itself, then the two counters.
+func rowNote(sc scenario, res result) string {
+	note := sc.note
+	if res.extra != "" {
+		note += "; " + res.extra
+	}
+	// Explain a token total that differs from the row above it. The number is real --
+	// a request emitted its end-of-sequence token -- but without this a reader sees
+	// two rows that should match and starts looking for a measurement bug.
+	if res.earlyStops > 0 {
+		note += fmt.Sprintf("; %d request(s) stopped early on EOS", res.earlyStops)
+	}
+	// Say what the cache setting actually bought. Without this the two prefix rows
+	// print nearly the same throughput and the reader has no way to tell whether
+	// reuse happened and did not help, or never happened at all.
+	if res.prefixReused > 0 {
+		note += fmt.Sprintf("; %d prompt positions reused", res.prefixReused)
+	}
+	return note
+}
+
 func runSuite(o suiteOptions) error {
 	fmt.Printf("model:       %s\n", o.model)
 	fmt.Printf("prompt:      %d tokens\n", len(o.prompt))
@@ -193,22 +223,7 @@ func runSuite(o suiteOptions) error {
 			writef("%s\t-\t-\t-\t-\tfailed: %v\n", r.scenario.name, r.err)
 			continue
 		}
-		note := r.scenario.note
-		if r.res.extra != "" {
-			note += "; " + r.res.extra
-		}
-		// Explain a token total that differs from the row above it. The number is real --
-		// a request emitted its end-of-sequence token -- but without this a reader sees
-		// two rows that should match and starts looking for a measurement bug.
-		if r.res.earlyStops > 0 {
-			note += fmt.Sprintf("; %d request(s) stopped early on EOS", r.res.earlyStops)
-		}
-		// Say what the cache setting actually bought. Without this the two prefix rows
-		// print nearly the same throughput and the reader has no way to tell whether
-		// reuse happened and did not help, or never happened at all.
-		if r.res.prefixReused > 0 {
-			note += fmt.Sprintf("; %d prompt positions reused", r.res.prefixReused)
-		}
+		note := rowNote(r.scenario, r.res)
 		first := "-"
 		if r.res.firstToken > 0 {
 			first = r.res.firstToken.Round(time.Millisecond).String()

@@ -471,3 +471,48 @@ func TestTokPerSec(t *testing.T) {
 		})
 	}
 }
+
+// TestRowNoteExplainsTheRow covers the NOTE cell, which is where a surprising number is
+// explained rather than left to look like a measurement bug.
+//
+// runSuite writes to os.Stdout, so none of this was reachable from a test before rowNote was
+// extracted: raising the early-stop threshold, the reuse threshold or the failure threshold
+// by one each passed the cmd suite. The clauses matter more than they look -- a row that
+// generated fewer tokens than its neighbours, or two prefix rows that print the same
+// throughput, are exactly the shapes a reader interprets as the tool being wrong.
+func TestRowNoteExplainsTheRow(t *testing.T) {
+	sc := scenario{name: "row", note: "baseline"}
+	cases := []struct {
+		name string
+		res  result
+		want string
+	}{
+		{"plain", result{}, "baseline"},
+		{"extra", result{extra: "paged 8x16"}, "baseline; paged 8x16"},
+		{"one early stop", result{earlyStops: 1},
+			"baseline; 1 request(s) stopped early on EOS"},
+		{"two early stops", result{earlyStops: 2},
+			"baseline; 2 request(s) stopped early on EOS"},
+		{"one reused position", result{prefixReused: 1},
+			"baseline; 1 prompt positions reused"},
+		{"many reused positions", result{prefixReused: 96},
+			"baseline; 96 prompt positions reused"},
+		{"all three", result{extra: "paged 8x16", earlyStops: 1, prefixReused: 32},
+			"baseline; paged 8x16; 1 request(s) stopped early on EOS; 32 prompt positions reused"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := rowNote(sc, c.res); got != c.want {
+				t.Errorf("rowNote = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	// A scenario's own note is not optional: every entry in the list has one, and the cell
+	// opening with the description is what makes the table readable without the code.
+	for _, s := range scenarioList() {
+		if s.note == "" {
+			t.Errorf("scenario %q has no note", s.name)
+		}
+	}
+}

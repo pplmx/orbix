@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -90,8 +91,16 @@ func TestLoaderRejectsWrappingOffset(t *testing.T) {
 		ti := gguf.TensorInfo{Name: "w", Offset: off, Dims: []uint64{4}, Type: gguf.F32}
 		if _, err := l.dataStart(ti, nbytes); err == nil {
 			t.Errorf("dataStart accepted offset %d, which wraps to %d as int64", off, int64(off))
-		} else if !strings.Contains(err.Error(), "too large") {
-			t.Errorf("offset %d: error %q does not say the offset is the problem", off, err)
+		} else {
+			// The message has to name the offset itself: which of three offending values was
+			// rejected is the first thing a reader needs, and "too large" alone does not say.
+			// Dropping the number from the format left every case passing.
+			if !strings.Contains(err.Error(), "too large") {
+				t.Errorf("offset %d: error %q does not say the offset is the problem", off, err)
+			}
+			if !strings.Contains(err.Error(), strconv.FormatUint(off, 10)) {
+				t.Errorf("offset %d: error %q does not name the offset", off, err)
+			}
 		}
 	}
 

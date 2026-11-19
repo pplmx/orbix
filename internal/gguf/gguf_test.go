@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -573,8 +574,15 @@ func TestTensorOffsetMustNotWrap(t *testing.T) {
 		}
 		if _, err := f.TensorData(path, "w"); err == nil {
 			t.Fatalf("TensorData accepted offset %d, which wraps to %d as int64", off, int64(off))
-		} else if !strings.Contains(err.Error(), "too large") {
-			t.Errorf("offset %d: error %q does not say the offset is the problem", off, err)
+		} else {
+			// The message names the offset, which is what tells a reader which of the values
+			// was refused. Dropping the number from the format left every case passing.
+			if !strings.Contains(err.Error(), "too large") {
+				t.Errorf("offset %d: error %q does not say the offset is the problem", off, err)
+			}
+			if !strings.Contains(err.Error(), strconv.FormatUint(off, 10)) {
+				t.Errorf("offset %d: error %q does not name the offset", off, err)
+			}
 		}
 	}
 
@@ -794,8 +802,16 @@ func TestRefusesOversizedArrayCount(t *testing.T) {
 	delta := allocDelta(t, func() {
 		if _, err := Read(bytes.NewReader(build(maxArrayElements+1, 4))); err == nil {
 			t.Error("Read accepted an array past the element limit")
-		} else if !strings.Contains(err.Error(), "too large") {
-			t.Errorf("error %q does not say the count is the problem", err)
+		} else {
+			if !strings.Contains(err.Error(), "too large") {
+				t.Errorf("error %q does not say the count is the problem", err)
+			}
+			// The claimed count is what makes the message diagnosable: a reader needs the number
+			// that was refused, and the limit it is compared against lives in the source.
+			if !strings.Contains(err.Error(), strconv.FormatUint(maxArrayElements+1, 10)) {
+				t.Errorf("error %q does not state the %d elements it refused",
+					err, uint64(maxArrayElements+1))
+			}
 		}
 	})
 	if delta > 16<<20 {

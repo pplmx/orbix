@@ -585,3 +585,61 @@ func TestTensorReaderReturnsTheTensorsOwnBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestTensorRejectsAnUnknownQuantType covers Tensor's unsupported-type refusal.
+//
+// Dequant has its own copy of this message and it was tested; Tensor's was not, so removing the
+// tensor name or the type from it passed. The loader is the path the model loader uses, so a file
+// with a type this build does not implement fails here first.
+//
+// Both pieces are asserted: the name says which tensor, and the type is what a reader compares
+// against the table in the format description.
+func TestTensorRejectsAnUnknownQuantType(t *testing.T) {
+	l := &Loader{size: 1000}
+	l.file = &gguf.File{TensorDataLoc: 100, TensorInfos: []gguf.TensorInfo{
+		{Name: "blk.0.attn_q.weight", Offset: 0, Dims: []uint64{4}, Type: gguf.QuantType(999)},
+	}}
+
+	_, err := l.Tensor("blk.0.attn_q.weight")
+	if err == nil {
+		t.Fatal("Tensor accepted a QuantType this build does not implement")
+	}
+	if !strings.Contains(err.Error(), "blk.0.attn_q.weight") {
+		t.Errorf("error %q does not name the tensor", err)
+	}
+	if !strings.Contains(err.Error(), "999") {
+		t.Errorf("error %q does not state the type", err)
+	}
+}
+
+// TestTensorRejectsAZeroElementCount covers the guard against a tensor that describes nothing.
+//
+// A dimension of zero is legal to write in a GGUF header and produces an element count of zero. The
+// loader refuses it rather than returning an empty slice, because the caller asked for a weight and
+// an empty one would be reshaped into a layer that silently contributes nothing.
+//
+// The message names the count, which distinguishes "this tensor is empty" from "this tensor is
+// malformed" for whoever has to decide which file is wrong.
+func TestTensorRejectsAZeroElementCount(t *testing.T) {
+	l := &Loader{size: 1000}
+	l.file = &gguf.File{TensorDataLoc: 100, TensorInfos: []gguf.TensorInfo{
+		{Name: "blk.0.ffn_down.weight", Offset: 0, Dims: []uint64{4, 0}, Type: gguf.F32},
+	}}
+
+	_, err := l.Tensor("blk.0.ffn_down.weight")
+	if err == nil {
+		t.Fatal("Tensor accepted a tensor with a zero dimension")
+	}
+	if !strings.Contains(err.Error(), "blk.0.ffn_down.weight") {
+		t.Errorf("error %q does not name the tensor", err)
+	}
+	// The count it computed, so the message says why it was refused. Asserted through the phrase
+	// rather than the bare digit: the tensor's own name contains "blk.0", so a substring check for
+	// "0" passes with the count missing.
+	if !strings.Contains(err.Error(), "element count 0") {
+		t.Errorf("error %q does not state the element count", err)
+	}
+	if !strings.Contains(err.Error(), "invalid element count") {
+		t.Errorf("error %q does not say the count is the problem", err)
+	}
+}

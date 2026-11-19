@@ -721,3 +721,49 @@ func TestChatSizesThePoolForAWholeContext(t *testing.T) {
 		})
 	}
 }
+
+// TestChatRefusesAConversationThatFillsTheContext covers the boundary the REPL checks before
+// it submits.
+//
+// Two failures live here and neither was tested. A prompt that encodes to nothing has to be
+// refused rather than submitted, since the engine would have no position to start from; and a
+// conversation that reaches the context length has to be refused with advice, because the
+// engine's own error at that point is about positions rather than about what the user should
+// do next.
+//
+// The comparison is >= rather than >: a prompt exactly filling the window leaves no room for
+// even one generated token, so accepting it produces an empty reply. Relaxing it to > passed the
+// cmd suite.
+func TestChatRefusesAConversationThatFillsTheContext(t *testing.T) {
+	// 45 "a " words plus "done" renders to exactly the fixture's 64 positions once the chat
+	// template adds its role markers -- measured, not derived: the prompt the user types is
+	// shorter than the prompt the model sees, and only the latter is compared against the
+	// window. A prompt far past the limit cannot distinguish `>=` from `>`.
+	path := gguftest.Model{ContextLen: 64, NoEOS: true}.Write(t, t.TempDir())
+	long := strings.Repeat("a ", 45) + "done"
+
+	var out bytes.Buffer
+	err := chatSession(strings.NewReader(long+"\n/exit\n"), &out, chatOptions{model: path, maxTokens: 4})
+	if err != nil {
+		t.Fatalf("chatSession: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "context is 64") {
+		t.Errorf("a conversation past the window was not refused with the size:\n%s", got)
+	}
+	// The advice is the part a user can act on.
+	if !strings.Contains(got, "/clear") {
+		t.Errorf("the refusal does not say what to do about it:\n%s", got)
+	}
+
+	// The session survives the refusal and keeps accepting input: a REPL that exited on the
+	// first oversized paste would lose the conversation the user still wants to /clear.
+	var out2 bytes.Buffer
+	err = chatSession(strings.NewReader(long+"\n/history\n/exit\n"), &out2, chatOptions{model: path, maxTokens: 4})
+	if err != nil {
+		t.Fatalf("chatSession: %v", err)
+	}
+	if !strings.Contains(out2.String(), "history is empty") {
+		t.Errorf("a refused turn left something in the history:\n%s", out2.String())
+	}
+}

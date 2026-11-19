@@ -442,3 +442,29 @@ func TestEscapingRoundTripsEveryByte(t *testing.T) {
 		}
 	}
 }
+
+// TestNewTokenizerSortsSpecialsLongestFirst pins the ordering matchSpecial depends on.
+//
+// matchSpecial takes the first special that prefixes the text, so correctness rests on
+// t.specials being longest-first. The other special-token tests use a vocabulary that
+// happens to already be in that order, so they pass with the sort removed and cannot see
+// this. This one lists the shorter marker first, which is the order a vocabulary file can
+// legitimately use, and a shortest-first scan then matches "<|im_end|>" inside
+// "<|im_end|>tail" and leaves "tail" to be encoded as text.
+func TestNewTokenizerSortsSpecialsLongestFirst(t *testing.T) {
+	tokens := []string{"<|im_end|>", "<|im_end|>tail", "hi"}
+	types := normalTypes(len(tokens))
+	types[0], types[1] = int32(Control), int32(Control)
+	f := buildTokenizerGGUF(t, "gpt2", tokens, types)
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	got := tok.EncodeWithSpecials("<|im_end|>tail", false)
+	want := []int32{1}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("EncodeWithSpecials = %v, want %v: the longer marker must win even "+
+			"though the vocabulary lists the shorter one first", got, want)
+	}
+}

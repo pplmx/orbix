@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -519,5 +520,59 @@ func TestLoaderRejectsTensorExtendingPastTheEnd(t *testing.T) {
 	// A negative length is refused rather than treated as zero.
 	if _, err := l.dataStart(inFile, -1); err == nil {
 		t.Error("dataStart accepted a negative byte count")
+	}
+}
+
+// TestTensorReaderReturnsTheTensorsOwnBytes covers what TensorReader actually produces.
+//
+// The existing cases only drive its refusal paths: an unknown name and an unsupported type. What it
+// returns on success was never read, so doubling the section length -- a reader that hands the
+// caller twice the tensor and lets it swallow the neighbouring one -- left every test green.
+//
+// The payload is distinctive per tensor so a reader starting at the wrong offset, or one returning
+// the wrong tensor's bytes, is visible rather than merely truncated.
+func TestTensorReaderReturnsTheTensorsOwnBytes(t *testing.T) {
+	// Two F32 tensors, each two elements, with different bytes.
+	first := []byte{1, 0, 0, 0, 2, 0, 0, 0}
+	second := []byte{3, 0, 0, 0, 4, 0, 0, 0}
+	// The offsets are the caller's job: writeModel writes them verbatim and appends the data
+	// block as one run, so a tensor that does not say where it starts reads the first one's
+	// bytes. That is what makes the payload comparison below meaningful.
+	path := writeModel(t, []gguf.TensorInfo{
+		{Name: "first", Type: gguf.F32, Dims: []uint64{2}, Offset: 0},
+		{Name: "second", Type: gguf.F32, Dims: []uint64{2}, Offset: 8},
+	}, append(append([]byte(nil), first...), second...))
+
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	for _, c := range []struct {
+		name string
+		want []byte
+	}{
+		{"first", first},
+		{"second", second},
+	} {
+		r, err := l.TensorReader(c.name)
+		if err != nil {
+			t.Fatalf("TensorReader(%q): %v", c.name, err)
+		}
+		got, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("reading %q: %v", c.name, err)
+		}
+		if len(got) != len(c.want) {
+			t.Errorf("TensorReader(%q) produced %d bytes, want %d; a section that runs past the "+
+				"tensor hands the caller its neighbour's bytes too", c.name, len(got), len(c.want))
+			continue
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Errorf("TensorReader(%q) byte %d = %d, want %d", c.name, i, got[i], c.want[i])
+			}
+		}
 	}
 }

@@ -1374,3 +1374,38 @@ func TestCallExpressionsAreRefused(t *testing.T) {
 		}
 	})
 }
+
+// TestIfTagErrors covers parseIf's error paths.
+//
+// A chat template is edited by hand, so the message a structural mistake produces is the thing
+// that gets a template fixed. None of these were covered: an if whose condition does not parse, an
+// elif whose condition does not parse, an else that is not followed by endif, and a body whose
+// inner tag fails.
+//
+// The else case is the one a hand edit actually produces -- changing {% endif %} to {% endfor %}
+// while converting a loop -- and the message has to name endif, because "malformed template" would
+// not say which tag is missing.
+func TestIfTagErrors(t *testing.T) {
+	cases := []struct{ src, want string }{
+		// The else block runs into something other than endif.
+		{`{% if x %}a{% else %}b{% endfor %}`, "must be followed by"},
+		// The condition itself does not parse.
+		{`{% if 1+ %}a{% endif %}`, "expression ends early"},
+		// An elif condition that does not parse.
+		{`{% if x %}a{% elif 1+ %}b{% endif %}`, "expression ends early"},
+		// An if that is never closed.
+		{`{% if x %}a`, "never closed"},
+		// An if closed by the wrong tag.
+		{`{% if x %}a{% endfor %}`, "closed by"},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a malformed if", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+		}
+	}
+}

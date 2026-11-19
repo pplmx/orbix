@@ -2052,3 +2052,63 @@ func TestAbandonedSequenceIsCountedAsAbandoned(t *testing.T) {
 		t.Errorf("read %d events from a 64-event buffer", drained)
 	}
 }
+
+// TestPromptThatFillsTheContextIsAcceptedButCannotGenerate covers the accepted boundary.
+//
+// Submit refuses a prompt longer than the window and accepts one that equals it. The accepted
+// case still has to end cleanly: the sequence prefills, samples the single token the prefill's
+// logits support, and is then finished by sample's own check before any decode runs -- a decode
+// at position ContextLen would address a row the cache does not have.
+//
+// That ordering is what the test pins. Reported generated=1 with finish_reason "length", and no
+// error, because the prompt used its whole budget rather than a defect.
+func TestPromptThatFillsTheContextIsAcceptedButCannotGenerate(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{})
+	cfg := e.model.Config()
+	if cfg.ContextLen <= 0 {
+		t.Fatalf("fixture context is %d", cfg.ContextLen)
+	}
+	// Repeat real tokens so the prompt is well-formed and the same length as the window.
+	seed := tok.Encode("Once upon a time", true)
+	if len(seed) == 0 {
+		t.Fatal("the tokenizer produced no tokens")
+	}
+	prompt := make([]int32, cfg.ContextLen)
+	for i := range prompt {
+		prompt[i] = seed[i%len(seed)]
+	}
+
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 5})
+	if err != nil {
+		t.Fatalf("Submit refused a prompt of exactly %d tokens: %v", cfg.ContextLen, err)
+	}
+	for e.Pump() > 0 {
+	}
+
+	var tokens, generated int
+	var last Event
+	for ev := range ch {
+		if ev.HasToken {
+			tokens++
+		}
+		if ev.Err != nil {
+			t.Fatalf("a full-window prompt produced an error: %v", ev.Err)
+		}
+		last = ev
+	}
+	if last.FinishReason != "length" {
+		t.Errorf("finish reason %q, want %q", last.FinishReason, "length")
+	}
+	if generated = last.Generated; generated != tokens {
+		t.Errorf("Generated = %d but %d token events arrived", generated, tokens)
+	}
+	if tokens != 1 {
+		t.Errorf("%d tokens generated from a full window, want exactly 1 (the prefill's own)",
+			tokens)
+	}
+
+	// One token past the window is still refused, so the boundary is the window itself.
+	if _, err := e.Submit(Request{Prompt: append(prompt, prompt[0]), MaxTokens: 5}); err == nil {
+		t.Error("Submit accepted a prompt one token longer than the context")
+	}
+}

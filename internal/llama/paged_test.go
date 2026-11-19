@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -731,4 +732,61 @@ func TestBlockPoolRefCountErrors(t *testing.T) {
 			t.Errorf("RefCount(-1) = %d, want 0", got)
 		}
 	})
+}
+
+// TestSpansRefusesOutOfRangeArguments covers the three range checks around the span walk.
+//
+// spans is unexported and only reached through attention today, so nothing exercised its bounds: a
+// caller passing a layer the cache does not have, a kv head it does not have, or a position count
+// beyond the context was never tested, and removing any of the three checks failed nothing.
+//
+// The messages carry the offending value and the limit, which is what a reader needs to see which side
+// of the off-by-one they are on.
+func TestSpansRefusesOutOfRangeArguments(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 4})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	cache := pool.New()
+	defer func() { _ = cache.Reset() }()
+
+	cases := []struct {
+		name       string
+		layer, kv  int
+		n          int
+		wantPhrase string
+		wantValues []string
+	}{
+		{"a layer past the cache", cfg.Layers, 0, 0, "outside the cache",
+			[]string{strconv.Itoa(cfg.Layers), "(" + strconv.Itoa(cfg.Layers) + ")"}},
+		{"a negative layer", -1, 0, 0, "outside the cache", []string{"-1"}},
+		{"a kv head past the cache", 0, cfg.KVHeads, 0, "outside the cache",
+			[]string{strconv.Itoa(cfg.KVHeads)}},
+		{"more positions than the context", 0, 0, cfg.ContextLen + 1, "positions requested",
+			[]string{strconv.Itoa(cfg.ContextLen + 1), strconv.Itoa(cfg.ContextLen)}},
+		{"a negative position count", 0, 0, -1, "positions requested", []string{"-1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, err := cache.spans(c.layer, c.kv, c.n)
+			if err == nil {
+				t.Fatalf("spans(%d, %d, %d) succeeded", c.layer, c.kv, c.n)
+			}
+			if !strings.Contains(err.Error(), c.wantPhrase) {
+				t.Errorf("error %q does not say what is wrong", err)
+			}
+			for _, want := range c.wantValues {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not state %q", err, want)
+				}
+			}
+		})
+	}
 }

@@ -359,3 +359,48 @@ func TestPrefixPairActuallyReuses(t *testing.T) {
 			on.prefixReused)
 	}
 }
+
+// TestBenchSingleMeasurement covers cmdBench's single-measurement path.
+//
+// The existing bench tests drive cmdBench twice and neither reaches this path: the rejection
+// cases return on a validation error, and the accepted case passes --suite, which branches off
+// at line 94 before any engine is built. So the whole single-run path -- opening the model,
+// choosing a cache, running the load, and printing the report -- had no test, and
+// Model.Runner() is called nowhere else in production, which is why it sat at 0% coverage.
+//
+// The report line is what is asserted: it is where the worker fan-out a caller asked for is
+// echoed back, so a run whose options were silently dropped shows up here rather than only in
+// numbers that look slightly wrong.
+func TestBenchSingleMeasurement(t *testing.T) {
+	model := suiteModel(t)
+
+	out := captureStdout(t, func() {
+		err := cmdBench([]string{
+			"--model", model,
+			"--max-tokens", "1",
+			"--requests", "1",
+			"--concurrency", "1",
+			"--workers", "2",
+		})
+		if err != nil {
+			t.Errorf("cmdBench: %v", err)
+		}
+	})
+
+	// The report has to name the worker count it ran with. Comparing the number matters:
+	// printing the flag's default would satisfy a test that only looked for the word.
+	if !strings.Contains(out, "workers 2") {
+		t.Errorf("bench report does not name the worker count:\n%s", out)
+	}
+	if !strings.Contains(out, "generating:  1 tokens x 1 requests") {
+		t.Errorf("bench report does not describe the run:\n%s", out)
+	}
+	// A single measurement reports one run, not the suite's table, so the header must be the
+	// one-line form and the kv cache line must be present for whichever cache was chosen.
+	if !strings.Contains(out, "kv cache:") {
+		t.Errorf("bench report has no kv cache line:\n%s", out)
+	}
+	if strings.Contains(out, "scenario") {
+		t.Errorf("a single measurement printed a suite table:\n%s", out)
+	}
+}

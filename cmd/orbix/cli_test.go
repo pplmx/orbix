@@ -1095,3 +1095,65 @@ func TestFormatValueKeepsUTF8Whole(t *testing.T) {
 		t.Errorf("formatValue(array) = %q, want \"7 values\"", got)
 	}
 }
+
+// TestReportFormatsTheMessageAndTheStatus covers the mapping from an error to what a caller
+// sees: the line on stderr and the exit status.
+//
+// The "orbix: " prefix is how a script and a human tell this program's complaint apart from
+// whatever else was on the terminal -- it was in the message for every command and nothing
+// asserted it, so removing it passed the cmd suite.
+func TestReportFormatsTheMessageAndTheStatus(t *testing.T) {
+	t.Run("success is silent", func(t *testing.T) {
+		var w bytes.Buffer
+		if got := report(nil, &w); got != 0 {
+			t.Errorf("report(nil) = %d, want 0", got)
+		}
+		if w.Len() != 0 {
+			t.Errorf("report(nil) wrote %q to stderr", w.String())
+		}
+	})
+
+	t.Run("an error is prefixed and non-zero", func(t *testing.T) {
+		var w bytes.Buffer
+		err := errors.New("something went wrong")
+		if got := report(err, &w); got != 1 {
+			t.Errorf("report(error) = %d, want 1", got)
+		}
+		got := w.String()
+		if !strings.HasPrefix(got, "orbix: ") {
+			t.Errorf("stderr line %q does not start with the program name", got)
+		}
+		if !strings.Contains(got, "something went wrong") {
+			t.Errorf("stderr line %q does not carry the message", got)
+		}
+	})
+
+	t.Run("help is a success", func(t *testing.T) {
+		// The flag package prints the usage itself and returns ErrHelp; treating that as a
+		// failure made every command's -h exit 1 with an extra complaint on stderr.
+		var w bytes.Buffer
+		if got := report(flag.ErrHelp, &w); got != 0 {
+			t.Errorf("report(flag.ErrHelp) = %d, want 0", got)
+		}
+		if w.Len() != 0 {
+			t.Errorf("report(flag.ErrHelp) wrote %q, want nothing", w.String())
+		}
+	})
+
+	t.Run("a wrapped help is still a success", func(t *testing.T) {
+		// errors.Is is what makes this work through wrapping, which is how a command that
+		// passes the flag package's error up reports it.
+		var w bytes.Buffer
+		if got := report(fmt.Errorf("serve: %w", flag.ErrHelp), &w); got != 0 {
+			t.Errorf("report(wrapped ErrHelp) = %d, want 0", got)
+		}
+	})
+
+	t.Run("a writer that fails does not change the status", func(t *testing.T) {
+		// The write is best effort: a CLI reporting a failure has nothing left to report on
+		// if stderr is gone, and the exit status is what a caller can act on.
+		if got := report(errors.New("boom"), failingWriter{err: errors.New("closed")}); got != 1 {
+			t.Errorf("report with a broken writer = %d, want 1", got)
+		}
+	})
+}

@@ -510,6 +510,15 @@ cannot separate them. The `NOTE` column in a live run is longer than the text ab
 it also reports the block pool's shape and the positions the prefix cache reused, which
 are trimmed here to fit.
 
+The `FIRST` column is a latency, but of a different request depending on the row, and reading it
+without knowing which is the faster way to be wrong about this table. On a throughput row it is
+how long until *any* request produced a token, which is essentially the prefill time. On the two
+policy rows it is the **short** request's own first token -- not "any", because under MaxActive 1
+the long request runs first and would supply that number under every policy, leaving the column
+with nothing to say. The policies reorder a fixed amount of work, so where the short request lands
+is the only thing they change: 41 ms under `shortest` against 401 ms under `fifo` is the whole
+result, and the two rows' `TOK/S` figures are not.
+
 Three of those rows need a sentence of explanation, because their numbers look flat or
 backwards for a reason:
 

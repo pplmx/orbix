@@ -2172,3 +2172,40 @@ func TestDanglingMinusIsARefusal(t *testing.T) {
 		t.Errorf("10 - 3 - 2 = %q, want 5 (left-associative)", got)
 	}
 }
+
+// TestFilterNameMustBeAnIdentifier covers the check after '|'.
+//
+// A non-name after the pipe has to be refused at parse time. Without the check the parser reads
+// the next token as the filter's name whatever it is, looks it up in supportedFilters, and reports
+// "unsupported template filter \"1\"" -- which names a filter the author did not write and hides
+// the malformed expression.
+//
+// The three shapes are the ones a typo produces: a number, a missing name, and a character the
+// lexer already refuses with a different message (kept as a control, so the assertion is about
+// this check rather than about the lexer).
+func TestFilterNameMustBeAnIdentifier(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: " hi "}}
+
+	// Only spellings that fail isIdentifier reach this check. `_` and a quoted 'x' are both
+	// identifiers by their text -- the check looks at the token's content, not its kind -- so
+	// they are reported as unknown filters instead, which is the case below.
+	for _, src := range []string{`{{ x | 1 }}`, `{{ x | }}`, `{{ x | 1.5 }}`, `{{ x | 2a }}`} {
+		_, err := Parse(src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a non-identifier filter name", src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "expected a filter name") {
+			t.Errorf("Parse(%q) error %q does not say a filter name was expected", src, err)
+		}
+	}
+
+	// A real filter still resolves, and an unknown but well-formed name is reported by name.
+	if got := render(t, `{{ messages[0].content | trim }}`, msgs, Inputs{}); got != "hi" {
+		t.Errorf("trim gave %q, want \"hi\"", got)
+	}
+	_, err := Parse(`{{ messages | nosuchfilter }}`)
+	if err == nil || !strings.Contains(err.Error(), `"nosuchfilter"`) {
+		t.Errorf("an unknown filter name was not reported by name: %v", err)
+	}
+}

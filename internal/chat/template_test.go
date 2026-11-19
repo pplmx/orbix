@@ -2514,3 +2514,75 @@ func TestTrailingTokensShowWhatWasParsed(t *testing.T) {
 		}
 	}
 }
+
+// TestEvalErrorsNameTheVariableAndField covers two render-time messages whose data went untested.
+//
+// A for loop over a non-sequence names the loop variable: a template with two loops needs to know
+// which one, and the message is the only thing that says. The attribute form on a non-mapping names
+// the field being read, for the same reason.
+//
+// Both messages carried the name and nothing asserted it; replacing either format with a sentence
+// passed every test.
+func TestEvalErrorsNameTheVariableAndField(t *testing.T) {
+	t.Run("for over a non-sequence", func(t *testing.T) {
+		tpl, err := Parse(`{% for item in 1 %}{{ item }}{% endfor %}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		_, err = tpl.Render(nil, Inputs{})
+		if err == nil {
+			t.Fatal("rendering a for over a number succeeded")
+		}
+		if !strings.Contains(err.Error(), "iterates a non-sequence") {
+			t.Errorf("error %q does not say what went wrong", err)
+		}
+		if !strings.Contains(err.Error(), "item") {
+			t.Errorf("error %q does not name the loop variable", err)
+		}
+	})
+
+	t.Run("attribute of a non-mapping", func(t *testing.T) {
+		// A message's content is a string, so reading .something from it is the case.
+		tpl, err := Parse(`{{ messages[0].content.nosuchfield }}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		_, err = tpl.Render([]Message{{Role: "user", Content: "hi"}}, Inputs{})
+		if err == nil {
+			t.Fatal("reading a field from a string succeeded")
+		}
+		if !strings.Contains(err.Error(), "non-mapping") {
+			t.Errorf("error %q does not say what went wrong", err)
+		}
+		if !strings.Contains(err.Error(), "nosuchfield") {
+			t.Errorf("error %q does not name the field", err)
+		}
+	})
+}
+
+// TestIndexErrorsShowTheIndex covers the two messages a bad sequence index produces.
+//
+// A non-numeric index prints the text it got, and an out-of-range one prints the index and the length
+// it exceeded. Both are what a template author compares against, and the non-numeric case had no test
+// at all -- removing the quoted text from the format passed everything.
+func TestIndexErrorsShowTheIndex(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+
+	t.Run("a non-numeric index", func(t *testing.T) {
+		tpl, err := Parse(`{{ messages['x'] }}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		_, err = tpl.Render(msgs, Inputs{})
+		if err == nil {
+			t.Fatal("indexing a sequence with a string succeeded")
+		}
+		// The quoted text, so a template with several indexes says which one is wrong.
+		if !strings.Contains(err.Error(), `"x"`) {
+			t.Errorf("error %q does not show the index it got", err)
+		}
+		if !strings.Contains(err.Error(), "is not a number") {
+			t.Errorf("error %q does not say what the index should be", err)
+		}
+	})
+}

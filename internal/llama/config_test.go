@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -348,6 +349,10 @@ func TestLoadConfigRejects(t *testing.T) {
 		name   string
 		mutate func(*tinyConfig) []kv
 		want   string
+		// wantAll are values the message has to carry as well: the numbers a caller needs to
+		// know which side of a comparison was wrong. Asserting only the category word leaves a
+		// message that says "not divisible" and nothing else passing.
+		wantAll []string
 	}{
 		{
 			name: "unsupported architecture",
@@ -380,6 +385,8 @@ func TestLoadConfigRejects(t *testing.T) {
 				return replaceKey(c.kvs(), "llama.attention.head_count", u32Val(3))
 			},
 			want: "not divisible",
+			// hidden=8, heads=3.
+			wantAll: []string{"8", "3"},
 		},
 		{
 			// Zero is not merely invalid, it is the value the divisibility check two lines
@@ -399,6 +406,8 @@ func TestLoadConfigRejects(t *testing.T) {
 				return replaceKey(c.kvs(), "llama.attention.head_count_kv", u32Val(3))
 			},
 			want: "not divisible",
+			// heads=2, kv heads=3.
+			wantAll: []string{"2", "3"},
 		},
 		{
 			name: "rope dim larger than head dim",
@@ -406,13 +415,16 @@ func TestLoadConfigRejects(t *testing.T) {
 				return replaceKey(c.kvs(), "llama.rope.dimension_count", u32Val(6))
 			},
 			want: "outside",
+			// The value asked for and the head dimension it must not exceed: 6 and 4.
+			wantAll: []string{"6", "4"},
 		},
 		{
 			name: "odd rope dim",
 			mutate: func(c *tinyConfig) []kv {
 				return replaceKey(c.kvs(), "llama.rope.dimension_count", u32Val(3))
 			},
-			want: "odd",
+			want:    "odd",
+			wantAll: []string{"3"},
 		},
 		{
 			name: "non-positive rope base",
@@ -450,6 +462,11 @@ func TestLoadConfigRejects(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+			for _, w := range tc.wantAll {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error = %v, want it to state %q", err, w)
+				}
 			}
 		})
 	}
@@ -1272,4 +1289,69 @@ func TestWindowLargerThanTheContextIsAccepted(t *testing.T) {
 		t.Errorf("the window (%d) is not larger than the context (%d), so this case does not "+
 			"exercise what it claims", cfg.WindowLen, cfg.ContextLen)
 	}
+}
+
+// TestLoadConfigRejectsBadEmbeddingShape covers the two checks on token_embd.weight.
+//
+// The embedding table is the one tensor whose shape the config file itself determines, so a
+// disagreement means the metadata and the weights came from different models. Both messages carry
+// numbers -- how many dimensions were found, how long a row is, and what was expected -- and neither
+// had a test: the existing shape test corrupts attn_q instead.
+//
+// Catching this at load time keeps the failure here. In the forward pass it surfaces as a
+// slice-bounds panic inside a matmul, which names nothing.
+func TestLoadConfigRejectsBadEmbeddingShape(t *testing.T) {
+	t.Run("wrong number of dimensions", func(t *testing.T) {
+		c := defaultTiny()
+		tensors := c.tensors()
+		for i := range tensors {
+			if tensors[i].Name == "token_embd.weight" {
+				// A vector instead of a matrix.
+				tensors[i].Dims = []uint64{uint64(c.vocab)}
+			}
+		}
+		f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), tensors, nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		_, err = LoadConfig(f)
+		if err == nil {
+			t.Fatal("LoadConfig accepted a one-dimensional token_embd.weight")
+		}
+		if !strings.Contains(err.Error(), "token_embd.weight") {
+			t.Errorf("error = %v, want it to name the tensor", err)
+		}
+		// Both the count found and the count expected.
+		for _, want := range []string{"1", "2"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("wrong row length", func(t *testing.T) {
+		c := defaultTiny()
+		tensors := c.tensors()
+		for i := range tensors {
+			if tensors[i].Name == "token_embd.weight" {
+				// Two-dimensional, but the rows are one wider than embedding_length. The shape is
+				// [hidden, vocab], which is what the fixture writes at its own definition.
+				tensors[i].Dims = []uint64{uint64(c.hidden + 1), uint64(c.vocab)}
+			}
+		}
+		f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), tensors, nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		_, err = LoadConfig(f)
+		if err == nil {
+			t.Fatal("LoadConfig accepted a token_embd.weight with the wrong row length")
+		}
+		// The row found and the embedding_length it must equal.
+		for _, want := range []string{strconv.Itoa(c.hidden + 1), strconv.Itoa(c.hidden)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to state %q", err, want)
+			}
+		}
+	})
 }

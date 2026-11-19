@@ -884,3 +884,76 @@ func TestExporterTreatsNon2xxAsFailure(t *testing.T) {
 		t.Errorf("Flush failed against a 204: %v", err)
 	}
 }
+
+// TestExporterFlushesOnItsInterval covers the ticker path, which is how a running server exports.
+//
+// Every other exporter test sets Interval to an hour and calls Flush itself, so the branch that
+// sends without being asked never ran. That is the path production uses: orbix serve creates an
+// exporter and never flushes it, so spans reach the collector only through this ticker.
+//
+// A short interval is used rather than waiting on the default second, and the assertion is that a
+// request arrives without any call to Flush or Close.
+func TestExporterFlushesOnItsInterval(t *testing.T) {
+	got := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		select {
+		case got <- struct{}{}:
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint: srv.URL,
+		Interval: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	// Close waits for run to stop, so a leak here would fail the test rather than the process.
+	defer func() { _ = exp.Close() }()
+
+	exp.Record(testSpan(t, "ticked"))
+
+	select {
+	case <-got:
+		// The ticker sent it with no help from the test.
+	case <-time.After(5 * time.Second):
+		t.Fatal("no export arrived on the interval; the ticker branch is not running")
+	}
+}
+
+// TestExporterDropsWhenTheCollectorIsDown covers the flush error path under the ticker.
+//
+// run ignores the error from flush, which is deliberate -- there is nowhere to report it from a
+// goroutine -- but the spans must still be dropped rather than re-queued, or a collector that is
+// down turns the exporter into an unbounded buffer. Nothing asserted the queue drains when a send
+// fails, so a change to re-queue would only show up as growing memory in production.
+func TestExporterDropsWhenTheCollectorIsDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	exp.Record(testSpan(t, "lost"))
+	// Flush reports the failure, so the caller knows; the queue must be empty afterwards.
+	if err := exp.Flush(context.Background()); err == nil {
+		t.Fatal("Flush succeeded against a collector returning 500")
+	}
+	if n := exp.Dropped(); n == 0 {
+		t.Error("the failed send was not counted as dropped")
+	}
+	// A second flush has nothing left to send, which is what proves the spans were dropped rather
+	// than kept for another attempt.
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Errorf("the second flush still had work: %v", err)
+	}
+}

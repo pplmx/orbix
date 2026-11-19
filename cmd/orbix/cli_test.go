@@ -1665,3 +1665,61 @@ func TestRunRefusesContextAndPromptThatDoNotFit(t *testing.T) {
 		t.Error("a short prompt produced no output")
 	}
 }
+
+// TestRunRefusesAPromptOfExactlyTheContext covers the boundary the previous test cannot see.
+//
+// The check is >= rather than >, so a prompt that fills the window exactly is refused: there is no
+// room left to generate into. A test that uses a prompt far past the window -- the 300-word case --
+// passes under both comparisons, which is why widening the bound tenfold changed nothing when that
+// test was written.
+//
+// Measured on the 128-position fixture: 126 repetitions of "a " encode to exactly 128 ids and are
+// refused with "prompt is 128 tokens, context is 128".
+func TestRunRefusesAPromptOfExactlyTheContext(t *testing.T) {
+	const ctx = 128
+	path := gguftest.Model{NoEOS: true, ContextLen: ctx}.Write(t, t.TempDir())
+	tok, cfg, err := benchLoad(path)
+	if err != nil {
+		t.Fatalf("benchLoad: %v", err)
+	}
+	// run encodes with the model's own BOS rule, so the prompt is measured the same way here. An
+	// earlier version used false and found a prompt one token short of the window.
+	withBOS := cfg.BOSID >= 0
+
+	// Find the repetition count whose encoding is exactly the window, rather than assuming one:
+	// the count depends on the vocabulary the fixture builds.
+	fill := ""
+	for n := 1; n <= 4*ctx; n++ {
+		fill = strings.Repeat("a ", n)
+		if len(tok.Encode(fill, withBOS)) == ctx {
+			break
+		}
+		fill = ""
+	}
+	if fill == "" {
+		t.Fatalf("no repetition count encodes to exactly %d tokens", ctx)
+	}
+	if got := len(tok.Encode(fill, withBOS)); got != ctx {
+		t.Fatalf("the constructed prompt is %d tokens, want %d", got, ctx)
+	}
+
+	err = run([]string{"run", "--model", path, "--max-tokens", "1", fill})
+	if err == nil {
+		t.Fatal("run accepted a prompt that fills the context exactly")
+	}
+	if !strings.Contains(err.Error(), "context is 128") {
+		t.Errorf("error %q does not name the context", err)
+	}
+
+	// One token shorter still runs, so the refusal is about the boundary rather than about a
+	// prompt this long being unusable.
+	shorter := strings.Repeat("a ", 125)
+	if got := len(tok.Encode(shorter, withBOS)); got >= ctx {
+		t.Fatalf("the shorter prompt is %d tokens, which does not leave room", got)
+	}
+	captureStdout(t, func() {
+		if err := run([]string{"run", "--model", path, "--max-tokens", "1", shorter}); err != nil {
+			t.Errorf("a prompt that leaves room was refused: %v", err)
+		}
+	})
+}

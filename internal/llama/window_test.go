@@ -822,3 +822,51 @@ func TestEmbedRefusesAnOutOfRangeToken(t *testing.T) {
 		}
 	})
 }
+
+// TestDecodeStepRefusesACachePastTheRopeTable covers DecodeStep's second bound.
+//
+// The first is the cache's own capacity; this one is the rope table, which can be shorter. NewKVCache
+// does not compare the two, so a cache built wider than the table is legal and a decode step at the
+// table's end has to be refused rather than indexing past the cosine table.
+//
+// The boundary is >= : a cache holding exactly the table's length is already past it, because the
+// step about to run needs one more position. Changing it to > passed every test before this one.
+func TestDecodeStepRefusesACachePastTheRopeTable(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	rope := len(m.rope.cos)
+	cache, err := NewKVCache(cfg, rope+2)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	toks := make([]int32, rope)
+	for i := range toks {
+		toks[i] = 1
+	}
+	if _, err := m.Prefill(cache, toks, 0); err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	if cache.Len() != rope {
+		t.Fatalf("cache holds %d positions, want %d", cache.Len(), rope)
+	}
+
+	_, err = m.DecodeStep([]Cache{cache}, []int32{1})
+	if err == nil {
+		t.Fatal("DecodeStep ran with the cache already at the rope table's end")
+	}
+	if !strings.Contains(err.Error(), "past the rope table") {
+		t.Errorf("error %q does not name the table", err)
+	}
+	// The cache's length and the table's, which are equal here -- the point of the >=.
+	for _, want := range []string{"at 32", "(32)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not state %q", err, want)
+		}
+	}
+}

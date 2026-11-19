@@ -2592,3 +2592,66 @@ func TestSeedZeroMeansRandom(t *testing.T) {
 		t.Errorf("greedy output differs by seed: %q vs %q", a, b)
 	}
 }
+
+// failingWriter accepts a few writes and then fails, which is what a client that stops reading
+// looks like to the handler: the socket is still there, the kernel buffer fills, and Write
+// starts returning an error.
+type failingWriter struct {
+	http.ResponseWriter
+	allow int
+	n     int
+}
+
+func (f *failingWriter) Write(b []byte) (int, error) {
+	f.n++
+	if f.n > f.allow {
+		return 0, errors.New("connection reset by peer")
+	}
+	return f.ResponseWriter.Write(b)
+}
+
+// Flush makes it an http.Flusher, so streamResponse gets past its own type assertion and the
+// failure happens where a real disconnect happens -- inside send.
+func (f *failingWriter) Flush() {}
+
+// TestStreamStopsWhenWritesFail covers the send-failure path in streamResponse.
+//
+// Every `if !send(...) { return }` in that function was unexecuted: the other streaming tests
+// write to an httptest.ResponseRecorder, whose Write never fails, and
+// TestClientDisconnectStopsGeneration cancels the request but reads a non-streaming response.
+// A real disconnect is observed here as a write error, because the handler cannot see the
+// socket -- only the failure of the next Write.
+//
+// The property under test is that the handler returns instead of looping over the rest of the
+// channel and writing into a dead connection.
+func TestStreamStopsWhenWritesFail(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	// More events than the writer accepts, so the loop has something left to do when the
+	// first write fails.
+	ch := make(chan engine.Event, 32)
+	for range 16 {
+		ch <- engine.Event{Token: 5, HasToken: true}
+	}
+	ch <- engine.Event{Done: true, FinishReason: "length"}
+	close(ch)
+
+	base := httptest.NewRecorder()
+	w := &failingWriter{ResponseWriter: base, allow: 1}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+			ch, "cmpl-test", false, nil, false, 0)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamResponse kept writing after Write failed")
+	}
+	// It must have stopped early: one accepted chunk is far fewer than the 16 events sent.
+	if w.n > 2 {
+		t.Errorf("made %d writes after the first failure; the loop should have returned", w.n)
+	}
+}

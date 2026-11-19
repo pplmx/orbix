@@ -16,7 +16,7 @@
 //   - {% for %} with loop.index0, loop.index, loop.first, loop.last, and loop.length
 //   - {% set %}, including assigning to a name another statement reads
 //   - {{ expression }} with string and variable operands, + concatenation, and the
-//     trim and tojson filters
+//     trim, tojson and length filters
 //   - whitespace control ({%- and -%}), which templates use to keep output tight
 //
 // Anything outside that set makes Parse report an error naming the construct it does

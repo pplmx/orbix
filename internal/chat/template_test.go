@@ -205,6 +205,12 @@ func TestRenderFilters(t *testing.T) {
 		{`{{ ' padded ' | trim }}`, "padded"},
 		{`{{ 'a' | tojson }}`, `"a"`},
 		{`{{ messages | length }}x`, "0x"},
+		// Jinja2's length is Python's len, which counts characters rather than bytes.
+		// Measured against it: "中文" is 2 there, and counting bytes here made it 6, so a
+		// template branching on a length threshold would have taken the other arm.
+		{`{{ '中文' | length }}`, "2"},
+		{`{{ 'é' | length }}`, "1"},
+		{`{{ 'hi' | length }}`, "2"},
 	}
 	for _, tc := range cases {
 		if got := render(t, tc.src, nil, Inputs{}); got != tc.want {

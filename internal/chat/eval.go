@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // value is a renderable value: text, a list, or a message-like map.
@@ -486,7 +487,10 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 		if v.isList {
 			return strValue(strconv.Itoa(len(v.list))), nil
 		}
-		return strValue(strconv.Itoa(len(v.text))), nil
+		// Runes, not bytes: Jinja2's length is Python's len, which counts characters.
+		// Measured against Jinja2 -- "中文" is 2 there and was 6 here, so a template
+		// branching on a length threshold would have taken the other arm.
+		return strValue(strconv.Itoa(utf8.RuneCountInString(v.text))), nil
 	default:
 		return value{}, fmt.Errorf("chat: unsupported template filter %q", f.name)
 	}

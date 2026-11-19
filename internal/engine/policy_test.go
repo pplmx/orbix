@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1010,5 +1011,29 @@ func TestErrorTypeOnFailedSpans(t *testing.T) {
 	mu.Unlock()
 	if strings.Contains(okBody, `"error.type"`) {
 		t.Errorf("successful span carries error.type: %s", okBody)
+	}
+}
+
+// TestPriorityStringNamesUnknownValues covers the default arm of Priority.String.
+//
+// Priority is an exported integer type, so a caller outside this package can construct a value
+// the three constants do not cover -- from a config file, a stored setting, or an RPC enum that
+// gained a member. The arm exists so that such a value is reported as what it is rather than
+// masquerading as one of the policies this package implements: a log line saying "fair" for a
+// value the engine does not treat as fair would be worse than a number.
+//
+// It is unreachable through ParsePriority, which is why no test reached it; nothing in the
+// package can produce these values from a string.
+func TestPriorityStringNamesUnknownValues(t *testing.T) {
+	for _, p := range []Priority{Priority(3), Priority(99), Priority(-1)} {
+		got := p.String()
+		if got == "fifo" || got == "shortest" || got == "fair" {
+			t.Errorf("Priority(%d).String() = %q, which names an implemented policy", int(p), got)
+			continue
+		}
+		// The number has to be in the text, or a reader cannot tell which value arrived.
+		if !strings.Contains(got, strconv.Itoa(int(p))) {
+			t.Errorf("Priority(%d).String() = %q, which does not carry the value", int(p), got)
+		}
 	}
 }

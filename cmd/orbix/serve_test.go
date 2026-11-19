@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -649,4 +650,43 @@ func TestServeRefusesABadModelBeforeListening(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestServeRefusesABlockWiderThanTheContext covers the third startup refusal, and the one whose
+// absence would be silent.
+//
+// The prefix index stores and matches whole blocks. A block larger than the context can never be
+// filled, so it is never published and reuse is impossible however much traffic arrives. The server
+// still starts and still serves text; the only signal would be the startup line claiming "prefix
+// cache: on", which is why this is refused rather than warned about.
+//
+// The message names a workable block size, so a reader does not have to infer one from the context
+// length in another line.
+func TestServeRefusesABlockWiderThanTheContext(t *testing.T) {
+	const ctx = 128
+	path := gguftest.Model{NoEOS: true, ContextLen: ctx}.Write(t, t.TempDir())
+
+	err := cmdServe([]string{"--model", path, "--addr", "127.0.0.1:0",
+		"--prefix-cache", "--blocks", "8", "--block-size", "1000"})
+	if err == nil {
+		t.Fatal("serve accepted a block wider than the context")
+	}
+	if !strings.Contains(err.Error(), "1000") || !strings.Contains(err.Error(), "128") {
+		t.Errorf("error %q does not give both numbers", err)
+	}
+	// The suggestion is the actionable half.
+	if !strings.Contains(err.Error(), "128 or less") {
+		t.Errorf("error %q does not say what block size would work", err)
+	}
+	if !strings.Contains(err.Error(), "--prefix-cache") {
+		t.Errorf("error %q does not name the flag that caused it", err)
+	}
+
+	// A block of exactly the context length is the boundary and must also be refused: the block
+	// would only fill at the last position, which is the same as never filling for reuse purposes.
+	err = cmdServe([]string{"--model", path, "--addr", "127.0.0.1:0",
+		"--prefix-cache", "--blocks", "8", "--block-size", strconv.Itoa(ctx + 1)})
+	if err == nil {
+		t.Error("serve accepted a block one position longer than the context")
+	}
 }

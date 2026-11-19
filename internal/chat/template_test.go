@@ -1459,3 +1459,32 @@ func TestIsIdentifier(t *testing.T) {
 		}
 	}
 }
+
+// TestEmptySequenceIsFalse covers Jinja's rule for an empty list, which the existing
+// condition table does not reach.
+//
+// The table's "not defined still renders" row tests `{% if tools %}` with tools UNBOUND, which
+// takes the undefined-variable path and says nothing about a bound empty sequence. Making
+// truthy report every list as true passed the whole chat, server and cmd suites, so
+// `{% if messages %}` would have entered its body on an empty conversation and rendered a
+// system-prompt block for a message list that does not have one.
+//
+// Both directions are asserted: an empty sequence is false, and a sequence with one element is
+// true, so the test cannot pass on an implementation that answers false unconditionally.
+func TestEmptySequenceIsFalse(t *testing.T) {
+	const src = `{% if messages %}nonempty{% else %}empty{% endif %}`
+	if got := render(t, src, nil, Inputs{}); got != "empty" {
+		t.Errorf("empty message list rendered %q, want \"empty\"", got)
+	}
+	one := []Message{{Role: "user", Content: "hi"}}
+	if got := render(t, src, one, Inputs{}); got != "nonempty" {
+		t.Errorf("one-message list rendered %q, want \"nonempty\"", got)
+	}
+
+	// The same rule through a boolean filter, so the check is on truthiness rather than on
+	// how a for body happens to iterate: `messages | length == 0` and `{% if messages %}`
+	// have to agree.
+	if got := render(t, `{% if messages | length == 0 %}empty{% else %}nonempty{% endif %}`, nil, Inputs{}); got != "empty" {
+		t.Errorf("empty list with a length filter rendered %q, want \"empty\"", got)
+	}
+}

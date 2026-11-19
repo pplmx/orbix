@@ -183,8 +183,16 @@ func TestEncodeSkipsInvalidSpans(t *testing.T) {
 	bad.TraceID = TraceID{}
 	unfinished := testSpan(t, "unfinished")
 	unfinished.End = time.Time{}
+	// A span whose end precedes its start is the other half of the guard, and it is not the
+	// same condition: a zero End is Before every Start, but a finite End can be moved back
+	// without becoming zero. TestEncodeSkipsInvalidSpans only covered the zero case, so
+	// dropping `s.End.Before(s.Start)` passed the otel and engine suites and let a span with
+	// a negative duration reach the collector -- which renders as a bar that ends before it
+	// begins, or is dropped by the backend's own validation, depending on the viewer.
+	backdated := testSpan(t, "backdated")
+	backdated.End = backdated.End.Add(-time.Hour)
 
-	body, err := Encode(nil, []Span{good, bad, unfinished})
+	body, err := Encode(nil, []Span{good, bad, unfinished, backdated})
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
@@ -790,4 +798,30 @@ func TestEncodeBoolAttribute(t *testing.T) {
 	if found.Value.StringValue != nil {
 		t.Error("boolean attribute also has stringValue set")
 	}
+}
+
+// TestEncodeDoesNotEscapeHTML pins the encoder setting that keeps attributes readable.
+//
+// A prompt is ordinary text that can contain <, > and &, and Go's encoder escapes those to
+// \u003c and friends by default. The bytes mean the same thing to a collector, so nothing
+// breaks either way -- which is why no test noticed: turning SetEscapeHTML back on passed the
+// otel and engine suites. What changes is the size of every trace that carries prompt text,
+// and whether the attribute can be read in a collector's UI without decoding.
+func TestEncodeDoesNotEscapeHTML(t *testing.T) {
+	sp := testSpan(t, "chat")
+	sp.Attributes = []Attribute{StringAttr("gen_ai.prompt", "x < y & z > w")}
+	body, err := Encode(nil, []Span{sp})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !strings.Contains(string(body), "x < y & z > w") {
+		t.Errorf("attribute text was escaped: %s", body)
+	}
+	for _, esc := range []string{`\u003c`, `\u0026`, `\u003e`} {
+		if strings.Contains(string(body), esc) {
+			t.Errorf("body contains %s: the encoder escaped HTML characters", esc)
+		}
+	}
+	// The escaping must not have been turned off to the point of producing invalid JSON.
+	unmarshalRequest(t, body)
 }

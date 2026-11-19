@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1822,5 +1823,93 @@ func TestStatsQueuedIsNeverNegative(t *testing.T) {
 	for _, ch := range chans {
 		for range ch {
 		}
+	}
+}
+
+// TestContainsDoesNotMatchAnUnrelatedToken is the other half of TestStopToken.
+//
+// A stop list is checked on every generated token, so the failure that matters is stopping on
+// a token that is NOT in the list. TestStopToken only asserts that generation stops on the
+// token it named, which an implementation answering true for any non-empty list satisfies: with
+// one element, every token is either equal to it or not equal to it, and the mutated version
+// answers true either way.
+//
+// The list here holds a token the model will not produce, so a request that runs to its budget
+// is the pass and one that stops early is the failure.
+func TestContainsDoesNotMatchAnUnrelatedToken(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{})
+	prompt := tok.Encode("Once upon a time", true)
+
+	// A token far outside anything this small fixture emits, so the stop list is non-empty and
+	// matches nothing.
+	const absent = int32(1 << 20)
+	if cfg := e.model.Config(); int(absent) < cfg.VocabSize {
+		t.Fatalf("the chosen token %d is inside the vocabulary (%d); it could be generated",
+			absent, cfg.VocabSize)
+	}
+
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 6, Stop: []int32{absent}})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	out, reason := collect(t, ch)
+	// The budget is 6, so running out of it is what a correct implementation reports. A stop
+	// on a token that was never in the list shows up as the other reason, with fewer tokens.
+	if reason != "length" {
+		t.Errorf("finish reason = %q, want length: stopped on a token that is not in the list", reason)
+	}
+	if len(out) != 6 {
+		t.Errorf("emitted %d tokens %v, want the whole budget of 6", len(out), out)
+	}
+}
+
+// TestSortByID pins the deterministic decode order.
+//
+// The engine collects active sequences from a map, whose iteration order Go randomises, and
+// sorts them by id before decoding so that a run is reproducible -- which is what makes a
+// comparison against a reference implementation meaningful. Reversing the comparison still
+// produces a sorted slice, so a test that only checked "sorted" would pass; what has to be
+// asserted is the direction, and that a single-element and empty slice are handled without
+// touching anything.
+func TestSortByID(t *testing.T) {
+	mk := func(ids ...int) ([]*sequence, []int) {
+		seqs := make([]*sequence, len(ids))
+		for i, id := range ids {
+			seqs[i] = &sequence{id: id}
+		}
+		return seqs, ids
+	}
+	got := func(seqs []*sequence) []int {
+		out := make([]int, len(seqs))
+		for i, s := range seqs {
+			out[i] = int(s.id)
+		}
+		return out
+	}
+
+	cases := []struct {
+		name string
+		in   []int
+		want []int
+	}{
+		{"already sorted", []int{1, 2, 3}, []int{1, 2, 3}},
+		{"reversed", []int{5, 4, 3, 2, 1}, []int{1, 2, 3, 4, 5}},
+		{"interleaved", []int{3, 1, 2, 5, 4}, []int{1, 2, 3, 4, 5}},
+		// The id starts at zero, so a zero must sort to the front rather than be treated as
+		// absent.
+		{"with zero", []int{2, 0, 1}, []int{0, 1, 2}},
+		{"one element", []int{7}, []int{7}},
+		{"none", nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			seqs, _ := mk(c.in...)
+			sortByID(seqs)
+			if gotIDs := got(seqs); !slices.Equal(gotIDs, c.want) {
+				t.Errorf("sortByID(%v) = %v, want %v", c.in, gotIDs, c.want)
+			}
+		})
 	}
 }

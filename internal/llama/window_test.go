@@ -605,3 +605,61 @@ func TestPrefillWithPrefixFallbacks(t *testing.T) {
 		}
 	})
 }
+
+// TestPrefillWithPrefixRefusesInconsistentState covers the three preconditions that guard the call.
+//
+// None was exercised: every test calls PrefillWithPrefix with position zero and a cache that agrees
+// with the token slice, which is what the engine's own call site guarantees. The guards exist for the
+// case where that guarantee breaks -- a resumable prefill, or a cache from another sequence -- and a
+// guard that fires with an unhelpful message turns a bookkeeping bug into a puzzle.
+//
+// Each message has to name the numbers: "needs to start at position 0" without the position it got
+// leaves the reader adding prints to find out which value was wrong.
+func TestPrefillWithPrefixRefusesInconsistentState(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	t.Run("a non-zero start position", func(t *testing.T) {
+		cache, err := NewKVCache(cfg, c.ctx)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		_, err = m.PrefillWithPrefix(cache, []int32{0, 1}, 3)
+		if err == nil {
+			t.Fatal("PrefillWithPrefix accepted a start position of 3")
+		}
+		if !strings.Contains(err.Error(), "position 0") {
+			t.Errorf("error %q does not say what it needs", err)
+		}
+		// The value it got is the half a reader needs.
+		if !strings.Contains(err.Error(), "3") {
+			t.Errorf("error %q does not state the position it got", err)
+		}
+	})
+
+	t.Run("a cache already past the start position", func(t *testing.T) {
+		cache, err := NewKVCache(cfg, c.ctx)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		// Four positions are cached, so prefilling from 0 would overwrite them.
+		if _, err := m.Prefill(cache, []int32{0, 1, 2, 3}, 0); err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		_, err = m.PrefillWithPrefix(cache, []int32{0, 1}, 0)
+		if err == nil {
+			t.Fatal("PrefillWithPrefix accepted a cache already past position 0")
+		}
+		// Both numbers appear: how much is cached and where the caller wants to write.
+		for _, want := range []string{"4", "0"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %s", err, want)
+			}
+		}
+	})
+}

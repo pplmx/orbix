@@ -169,7 +169,15 @@ func TestChatClearAndHistory(t *testing.T) {
 func TestChatHelpAndUnknownCommand(t *testing.T) {
 	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40},
 		"/help\n/nope\n/exit\n")
-	for _, want := range []string{"Commands:", "/clear", `unknown command "/nope"`} {
+	// The descriptions are what /help adds over the banner, which lists the same names on one line.
+	// Asserting a name only proves the banner appeared: with the /help case removed, the command falls
+	// to the default arm and the banner's "/clear" still satisfies it.
+	for _, want := range []string{
+		"Commands:",
+		"forget the conversation",
+		"show the conversation so far",
+		`unknown command "/nope"`,
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}

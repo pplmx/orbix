@@ -2949,3 +2949,71 @@ func TestMaxTokensZeroTakesTheDefault(t *testing.T) {
 			withZero.Choices[0].FinishReason)
 	}
 }
+
+// TestChatAndCompletionsEncodePromptsDifferently covers the branch that picks between the two
+// encoders.
+//
+// A chat prompt is markup this server rendered, so its control markers have to be matched whole: the
+// model was trained to see <|im_start|> as one token, not as the characters it is spelled from. A
+// completions prompt is text the caller typed, so the same characters there are prose and must stay
+// prose. The two cases use different functions for that reason, and nothing tested the choice.
+//
+// The fixture has to declare the marker as a control piece for the difference to exist at all: with
+// the default vocabulary the two encoders agree and the branch is invisible. This one puts it at
+// index 2 as a control token, and the two encoders then produce different lengths for the same
+// input -- measured, 16 ids against 5.
+func TestChatAndCompletionsEncodePromptsDifferently(t *testing.T) {
+	const marker = "<|im_start|>"
+	srv, tok := newTestServerModel(t, gguftest.Model{
+		Vocab:      []string{"<unk>", "<s>", marker, "</s>", "hi", "a", "b"},
+		BOSID:      1,
+		EOSID:      3,
+		NoEOS:      true,
+		ContextLen: 64,
+	})
+
+	// The premise: the two encoders disagree about this text on this file.
+	asText := tok.Encode(marker+"hi", false)
+	asMarkup := tok.EncodeWithSpecials(marker+"hi", false)
+	if len(asText) == len(asMarkup) {
+		t.Fatalf("the fixture does not distinguish the encoders (%d ids each), so this test "+
+			"would pass whichever one the handler chose", len(asText))
+	}
+
+	// The handler's choice, read off the usage counts the response reports for a one-token
+	// completion: prompt_tokens is the encoded length before generation.
+	chat := decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages":[{"role":"user","content":"`+marker+`hi"}],"max_tokens":1}`))
+	completion := decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions",
+		`{"prompt":"`+marker+`hi","max_tokens":1}`))
+
+	// The expected chat count is computed here from the rendered prompt rather than hardcoded, and
+	// the two encoders are applied to it so the assertion names which one the handler must have
+	// used. Asserting only that the endpoints differ is not enough: the chat side is longer either
+	// way -- 25 ids against 36 under the wrong encoder, measured -- because the neutral transcript
+	// adds text around the message.
+	rendered := srv.renderChat([]chatMessage{{Role: "user", Content: marker + "hi"}})
+	withBOS := cfgBOS(t, srv)
+	wantMarkup := len(tok.EncodeWithSpecials(rendered, withBOS))
+	wantText := len(tok.Encode(rendered, withBOS))
+	if wantMarkup == wantText {
+		t.Fatalf("the rendered prompt does not distinguish the encoders (%d ids each), so this "+
+			"test would pass whichever one the handler chose", wantMarkup)
+	}
+	if chat.Usage.PromptTokens != wantMarkup {
+		t.Errorf("chat encoded the rendered prompt to %d ids; encoding it as markup gives %d and "+
+			"as text %d, so the handler used the text path", chat.Usage.PromptTokens, wantMarkup, wantText)
+	}
+
+	if wantTextForPrompt := len(tok.Encode(marker+"hi", withBOS)); completion.Usage.PromptTokens != wantTextForPrompt {
+		t.Errorf("completions encoded the prompt to %d ids; encoding it as text gives %d",
+			completion.Usage.PromptTokens, wantTextForPrompt)
+	}
+}
+
+// cfgBOS reports the addSpecial argument the handler derives from the model: BOS is prepended only
+// when the model declares one.
+func cfgBOS(t *testing.T, srv *Server) bool {
+	t.Helper()
+	return srv.eng.Model().Config().BOSID >= 0
+}

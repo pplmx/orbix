@@ -345,11 +345,14 @@ func (c *PagedKVCache) adopt(blocks []int32) error {
 	}
 	for _, id := range blocks {
 		if err := c.pool.retain(id); err != nil {
-			// Undo the retains done so far: a partial adopt would leave the cache
-			// holding blocks with no positions recorded.
+			// Undo the retains done so far, and forget the blocks: a partial adopt would leave
+			// the cache holding blocks with no positions recorded, and a cache that still lists
+			// them would release somebody else's references when it is reset.
 			for _, done := range c.blocks {
 				_ = c.pool.release(done)
 			}
+			clear(c.blocks)
+			c.blocks = c.blocks[:0]
 			return err
 		}
 		c.blocks = append(c.blocks, id)

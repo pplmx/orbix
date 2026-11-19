@@ -551,3 +551,60 @@ func TestPoolFreeIsSafeConcurrently(t *testing.T) {
 		t.Errorf("Free() = %d after the load, want %d", got, total)
 	}
 }
+
+// TestAdoptRollsBackOnFailure covers adopt's undo loop.
+//
+// adopt retains each block in turn, and a retain can fail part way through -- the block list comes
+// from the prefix index, so a stale id (a block released between the match and the adopt) reaches
+// it, and retain reports an unreferenced block. Without the undo, the cache would hold references
+// for the blocks it did retain while recording no positions for them: those blocks stay
+// permanently unavailable, and a long-running server loses its pool one failed adopt at a time.
+//
+// The list is built with a valid block first and an impossible one second, which is the shape that
+// makes the first retain succeed and the second fail.
+func TestAdoptRollsBackOnFailure(t *testing.T) {
+	cfg := testConfig()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := pool.New()
+	// Give the cache two blocks so its own blocks are real, then take a block the pool knows
+	// about from a second cache.
+	for pos := range 4 {
+		if err := c.ensureBlocks(pos); err != nil {
+			t.Fatalf("ensureBlocks: %v", err)
+		}
+	}
+	valid := c.blocks[0]
+	if got := pool.RefCount(valid); got == 0 {
+		t.Fatalf("block %d is unreferenced before the test", valid)
+	}
+
+	before := pool.RefCount(valid)
+	target := pool.New()
+	// -1 is outside the pool, so retain rejects it after the first block was retained.
+	err = target.adopt([]int32{valid, -1})
+	if err == nil {
+		t.Fatal("adopt accepted a block outside the pool")
+	}
+	if got := pool.RefCount(valid); got != before {
+		t.Errorf("RefCount(%d) = %d after a failed adopt, want the original %d: "+
+			"the undo loop did not release it", valid, got, before)
+	}
+	if got := target.BlocksHeld(); got != 0 {
+		t.Errorf("the failed adopt left %d blocks in the cache, want 0", got)
+	}
+	if got := target.Len(); got != 0 {
+		t.Errorf("the failed adopt left %d positions, want 0", got)
+	}
+
+	// And a reject on the very first block must not touch anything either.
+	before = pool.RefCount(valid)
+	if err := pool.New().adopt([]int32{-1}); err == nil {
+		t.Error("adopt accepted an out-of-pool block as the first entry")
+	}
+	if got := pool.RefCount(valid); got != before {
+		t.Errorf("RefCount(%d) changed on a first-block rejection: %d, want %d", valid, got, before)
+	}
+}

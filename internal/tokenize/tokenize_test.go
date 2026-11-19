@@ -535,3 +535,45 @@ func TestByteLevelVocabularyWithoutModelKeyIsRecognised(t *testing.T) {
 		t.Error("a SentencePiece vocabulary without the model key was read as byte-level")
 	}
 }
+
+// TestBpeUnescapePassthrough covers the two arms of bpeUnescape that a real byte-level
+// vocabulary never produces.
+//
+// The function is documented to handle both families, and its two escape tables cover all 256
+// GPT-2 bytes plus the SentencePiece marker. A piece that is neither -- a literal space, or text
+// outside both tables such as CJK -- is passed through as itself, which is the right answer for a
+// vocabulary that spells its pieces as plain text. Those arms are what keeps this function from
+// mangling such a file, and neither was executed: every fixture piece is in the tables.
+func TestBpeUnescapePassthrough(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// In the bpeBytes table, so this is the ordinary path, kept as a control.
+		{"\u0120", " "},
+		// The SentencePiece marker.
+		{"\u2581hello", " hello"},
+		// A literal space: r == ' ' arm.
+		{"a b", "a b"},
+		// Outside both tables: the utf8 append arm.
+		{"\u4e2d", "\u4e2d"},
+		{"\u4e2d\u6587", "\u4e2d\u6587"},
+		// A piece holding both markers takes the slow path (because U+0120 is a table entry
+		// above 0x7e) and must still treat U+2581 as a space there, not pass it through.
+		{"\u0120\u2581x", "  x"},
+		// A literal space inside a piece that also has a table entry above 0x7e: the slow
+		// path's own space arm, which the fast path covers by ReplaceAll instead.
+		{"\u0120 y", "  y"},
+		// And a CJK rune in a piece that is on the slow path: the WriteRune arm, which is what
+		// keeps a vocabulary that mixes escaped bytes with plain non-ASCII from losing the
+		// plain part.
+		{"\u0120\u4e2d", " \u4e2d"},
+	}
+	for _, c := range cases {
+		if got := bpeUnescape(c.in); got != c.want {
+			t.Errorf("bpeUnescape(%q) = %q, want %q", c.in, got, c.want)
+		}
+		// The byte form must agree, since the decoder routes by vocabulary family rather than
+		// by piece shape and the two have to produce the same text.
+		if got := string(bpeUnescapeBytes(c.in)); got != c.want {
+			t.Errorf("bpeUnescapeBytes(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

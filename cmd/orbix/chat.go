@@ -146,12 +146,23 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	}
 	// The prefix index stores and matches whole blocks, so a block larger than the context can
 	// never be filled and the default-on prefix reuse would silently never fire. Same check as
-	// serve's, made here because chat enables reuse by default rather than on request: an
-	// oversized --block-size arrives without the operator asking for the feature that breaks.
-	if window := cfgForBlocks(gf); blockSize > window {
+	// serve's and bench's, made here because chat enables reuse by default rather than on
+	// request: an oversized --block-size arrives without the operator asking for the feature
+	// that breaks.
+	//
+	// The window comes from llama.LoadConfig, the same source serve and bench use, rather than
+	// from cfgForBlocks: that helper answers a different question -- how big to make the pool --
+	// and falls back to a constant when the file states no context. A file with no context_length
+	// fails inside engine.New anyway, but reading two sources for one concept is how the two
+	// checks would drift apart.
+	bcfg, err := llama.LoadConfig(gf)
+	if err != nil {
+		return err
+	}
+	if blockSize > bcfg.ContextLen {
 		return fmt.Errorf("chat: --block-size %d is larger than this model's %d-position "+
 			"context, so no block ever fills and prefix reuse could never fire; use "+
-			"--block-size %d or less", blockSize, window, window)
+			"--block-size %d or less", blockSize, bcfg.ContextLen, bcfg.ContextLen)
 	}
 
 	eng, err := engine.New(opts.model, engine.Options{

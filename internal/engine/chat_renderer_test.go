@@ -308,3 +308,25 @@ func TestSpecialPieceTextEmptyPaths(t *testing.T) {
 		}
 	})
 }
+
+// TestNilChatRendererPredicates covers the three predicates on a nil renderer.
+//
+// The server's Config defaults to a nil ChatRenderer and must keep working, which is why
+// Render has a nil test. The predicates matter for the same reason and on a different path:
+// the REPL asks HasTemplate and UsesModelTemplate on every turn to decide whether a fallback
+// is worth announcing, and a nil dereference there would be a panic on a configuration the
+// package documents as supported.
+func TestNilChatRendererPredicates(t *testing.T) {
+	var r *ChatRenderer
+	if got := r.FallbackReason(); got != "" {
+		t.Errorf("FallbackReason on a nil renderer = %q, want empty", got)
+	}
+	if r.HasTemplate() {
+		t.Error("HasTemplate on a nil renderer = true, want false")
+	}
+	if r.UsesModelTemplate() {
+		t.Error("UsesModelTemplate on a nil renderer = true, want false")
+	}
+	// Empty rather than a message: a nil renderer is not in a fallback, it is absent, and
+	// the REPL only prints a reason when HasTemplate says a template exists.
+}

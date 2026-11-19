@@ -642,3 +642,82 @@ func TestChatCommandStatsAndHistory(t *testing.T) {
 		}
 	})
 }
+
+// TestChatBannerNamesTheFallback covers the one line that says which chat format is in use.
+//
+// A model whose template could not be evaluated still answers -- in the neutral transcript,
+// which is a different shape from what its own template would produce. Saying so at startup is
+// the difference between a bug report and a mystery, and the reason is the actionable half: it
+// names what about the template could not be evaluated. Dropping the reason from the banner
+// passed the cmd suite.
+func TestChatBannerNamesTheFallback(t *testing.T) {
+	// A model whose template this project cannot parse. The fallback is decided at parse time,
+	// not at render time, so an unknown *call* would not produce it -- the template has to use
+	// a construct the parser rejects.
+	path := gguftest.Model{
+		ChatTemplate: "{% unknown_tag %}",
+	}.Write(t, t.TempDir())
+
+	var out bytes.Buffer
+	// EOF ends the session immediately, so only the banner is printed.
+	if err := chatSession(strings.NewReader(""), &out, chatOptions{model: path, maxTokens: 1}); err != nil {
+		t.Fatalf("chatSession: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "neutral transcript") {
+		t.Fatalf("banner does not announce the fallback:\n%s", got)
+	}
+	// The reason is inside the parentheses after the colon.
+	if !strings.Contains(got, "neutral transcript: ") {
+		t.Errorf("banner does not give a reason for the fallback:\n%s", got)
+	}
+	if strings.HasSuffix(strings.TrimSpace(strings.SplitN(got, "\n", 2)[0]), ":") {
+		t.Errorf("banner ends at a bare colon, so the reason is empty:\n%s", got)
+	}
+}
+
+// TestChatSizesThePoolForAWholeContext covers the block count a REPL starts with.
+//
+// The pool has to hold one whole conversation, because every turn re-sends the history and the
+// prefix index hands back whole blocks. Rounding the context down to a block loses the last
+// partial one, so a conversation that exactly fills the window fails on its final turn.
+//
+// What this asserts is the ceiling division and cfgForBlocks, not the wiring: the pool size is
+// not reported anywhere a session prints, so the connection from these numbers to the engine's
+// block count is still read rather than measured. Reaching it through behaviour needs a
+// conversation that fills the window exactly, which the fixture's 64-position default makes
+// cheap to construct but the assertion would then be about the engine's pool-exhaustion error
+// rather than about this arithmetic.
+func TestChatSizesThePoolForAWholeContext(t *testing.T) {
+	cases := []struct {
+		name    string
+		ctx     int
+		blockSz int
+		want    int
+	}{
+		{"exact multiple", 128, 16, 8},
+		// A context that is not a whole number of blocks still needs the last partial one.
+		{"one past a multiple", 129, 16, 9},
+		{"one short of a multiple", 127, 16, 8},
+		{"one block", 16, 16, 1},
+		{"smaller than a block", 8, 16, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := gguftest.Model{ContextLen: c.ctx, NoEOS: true}.Write(t, t.TempDir())
+			gf, err := gguf.Open(path)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if got := cfgForBlocks(gf); got != c.ctx {
+				t.Fatalf("cfgForBlocks = %d, want the file's %d", got, c.ctx)
+			}
+			// The ceiling division chatSession applies to it.
+			got := (cfgForBlocks(gf) + c.blockSz - 1) / c.blockSz
+			if got != c.want {
+				t.Errorf("a %d-position context at block size %d needs %d blocks, got %d",
+					c.ctx, c.blockSz, c.want, got)
+			}
+		})
+	}
+}

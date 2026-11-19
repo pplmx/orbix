@@ -1650,3 +1650,46 @@ func TestFractionFull(t *testing.T) {
 		})
 	}
 }
+
+// TestFinishReasonIsLengthWhenTheWindowFills covers the context-exhaustion finish.
+//
+// There are two ways a sequence ends on "length": it used its token budget, and it filled
+// the model's window. The budget path is covered; the window path was not, because every
+// fixture prompt was short enough that generation stopped on the budget first. They are
+// different branches of sample -- one tests len(out) against MaxTokens, the other tests pos
+// against the model's ContextLen -- so covering one says nothing about the other.
+//
+// The distinction matters to a caller: a budget stop is what was asked for, while a window
+// stop means the prompt left no room and the answer is shorter than requested.
+func TestFinishReasonIsLengthWhenTheWindowFills(t *testing.T) {
+	const ctxLen = 64
+	path := gguftest.Model{NoEOS: true, ContextLen: ctxLen}.Write(t, t.TempDir())
+	e, tok := loadModelAt(t, path, Options{MaxActive: 1})
+
+	// A prompt that fills most of the window, with a budget large enough that the window is
+	// what stops it.
+	prompt := tok.Encode("Once upon a time there was a little girl who lived", true)
+	if len(prompt) >= ctxLen {
+		t.Fatalf("prompt is %d tokens, too long for a %d-token window", len(prompt), ctxLen)
+	}
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: ctxLen * 2})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	out, reason := collect(t, ch)
+	if reason != "length" {
+		t.Errorf("finish reason = %q, want length", reason)
+	}
+	// The token that takes pos to the window edge is emitted and only then noticed, so
+	// the prompt plus the generated tokens can reach ContextLen+1 but not further. Asserted
+	// as a bound rather than an equality: the exact count depends on where the prompt ended.
+	if got, limit := len(prompt)+len(out), ctxLen+1; got > limit {
+		t.Errorf("prompt %d + generated %d = %d, past the %d-token window's last usable position",
+			len(prompt), len(out), got, limit)
+	}
+	if len(out) == 0 {
+		t.Error("generated nothing, so the window branch was not reached")
+	}
+}

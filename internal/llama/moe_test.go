@@ -582,3 +582,68 @@ func TestSplitExpertsDegenerateInputs(t *testing.T) {
 		})
 	}
 }
+
+// TestParamsMatchesTheTensorElements checks Params against something other than a second copy
+// of itself.
+//
+// TestParamsCountsExpertWeights recomputes the expected figure by walking the same fields in the
+// same order, so the two agree on what to leave out. Dropping the k/v bias terms from Params
+// passed that test, because the independent sum drops them too.
+//
+// The check here is arithmetic on the file: every element of every tensor the checkpoint holds.
+// A bias vector, an expert stack, and a tied output projection all count once, which is the
+// definition the stats line is making a claim about. The fixture's shapes are known from its
+// config, so the expected total is derivable without asking the loader what it loaded.
+func TestParamsMatchesTheTensorElements(t *testing.T) {
+	// A fixture with attention bias, so the k/v vectors are non-empty and their omission is
+	// arithmetically visible rather than hidden behind zero-length slices.
+	path := gguftest.Model{
+		Arch: "qwen2", AttnBias: true, NoEOS: true, ContextLen: 64,
+	}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	// Recompute from the config the file declares, not from the loaded slices: a tensor that
+	// was silently dropped during loading would be missing from both the model and the sum
+	// above, but only this version notices.
+	h := int64(cfg.Hidden)
+	ffn := int64(cfg.FFN)
+	vocab := int64(cfg.VocabSize)
+	qdim := int64(cfg.Heads * cfg.HeadDim)
+	kvdim := int64(cfg.KVHeads * cfg.HeadDim)
+	var want int64
+	want += vocab * h // token_embd
+	want += h         // output_norm
+	want += h * vocab // output (not tied in the fixture)
+	for range cfg.Layers {
+		want += h         // attn_norm
+		want += h * qdim  // attn_q
+		want += h * kvdim // attn_k
+		want += h * kvdim // attn_v
+		want += qdim * h  // attn_output
+		want += h         // ffn_norm
+		want += h * ffn   // ffn_gate
+		want += h * ffn   // ffn_up
+		want += ffn * h   // ffn_down
+		if cfg.AttnBias {
+			want += qdim  // attn_q.bias
+			want += kvdim // attn_k.bias
+			want += kvdim // attn_v.bias
+		}
+	}
+	if got := m.W.Params(); got != want {
+		t.Errorf("Params = %d, want %d (the element count the declared shapes add up to)", got, want)
+	}
+
+	// The bias terms must be a real part of the difference, or the test would not notice them
+	// going missing again.
+	if !cfg.AttnBias {
+		t.Fatal("the fixture has no attention bias, so this test cannot see one omitted")
+	}
+	if want-2*kvdim-qdim <= 0 {
+		t.Fatal("the bias terms are not a positive part of the total")
+	}
+}

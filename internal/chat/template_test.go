@@ -1914,3 +1914,49 @@ func TestJinjaIsTests(t *testing.T) {
 		}
 	}
 }
+
+// TestNotNestsAndReportsErrors covers the two properties of the `not` parser.
+//
+// `not` recurses into itself rather than into the next precedence level, which is what makes
+// `not not x` parse. Parsing the next level instead would accept only one negation and then
+// leave the second `not` to be read as a name, so `{% if not not true %}` would render the wrong
+// branch rather than fail loudly.
+//
+// And an operand that cannot be parsed has to be reported. A parser that swallowed the error and
+// built the node around a nil operand would accept `{% if not %}` and then either render
+// something arbitrary or panic during evaluation.
+//
+// Neither had a test: every case in the corpus uses a single negation with a valid operand.
+func TestNotNestsAndReportsErrors(t *testing.T) {
+	// Odd numbers of negations flip the answer; even numbers restore it.
+	for _, c := range []struct{ src, want string }{
+		{`{% if not false %}T{% else %}F{% endif %}`, "T"},
+		{`{% if not not true %}T{% else %}F{% endif %}`, "T"},
+		{`{% if not not not false %}T{% else %}F{% endif %}`, "T"},
+		{`{% if not true %}T{% else %}F{% endif %}`, "F"},
+		{`{% if not not false %}T{% else %}F{% endif %}`, "F"},
+	} {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", c.src, err)
+		}
+		got, err := tpl.Render(nil, Inputs{})
+		if err != nil {
+			t.Fatalf("Render(%q): %v", c.src, err)
+		}
+		if got != c.want {
+			t.Errorf("%q = %q, want %q", c.src, got, c.want)
+		}
+	}
+
+	// A missing operand is a parse error, not an accepted node.
+	for _, src := range []string{
+		`{% if not %}{% endif %}`,
+		`{% if not ( %}{% endif %}`,
+		`{% if not == %}{% endif %}`,
+	} {
+		if _, err := Parse(src); err == nil {
+			t.Errorf("Parse(%q) accepted a negation with no operand", src)
+		}
+	}
+}

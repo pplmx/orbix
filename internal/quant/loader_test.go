@@ -643,3 +643,38 @@ func TestTensorRejectsAZeroElementCount(t *testing.T) {
 		t.Errorf("error %q does not say the count is the problem", err)
 	}
 }
+
+// TestSizedButUndecodableTypeIsNamed covers the second refusal, which is not the one above.
+//
+// An unrecognised type fails at Size(), so the loader reports "unsupported type" before it reads
+// anything. A type this package can size but has no codec for -- IQ1_S, Q8_K, MXFP4 and thirty others
+// -- passes that check, because the directory has to know every block's width to walk the file, and is
+// refused later with "cannot decode <type>". Both messages must name the type, since a file with
+// several tensors needs to know which one is the problem.
+func TestSizedButUndecodableTypeIsNamed(t *testing.T) {
+	// IQ1_S is 256 weights in 50 bytes; the directory sizes it correctly and the decoder has no entry.
+	ti := gguf.TensorInfo{Name: "odd.weight", Dims: []uint64{256}, Type: gguf.IQ1_S}
+	path := writeModel(t, []gguf.TensorInfo{ti}, make([]byte, 50))
+
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader refused a file whose directory it can size: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	_, err = l.Tensor("odd.weight")
+	if err == nil {
+		t.Fatal("Tensor decoded an IQ1_S tensor")
+	}
+	if !strings.Contains(err.Error(), "cannot decode") {
+		t.Errorf("error %q does not say the type cannot be decoded", err)
+	}
+	// The type's name, not only the fact of the refusal.
+	if !strings.Contains(err.Error(), "IQ1_S") {
+		t.Errorf("error %q does not name the type", err)
+	}
+	// And the tensor it belongs to, which the loader's own wrapper adds.
+	if !strings.Contains(err.Error(), "odd.weight") {
+		t.Errorf("error %q does not name the tensor", err)
+	}
+}

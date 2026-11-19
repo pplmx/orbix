@@ -45,6 +45,13 @@ func FuzzParse(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, src string) {
+		// The input is wider than production ever supplies. A template reaches this package
+		// through gguf's string reader, which refuses a value that is not valid UTF-8, so the
+		// source here is always well-formed in reality. Fuzzing with arbitrary bytes is still
+		// worth it -- the parser should not panic on anything -- but it means the rendered
+		// output can be invalid UTF-8, and that is not a defect this target may report:
+		// measured, "{{ '\xff\xfe' }}" parses and renders the two bytes back unchanged, and
+		// the same source cannot arrive from a file.
 		tmpl, err := Parse(src)
 		if err != nil {
 			// A reported error is the designed answer for anything outside the subset.

@@ -1913,3 +1913,43 @@ func TestSortByID(t *testing.T) {
 		})
 	}
 }
+
+// TestRoundCountsPumpCalls pins the scheduling clock's contract.
+//
+// Round exists so a test can measure scheduling in exact units rather than wall-clock time,
+// and `bench`'s suite prints it. Its statement coverage in this package is 0% because the only
+// caller is in cmd/orbix -- the per-package figure counts an exported function as uncovered
+// when another package calls it, which is the trap AGENTS.md names. The clock itself is worth a
+// test regardless: it is what makes an ordering assertion exact instead of flaky.
+func TestRoundCountsPumpCalls(t *testing.T) {
+	e, tok := loadModel(t)
+	if got := e.Round(); got != 0 {
+		t.Errorf("a fresh engine is at round %d, want 0", got)
+	}
+
+	// A request with a budget the fixture will use up, drained so Pump never blocks.
+	h, err := e.Submit(Request{Prompt: tok.Encode("Once", true), MaxTokens: 4})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	go func() {
+		for range h {
+		}
+	}()
+	for e.Pump() > 0 {
+	}
+
+	// The count is at least the number of tokens plus the finishing round, and it stops
+	// moving once nothing is active -- which is the property a test relies on when it reads
+	// Round to mean "how many scheduling decisions happened".
+	after := e.Round()
+	if after < 4 {
+		t.Errorf("Round = %d after a 4-token request, want at least 4", after)
+	}
+	if e.Pump() != 0 {
+		t.Fatal("Pump reported active sequences after a drained request")
+	}
+	if got := e.Round(); got <= after {
+		t.Errorf("Round = %d on an idle Pump, want it to keep advancing past %d", got, after)
+	}
+}

@@ -662,3 +662,58 @@ func TestRunSequentialRepeatsAShortPrompt(t *testing.T) {
 			res.prefixReused, blockSize)
 	}
 }
+
+// TestSuiteReuseRowPadsAShortPrompt covers the repetition runSequential applies to the caller's
+// prompt.
+//
+// A prompt shorter than one block publishes nothing to the prefix index, so the reuse row would
+// measure zero however the cache is configured. Repeating it to two blocks is what makes the row
+// meaningful. The existing fixture's prompt is 90 tokens -- far past both one block and two -- so
+// the loop never runs there and lowering the threshold from 2*block to 1*block changed nothing
+// measurable.
+//
+// This test uses a three-token prompt, so the loop has to run, and asserts the row reports reuse
+// across at least one block per request: four requests reusing one block each is the floor.
+func TestSuiteReuseRowPadsAShortPrompt(t *testing.T) {
+	path := suiteModel(t)
+	tok, cfg, err := benchLoad(path)
+	if err != nil {
+		t.Fatalf("benchLoad: %v", err)
+	}
+	prompt := tok.Encode("hi", cfg.BOSID >= 0)
+	if n := len(prompt); n >= 16 {
+		t.Fatalf("the prompt is already %d tokens, so it does not need padding", n)
+	}
+
+	o := suiteOptions{model: path, prompt: prompt, maxTok: 4, workers: 1}
+	var sc scenario
+	for _, c := range scenarioList() {
+		if c.name == "prefix reuse x4" {
+			sc = c
+		}
+	}
+	if sc.run == nil {
+		t.Fatal("scenarioList has no prefix reuse row")
+	}
+	res, err := sc.run(o)
+	if err != nil {
+		t.Fatalf("%s: %v", sc.name, err)
+	}
+	// Four requests over a two-block prompt: the first fills it, and each of the other three reuses
+	// both blocks, so four requests' worth is 96 positions -- measured. Padding to one block instead
+	// reports 48, which is why the floor is two blocks rather than one.
+	//
+	// The number is not asserted exactly: it is the model's block count times the requests that
+	// reused, and a different fixture would report a different total. What the threshold pins is
+	// that the padded prompt spans two blocks, which is what the row's NOTE promises the reader.
+	// Measured on this fixture: two blocks of padding report 96 reused positions and one block
+	// reports 48, so the floor that separates them is above 48 and at or below 96. Three requests
+	// reuse both blocks and the first reuses none, which is where 96 comes from; padding to one
+	// block halves it.
+	const twoBlocksPerRequest = 96
+	if res.prefixReused <= twoBlocksPerRequest/2 {
+		t.Errorf("a %d-token prompt reported %d reused positions; padding to one block instead of "+
+			"two reports 48, so the prompt was padded to one block and the NOTE's \"two blocks\" "+
+			"disagrees with the measurement", len(prompt), res.prefixReused)
+	}
+}

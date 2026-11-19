@@ -97,6 +97,9 @@ type tinyConfig struct {
 	// experts and usedAbove are non-zero for a mixture-of-experts fixture.
 	experts int
 	used    int
+	// ropeFreqs, when non-nil, is written as a rope_freqs.weight tensor with these values.
+	// Its length is whatever the caller gave, so a wrong-size tensor is expressible.
+	ropeFreqs []float32
 }
 
 func (c tinyConfig) headDim() int { return c.hidden / c.heads }
@@ -231,6 +234,11 @@ func (c tinyConfig) tensors() []gguf.TensorInfo {
 	}
 	if !c.tied {
 		out = append(out, gguf.TensorInfo{Name: "output.weight", Dims: []uint64{h, uint64(c.vocab)}, Type: gguf.F32})
+	}
+	if c.ropeFreqs != nil {
+		out = append(out, gguf.TensorInfo{
+			Name: "rope_freqs.weight", Dims: []uint64{uint64(len(c.ropeFreqs))}, Type: gguf.F32,
+		})
 	}
 	for i := range c.layers {
 		p := "blk." + string(rune('0'+i)) + "."
@@ -551,6 +559,14 @@ func buildTinyWeights(t *testing.T, c tinyConfig) string {
 		n := int64(1)
 		for _, d := range ti.Dims {
 			n *= int64(d)
+		}
+		// Values a test chose override the shared sequence, so a NaN or a specific factor
+		// reaches the loader unchanged. The sequence would otherwise make every tensor
+		// well-formed and every value arbitrary.
+		if ti.Name == "rope_freqs.weight" && c.ropeFreqs != nil {
+			data = appendFloat32s(data, c.ropeFreqs)
+			offset += int(n) * 4
+			continue
 		}
 		next(int(n))
 		offset += int(n) * 4

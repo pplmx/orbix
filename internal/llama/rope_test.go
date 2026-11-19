@@ -476,3 +476,87 @@ func TestKVCacheChecksAvailableMemory(t *testing.T) {
 		t.Fatalf("with an unknown budget the cache was still refused: %v", err)
 	}
 }
+
+// TestRopeFreqsLoadsFromTheTensor covers LoadWeights' rope_freqs branch.
+//
+// Llama 3.2 carries the per-dimension frequency factors as a tensor rather than metadata, so
+// LoadConfig cannot see them and LoadWeights reads the tensor itself. A model without one keeps
+// the field nil, which the rope treats as no scaling -- that path had coverage. The three
+// branches behind the tensor's presence did not: reading it, rejecting a wrong-length tensor, and
+// rejecting one that carries a NaN.
+//
+// The length check is the one that matters most. rope_freqs is indexed by RopeDim/2 in the rope,
+// so a short tensor is an out-of-range read on every position rather than a wrong number, and a
+// NaN factor poisons the rotation for every position -- the same silent-garbage failure the batch
+// finite check guards against, and this tensor is loaded outside that batch.
+func TestRopeFreqsLoadsFromTheTensor(t *testing.T) {
+	base := defaultTiny()
+	want := base.headDim() / 2
+
+	t.Run("loads a well-formed tensor", func(t *testing.T) {
+		c := base
+		c.ropeFreqs = make([]float32, want)
+		for i := range c.ropeFreqs {
+			c.ropeFreqs[i] = 1
+		}
+		// A distinctive factor, so the assertion below cannot pass on a default of ones
+		// written by something else.
+		c.ropeFreqs[0] = 4
+
+		m, err := New(buildTinyWeights(t, c))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		got := m.Config().RopeFreqs
+		if len(got) != want {
+			t.Fatalf("RopeFreqs has %d values, want %d", len(got), want)
+		}
+		if got[0] != 4 {
+			t.Errorf("RopeFreqs[0] = %v, want the tensor's 4", got[0])
+		}
+	})
+
+	t.Run("rejects a short tensor", func(t *testing.T) {
+		c := base
+		c.ropeFreqs = make([]float32, want-1)
+		for i := range c.ropeFreqs {
+			c.ropeFreqs[i] = 1
+		}
+		_, err := New(buildTinyWeights(t, c))
+		if err == nil {
+			t.Fatal("a short rope_freqs tensor was accepted")
+		}
+		if !strings.Contains(err.Error(), "rope_freqs has") {
+			t.Errorf("error = %q, want it to name the tensor and its length", err)
+		}
+	})
+
+	t.Run("rejects a NaN factor", func(t *testing.T) {
+		c := base
+		c.ropeFreqs = make([]float32, want)
+		for i := range c.ropeFreqs {
+			c.ropeFreqs[i] = 1
+		}
+		c.ropeFreqs[0] = float32(math.NaN())
+		_, err := New(buildTinyWeights(t, c))
+		if err == nil {
+			t.Fatal("a NaN rope_freqs factor was accepted")
+		}
+		if !strings.Contains(err.Error(), "rope_freqs") {
+			t.Errorf("error = %q, want it to name the tensor", err)
+		}
+	})
+
+	// Without the tensor the field stays nil, which is the no-scaling case. Asserted here so a
+	// change that invented a default slice would fail rather than silently switch every model
+	// to a scaling this package made up.
+	t.Run("absent leaves nil", func(t *testing.T) {
+		m, err := New(buildTinyWeights(t, base))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if got := m.Config().RopeFreqs; got != nil {
+			t.Errorf("RopeFreqs = %v without a tensor, want nil", got)
+		}
+	})
+}

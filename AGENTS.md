@@ -105,8 +105,8 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - 确实要真实权重的测试（例如与 llama.cpp 逐 token 比对 logits）保留 `MODEL` 门禁，只用于本地交叉验证。
 - 解析器的错误路径要测：截断、幻数错误、版本不符、越界张量。
 - 覆盖率按**包**看，不按仓库看：`go test -cover ./pkg/` 只 instrument `pkg` 自己，所以别的包的测试调用过来的代码在这个数字里仍然是 0%。`Float32s` 显示 0% 而实际被 `tokenize` 的测试大量调用，追这个数字会浪费一轮。判断真缺口要问「这个函数有没有生产调用方」，不是「这个数字是不是 0」。
-- 覆盖率可能依赖**环境变量**，但只在这两处：设齐四个 `*_MODEL` 后 `internal/engine` 从 85.5% 升到 89.1%、`internal/llama` 从 82.9% 升到 83.3%，其余九个包一个字节都不变。原因是只有 engine 的追踪测试和 llama 的权重测试需要真实 checkpoint，别的包的门控测试跑的是同一条代码路径，跳过了也不影响哪些语句被执行。
-- 所以追低覆盖率之前先问「这个包的数会不会因为我没设环境变量而偏低」，答案在上述两个包里是「会」，别处是「不会」。`engine.finish` 是这个陷阱的唯一实例：无 `MODEL` 时 47.4%、有 checkpoint 时 84.2%，因为 `TestTracingRecordsRequestSpans` 被跳过就把整条追踪分支抹掉了——我为这个数字追过两轮，它从来不是缺口。
+- 覆盖率基本不依赖**环境变量**：2026-11 测过，设齐四个 `*_MODEL` 后 `internal/engine` 仍是 93.5%，`internal/llama` 从 85.5% 升到 86.0%，`internal/tokenize` 从 96.4% 升到 96.7%（`QWEN2_MODEL` 才动，`MODEL` 不动），其余九个包一个字节都不变。llama 的 0.5 个百分点全部落在 `addBias`、`addBiasBatch`、`finishBatch`、`finish`、`LoadConfig` 这五处，tokenize 的 0.3 落在 `looksByteLevel` 和 `drainPending`。
+- 盯覆盖率之前先跑一遍上面这条对照：这个包的数字可能是低在没设 checkpoint 上，也可能只是防御性分支。两边都对不上时，先找有没有生产调用方，再决定要不要补测试。
 - 剩下那些设了 checkpoint 仍不着陆的行，多半是**防御性分支**：`engine.finish` 里 `cache.Reset()` 失败那条只在引用计数被破坏时触发，注释自己写着「a pool bug」。不为它伪造内部状态去凑覆盖率——不可达的错误路径正说明它所在的层是对的。
 - 验证一条回归测试有没有判别力，要靠改动被测代码后重跑，不是靠读代码推断。改动时注意**同文本多处出现**：`moeRowsFromBatch` 和 `moeRowsFromDecode` 的构造体逐字相同，用 Python `str.replace` 不加限定会打到第一个，于是测出来「注入不生效」而实际是没打到目标。改完用 `git diff` 确认命中位置。
 - 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。

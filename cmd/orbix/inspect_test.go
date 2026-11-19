@@ -54,5 +54,11 @@ func TestInspectReportsPreTokenizer(t *testing.T) {
 		if !strings.Contains(out, c.want) {
 			t.Errorf("pre=%q: output does not say %q:\n%s", c.pre, c.want, out)
 		}
+		// "implemented" is a substring of "NOT implemented", so the assertion above cannot
+		// tell the two apart: emitting the warning for every family passed this test. The
+		// warning text is checked for directly instead.
+		if c.want == "implemented" && strings.Contains(out, "NOT implemented") {
+			t.Errorf("pre=%q: reported as implemented but the output warns it is not:\n%s", c.pre, out)
+		}
 	}
 }

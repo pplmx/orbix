@@ -1641,3 +1641,78 @@ func TestRenderSliceEdges(t *testing.T) {
 		t.Errorf("error %q does not say the operand is not a sequence", err)
 	}
 }
+
+// TestAndOrShortCircuit covers the property the evaluator's own comment states: `x is defined
+// and x == y` must not evaluate its right side.
+//
+// The right operand reads a name that does not exist, which is an error when it is evaluated
+// and provably not touched when it is short-circuited. Removing either short-circuit passed
+// every other chat test: the only place the pattern appeared was a fuzz seed, which exercises
+// it by accident rather than asserting it.
+//
+// This is the shape real templates use to guard optional inputs -- tools, tool_calls, a system
+// message -- so an evaluator that read both sides would turn every guarded read of an absent
+// name into a render failure, and Parse would still accept the template.
+func TestAndOrShortCircuit(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		// `and` stops on a false left side, so the undefined right side is never read.
+		{"and stops on false", `{% if false and no_such_name %}T{% else %}F{% endif %}`, "F"},
+		// An undefined name makes a poor probe on its own: evalCond absorbs that error and
+		// answers false, so a non-short-circuiting evaluator reaches the same rendering. A
+		// right operand that fails some OTHER way is what distinguishes them -- this one
+		// reads a field from a string, which is a template defect that must surface.
+		{"and does not evaluate a failing right side",
+			`{% if false and messages[0].role.content %}T{% else %}F{% endif %}`, "F"},
+		// `or` stops on a true left side.
+		{"or stops on true", `{% if true or no_such_name %}T{% else %}F{% endif %}`, "T"},
+		{"or does not evaluate a failing right side",
+			`{% if true or messages[0].role.content %}T{% else %}F{% endif %}`, "T"},
+		// The real-template form: the guard and the read it guards.
+		{"guarded read of an absent name", `{% if no_such_name is defined and no_such_name %}T{% else %}F{% endif %}`, "F"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, err := tpl.Render(nil, Inputs{})
+			if err != nil {
+				t.Fatalf("Render: %v (the right operand of %q was evaluated)", err, c.src)
+			}
+			if got != c.want {
+				t.Errorf("Render = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	// The other half, so the test cannot pass for an evaluator that ignores the right operand
+	// entirely: when the left side does NOT short-circuit, the right side decides the answer.
+	// An undefined name in a condition is absorbed as false (evalCond's rule, which is Jinja's
+	// too), so the result is F rather than an error -- what proves the read happened is that
+	// the branch taken differs from the short-circuited case above.
+	for _, c := range []struct{ src, want string }{
+		{`{% if true and no_such_name %}T{% else %}F{% endif %}`, "F"},
+		{`{% if false or no_such_name %}T{% else %}F{% endif %}`, "F"},
+		// A defined right side flips both, which is the case an evaluator ignoring the right
+		// operand could not produce.
+		{`{% if true and messages %}T{% else %}F{% endif %}`, "F"},
+		{`{% if false or add_generation_prompt %}T{% else %}F{% endif %}`, "T"},
+	} {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		got, err := tpl.Render(nil, Inputs{AddGenerationPrompt: true})
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got != c.want {
+			t.Errorf("%q rendered %q, want %q", c.src, got, c.want)
+		}
+	}
+}

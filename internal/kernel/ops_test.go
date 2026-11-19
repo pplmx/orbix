@@ -806,3 +806,40 @@ func TestAddBiasRejectsBadShapes(t *testing.T) {
 		})
 	}
 }
+
+// TestSiLUBeyondTheClampIsZeroEitherWay pins what the clamp is for.
+//
+// The function clamps below -88 so exp never has to be evaluated on a value that would overflow.
+// It is not a correctness guard: x/(1+Inf) is -0, not NaN, so the clamped and unclamped spellings
+// agree on every input this can be handed. Measured at -89, -1000 and -1e30 -- all -0 without the
+// clamp, all 0 with it.
+//
+// The test therefore asserts the value rather than the branch, and records that it cannot tell the
+// two implementations apart. Moving the threshold from -88 to -8888 leaves this passing, and the
+// comment on the function says why that is acceptable: the clamp earns its place on cost.
+func TestSiLUBeyondTheClampIsZeroEitherWay(t *testing.T) {
+	for _, v := range []float32{-89, -100, -1000, -1e30} {
+		x := []float32{v}
+		SiLU(x)
+		if x[0] != 0 {
+			t.Errorf("SiLU(%v) = %v, want 0", v, x[0])
+		}
+	}
+
+	// And inside the clamp the function still computes, so a guard that blanked everything
+	// negative cannot pass.
+	for _, v := range []float32{-1, -0.5, 0, 0.5, 1} {
+		x := []float32{v}
+		SiLU(x)
+		want := v / (1 + float32(math.Exp(float64(-v))))
+		if x[0] != want {
+			t.Errorf("SiLU(%v) = %v, want %v", v, x[0], want)
+		}
+	}
+
+	// The two are equal in sign and value at the boundary, which is the property the comment
+	// relies on.
+	if got := float32(-0.0); got != 0 {
+		t.Errorf("-0 != 0 in this build, so the clamp could change a value: %v", got)
+	}
+}

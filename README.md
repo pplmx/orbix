@@ -713,6 +713,7 @@ the file.
 Orbix is a learning project, and it is honest about where it stands:
 
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
+
 - **Prefill throughput improves with prompt length, within the window.** On Llama 3.2
   1B Q2_K with 32 workers, medians of five interleaved runs gave 3.96x the tokens for
   3.04x the time (155 tokens in 8.1 s, 614 in 24.5 s), so the per-token cost fell from
@@ -737,6 +738,7 @@ Orbix is a learning project, and it is honest about where it stands:
   attention was parallelised, when 2001 tokens took 177 s and attention was 135 s of
   it. Both halves are replaced rather than deleted, because the shape of the mistake
   -- an adjective that outlived the measurement under it -- is the reusable part.
+
 - **Treat the numbers above as indicative, not as a benchmark.** They were taken on
   a shared machine whose load drifted between 40 and 90 over the course of a few
   minutes, and repeat runs of the same workload varied by more than the improvements
@@ -744,14 +746,17 @@ Orbix is a learning project, and it is honest about where it stands:
   The direction of each change is sound and the bit-identity tests are unaffected,
   but a timing claim from this machine needs a quiet one to confirm. `orbix bench`
   prints its own conditions so a reader can judge a table taken elsewhere.
+
 - **Reference kernels are not optimized per instruction.** They are written to be
   readable, with no SIMD and no assembly. What they do use is more than one core: the
   partitionable products run on a bounded worker set, which took decoding on
   stories15M from 65 to 235 tokens per second on a 128-core EPYC.
+
 - **SIMD and assembly are deliberately out of scope.** This project exists to make
   inference legible in one language, and a kernel that cannot be read in the
   repository's own language defeats that. Parallelism over independent outputs is where
   the speed comes from instead, and it is what the numbers above measure.
+
 - **A model runs in its trained context, and no larger.** The rope table is built for
   that window, so `--ctx` accepts a smaller value and refuses a larger one with a
   message naming both numbers. Going past it needs rope scaling -- the frequency
@@ -759,6 +764,7 @@ Orbix is a learning project, and it is honest about where it stands:
   A generation budget larger than the window is cut to fit, and `--stats` says when
   that happened, because a run that asked for 128 tokens and printed 123 otherwise
   looks like the model stopped early.
+
 - **Parallelism is over independent outputs, never over a reduction.** The split decides
   which goroutine computes which output element -- rows for a matvec, columns for a
   transposed product -- and never splits the dot product itself, so every element is summed
@@ -766,7 +772,9 @@ Orbix is a learning project, and it is honest about where it stands:
   and the parallel result is bit-identical. That is a deliberate constraint: a split reduction
   would be faster on paper and would silently change every number the project compares against
   llama.cpp.
+
 - **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 with 32 generated tokens per request it goes 239 tok/s at one stream to 655 tok/s at sixteen, medians of seven interleaved runs. Per-stream speed still drops as streams are added, because the model is one shared resource.
+
 - **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a
   request whose prompt starts with blocks the pool has already computed attaches them
   instead of prefilling them again. The suite's reuse pair shows the effect end to end:
@@ -775,6 +783,7 @@ Orbix is a learning project, and it is honest about where it stands:
   flag on prints how many positions were reused, so a run that shares nothing says so
   instead of looking merely slow. This is the case a chat application actually has: a
   system prompt and earlier turns are re-sent verbatim on every call.
+
 - **Benchmarks are self-run.** `orbix bench` is part of the CLI so you can measure on your own hardware, with your own model. It reports the worker count it actually used.
 
 The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it take to make LLM inference work in pure Go, and what do I learn by building it?"

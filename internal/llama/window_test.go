@@ -766,3 +766,59 @@ func TestForwardRefusesOutOfRangeArguments(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbedRefusesAnOutOfRangeToken covers embed's two bounds.
+//
+// Forward checks the token before calling embed, so embed's own vocabulary check is a second guard on
+// the same condition -- but the offset check is not, and it is the one that catches a table shorter
+// than the vocabulary implies. Nothing tested it: replacing its message with a sentence passed.
+//
+// The bound belongs in embed rather than only in its callers because embed is what performs the
+// indexing, and the file's own weights are what decide the table's length.
+func TestEmbedRefusesAnOutOfRangeToken(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	t.Run("a token past the vocabulary", func(t *testing.T) {
+		err := m.embed(cfg.VocabSize)
+		if err == nil {
+			t.Fatal("embed accepted a token equal to the vocabulary size")
+		}
+		// Both the token and the size.
+		for _, want := range []string{"token 11", "of 11"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("a table shorter than the vocabulary", func(t *testing.T) {
+		// One row instead of the vocabulary's worth: the token is legal and the table is not.
+		m.W.TokenEmbedding = m.W.TokenEmbedding[:cfg.Hidden]
+		defer func() { m.W.TokenEmbedding = m.W.TokenEmbedding[:cap(m.W.TokenEmbedding)] }()
+
+		err := m.embed(cfg.VocabSize - 1)
+		if err == nil {
+			t.Fatal("embed indexed past a truncated table")
+		}
+		// The token and the table's actual length, which is the mismatch to report.
+		if !strings.Contains(err.Error(), "token 10") {
+			t.Errorf("error %q does not name the token", err)
+		}
+		if !strings.Contains(err.Error(), "outside 8 values") {
+			t.Errorf("error %q does not state the table length", err)
+		}
+
+		// The boundary itself: a row that ends exactly at the table's end is legal, so token 0 must
+		// still embed into the truncated table. The check is >, not >=, and only this case separates
+		// them -- a table one row long is far enough short of token 10 that either comparison fails.
+		if err := m.embed(0); err != nil {
+			t.Errorf("embed refused a row that fits exactly: %v", err)
+		}
+	})
+}

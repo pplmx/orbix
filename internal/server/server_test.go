@@ -2401,6 +2401,11 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		{"top_logprobs on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": 2}`,
 			"top_logprobs", nil},
+		// The chat endpoint has a logprobs field of its own, separate from top_logprobs. It was the
+		// one entry in chatShapeFields with no case.
+		{"logprobs on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": true}`,
+			"logprobs", nil},
 		{"three at once", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "n": 2, "logprobs": 1, "echo": true}`,
 			"n", []string{"n", "logprobs", "echo"}},

@@ -841,6 +841,7 @@ func TestSpanCarriesTheRequiredGenAIAttributes(t *testing.T) {
 // than the coverage number suggests, because these strings go into error.type and a backend
 // groups failures by them. A branch that returned "" would make failed requests count as
 // unclassified rather than as a named class.
+
 // TestRenderChatPromptCapitalizesRunes covers the neutral transcript's role capitalization.
 //
 // It sliced role[:1] to uppercase the first letter, which cuts a multi-byte rune in half: a

@@ -1752,3 +1752,75 @@ func TestModelEOSStopsGeneration(t *testing.T) {
 			len(out))
 	}
 }
+
+// TestStatsQueuedIsNeverNegative pins the derived queue gauge.
+//
+// Queued is len(active) - MaxActive clamped at zero, because a round can hold every active
+// sequence and the difference goes negative. That negative would be reported verbatim by
+// /metrics as orbix_requests_queued, so a server with one request and four slots would claim
+// it had minus three waiting -- and the gauge is the number the README tells an operator to
+// watch when latency rises.
+//
+// Two mutations were checked. Dropping the max(0, ...) passed the whole engine, server and
+// cmd suites, because no test read Queued at all: the admission tests check how many requests
+// are accepted, never what the gauge says about the ones still in flight.
+func TestStatsQueuedIsNeverNegative(t *testing.T) {
+	const maxActive = 4
+	e, tok, _ := loadModelPath(t, Options{MaxActive: maxActive})
+	prompt := tok.Encode("Once upon a time", true)
+
+	// An idle engine has nothing active and nothing queued.
+	if got := e.Stats(); got.Queued != 0 || got.Active != 0 {
+		t.Fatalf("idle stats: %d queued, %d active; want 0, 0", got.Queued, got.Active)
+	}
+
+	// Fewer sequences than slots: everything runs, so Queued stays zero rather than going
+	// negative. Both a partially full round and an exactly full one are checked, because
+	// the clamp and the arithmetic only differ below the limit.
+	for _, n := range []int{1, maxActive} {
+		var chans []<-chan Event
+		for range n {
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			chans = append(chans, ch)
+		}
+		if got := e.Stats(); got.Queued != 0 {
+			t.Errorf("%d active with %d slots: Queued = %d, want 0", n, maxActive, got.Queued)
+		}
+		if got := e.Stats().Active; got != n {
+			t.Errorf("%d submitted: Active = %d, want %d", n, got, n)
+		}
+		for e.Pump() > 0 {
+		}
+		for _, ch := range chans {
+			for range ch {
+			}
+		}
+	}
+
+	// More sequences than slots: the excess is the queue, and it is exactly the difference.
+	// maxActive+3 accepted, so three wait.
+	var chans []<-chan Event
+	for range maxActive + 3 {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		chans = append(chans, ch)
+	}
+	got := e.Stats()
+	if want := 3; got.Queued != want {
+		t.Errorf("Queued = %d, want %d (%d active, %d slots)", got.Queued, want, got.Active, maxActive)
+	}
+	if want := maxActive + 3; got.Active != want {
+		t.Errorf("Active = %d, want %d", got.Active, want)
+	}
+	for e.Pump() > 0 {
+	}
+	for _, ch := range chans {
+		for range ch {
+		}
+	}
+}

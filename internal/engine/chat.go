@@ -149,11 +149,14 @@ func (r *ChatRenderer) FallbackReason() string {
 //
 // A template that compiles can still fail at render time -- an undefined variable in a
 // branch this conversation takes, for instance -- so a render error also falls back
-// rather than failing the request. The error is recorded so it is visible instead of
-// silent.
-func (r *ChatRenderer) Render(turns []Turn) (string, error) {
+// rather than failing the request. FallbackReason records why.
+//
+// There is no error return because there is no failing path: every branch here produces a
+// prompt. An error that is always nil reads as a case the caller has to handle, and both
+// callers either checked it or discarded it with _, neither of which could ever matter.
+func (r *ChatRenderer) Render(turns []Turn) string {
 	if r == nil || r.tmpl == nil {
-		return RenderChatPrompt(turns), nil
+		return RenderChatPrompt(turns)
 	}
 	msgs := make([]chat.Message, len(turns))
 	for i, t := range turns {
@@ -177,9 +180,9 @@ func (r *ChatRenderer) Render(turns []Turn) (string, error) {
 		r.mu.Lock()
 		r.renderReason = err.Error()
 		r.mu.Unlock()
-		return RenderChatPrompt(turns), nil
+		return RenderChatPrompt(turns)
 	}
-	return out, nil
+	return out
 }
 
 // specialPieceText returns the surface text of a token id, or the empty string.

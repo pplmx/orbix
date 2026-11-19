@@ -77,10 +77,7 @@ func TestChatRendererFallsBackWithoutTemplate(t *testing.T) {
 	if r.FallbackReason() == "" {
 		t.Error("FallbackReason is empty; a fallback must say why")
 	}
-	got, err := r.Render([]Turn{{Role: "user", Text: "hi"}})
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
+	got := r.Render([]Turn{{Role: "user", Text: "hi"}})
 	if !strings.Contains(got, "User: hi") {
 		t.Errorf("neutral transcript = %q", got)
 	}
@@ -121,10 +118,7 @@ func TestChatRendererUsesModelTemplate(t *testing.T) {
 	if !r.UsesModelTemplate() {
 		t.Fatalf("UsesModelTemplate = false: %s", r.FallbackReason())
 	}
-	got, err := r.Render([]Turn{{Role: "user", Text: "hi"}})
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
+	got := r.Render([]Turn{{Role: "user", Text: "hi"}})
 	if want := "[user:hi]<s>"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -142,10 +136,7 @@ func TestChatRendererRenderFailureFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewChatRenderer: %v", err)
 	}
-	got, err := r.Render([]Turn{{Role: "user", Text: "hi"}})
-	if err != nil {
-		t.Fatalf("Render returned an error instead of falling back: %v", err)
-	}
+	got := r.Render([]Turn{{Role: "user", Text: "hi"}})
 	if !strings.Contains(got, "User: hi") {
 		t.Errorf("got %q, want the neutral transcript", got)
 	}
@@ -155,10 +146,7 @@ func TestChatRendererRenderFailureFallsBack(t *testing.T) {
 // defaults to nil and must keep working.
 func TestNilChatRendererUsesNeutral(t *testing.T) {
 	var r *ChatRenderer
-	got, err := r.Render([]Turn{{Role: "user", Text: "hi"}})
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
+	got := r.Render([]Turn{{Role: "user", Text: "hi"}})
 	if got != RenderChatPrompt([]Turn{{Role: "user", Text: "hi"}}) {
 		t.Errorf("nil renderer produced %q", got)
 	}
@@ -188,10 +176,7 @@ func TestChatRendererReportsARenderFailure(t *testing.T) {
 			r.FallbackReason())
 	}
 
-	out, err := r.Render([]Turn{{Role: "user", Text: "hi"}})
-	if err != nil {
-		t.Fatalf("Render should fall back rather than fail: %v", err)
-	}
+	out := r.Render([]Turn{{Role: "user", Text: "hi"}})
 	if !strings.Contains(out, "User: hi") {
 		t.Errorf("the fallback did not produce a neutral transcript: %q", out)
 	}

@@ -639,8 +639,7 @@ func (s *Server) renderChat(msgs []chatMessage) string {
 	// Render always returns a usable prompt: a model template that fails at render time
 	// falls back to the neutral transcript inside the renderer, so this call cannot
 	// leave the request without a prompt.
-	prompt, _ := s.cfg.ChatRenderer.Render(turns)
-	return prompt
+	return s.cfg.ChatRenderer.Render(turns)
 }
 
 // generateParams is what both endpoints share once their JSON is decoded.

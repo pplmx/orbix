@@ -305,10 +305,7 @@ func explainChatError(err error) error {
 }
 
 func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, system string, history []chatTurn, user string, opts chatOptions) (string, error) {
-	prompt, err := opts.renderer.Render(chatTurns(system, history, user))
-	if err != nil {
-		return "", err
-	}
+	prompt := opts.renderer.Render(chatTurns(system, history, user))
 	cfg := eng.Model().Config()
 	// The chat transcript is markup, not prose: its markers are control tokens the
 	// model was trained to see, so they have to be matched whole.

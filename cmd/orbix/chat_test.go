@@ -403,3 +403,29 @@ func TestChatStatsCommand(t *testing.T) {
 		t.Errorf("a two-turn conversation reused nothing:\n%s", out)
 	}
 }
+
+// TestChatRefusesABlockBiggerThanTheContext covers the REPL's version of the prefix-cache trap.
+//
+// Reuse is on by default in chat, so an oversized --block-size breaks a feature the operator
+// never asked for and gets no line announcing it. A prefix index stores and matches whole
+// blocks, so a block the context cannot fill is never published: measured on Qwen2.5-0.5B a
+// 16-position block reused 32 positions across two turns, and this configuration would reuse
+// none however long the conversation ran.
+func TestChatRefusesABlockBiggerThanTheContext(t *testing.T) {
+	var out bytes.Buffer
+	// The fixture's default window is 64 positions, so 1000 cannot fit.
+	err := chatSession(strings.NewReader("/exit\n"), &out, chatOptions{
+		model:     gguftest.Model{NoEOS: true}.Write(t, t.TempDir()),
+		blockSize: 1000,
+		maxTokens: 4,
+		topK:      40,
+	})
+	if err == nil {
+		t.Fatal("chat accepted a block larger than the context")
+	}
+	for _, want := range []string{"--block-size", "1000", "64"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

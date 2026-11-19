@@ -107,6 +107,33 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
 			"optionally --block-size), or drop --prefix-cache")
 	}
+	// The prefix index stores and matches whole blocks, so a block larger than the model's
+	// context can never be filled and never published: reuse is impossible however much
+	// traffic arrives. Measured against the 128-position stories model with --blocks 8
+	// --block-size 1000 --prefix-cache and three identical prompts,
+	// orbix_prefix_positions_reused_total stayed at 0 while the startup line said "prefix
+	// cache: on"; the same run at --block-size 16 reported 32.
+	//
+	// Refused rather than warned about, like the --blocks check above: both configurations
+	// start a server that serves text, so the only signal is the line claiming a feature the
+	// operator asked for, and a warning under it can be read as advice rather than as "this
+	// did not happen". The context length is needed before the pool is built, which is why the
+	// model is opened first.
+	if *prefixCache && *cache.blocks > 0 && *cache.blockSize > 0 {
+		gf, err := gguf.Open(*model)
+		if err != nil {
+			return err
+		}
+		cfg, err := llama.LoadConfig(gf)
+		if err != nil {
+			return err
+		}
+		if *cache.blockSize > cfg.ContextLen {
+			return fmt.Errorf("serve: --block-size %d is larger than this model's %d-position "+
+				"context, so no block ever fills and --prefix-cache could never reuse anything; "+
+				"use --block-size %d or less", *cache.blockSize, cfg.ContextLen, cfg.ContextLen)
+		}
+	}
 
 	gf, err := gguf.Open(*model)
 	if err != nil {

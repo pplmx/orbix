@@ -127,6 +127,17 @@ func cmdBench(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Same trap as serve and chat: a block the context cannot fill is never published to the
+	// prefix index, so --prefix-cache would measure a run that reused nothing while claiming
+	// the flag was on. The row that reports reused positions is what the reader compares
+	// against, and a zero there for this reason reads as "reuse does not pay".
+	if *prefixCache && *cache.blockSize > 0 {
+		if bcfg, err := llama.LoadConfig(gf); err == nil && *cache.blockSize > bcfg.ContextLen {
+			return fmt.Errorf("bench: --block-size %d is larger than this model's %d-position "+
+				"context, so no block ever fills and --prefix-cache could never reuse anything; "+
+				"use --block-size %d or less", *cache.blockSize, bcfg.ContextLen, bcfg.ContextLen)
+		}
+	}
 	tok, err := tokenize.New(gf)
 	if err != nil {
 		return err

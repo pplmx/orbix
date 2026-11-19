@@ -404,3 +404,25 @@ func TestBenchSingleMeasurement(t *testing.T) {
 		t.Errorf("a single measurement printed a suite table:\n%s", out)
 	}
 }
+
+// TestBenchRefusesABlockBiggerThanTheContext covers bench's copy of the prefix-cache trap.
+//
+// The run reports how many prompt positions it reused, and a reader compares that number
+// against zero. A block larger than the context guarantees zero for a reason that has nothing
+// to do with whether reuse pays, so the flag is refused rather than measured.
+func TestBenchRefusesABlockBiggerThanTheContext(t *testing.T) {
+	// The fixture's default window is 64 positions, so 1000 cannot fit.
+	path := gguftest.Model{NoEOS: true}.Write(t, t.TempDir())
+	err := cmdBench([]string{
+		"--model", path, "--blocks", "8", "--block-size", "1000", "--prefix-cache",
+		"--max-tokens", "1", "--concurrency", "1",
+	})
+	if err == nil {
+		t.Fatal("bench accepted a block larger than the context with --prefix-cache")
+	}
+	for _, want := range []string{"--block-size", "1000", "64"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

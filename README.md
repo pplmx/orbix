@@ -840,6 +840,12 @@ orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --pr
 | `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context  |
 | `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix             |
 
+`--block-size` has one hard limit worth stating next to the flag: it cannot exceed the model's
+context. Prefix reuse stores and matches whole blocks, so a block the context can never fill is
+never published to the index, and `--prefix-cache` would reuse nothing while still reporting
+itself on. `serve`, `chat`, and `bench` all refuse that combination rather than start; the
+default of 16 is safe for any model with a context of 16 or more.
+
 A config file is on the roadmap, not in the code: the interface block at the top of
 this file describes the target, and this table describes what exists.
 

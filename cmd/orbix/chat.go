@@ -144,6 +144,15 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	if blocks <= 0 {
 		blocks = (cfgForBlocks(gf) + blockSize - 1) / blockSize
 	}
+	// The prefix index stores and matches whole blocks, so a block larger than the context can
+	// never be filled and the default-on prefix reuse would silently never fire. Same check as
+	// serve's, made here because chat enables reuse by default rather than on request: an
+	// oversized --block-size arrives without the operator asking for the feature that breaks.
+	if window := cfgForBlocks(gf); blockSize > window {
+		return fmt.Errorf("chat: --block-size %d is larger than this model's %d-position "+
+			"context, so no block ever fills and prefix reuse could never fire; use "+
+			"--block-size %d or less", blockSize, window, window)
+	}
 
 	eng, err := engine.New(opts.model, engine.Options{
 		MaxActive: 1, // a REPL has one request at a time

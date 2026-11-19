@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/llama"
 )
 
@@ -152,6 +153,37 @@ func TestPoolCapacityWarning(t *testing.T) {
 	for _, want := range []string{"--blocks", "--block-size", "1", "128", "503"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("warning %q does not mention %q", got, want)
+		}
+	}
+}
+
+// TestServeRefusesABlockBiggerThanTheContext covers the prefix-cache configuration that
+// cannot work.
+//
+// A prefix index stores and matches whole blocks, so a block larger than the model's context
+// can never be filled and never published. Measured against stories15M (128 positions) with
+// --blocks 8 --block-size 1000 --prefix-cache and three identical prompts:
+// orbix_prefix_positions_reused_total stayed at 0 while the startup line said "prefix cache:
+// on", and the same run at --block-size 16 reported 32.
+//
+// Refused rather than warned about, because both readings start a server that serves text and
+// the operator's only evidence was the line claiming the feature they asked for.
+func TestServeRefusesABlockBiggerThanTheContext(t *testing.T) {
+	// The fixture's default window is 64 positions, so 100000 cannot fit in it.
+	path := gguftest.Model{NoEOS: true}.Write(t, t.TempDir())
+
+	err := cmdServe([]string{
+		"--model", path, "--addr", "127.0.0.1:0",
+		"--blocks", "8", "--block-size", "100000", "--prefix-cache",
+	})
+	if err == nil {
+		t.Fatal("serve accepted a block larger than the context with --prefix-cache")
+	}
+	// The message has to name both numbers and the flag to change, for the same reason the
+	// other cache checks do: either number alone leaves the operator guessing.
+	for _, want := range []string{"--block-size", "100000", "--prefix-cache"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
 		}
 	}
 }

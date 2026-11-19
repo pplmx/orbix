@@ -2696,3 +2696,84 @@ func TestStreamRefusesAConnectionItCannotFlush(t *testing.T) {
 		t.Errorf("body starts an event stream despite refusing: %q", rec.Body.String())
 	}
 }
+
+// TestNewRejectsNilDependencies covers New's two argument guards.
+//
+// Both parameters are dereferenced at request time -- eng in every handler, tok in prompt
+// encoding -- so a nil accepted here would panic inside the first request with a stack that
+// points at the handler rather than at the wiring. Refusing at construction is the same
+// reasoning as the engine's own nil checks.
+//
+// Worth a test because neither guard is reachable from the normal path: newTestServer always
+// builds both values, so the two return statements had no coverage.
+func TestNewRejectsNilDependencies(t *testing.T) {
+	// A real engine and tokenizer to pass for the argument that is not nil.
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	eng, err := engine.New(path, engine.Options{MaxActive: 1})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize.New: %v", err)
+	}
+
+	t.Run("nil engine", func(t *testing.T) {
+		if _, err := New(nil, tok, Config{}); err == nil {
+			t.Error("New accepted a nil engine")
+		} else if !strings.Contains(err.Error(), "nil engine") {
+			t.Errorf("error = %q, want it to name the engine", err)
+		}
+	})
+	t.Run("nil tokenizer", func(t *testing.T) {
+		if _, err := New(eng, nil, Config{}); err == nil {
+			t.Error("New accepted a nil tokenizer")
+		} else if !strings.Contains(err.Error(), "nil tokenizer") {
+			t.Errorf("error = %q, want it to name the tokenizer", err)
+		}
+	})
+}
+
+// TestNewDefaultsAnEmptyConfig covers the two defaults applied when a Config leaves fields
+// zero.
+//
+// ModelName is what every response's model field and every "does not exist" error names, so
+// an empty string there would produce responses naming a model with no name. ContextLen is
+// the bound the prompt-length check uses, so leaving it zero would reject every prompt of one
+// token or more.
+//
+// Neither default was reachable: newTestServer always passes both explicitly.
+func TestNewDefaultsAnEmptyConfig(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	eng, err := engine.New(path, engine.Options{MaxActive: 1})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize.New: %v", err)
+	}
+
+	srv, err := New(eng, tok, Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if srv.cfg.ModelName != "orbix" {
+		t.Errorf("ModelName = %q, want orbix", srv.cfg.ModelName)
+	}
+	// Taken from the model rather than hardcoded, so a fixture change moves both sides.
+	if want := eng.Model().Config().ContextLen; srv.cfg.ContextLen != want {
+		t.Errorf("ContextLen = %d, want the model's %d", srv.cfg.ContextLen, want)
+	}
+	if srv.cfg.MaxTokens != 256 {
+		t.Errorf("MaxTokens = %d, want 256", srv.cfg.MaxTokens)
+	}
+}

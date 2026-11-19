@@ -875,9 +875,11 @@ decides which bound applies, and changing one silently invalidated the measureme
 other.
 
 For scale: the 128k-window Llama 3.2 checkpoint in this repository's test set reserves
-about 8 GB per request that way, while the small test fixture reserves 1.7 MB. Any model
-with a long window should be run with `--blocks`, where the total is the pool size and
-`--block-size` positions per block.
+8 GiB per request that way (`context_length x kv_heads x head_dim x 2 x 4 x layers`;
+131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes). The synthetic fixtures are 32 KiB by
+comparison, because their default window is 64 positions. Any model with a long window
+should be run with `--blocks`, where the total is the pool size and `--block-size`
+positions per block.
 
 ## Development
 

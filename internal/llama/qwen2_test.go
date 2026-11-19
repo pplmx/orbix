@@ -2,7 +2,6 @@ package llama
 
 import (
 	"os"
-	"strings"
 	"testing"
 )
 
@@ -261,10 +260,12 @@ func TestQwen2PrefillMatchesForward(t *testing.T) {
 // should be a visible change, and removing one should fail a test rather than a
 // user's model load.
 func TestQwen2ArchitectureRegistry(t *testing.T) {
-	for _, want := range []string{"llama", "mistral", "qwen2"} {
-		if got := supportedArchs(); !strings.Contains(got, want) {
-			t.Errorf("supported architectures = %q, want %s", got, want)
-		}
+	// A whole-string comparison, not a Contains per name: supportedArchs sorts because the
+	// names come out of a map, and a message that reordered itself between runs would be
+	// the thing the sort exists to prevent. Contains cannot see that -- removing the sort
+	// leaves it green.
+	if got, want := supportedArchs(), "llama, mistral, qwen2"; got != want {
+		t.Errorf("supportedArchs() = %q, want %q", got, want)
 	}
 	spec, ok := archSpecs["qwen2"]
 	if !ok {

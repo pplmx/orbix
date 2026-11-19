@@ -678,3 +678,50 @@ func TestSizedButUndecodableTypeIsNamed(t *testing.T) {
 		t.Errorf("error %q does not name the tensor", err)
 	}
 }
+
+// TestOpenLoaderReportsAMissingFile covers the first of its two opens.
+//
+// The loader opens the path twice: once through gguf.Open for the directory and once through os.Open
+// for the tensor data. Neither failure had a test, so neither error could lose its message.
+//
+// The assertion is on the path in the message, since that is what a reader compares against the flag
+// or configuration that produced it.
+func TestOpenLoaderReportsAMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent.gguf")
+	l, err := OpenLoader(path)
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("OpenLoader opened a file that does not exist")
+	}
+	if l != nil {
+		t.Error("a failed OpenLoader returned a loader")
+	}
+	if !strings.Contains(err.Error(), "absent.gguf") {
+		t.Errorf("error %q does not name the file", err)
+	}
+	if !strings.Contains(err.Error(), "no such file") {
+		t.Errorf("error %q does not say the file is missing", err)
+	}
+}
+
+// TestOpenLoaderReportsAMalformedFile covers the path where the directory cannot be read.
+//
+// A file that exists but is not GGUF fails inside gguf.Open, before the second open happens, which is
+// the ordering the two calls are in for: a malformed file never leaves a second handle open.
+func TestOpenLoaderReportsAMalformedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-gguf.bin")
+	if err := os.WriteFile(path, []byte("this is not a gguf file"), 0o644); err != nil {
+		t.Fatalf("writing: %v", err)
+	}
+	l, err := OpenLoader(path)
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("OpenLoader accepted a file that is not GGUF")
+	}
+	if l != nil {
+		t.Error("a failed OpenLoader returned a loader")
+	}
+	if !strings.Contains(err.Error(), "gguf") {
+		t.Errorf("error %q does not say the format is the problem", err)
+	}
+}

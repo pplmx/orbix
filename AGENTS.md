@@ -109,6 +109,7 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - 盯覆盖率之前先跑一遍上面这条对照：这个包的数字可能是低在没设 checkpoint 上，也可能只是防御性分支。两边都对不上时，先找有没有生产调用方，再决定要不要补测试。
 - 剩下那些设了 checkpoint 仍不着陆的行，多半是**防御性分支**：`engine.finish` 里 `cache.Reset()` 失败那条只在引用计数被破坏时触发，注释自己写着「a pool bug」。不为它伪造内部状态去凑覆盖率——不可达的错误路径正说明它所在的层是对的。
 - 验证一条回归测试有没有判别力，要靠改动被测代码后重跑，不是靠读代码推断。改动时注意**同文本多处出现**：`moeRowsFromBatch` 和 `moeRowsFromDecode` 的构造体逐字相同，用 Python `str.replace` 不加限定会打到第一个，于是测出来「注入不生效」而实际是没打到目标。改完用 `git diff` 确认命中位置。
+- 断言错误消息时，断言**消息里的数据**，不要断言它周围的模板文字。`strings.Contains(err, "tokens")` 对 `"prompt is too many tokens"` 成立而没有任何尺寸；`strings.Contains(err, "does not implement")` 是模板前缀，与它后面拼进去的原因无关。2026-11 连着修了四处这类：上下文溢出只断言 `"tokens"` 没断言两个数字，413 只断言 `"too large"` 没断言字节上限，形状字段拒绝只断言字段名没断言原因，词表并行数组的两条长度检查则一条都没测。每条都是把断言换成消息里的具体值（数字、上限、原因短语、两个计数）之后才抓得住对应变异。
 - 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。
 - `just test-race` 只覆盖测试里出现的并发。手动验证用 `CGO_ENABLED=1 go build -race` 出一个竞态版二进制，跑 `serve --max-active N`（配 `--blocks --block-size --prefix-cache` 开共享缓存），再打并发混合负载：非流式、SSE 流式、以及用 `timeout` 中途取消的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`，且 `orbix_requests_active` 归零——队列泄漏和竞态一样会让这个数停在非零。
 

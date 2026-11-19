@@ -1518,6 +1518,15 @@ func TestTinyAyaChunks(t *testing.T) {
 		{"Hello, world!", []string{"Hello", ",", " world", "!"}},
 		{"don't", []string{"don't"}},
 		{"中文测试", []string{"中文测试"}},
+		// The word-boundary rule's own edge cases, which isWordRune's comment names but no
+		// test asserted. \w covers the letter-numbers (\p{Nl}) and not the other numbers
+		// (\p{No}), so a Roman numeral after a digit leaves no boundary while a superscript
+		// does -- the same two characters that look alike and belong to different classes.
+		//
+		// Checked by deleting the IsMark/underscore arms of isWordRune and by widening it to
+		// every unicode.IsNumber: both passed every other tokenize test.
+		{"0\u2163", []string{"0\u2163"}},
+		{"1\u00b2", []string{"1", "\u00b2"}},
 	}
 	for _, c := range cases {
 		if got := tok.preSplit(c.in); !sameStrings(got, c.want) {
@@ -3410,5 +3419,44 @@ func TestStartsLetterRunMarkBranch(t *testing.T) {
 	}
 	if startsLetterRun("\u200cabc", preRule{}) {
 		t.Error("a joiner began a run without the joiners flag")
+	}
+}
+
+// TestIsWordRune pins the class that decides where a regex \b falls.
+//
+// The class is not "letter or digit". It is letters, marks, underscores, the decimal and
+// letter-number categories, and two format characters -- and it deliberately excludes the
+// other numbers, which is the distinction the function's own comment calls out with a Roman
+// numeral and a superscript.
+//
+// Reached through a family rather than directly, a wrong class hides: the tokenize suite has
+// hundreds of chunking cases and only a few land on a boundary this can move. Both the
+// Nl-vs-No distinction and the joiner arm are asserted here so a change to either fails
+// something.
+func TestIsWordRune(t *testing.T) {
+	cases := []struct {
+		r    rune
+		want bool
+		why  string
+	}{
+		{'a', true, "a letter"},
+		{'Z', true, "a letter"},
+		{'0', true, "a decimal digit (Nd)"},
+		{'٣', true, "an Arabic-Indic decimal digit (Nd)"},
+		{'\u2163', true, "a Roman numeral (Nl): \\w takes Nl"},
+		{'\u00b2', false, "a superscript (No): \\w does not take No"},
+		{'\u0661', true, "an extended Arabic-Indic digit (Nd)"},
+		{'_', true, "the underscore is written into \\w"},
+		{'\u0301', true, "a combining mark (M) extends a word"},
+		{'\u200c', true, "a zero-width non-joiner, one of the two format characters \\w takes"},
+		{'\u200d', true, "a zero-width joiner, the other"},
+		{'-', false, "punctuation is not a word character"},
+		{' ', false, "a space is not a word character"},
+		{'中', true, "a CJK letter"},
+	}
+	for _, c := range cases {
+		if got := isWordRune(c.r); got != c.want {
+			t.Errorf("isWordRune(%q U+%04X) = %v, want %v (%s)", c.r, c.r, got, c.want, c.why)
+		}
 	}
 }

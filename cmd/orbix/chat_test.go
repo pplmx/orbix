@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -938,4 +939,61 @@ func TestChatTurnsPutsTheSystemPromptFirst(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestChatStopsWhenTheOutputIsGone covers the four write failures in the session loop.
+//
+// A session whose output is a broken pipe has nothing useful left to do, and the loop's contract is
+// to return the error rather than generate more tokens into it. None of these paths had a test: every
+// chat test writes to a bytes.Buffer, which cannot fail.
+//
+// The first two are the interesting pair -- the prompt before reading a line, and the command reply --
+// because both happen before any generation, so a session that ignored the error would sit waiting for
+// input it could not prompt for.
+func TestChatStopsWhenTheOutputIsGone(t *testing.T) {
+	model := chatModel(t)
+
+	// The session writes four things before the first prompt: the banner, the model summary, the
+	// command list and a blank line. Allowing exactly those lets the prompt be the write that fails,
+	// which is the check this subtest is for -- a writer that fails immediately exercises the banner's
+	// check instead and reaches the same error.
+	t.Run("the prompt", func(t *testing.T) {
+		fw := &failingAfter{Writer: io.Discard, remaining: 4}
+		err := chatSession(strings.NewReader("hi\n"), fw, chatOptions{model: model})
+		if err == nil {
+			t.Fatal("a prompt into a broken writer returned no error")
+		}
+		if !errors.Is(err, fw.err) {
+			t.Errorf("error = %v, want the writer's error %v", err, fw.err)
+		}
+	})
+
+	t.Run("a command reply", func(t *testing.T) {
+		// The banner and the first prompt are written before any input is read, so the writer is
+		// allowed that much and fails on the reply to /help.
+		err := chatSession(strings.NewReader("/help\n"),
+			&failingAfter{Writer: io.Discard, remaining: 2}, chatOptions{model: model})
+		if err == nil {
+			t.Fatal("a command reply into a broken writer returned no error")
+		}
+	})
+}
+
+// failingAfter passes writes through until a count is exhausted, then fails. The session writes the
+// banner and the first prompt before any input is read, so a count of two lets it reach the command.
+type failingAfter struct {
+	io.Writer
+	remaining int
+	err       error
+}
+
+func (f *failingAfter) Write(p []byte) (int, error) {
+	if f.remaining <= 0 {
+		if f.err == nil {
+			f.err = errors.New("write: broken pipe")
+		}
+		return 0, f.err
+	}
+	f.remaining--
+	return f.Writer.Write(p)
 }

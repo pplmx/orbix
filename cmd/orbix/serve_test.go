@@ -690,3 +690,30 @@ func TestServeRefusesABlockWiderThanTheContext(t *testing.T) {
 		t.Error("serve accepted a block one position longer than the context")
 	}
 }
+
+// TestServeRefusesAnUnknownLogFormat covers the switch's default arm.
+//
+// The existing default test checks that the flag's initial value is one the switch accepts, which
+// is a different property: that catches a broken default, not a bad argument. With the default arm
+// changed to return nil, a serve with --log-format bogus started a server with no access log and no
+// message, so an operator who mistyped the value would see a running server and wonder later why
+// nothing was logged.
+//
+// The message lists every accepted spelling, so the refusal is actionable rather than a puzzle.
+func TestServeRefusesAnUnknownLogFormat(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+
+	err := cmdServe([]string{"--model", path, "--addr", "127.0.0.1:0", "--log-format", "bogus"})
+	if err == nil {
+		t.Fatal("serve accepted an unknown --log-format")
+	}
+	if !strings.Contains(err.Error(), "bogus") {
+		t.Errorf("error %q does not quote the value", err)
+	}
+	// The accepted set is enumerated in logFormatChoices; the message has to carry all of it.
+	for _, want := range []string{"text", "json", "off"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not list %q", err, want)
+		}
+	}
+}

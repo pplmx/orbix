@@ -1441,3 +1441,63 @@ func TestBenchRefusesAPromptPastTheContext(t *testing.T) {
 		})
 	}
 }
+
+// TestBenchReportsWhetherPrefixReuseHappened covers the two lines bench prints about reuse.
+//
+// --prefix-cache is the one flag whose effect is invisible in a throughput number: a run where
+// sharing worked and one where it could not apply print the same tok/s. The two messages exist to
+// tell them apart, and neither had a test -- a run that reused nothing printed nothing, which is
+// how the flag looked unimplemented.
+//
+// The sequential case is what makes reuse possible: runRequests submits every request at once, so
+// with MaxActive as large as the count they all prefill together and none can attach a prefix
+// another has not written yet.
+func TestBenchReportsWhetherPrefixReuseHappened(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	// Spans several 16-position blocks, so there is a whole block to publish and reuse.
+	prompt := strings.Repeat("Once upon a time there was a girl. ", 4)
+
+	t.Run("reuse that happened is counted", func(t *testing.T) {
+		out := captureStdout(t, func() {
+			err := run([]string{"bench", "--model", path, "--prompt", prompt,
+				"--prefix-cache", "--blocks", "64", "--block-size", "16",
+				"--requests", "2", "--concurrency", "1", "--max-tokens", "2"})
+			if err != nil {
+				t.Fatalf("bench: %v", err)
+			}
+		})
+		if !strings.Contains(out, "prompt positions") {
+			t.Errorf("bench did not report reused positions:\n%s", out)
+		}
+		if strings.Contains(out, "none") {
+			t.Errorf("bench reported no reuse for a sequential run with a spanning prompt:\n%s", out)
+		}
+	})
+
+	t.Run("reuse that could not apply says why", func(t *testing.T) {
+		// A prompt shorter than one block leaves nothing to publish, so reuse cannot happen
+		// however many requests run. This is the case the message is about -- and it is NOT the
+		// concurrency: measured, four concurrent requests over a prompt spanning several blocks
+		// reported 240 reused positions, because the batched prefill still publishes blocks for
+		// the requests processed first in the batch.
+		out := captureStdout(t, func() {
+			err := run([]string{"bench", "--model", path, "--prompt", "hi",
+				"--prefix-cache", "--blocks", "64", "--block-size", "16",
+				"--requests", "4", "--concurrency", "4", "--max-tokens", "2"})
+			if err != nil {
+				t.Fatalf("bench: %v", err)
+			}
+		})
+		if !strings.Contains(out, "reused:") {
+			t.Errorf("bench printed no reuse line:\n%s", out)
+		}
+		if !strings.Contains(out, "none") {
+			t.Errorf("bench claimed reuse for a prompt shorter than one block:\n%s", out)
+		}
+		// The explanation is the actionable part: it names the block size so the reader can
+		// lengthen the prompt.
+		if !strings.Contains(out, "block") {
+			t.Errorf("the message does not mention the block:\n%s", out)
+		}
+	})
+}

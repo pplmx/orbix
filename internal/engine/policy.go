@@ -94,8 +94,9 @@ func ParsePriority(s string) (Priority, error) {
 // alternative -- finish what you started, then take the queue in priority order -- is what
 // most callers assume a priority field means.
 //
-// Measured on one slot: a 120-token request takes 1.4 s alone, and 2.2 s when a stream of
-// twelve short high-priority requests arrives during it (58% longer). Nothing starves as
+// Measured on one slot with stories15M q4_0: a 120-token request takes 553-556 ms alone and
+// 756-769 ms when a stream of twelve short high-priority requests arrives during it, 37-39%
+// longer over three interleaved runs. Nothing starves as
 // long as the higher-priority arrivals are finite, because each round still admits
 // maxActive sequences and the preempted one is first among its own priority class -- but a
 // high-priority stream that never ends will hold a low-priority request indefinitely.

@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -1156,4 +1158,100 @@ func TestReportFormatsTheMessageAndTheStatus(t *testing.T) {
 			t.Errorf("report with a broken writer = %d, want 1", got)
 		}
 	})
+}
+
+// TestUsageAndDispatchAgree checks the help text against the dispatcher in both directions.
+//
+// A command that dispatches but is absent from the usage text is unreachable in practice: the
+// only way to learn it exists is to read main.go. The reverse is a help line promising something
+// the binary does not do. The existing usage test spot-checks three strings, so a newly added
+// command that nobody documented -- or a documented one whose case was dropped -- still passed.
+//
+// Each name is exercised through run() rather than compared as text: dispatching is the property
+// that matters, and a command that is listed but errors out from its own flag parsing has still
+// been dispatched.
+func TestUsageAndDispatchAgree(t *testing.T) {
+	// The commands that appear under "Commands:" in the usage text.
+	out := captureStdout(t, func() {
+		if err := run(nil); err != nil {
+			t.Fatalf("run(nil) = %v", err)
+		}
+	})
+	var listed []string
+	inCommands := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Commands:") {
+			inCommands = true
+			continue
+		}
+		if inCommands {
+			if strings.TrimSpace(line) == "" {
+				break
+			}
+			if name, rest, ok := strings.Cut(strings.TrimSpace(line), " "); ok && rest != "" {
+				listed = append(listed, name)
+			}
+		}
+	}
+	if len(listed) < 5 {
+		t.Fatalf("parsed only %d commands from the usage text: %v", len(listed), listed)
+	}
+
+	for _, name := range listed {
+		// "model inspect" is the one subcommand form; its name is "model" in the dispatcher.
+		cmd := name
+		if cmd == "model" {
+			// Dispatched through its own subcommand check; a bare "model" is an error naming
+			// the subcommand, which still proves the case exists.
+			err := run([]string{"model"})
+			if err == nil || !strings.Contains(err.Error(), "inspect") {
+				t.Errorf("usage lists %q but run([model]) returned %v", name, err)
+			}
+			continue
+		}
+		// A command that reaches its own flag parsing is dispatched. -h makes that happen
+		// without doing work, and report() maps the resulting ErrHelp to success.
+		done := make(chan error, 1)
+		go func() {
+			defer func() { _ = recover() }()
+			done <- run([]string{cmd, "-h"})
+		}()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, flag.ErrHelp) {
+				// A command may legitimately refuse -h or require a model first; what must not
+				// happen is "unknown command", which is the dispatcher not having the case.
+				if strings.Contains(err.Error(), "unknown command") {
+					t.Errorf("usage lists %q but the dispatcher does not know it: %v", name, err)
+				}
+			}
+		case <-time.After(20 * time.Second):
+			// serve with -h exits immediately; a hang here would mean the command started
+			// working, which this test cannot allow.
+			t.Errorf("%q did not return from -h", name)
+		}
+	}
+
+	// The reverse direction: every command the dispatcher knows must be listed. The set is
+	// restated here rather than parsed out of main.go's switch -- the spelling is not stable
+	// enough to read mechanically -- and the cost of that choice is that adding a command
+	// means touching both main.go and this list. That is the point: the second edit is what
+	// makes someone notice the usage text has not been updated, and both loops below fail
+	// when the two sides drift.
+	all := []string{"run", "bench", "chat", "serve", "model", "version", "help"}
+	for _, name := range all {
+		if !slices.Contains(listed, name) {
+			t.Errorf("the dispatcher knows %q but the usage text does not list it", name)
+		}
+	}
+	for _, name := range listed {
+		if !slices.Contains(all, name) {
+			t.Errorf("the usage text lists %q, which no test knows is dispatched", name)
+		}
+	}
+
+	// And a name the dispatcher rejects must not be listed.
+	if err := run([]string{"definitely-not-a-command"}); err == nil {
+		t.Error("an unknown command was accepted")
+	}
 }

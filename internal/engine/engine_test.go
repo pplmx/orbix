@@ -1693,3 +1693,62 @@ func TestFinishReasonIsLengthWhenTheWindowFills(t *testing.T) {
 		t.Error("generated nothing, so the window branch was not reached")
 	}
 }
+
+// TestModelEOSStopsGeneration covers the end-of-sequence token, which no engine test
+// exercised.
+//
+// Every engine fixture here is built with NoEOS, for the reason gguftest gives: a random
+// model's argmax lands on EOS only by accident, so tests that need a long sequence have to
+// switch EOS off. The cost is that the eos half of sample's condition was never run --
+// replacing `tok == eos || contains(s.req.Stop, tok)` with just the Stop check left the
+// whole engine and server suites green, which means a model would have generated to its
+// budget instead of stopping.
+//
+// The EOS id is chosen so the stop is certain rather than accidental: the test learns the
+// greedy continuation on a NoEOS fixture, then builds a second fixture whose EOS is the
+// second token of that continuation. The first token is then emitted and the second ends the
+// request, deterministically, on any weights.
+func TestModelEOSStopsGeneration(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{})
+	prompt := tok.Encode("Once upon a time", true)
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 3})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	full, _ := collect(t, ch)
+	if len(full) < 2 {
+		t.Skip("model produced too few tokens to test EOS")
+	}
+	eos := full[1]
+
+	// A fresh fixture with that token as EOS. EOSID is only defaulted when both special
+	// ids are zero, so setting it alone keeps BOS at its default.
+	path := gguftest.Model{ContextLen: 512, EOSID: int(eos)}.Write(t, t.TempDir())
+
+	e2, _ := loadModelAt(t, path, Options{})
+	if got := e2.Model().Config().EOSID; got != int(eos) {
+		t.Fatalf("fixture reports EOS %d, want %d", got, eos)
+	}
+	ch2, err := e2.Submit(Request{Prompt: prompt, MaxTokens: 10})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e2.Pump() > 0 {
+	}
+	out, reason := collect(t, ch2)
+	if reason != "stop" {
+		t.Errorf("finish reason = %q, want stop (EOS was not honoured)", reason)
+	}
+	// The EOS token itself is not emitted, and generation stops before the budget of 10.
+	for _, id := range out {
+		if id == eos {
+			t.Errorf("output contains the EOS token %d", eos)
+		}
+	}
+	if len(out) >= 10 {
+		t.Errorf("generated %d tokens, want fewer than the 10-token budget: EOS did not stop it",
+			len(out))
+	}
+}

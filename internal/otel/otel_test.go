@@ -1061,3 +1061,73 @@ func TestMaxBatchDefaultIsUsed(t *testing.T) {
 		t.Errorf("512 spans took %d requests with the default batch, want 1", posts)
 	}
 }
+
+// TestRecordDropsInvalidSpans covers the guard before a span reaches the queue.
+//
+// Encode has the same rule and is tested, but it runs at flush time -- by then the span has already
+// occupied queue space, and a caller recording thousands of unfinished spans would push the queue to
+// its limit with work that can never be sent. Record's own check is what keeps them out.
+//
+// The three conditions are separate: an invalid trace id, an invalid span id, and a zero end time. The
+// assertion is on what reaches the collector, which is the only thing a caller can observe.
+func TestRecordDropsInvalidSpans(t *testing.T) {
+	got := make(chan int, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		spans := unmarshalRequest(t, body).ResourceSpans[0].ScopeSpans[0].Spans
+		select {
+		case got <- len(spans):
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	exp.Record(testSpan(t, "good"))
+
+	noTrace := testSpan(t, "no-trace")
+	noTrace.TraceID = TraceID{}
+	exp.Record(noTrace)
+
+	noSpan := testSpan(t, "no-span")
+	noSpan.SpanID = SpanID{}
+	exp.Record(noSpan)
+
+	unfinished := testSpan(t, "unfinished")
+	unfinished.End = time.Time{}
+	exp.Record(unfinished)
+
+	// The queue's length, not only what arrives: Encode applies the same rule at flush time, so the
+	// end-to-end view cannot tell whether Record rejected these spans or merely queued them for the
+	// encoder to drop. Reading the queue is what separates the two.
+	exp.mu.Lock()
+	queued := len(exp.queue)
+	exp.mu.Unlock()
+	if queued != 1 {
+		t.Errorf("%d spans queued, want only the valid one -- the guard belongs in Record, not only "+
+			"in Encode", queued)
+	}
+
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	select {
+	case n := <-got:
+		if n != 1 {
+			t.Errorf("%d spans reached the collector, want only the valid one", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no export arrived")
+	}
+}

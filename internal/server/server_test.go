@@ -168,6 +168,12 @@ func TestOversizedBodyIs413(t *testing.T) {
 	if !strings.Contains(env.Error.Message, "too large") {
 		t.Errorf("message %q does not say the body is too large", env.Error.Message)
 	}
+	// The limit itself has to be in the message: "too large" tells a client to send less,
+	// and the number tells it how much less. Dropping it from the format string left every
+	// test passing.
+	if !strings.Contains(env.Error.Message, strconv.FormatInt(limit, 10)) {
+		t.Errorf("message %q does not state the %d-byte limit", env.Error.Message, limit)
+	}
 
 	// The same limit must reject a chat request, since it shares the decoder.
 	chatBody := `{"messages":[{"role":"user","content":"` + strings.Repeat("y", int(limit)) + `"}]}`

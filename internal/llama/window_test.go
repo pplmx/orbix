@@ -870,3 +870,39 @@ func TestDecodeStepRefusesACachePastTheRopeTable(t *testing.T) {
 		}
 	}
 }
+
+// TestRunnerReportsTheConfiguredWorkers covers the accessor bench uses to report parallelism.
+//
+// cmd/orbix's bench prints the worker count from eng.Model().Runner().Workers(), so the accessor and
+// the count it returns are both on a path a user reads. Neither had a test: the accessor could return
+// a fresh runner, or lose the configured count, and the bench header would quietly lie about the
+// parallelism it measured.
+//
+// Zero is the interesting value because Workers() resolves it to a default and New clamps it to the
+// CPU count, so the assertion is that whatever is reported is positive and does not change between
+// calls -- the same runner, not a new one per call.
+func TestRunnerReportsTheConfiguredWorkers(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	run := m.Runner()
+	if run == nil {
+		t.Fatal("Runner returned nil")
+	}
+	first := run.Workers()
+	if first <= 0 {
+		t.Errorf("Workers() = %d, want a positive count", first)
+	}
+	// The same runner each time: a per-call allocation would report the same number but lose the
+	// pool's reuse, and the bench measures the effect of that reuse.
+	if again := m.Runner(); again != run {
+		t.Error("Runner returned a different pool on the second call")
+	}
+	if again := m.Runner().Workers(); again != first {
+		t.Errorf("Workers() = %d on the second call, want %d", again, first)
+	}
+}

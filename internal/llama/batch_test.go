@@ -1105,3 +1105,49 @@ func TestPrefillRejectsATokenOutsideTheVocabulary(t *testing.T) {
 		t.Errorf("Prefill of legal tokens failed: %v", err)
 	}
 }
+
+// TestEmptyPromptThroughThePagedPathIsRefused covers the zero-position case of
+// logitsForCached.
+//
+// An empty prompt and a fully-cached one take the same branch: the prefix index matches every
+// position, and for an empty slice "every position" is none. The last position is then at -1, so
+// the guard has to reject the request rather than let the model embed a token at a negative
+// offset. Relaxing it to "n < 0" is not enough -- zero is exactly the value that slips through --
+// which is why the test exists.
+//
+// The engine refuses an empty prompt before this layer, so the case is reachable only through
+// PrefillWithPrefix directly; both callers that share the paged path are library users, and a
+// negative offset on a shared cache is not a failure worth leaving to a bounds check three frames
+// deeper.
+func TestEmptyPromptThroughThePagedPathIsRefused(t *testing.T) {
+	c := defaultTiny()
+	c.ctx = 32
+	m, err := New(buildTinyWeights(t, c))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 4})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+
+	cache := pool.New()
+	out, err := m.PrefillWithPrefix(cache, nil, 0)
+	if err == nil {
+		t.Fatalf("an empty prompt produced %d logits instead of an error", len(out))
+	}
+	if !strings.Contains(err.Error(), "cached prefix") {
+		t.Errorf("error %q does not describe the cached-prefix mismatch", err)
+	}
+	if out != nil {
+		t.Errorf("a refused prefill returned %d logits", len(out))
+	}
+
+	// The same cache still serves a real prompt, so the refusal is about the input rather than
+	// about a poisoned cache.
+	if _, err := m.PrefillWithPrefix(cache, []int32{0, 1, 2, 3}, 0); err != nil {
+		t.Errorf("a four-token prompt through the same cache: %v", err)
+	}
+}

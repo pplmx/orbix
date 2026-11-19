@@ -13,7 +13,8 @@
 //
 //   - {% if %} / {% elif %} / {% else %} / {% endif %} with ==, !=, not, and, or,
 //     in, and is defined
-//   - {% for %} with loop.index0, loop.index, loop.first, loop.last, and loop.length
+//   - {% for %} with loop.index0, loop.index, loop.first, loop.last, loop.length,
+//     loop.revindex, and loop.revindex0
 //   - {% set %}, including assigning to a name another statement reads
 //   - {{ expression }} with string and variable operands, + concatenation, and the
 //     trim, tojson and length filters
@@ -32,7 +33,7 @@
 // message`, and both mean "no tool calls" only if a missing field is empty *and* absent.
 // The rule is right for message fields and it also covers the loop object, so
 // `{{ loop.depth }}` -- a Jinja field this package does not implement -- renders as the
-// empty string instead of failing. The loop fields that do exist are the five listed
+// empty string instead of failing. The loop fields that do exist are the seven listed
 // above; a template using another one produces output one token short rather than an
 // error, which is the failure mode the paragraph above promises not to have. It has not
 // come up in a published template yet, which is why it is documented rather than fixed:

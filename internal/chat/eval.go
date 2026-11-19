@@ -256,6 +256,11 @@ func loopValue(i, n int) value {
 		"first":  boolValue(i == 0),
 		"last":   boolValue(i == n-1),
 		"length": strValue(strconv.Itoa(n)),
+		// Counting down is what "how many remain" means in Jinja, and the two are what
+		// templates reach for when a separator depends on the position. Checked against
+		// jinja2 3.1.6 with two items: revindex is "21" and revindex0 is "10".
+		"revindex":  strValue(strconv.Itoa(n - i)),
+		"revindex0": strValue(strconv.Itoa(n - i - 1)),
 	}
 	return value{fields: fields, isMap: true}
 }

@@ -126,6 +126,14 @@ func TestRenderLoopVariables(t *testing.T) {
 	if got := render(t, src, msgs, Inputs{}); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
+
+	// The two counting down. Jinja2 3.1.6 renders the same two-item loop as
+	// "2/1 1/0", which is what a separator that depends on remaining items reads.
+	src = `{% for m in messages %}{{ loop.revindex }}/{{ loop.revindex0 }} {% endfor %}`
+	want = "2/1 1/0 "
+	if got := render(t, src, msgs, Inputs{}); got != want {
+		t.Errorf("revindex: got %q, want %q", got, want)
+	}
 }
 
 // TestRenderSet covers assignment and that a set survives its loop, which is what

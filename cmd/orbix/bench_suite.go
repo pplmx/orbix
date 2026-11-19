@@ -219,18 +219,7 @@ func runSuite(o suiteOptions) error {
 	}
 	writef("SCENARIO\tTOKENS\tELAPSED\tTOK/S\tFIRST\tNOTE\n")
 	for _, r := range rows {
-		if r.err != nil {
-			writef("%s\t-\t-\t-\t-\tfailed: %v\n", r.scenario.name, r.err)
-			continue
-		}
-		note := rowNote(r.scenario, r.res)
-		first := "-"
-		if r.res.firstToken > 0 {
-			first = r.res.firstToken.Round(time.Millisecond).String()
-		}
-		writef("%s\t%d\t%s\t%.1f\t%s\t%s\n",
-			r.scenario.name, r.res.tokens, r.res.elapsed.Round(time.Millisecond),
-			r.res.tokPerSec(), first, note)
+		writef("%s\n", rowLine(r.scenario, r.res, r.err))
 	}
 	if werr == nil {
 		werr = tw.Flush()
@@ -251,6 +240,26 @@ func runSuite(o suiteOptions) error {
 		return fmt.Errorf("bench: %d scenario(s) failed: %v", len(failed), failed)
 	}
 	return nil
+}
+
+// rowLine renders one table row as tab-separated cells.
+//
+// Split out of runSuite for the same reason rowNote was: runSuite writes to os.Stdout, so
+// nothing inside it can be observed from a test. A scenario that failed has to print its
+// reason in the NOTE column rather than numbers, or a row that did not run reads as a row that
+// ran; and a zero first-token duration means the scenario did not record one, which is a dash
+// rather than "0s". Both were reachable only by reading the code.
+func rowLine(sc scenario, res result, runErr error) string {
+	if runErr != nil {
+		return fmt.Sprintf("%s\t-\t-\t-\t-\tfailed: %v", sc.name, runErr)
+	}
+	first := "-"
+	if res.firstToken > 0 {
+		first = res.firstToken.Round(time.Millisecond).String()
+	}
+	return fmt.Sprintf("%s\t%d\t%s\t%.1f\t%s\t%s",
+		sc.name, res.tokens, res.elapsed.Round(time.Millisecond),
+		res.tokPerSec(), first, rowNote(sc, res))
 }
 
 // newSuiteEngine builds an engine with the suite's shared settings plus opts.

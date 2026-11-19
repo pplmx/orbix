@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -515,4 +516,58 @@ func TestRowNoteExplainsTheRow(t *testing.T) {
 			t.Errorf("scenario %q has no note", s.name)
 		}
 	}
+}
+
+// TestRowLine covers the two shapes a row can take that are not a plain measurement.
+//
+// runSuite writes to os.Stdout, so the rendering inside it was unobservable: printing a failed
+// scenario as a row of dashes, or a missing first-token time as "0s", both passed the cmd suite.
+// Either would be read as a result rather than as an absence.
+func TestRowLine(t *testing.T) {
+	sc := scenario{name: "single", note: "baseline"}
+
+	t.Run("a measurement", func(t *testing.T) {
+		got := rowLine(sc, result{
+			tokens:     64,
+			elapsed:    500 * time.Millisecond,
+			firstToken: 41 * time.Millisecond,
+		}, nil)
+		want := "single\t64\t500ms\t128.0\t41ms\tbaseline"
+		if got != want {
+			t.Errorf("rowLine = %q, want %q", got, want)
+		}
+		// Six cells, so a row cannot silently lose a column.
+		if n := len(strings.Split(got, "\t")); n != 6 {
+			t.Errorf("rowLine produced %d cells, want 6: %q", n, got)
+		}
+	})
+
+	t.Run("a scenario that did not run", func(t *testing.T) {
+		got := rowLine(sc, result{}, errors.New("model would not load"))
+		if !strings.Contains(got, "failed:") {
+			t.Errorf("rowLine = %q, want it to say the scenario failed", got)
+		}
+		if !strings.Contains(got, "model would not load") {
+			t.Errorf("rowLine = %q, want it to carry the reason", got)
+		}
+		// Every measurement cell is a dash: a zero would read as a measurement of nothing.
+		cells := strings.Split(got, "\t")
+		for i := 1; i <= 4; i++ {
+			if cells[i] != "-" {
+				t.Errorf("cell %d = %q, want a dash for a scenario that did not run", i, cells[i])
+			}
+		}
+	})
+
+	t.Run("no first-token time recorded", func(t *testing.T) {
+		got := rowLine(sc, result{tokens: 8, elapsed: time.Second}, nil)
+		cells := strings.Split(got, "\t")
+		if cells[4] != "-" {
+			t.Errorf("first-token cell = %q, want a dash when none was recorded", cells[4])
+		}
+		// The rest of the row still has its numbers, or the dash would hide a real row.
+		if cells[1] != "8" {
+			t.Errorf("token cell = %q, want 8", cells[1])
+		}
+	})
 }

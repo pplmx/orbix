@@ -307,3 +307,87 @@ func TestPrefillAppliesAttentionBiasToEveryRow(t *testing.T) {
 		}
 	}
 }
+
+// TestDecodeStepAppliesAttentionBiasToEverySequence covers the row count on the decode path.
+//
+// TestDecodeStepReadsAttentionBias compares a biased decode against one whose vectors were
+// zeroed with two sequences in flight, which reads as a per-row assertion but is not: applying
+// the bias to row 0 only still makes the two runs differ. Narrowing n to 1 in addBiasDecode left
+// the whole suite green -- measured -- for all three of q, k and v.
+//
+// What distinguishes the rows is decoding one sequence at a time and comparing each against its
+// own position in a batch. A single-sequence step has a row count of one by construction, so the
+// batched call is the only place the count can be wrong, and the two have to agree exactly.
+func TestDecodeStepAppliesAttentionBiasToEverySequence(t *testing.T) {
+	path := gguftest.Model{
+		Arch:       "qwen2",
+		AttnBias:   true,
+		NoEOS:      true,
+		ContextLen: 128,
+	}.Write(t, t.TempDir())
+
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if !cfg.AttnBias {
+		t.Fatal("the fixture did not load as a model with attention bias")
+	}
+
+	ids := fixtureTokens(cfg, 8)
+	const prefix = 4
+	tokens := []int32{ids[4], ids[5], ids[6]}
+
+	// Three sequences, each prefilled to the same prefix, then decoded together.
+	batched := make([]Cache, len(tokens))
+	for i := range batched {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Prefill(cache, ids[:prefix], 0); err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		batched[i] = cache
+	}
+	together, err := m.DecodeStep(batched, tokens)
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+	// The model's logits buffer is sized to the largest batch it has ever decoded, so only the
+	// first n rows belong to this call. Rows are VocabSize wide.
+	rowLen := cfg.VocabSize
+	if len(together) < rowLen*len(tokens) {
+		t.Fatalf("DecodeStep returned %d logits for %d sequences of %d",
+			len(together), len(tokens), rowLen)
+	}
+	togetherCopy := append([]float32(nil), together[:rowLen*len(tokens)]...)
+
+	// The same three, decoded one at a time from equal caches.
+	for i := range tokens {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Prefill(cache, ids[:prefix], 0); err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		alone, err := m.DecodeStep([]Cache{cache}, tokens[i:i+1])
+		if err != nil {
+			t.Fatalf("DecodeStep alone: %v", err)
+		}
+		if len(alone) < rowLen {
+			t.Fatalf("a single-sequence step returned %d logits, a row is %d", len(alone), rowLen)
+		}
+		// The buffer is the model's and the next call overwrites it, so the comparison has to
+		// finish before that happens. togetherCopy was taken before the loop for the same reason.
+		alone = append([]float32(nil), alone[:rowLen]...)
+		for j := range alone {
+			if got := togetherCopy[i*rowLen+j]; got != alone[j] {
+				t.Fatalf("sequence %d logit %d: batched %v, alone %v; the batched decode "+
+					"applied the attention bias to fewer rows than sequences", i, j, got, alone[j])
+			}
+		}
+	}
+}

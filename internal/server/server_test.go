@@ -3103,3 +3103,41 @@ func TestStreamReportsAMidStreamError(t *testing.T) {
 		t.Errorf("the error path wrote the [DONE] sentinel:\n%s", body)
 	}
 }
+
+// TestEmptyPromptIsRefusedAfterEncoding covers the check that the encoded prompt is not empty, and
+// the earlier one that an empty message list trips.
+//
+// A prompt of "" encodes to zero ids, and the engine's Submit refuses that with its own message.
+// The server checks first so the reply is a 400 naming the prompt rather than a 500 from deeper in
+// -- and the check has to run after encoding, since a prompt like " " may also encode to nothing
+// depending on the vocabulary.
+//
+// Both endpoints are asserted because they share the branch but decode different request types.
+func TestEmptyPromptIsRefusedAfterEncoding(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// An empty completions prompt reaches the encoder and is caught there.
+	resp := post(t, h, "/v1/completions", `{"prompt":"","max_tokens":1}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a prompt that encodes to nothing", resp.StatusCode)
+	}
+	env := decodeBody[errorBody](t, resp)
+	if !strings.Contains(env.Error.Message, "prompt") {
+		t.Errorf("message %q does not mention the prompt", env.Error.Message)
+	}
+
+	// The chat endpoint refuses an empty message list earlier, with its own message: a request with
+	// no messages is malformed before encoding is reached, so the two checks are not the same one.
+	// Asserted separately so a change to either stays visible.
+	resp = post(t, h, "/v1/chat/completions", `{"messages":[],"max_tokens":1}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for an empty message list", resp.StatusCode)
+	}
+	env = decodeBody[errorBody](t, resp)
+	if !strings.Contains(env.Error.Message, "messages") {
+		t.Errorf("message %q does not mention the messages", env.Error.Message)
+	}
+}

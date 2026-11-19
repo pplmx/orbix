@@ -498,17 +498,41 @@ func quoteJSON(s string) string {
 }
 
 func TestMaxTokensClampedToContextRoom(t *testing.T) {
-	// Asking for more than the window can hold must be clamped, not fail: a client
-	// with a 512-token default against a 128-token model should get what fits.
-	srv, _ := newTestServer(t)
-	resp := post(t, srv.Handler(), "/v1/completions", `{"prompt": "Once upon a time", "max_tokens": 100000}`)
+	// Asking for more than the window can hold must be clamped, not fail: a client with
+	// a 512-token default against a 128-token model should get what fits.
+	//
+	// The assertion is an exact count rather than an upper bound. It used to be
+	// `CompletionTokens > cfg.ContextLen`, which passes whether or not the clamp runs: the
+	// engine stops at the cache boundary anyway, so a request for 100000 tokens produces a
+	// full window either way and the only difference is whether the last few positions are
+	// wasted on a token the server already knew would not fit. Disabling the clamp in
+	// generate left this test green.
+	//
+	// NoEOS so the run cannot end early on a constructed model's accidental EOS: the count
+	// is only a property of the clamp if nothing else can stop generation.
+	srv, tok := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 64})
+	cfg := srv.eng.Model().Config()
+	// Leave room for exactly n tokens after the prompt, so "what fits" is known.
+	prompt := "Once upon a time"
+	promptLen := len(tok.Encode(prompt, cfg.BOSID >= 0))
+	const want = 8
+	room := promptLen + want
+	if room >= cfg.ContextLen {
+		t.Fatalf("prompt %d plus %d leaves no room in a %d context", promptLen, want, cfg.ContextLen)
+	}
+	// A server whose own default fills the window would hide the clamp, so set the context
+	// length the handler compares against to exactly prompt+want.
+	srv.cfg.ContextLen = room
+
+	resp := post(t, srv.Handler(), "/v1/completions",
+		fmt.Sprintf(`{"prompt": %s, "max_tokens": 100000}`, quoteJSON(prompt)))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	body := decodeBody[completionResponse](t, resp)
-	cfg := srv.eng.Model().Config()
-	if body.Usage.CompletionTokens > cfg.ContextLen {
-		t.Errorf("generated %d tokens, more than the context %d", body.Usage.CompletionTokens, cfg.ContextLen)
+	if got := body.Usage.CompletionTokens; got != want {
+		t.Errorf("generated %d tokens, want exactly %d (the clamp did not run or was off by one)",
+			got, want)
 	}
 }
 

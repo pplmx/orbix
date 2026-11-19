@@ -35,8 +35,13 @@ func resolveModel(fs *flag.FlagSet, model *string) error {
 }
 
 // maxTokensFlag registers --max-tokens with the one wording every command shares.
+//
+// run accepts 0, which prefills and generates nothing; bench refuses it, because a
+// measurement of zero generated tokens is not a measurement. The shared wording says so
+// rather than leaving the two commands to be discovered to disagree.
 func maxTokensFlag(fs *flag.FlagSet, def int) *int {
-	return fs.Int("max-tokens", def, "cap on generated tokens, not counting the prompt")
+	return fs.Int("max-tokens", def,
+		"cap on generated tokens, not counting the prompt; run accepts 0 (prefill only), bench needs 1 or more")
 }
 
 // cacheFlags are the paged-cache settings several commands share.

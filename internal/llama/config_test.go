@@ -1355,3 +1355,44 @@ func TestLoadConfigRejectsBadEmbeddingShape(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadConfigRejectsWrongDimensionCount covers the generic shape check's dims message.
+//
+// The check runs over every tensor whose shape the config expects, and it distinguishes two
+// failures: a tensor with the wrong number of dimensions, and one with the right count but the wrong
+// extent. The second is covered by the attn_q case; the first had no test, so its message -- which
+// prints the dimensions actually found and the count expected -- could lose both without a failure.
+//
+// The shapes are hard to read at a glance, which is the reason to print them: an error naming only
+// the tensor leaves its reader comparing two lists by hand.
+func TestLoadConfigRejectsWrongDimensionCount(t *testing.T) {
+	c := defaultTiny()
+	tensors := c.tensors()
+	for i := range tensors {
+		if tensors[i].Name == "blk.0.attn_q.weight" {
+			// Three dimensions where the weight matrix has two.
+			tensors[i].Dims = []uint64{8, 5, 3}
+		}
+	}
+	f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), tensors, nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	_, err = LoadConfig(f)
+	if err == nil {
+		t.Fatal("LoadConfig accepted a three-dimensional attn_q.weight")
+	}
+	if !strings.Contains(err.Error(), "blk.0.attn_q.weight") {
+		t.Errorf("error = %v, want it to name the tensor", err)
+	}
+	// The count found, the dims themselves, and the count expected.
+	if !strings.Contains(err.Error(), "3 dims") {
+		t.Errorf("error = %v, want it to state the 3 dims found", err)
+	}
+	if !strings.Contains(err.Error(), "want 2") {
+		t.Errorf("error = %v, want it to state the 2 expected", err)
+	}
+	if !strings.Contains(err.Error(), "[8 5 3]") {
+		t.Errorf("error = %v, want it to print the dims it found", err)
+	}
+}

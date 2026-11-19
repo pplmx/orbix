@@ -487,3 +487,43 @@ func TestAttendRefusesInconsistentArguments(t *testing.T) {
 		})
 	}
 }
+
+// TestTrimSpansOffsetsByStride covers the case makeSpans cannot express.
+//
+// Every span makeSpans builds has stride == width == 1, so dropping the multiply by stride is
+// indistinguishable from dropping rows there. Real caches interleave the heads: one head's rows
+// sit stride floats apart, with other heads' values between them, and a span that survives a
+// partial trim has to start drop*stride floats in. Offsetting by drop alone lands in the middle
+// of the previous surviving row and every value read afterwards is another head's.
+//
+// The values here are laid out at stride 4 with width 1, so a span of four rows occupies
+// {0, _, _, _, 1, _, _, _, 2, _, _, _, 3} and keeping the last two must return 2 and 3.
+func TestTrimSpansOffsetsByStride(t *testing.T) {
+	const stride = 4
+	data := make([]float32, 4*stride)
+	for i := range 4 {
+		data[i*stride] = float32(i)
+		// The gaps hold values that must never be read as this head's.
+		for j := 1; j < stride; j++ {
+			data[i*stride+j] = -100 - float32(i)
+		}
+	}
+	spans := []span{{data: data, stride: stride, rows: 4, width: 1}}
+
+	got := spanValues(trimSpans(spans, 2))
+	want := []float32{2, 3}
+	if len(got) != len(want) {
+		t.Fatalf("kept %d rows %v, want %v", len(got), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %v, want %v (an offset by rows instead of stride reads another "+
+				"head's slot)", i, got[i], want[i])
+		}
+	}
+
+	// And the trimmed span still aliases the original rather than copying it.
+	if len(spans) != 1 || spans[0].rows != 4 {
+		t.Errorf("trimSpans modified its input: %+v", spans)
+	}
+}

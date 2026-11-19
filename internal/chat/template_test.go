@@ -2439,3 +2439,34 @@ func TestParseErrorsNameTheOffendingTag(t *testing.T) {
 		}
 	}
 }
+
+// TestLexerErrorsLocateTheProblem covers the message for a tag that is opened and never closed.
+//
+// It carries two things a reader needs: which of the three delimiters was opened, and where. A
+// template with several tags makes the offset the difference between finding the line and scanning
+// the file, and the delimiter tells them whether to look for a brace or a percent sign.
+//
+// Nothing asserted either: replacing the format with "template has an unclosed tag" passed.
+//
+// The neighbouring branch, "template ends inside %q", is unreachable and deliberately left untested:
+// the loop that finds a delimiter stops at j+1 < len(src), so by the time control reaches that check
+// the byte after the brace is guaranteed to exist.
+func TestLexerErrorsLocateTheProblem(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`a{% set x`, `unclosed "{%" at offset 1`},
+		{`{{ x`, `unclosed "{{" at offset 0`},
+		{`x{# note`, `unclosed "{#" at offset 1`},
+		// The offset is not always zero or one: it is wherever the tag starts.
+		{`abcdef{{ x`, `unclosed "{{" at offset 6`},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted an unclosed tag", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+		}
+	}
+}

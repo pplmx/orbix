@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1552,5 +1553,62 @@ func TestBenchSuiteReportsWhichScenariosFailed(t *testing.T) {
 	out = captureStdout(t, func() { err = runScenarios(opts, scenarios) })
 	if err != nil {
 		t.Errorf("a suite with no failures returned %v:\n%s", err, out)
+	}
+}
+
+// TestResolveModelReadsTheEnvironment covers the half of the model lookup that succeeds.
+//
+// The existing test sets ORBIX_MODEL to the empty string and checks the error mentions it, so the
+// branch that reads a non-empty value was never taken. That branch is what makes the variable
+// useful: a contributor with one checkpoint can export it and drop --model from every command.
+//
+// The returned path is asserted rather than only the absence of an error, so an implementation
+// that accepted the variable and ignored it would fail.
+func TestResolveModelReadsTheEnvironment(t *testing.T) {
+	const path = "/somewhere/model.gguf"
+	t.Setenv("ORBIX_MODEL", path)
+
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	model := fs.String("model", "", "")
+	if err := resolveModel(fs, model); err != nil {
+		t.Fatalf("resolveModel with ORBIX_MODEL set: %v", err)
+	}
+	if *model != path {
+		t.Errorf("model = %q, want %q", *model, path)
+	}
+
+	// An explicit flag wins over the variable, which is what lets a one-off command use a
+	// different checkpoint without unsetting it.
+	*model = "explicit.gguf"
+	if err := resolveModel(fs, model); err != nil {
+		t.Fatalf("resolveModel with both set: %v", err)
+	}
+	if *model != "explicit.gguf" {
+		t.Errorf("model = %q, want the explicit value to win", *model)
+	}
+}
+
+// TestRunRefusesAFileWithNoTokenizer covers run's startup check, which had no test.
+//
+// serve's equivalent was covered last round; run opens the same file and makes the same assumption
+// one call earlier in its own sequence. A file with a valid header and no metadata is the smallest
+// input that reaches it.
+func TestRunRefusesAFileWithNoTokenizer(t *testing.T) {
+	b := []byte("GGUF")
+	b = append(b, 3, 0, 0, 0)         // version 3
+	b = append(b, make([]byte, 8)...) // no tensors
+	b = append(b, make([]byte, 8)...) // no metadata
+	path := filepath.Join(t.TempDir(), "bare.gguf")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+
+	err := run([]string{"run", "--model", path, "hi"})
+	if err == nil {
+		t.Fatal("run accepted a file with no tokenizer")
+	}
+	if !strings.Contains(err.Error(), "tokenizer") {
+		t.Errorf("error %q does not name the tokenizer", err)
 	}
 }

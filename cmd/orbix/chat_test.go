@@ -1005,3 +1005,43 @@ func (f *failingAfter) Write(p []byte) (int, error) {
 	f.remaining--
 	return f.Writer.Write(p)
 }
+
+// TestChatStopsWhenTheBannerCannotBeWritten covers the first write a session makes.
+//
+// The banner is how a caller learns whether the model's own template is in use; a session that cannot
+// write it has nothing to say and should stop, rather than reading prompts and answering into a stream
+// that is already failing. Nothing tested it: dropping the error made every test still pass.
+func TestChatStopsWhenTheBannerCannotBeWritten(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	wantErr := errors.New("output is gone")
+	// A writer that fails once and then succeeds, so the session's later writes are not what stops it.
+	// With a permanently failing writer, discarding the banner's error still ends in an error from the
+	// next write, and the mutation is invisible.
+	err := chatSession(strings.NewReader("hello\n"), &failOnceWriter{err: wantErr}, chatOptions{
+		model:     path,
+		blockSize: 4,
+	})
+	if err == nil {
+		t.Fatal("chatSession kept reading with a failing output")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("error %v does not carry the writer's error %v", err, wantErr)
+	}
+}
+
+// failOnceWriter fails its first write and accepts every later one.
+//
+// It exists for tests about a specific write failing rather than about output being gone: with a writer
+// that always fails, dropping one error is invisible because the next write reports the same thing.
+type failOnceWriter struct {
+	err  error
+	once bool
+}
+
+func (w *failOnceWriter) Write(p []byte) (int, error) {
+	if !w.once {
+		w.once = true
+		return 0, w.err
+	}
+	return len(p), nil
+}

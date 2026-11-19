@@ -108,6 +108,7 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - 覆盖率基本不依赖**环境变量**：2026-11 测过，设齐四个 `*_MODEL` 后 `internal/engine` 仍是 93.5%，`internal/llama` 从 85.5% 升到 86.0%，`internal/tokenize` 从 96.4% 升到 96.7%（`QWEN2_MODEL` 才动，`MODEL` 不动），其余九个包一个字节都不变。llama 的 0.5 个百分点全部落在 `addBias`、`addBiasBatch`、`finishBatch`、`finish`、`LoadConfig` 这五处，tokenize 的 0.3 落在 `looksByteLevel` 和 `drainPending`。
 - 盯覆盖率之前先跑一遍上面这条对照：这个包的数字可能是低在没设 checkpoint 上，也可能只是防御性分支。两边都对不上时，先找有没有生产调用方，再决定要不要补测试。
 - 剩下那些设了 checkpoint 仍不着陆的行，多半是**防御性分支**：`engine.finish` 里 `cache.Reset()` 失败那条只在引用计数被破坏时触发，注释自己写着「a pool bug」。不为它伪造内部状态去凑覆盖率——不可达的错误路径正说明它所在的层是对的。
+- 判定「不可达」之前先看**函数的参数**，而不是凭调用链推断。2026-11 有两处被判死、后来又测通了：`PagedKVCache.rememberFullBlock` 的 token 切片和 `sequence.remaining()` 的预算都是从参数算的，同包测试直接构造就能触发。真正够不到的是**只从内部状态派生**的条件（`cache.Reset()` 的失败、`paramError.Error()` 这种没有调用方的接口方法），不是「正常路径不会传这种值」。
 - 验证一条回归测试有没有判别力，要靠改动被测代码后重跑，不是靠读代码推断。改动时注意**同文本多处出现**：`moeRowsFromBatch` 和 `moeRowsFromDecode` 的构造体逐字相同，用 Python `str.replace` 不加限定会打到第一个，于是测出来「注入不生效」而实际是没打到目标。改完用 `git diff` 确认命中位置。
 - 断言错误消息时，断言**消息里的数据**，不要断言它周围的模板文字。`strings.Contains(err, "tokens")` 对 `"prompt is too many tokens"` 成立而没有任何尺寸；`strings.Contains(err, "does not implement")` 是模板前缀，与它后面拼进去的原因无关。2026-11 连着修了四处这类：上下文溢出只断言 `"tokens"` 没断言两个数字，413 只断言 `"too large"` 没断言字节上限，形状字段拒绝只断言字段名没断言原因，词表并行数组的两条长度检查则一条都没测。每条都是把断言换成消息里的具体值（数字、上限、原因短语、两个计数）之后才抓得住对应变异。
 - 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。

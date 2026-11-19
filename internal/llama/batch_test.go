@@ -1152,8 +1152,12 @@ func TestEmptyPromptThroughThePagedPathIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatalf("an empty prompt produced %d logits instead of an error", len(out))
 	}
-	if !strings.Contains(err.Error(), "cached prefix") {
-		t.Errorf("error %q does not describe the cached-prefix mismatch", err)
+	// Both counts: how many positions the cache holds and how many tokens were offered. The
+	// assertion used to stop at the opening words, which survive any change to the numbers.
+	for _, want := range []string{"cached prefix of 0 positions", "for 0 tokens"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not state %q", err, want)
+		}
 	}
 	if out != nil {
 		t.Errorf("a refused prefill returned %d logits", len(out))

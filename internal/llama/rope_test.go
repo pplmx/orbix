@@ -3,6 +3,7 @@ package llama
 import (
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -534,8 +535,17 @@ func TestRopeFreqsLoadsFromTheTensor(t *testing.T) {
 		if err == nil {
 			t.Fatal("a short rope_freqs tensor was accepted")
 		}
-		if !strings.Contains(err.Error(), "rope_freqs has") {
-			t.Errorf("error = %q, want it to name the tensor and its length", err)
+		// All three numbers: what it found, what it needs, and the rope dim that decides it. The
+		// existing check looked for "rope_freqs has", which is the template -- dropping both counts
+		// from the message passed.
+		for _, want := range []string{
+			"has " + strconv.Itoa(want-1) + " values",
+			"want " + strconv.Itoa(want),
+			"rope dim " + strconv.Itoa(base.headDim()),
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to state %q", err, want)
+			}
 		}
 	})
 
@@ -567,4 +577,35 @@ func TestRopeFreqsLoadsFromTheTensor(t *testing.T) {
 			t.Errorf("RopeFreqs = %v without a tensor, want nil", got)
 		}
 	})
+}
+
+// TestNewRopeRejectsANonPositiveContext covers the second of newRope's two guards.
+//
+// The odd-dimension guard is tested; this one was not, so relaxing it to < 0 passed. It matters because
+// the caller passes Config.ContextLen straight through: a file that states zero would build a rope
+// table with no entries, and the first position lookup would index past it.
+func TestNewRopeRejectsANonPositiveContext(t *testing.T) {
+	cfg := Config{RopeDim: 8, RopeBase: 10000, RopeScale: 1}
+	for _, n := range []int{0, -1} {
+		r, err := newRope(cfg, n)
+		if err == nil {
+			t.Errorf("newRope accepted nCtx=%d", n)
+			continue
+		}
+		if r != nil {
+			t.Errorf("nCtx=%d returned a table alongside the error", n)
+		}
+		if !strings.Contains(err.Error(), "positive context length") {
+			t.Errorf("nCtx=%d: error %q does not say the length is the problem", n, err)
+		}
+		// The value it got, so a reader knows which number came from the file.
+		if !strings.Contains(err.Error(), strconv.Itoa(n)) {
+			t.Errorf("nCtx=%d: error %q does not state the length", n, err)
+		}
+	}
+
+	// One position is enough, so the boundary is > 0 rather than > 1.
+	if _, err := newRope(cfg, 1); err != nil {
+		t.Errorf("newRope refused a one-position context: %v", err)
+	}
 }

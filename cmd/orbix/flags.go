@@ -88,6 +88,17 @@ func (c cacheFlags) validate(prefix string) error {
 	if *c.blockSize < 0 {
 		return fmt.Errorf("%s: --block-size must not be negative", prefix)
 	}
+	// --block-size only sets how the pool's blocks are divided; without --blocks there is no
+	// pool to divide. Accepting it alone leaves the contiguous cache in place, which on a
+	// 128k-context model reserves 8 GB per accepted request -- and the operator who passed a
+	// block size reads the resulting "kv cache: contiguous" line as the size they asked for.
+	//
+	// Checked here rather than in each command so a command that registers these flags cannot
+	// forget it: chat did, and silently ignored a block size nobody could see was unused.
+	if *c.blockSize > 0 && *c.blocks == 0 {
+		return fmt.Errorf("%s: --block-size needs --blocks; without a pool there are no "+
+			"blocks to size, and each request still reserves a whole context", prefix)
+	}
 	if c.workers != nil && *c.workers < 0 {
 		return fmt.Errorf("%s: --workers must not be negative", prefix)
 	}

@@ -103,14 +103,6 @@ func cmdServe(args []string) error {
 	if *maxQueued < 0 {
 		return fmt.Errorf("serve: --max-queued must not be negative (0 means 8x --max-active)")
 	}
-	// --block-size only sets how the pool's blocks are divided; without --blocks there is no
-	// pool to divide. Accepting it alone left the contiguous cache in place, which on a
-	// 128k-context model reserves 8 GB per accepted request -- and the operator who passed a
-	// block size read the resulting "kv cache: contiguous" line as the size they asked for.
-	if *cache.blockSize > 0 && *cache.blocks == 0 {
-		return fmt.Errorf("serve: --block-size needs --blocks; without a pool there are no " +
-			"blocks to size, and each request still reserves a whole context")
-	}
 	if *prefixCache && *cache.blocks == 0 {
 		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
 			"optionally --block-size), or drop --prefix-cache")

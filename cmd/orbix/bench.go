@@ -57,9 +57,6 @@ func cmdBench(args []string) error {
 		return fmt.Errorf("bench: --requests must not be negative (0 means one per " +
 			"concurrency slot)")
 	}
-	if err := cache.validate("bench"); err != nil {
-		return err
-	}
 	// The suite fixes its own concurrency, request count, admission policy, and cache shape:
 	// those are the variables the rows compare, so letting a flag override them would remove
 	// the comparison the table exists to make. Which is exactly why the flags cannot be
@@ -85,6 +82,9 @@ func cmdBench(args []string) error {
 				" drop the flag, or run without --suite to measure one configuration",
 				strings.Join(ignored, ", "))
 		}
+	}
+	if err := cache.validate("bench"); err != nil {
+		return err
 	}
 	total := *requests
 	if total <= 0 {
@@ -121,10 +121,6 @@ func cmdBench(args []string) error {
 	if *prefixCache && *cache.blocks == 0 {
 		return fmt.Errorf("bench: --prefix-cache needs a paged cache; add --blocks (and " +
 			"optionally --block-size), or drop --prefix-cache")
-	}
-	if *cache.blockSize > 0 && *cache.blocks == 0 {
-		return fmt.Errorf("bench: --block-size needs --blocks; without a pool there are no " +
-			"blocks to size, and every request still reserves a whole context")
 	}
 
 	gf, err := gguf.Open(*model)

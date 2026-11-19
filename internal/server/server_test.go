@@ -2031,6 +2031,18 @@ func TestSafePrefixLen(t *testing.T) {
 		{"", []string{"abc"}, 0, "empty text holds nothing back"},
 		{"abc", nil, 3, "no stop list holds nothing back"},
 		{"a中", []string{"a中X"}, 0, "a multi-byte suffix is held the same way"},
+		// A complete match is not held back. cutAtStop runs first and consumes it, so text
+		// that already equals a stop string is all safe -- the n loop must stop at len(s)-1,
+		// or this reports 0 and holds a complete match forever. Measured: with the bound at
+		// len(s) this case returns 0 and "xabc" returns 1.
+		{"abc", []string{"abc"}, 3, "a complete match is cutAtStop's business, not hold-back"},
+		{"xabc", []string{"abc"}, 4, "the same, after unrelated text"},
+		{"abcd", []string{"abc"}, 4, "text longer than the stop string is all safe"},
+		// An empty entry is skipped explicitly, and the loop condition would also exclude it
+		// (len("")-1 is -1, which is never above hold). The skip stays because it says what it
+		// means; the result is the same either way, so no mutation of it is detectable here.
+		{"abc", []string{""}, 3, "an empty stop holds nothing back"},
+		{"abc", []string{"", "abc"}, 3, "an empty stop beside a complete match"},
 	}
 	for _, c := range cases {
 		if got := safePrefixLen(c.text, c.stop); got != c.want {
@@ -2857,5 +2869,47 @@ func TestPromptExactlyFillingTheContextIsRefused(t *testing.T) {
 	}
 	if body.Error.Code != "context_length_exceeded" {
 		t.Errorf("code = %q, want context_length_exceeded", body.Error.Code)
+	}
+}
+
+// TestCutAtStop covers the stop-string cut directly, including the operands the end-to-end tests
+// never use.
+//
+// An empty entry in the stop list has to be skipped. strings.Index(text, "") is 0 for every
+// text, so a client that sends `"stop": ["", "END"]` -- or a proxy that rewrites an omitted
+// value into an empty string -- would have every response truncated to nothing. Measured: with
+// the skip removed, cutAtStop("hello world", ["", "world"]) returns "" instead of "hello ".
+//
+// The earliest match also has to win. Taking the first stop string that matches rather than the
+// leftmost returns whatever the list order happens to be, so the same request would cut at a
+// different place depending on how the client ordered its stop strings.
+func TestCutAtStop(t *testing.T) {
+	cases := []struct {
+		text  string
+		stop  []string
+		want  string
+		found bool
+		why   string
+	}{
+		{"hello world", []string{"world"}, "hello ", true, "a single match"},
+		{"hello world", []string{"absent"}, "hello world", false, "no match leaves the text alone"},
+		{"hello world", nil, "hello world", false, "no stop list at all"},
+		// The empty entry must not count as a match at position zero.
+		{"hello world", []string{"", "world"}, "hello ", true, "an empty stop is skipped"},
+		{"hello world", []string{"world", ""}, "hello ", true, "the same, in either order"},
+		{"hello world", []string{""}, "hello world", false, "an empty stop alone matches nothing"},
+		// Leftmost wins, whatever the list order says.
+		{"hello world", []string{"world", "hello"}, "", true, "hello comes first in the text"},
+		// "abc" starts at 0 and "c" at 2, so the leftmost is "abc" -- the cut lands at zero
+		// even though the longer string is listed second.
+		{"abcabc", []string{"c", "abc"}, "", true, "the leftmost of a nested pair"},
+		{"xx", []string{"x", "xx"}, "", true, "the shorter stop at the same position"},
+	}
+	for _, c := range cases {
+		got, found := cutAtStop(c.text, c.stop)
+		if got != c.want || found != c.found {
+			t.Errorf("cutAtStop(%q, %v) = %q, %v; want %q, %v (%s)",
+				c.text, c.stop, got, found, c.want, c.found, c.why)
+		}
 	}
 }

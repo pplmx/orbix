@@ -19,9 +19,10 @@ A disagreement is one of two things, and the output says which:
 
   - a bug in the subset -- the Go side produced something Jinja2 does not;
   - an unsupported construct -- the package documents a list of Jinja2 features it does
-    not implement, and a template using one is expected to be refused at parse time rather
-    than rendered. Those cases are reported separately, because "refused" is the designed
-    behaviour and "rendered differently" is not.
+    not implement, and a template using one is expected to be refused rather than rendered.
+    Some are refused at parse time (a macro, a filter block) and some at render time (printing
+    a message dict, iterating a string), and both count as designed behaviour. Those cases are
+    reported separately, because "refused" is the design and "rendered differently" is not.
 
 The corpus is in this file rather than in testdata: it belongs with the tool that reproduces
 it, and a template corpus without its reference output is a list of strings with no claim
@@ -162,6 +163,10 @@ UNSUPPORTED = {
     "selectattr": """{{ messages | selectattr('role', 'equalto', 'user') | list }}""",
     "dict_literal": """{{ {'a': 1} }}""",
     "print_a_message": """{{ messages[0] }}""",
+    # Jinja2 iterates a string character by character; this subset does not implement that and
+    # refuses rather than yielding no turns. The refusal is at render time, which the tool treats
+    # the same as a parse-time one -- both mean "this construct is not supported".
+    "for_over_string": """{% for c in 'abc' %}{{ c }}{% endfor %}""",
 }
 
 
@@ -351,7 +356,7 @@ def main():
 
     print(f"{len(cases)} cases compared, {agree} agree with Jinja2")
     if refused_ok:
-        print(f"{len(refused_ok)} unsupported constructs refused at parse time, as designed")
+        print(f"{len(refused_ok)} unsupported constructs refused, as designed")
     if no_oracle:
         print(f"{len(no_oracle)} cases skipped because Jinja2 itself failed")
 

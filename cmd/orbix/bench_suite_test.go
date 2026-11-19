@@ -817,3 +817,59 @@ func TestBenchPropagatesSetupErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestRunRefusesAnEmptyEncoding covers the guard that fires before the model runs.
+//
+// A model that declares no BOS, given an empty prompt, encodes to nothing. Without the check the
+// engine is handed an empty prompt and the failure surfaces there as a context complaint, which names
+// neither the prompt nor the reason.
+//
+// built through the same fixture entry point the other CLI tests use; BOSID -1 is what removes the only
+// token this prompt would have had.
+func TestRunRefusesAnEmptyEncoding(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64, BOSID: -1}.Write(t, t.TempDir())
+	err := cmdRun([]string{"--model", path, "--max-tokens", "1", ""})
+	if err == nil {
+		t.Fatal("run accepted a prompt that encodes to nothing")
+	}
+	if !strings.Contains(err.Error(), "no tokens") {
+		t.Errorf("error %q does not say the prompt encoded to nothing", err)
+	}
+}
+
+// TestRunSeedZeroIsNotSeedZero covers the sentinel meaning "pick a seed".
+//
+// --seed 0 asks for a random seed rather than the reproducible zero, so two runs with it must be free
+// to differ while two runs at --seed 7 must not. The check is on the sampler's behaviour through a real
+// generation, since that is what the flag controls.
+func TestRunSeedZeroIsNotSeedZero(t *testing.T) {
+	model := suiteModel(t)
+
+	// The same fixed seed twice: identical output, because the sampler is the only source of
+	// variation and it is seeded the same way.
+	first := captureStdout(t, func() {
+		_ = cmdRun([]string{"--model", model, "--max-tokens", "8", "--temp", "1.2", "--seed", "7", "Once"})
+	})
+	second := captureStdout(t, func() {
+		_ = cmdRun([]string{"--model", model, "--max-tokens", "8", "--temp", "1.2", "--seed", "7", "Once"})
+	})
+	if first != second {
+		t.Errorf("two runs with --seed 7 differ:\n%q\n%q", first, second)
+	}
+
+	// Seed zero picks from the clock, so two runs must differ. Sixty-four samples at temperature 1.5
+	// over a 32k vocabulary: identical text would mean both runs used the same seed, which is exactly
+	// the defect this covers.
+	//
+	// Skipping on equality would defeat it -- the mutation that removes the sentinel makes the two runs
+	// identical by construction, and a skip reports that as a pass.
+	a := captureStdout(t, func() {
+		_ = cmdRun([]string{"--model", model, "--max-tokens", "64", "--temp", "1.5", "--seed", "0", "Once"})
+	})
+	b := captureStdout(t, func() {
+		_ = cmdRun([]string{"--model", model, "--max-tokens", "64", "--temp", "1.5", "--seed", "0", "Once"})
+	})
+	if a == b {
+		t.Errorf("two --seed 0 runs produced identical text, so the sentinel did not reach the clock: %q", a)
+	}
+}

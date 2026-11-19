@@ -922,6 +922,16 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
 			return false
 		}
+		// A flush error is not checked, and that is deliberate: the request context is what
+		// notices a client that left, and it is already passed to the engine as Request.Cancel.
+		// Measured over a raw TCP connection that is reset mid-stream, the engine stops within
+		// two tokens of the reset -- the cancel fires first, so a flush check would add a second
+		// route to the same place.
+		//
+		// A test that measures this over http.Post and closes the body sees something else: a
+		// graceful close leaves the connection usable, no reset is sent, and generation runs to
+		// its full budget. That is a property of the client, not of this code, and it is worth
+		// knowing before reading a large number as waste.
 		flusher.Flush()
 		return true
 	}

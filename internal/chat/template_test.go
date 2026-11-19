@@ -1488,3 +1488,97 @@ func TestEmptySequenceIsFalse(t *testing.T) {
 		t.Errorf("empty list with a length filter rendered %q, want \"empty\"", got)
 	}
 }
+
+// TestRenderIndexOutOfRange covers both ends of the sequence bound.
+//
+// A negative index counts from the end, and the conversion is followed by a second check
+// because a negative index past the start stays negative after it: -5 against a one-message
+// list becomes -4. Dropping that half of the condition passed the whole chat, server and cmd
+// suites -- TestRenderIndex covers [-1] and [0] and [1], never a magnitude larger than the
+// list.
+//
+// Both directions and both edges are asserted, so a check that rejected only one end cannot
+// pass, and so the messages name the index rather than panicking on a slice bound.
+func TestRenderIndexOutOfRange(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "only"}}
+	cases := []struct {
+		name string
+		src  string
+		want string // the index the error must name, after negative conversion
+	}{
+		{"one past the end", `{{ messages[1].content }}`, "1"},
+		{"far past the end", `{{ messages[9].content }}`, "9"},
+		{"one before the start", `{{ messages[-2].content }}`, "-1"},
+		{"far before the start", `{{ messages[-9].content }}`, "-8"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%q panicked instead of reporting the index: %v", c.src, r)
+				}
+			}()
+			out, err := tpl.Render(msgs, Inputs{})
+			if err == nil {
+				t.Fatalf("%q rendered %q, want an out-of-range error", c.src, out)
+			}
+			if !strings.Contains(err.Error(), "outside a sequence") {
+				t.Errorf("error %q does not say the index is outside the sequence", err)
+			}
+			if !strings.Contains(err.Error(), " "+c.want+" ") {
+				t.Errorf("error %q does not name the converted index %s", err, c.want)
+			}
+		})
+	}
+
+	// The legal edges still work, so the test cannot be satisfied by rejecting everything.
+	if got := render(t, `{{ messages[0].content }}`, msgs, Inputs{}); got != "only" {
+		t.Errorf("messages[0] = %q, want \"only\"", got)
+	}
+	if got := render(t, `{{ messages[-1].content }}`, msgs, Inputs{}); got != "only" {
+		t.Errorf("messages[-1] = %q, want \"only\"", got)
+	}
+}
+
+// TestReadMissingFieldIsEmpty covers the branch that makes an absent mapping field empty
+// rather than an error.
+//
+// Templates ask "is this field there" two ways: Qwen2 writes `not message.tool_calls`, which
+// needs the read to succeed with an empty value, and Llama 3 writes `'tool_calls' in message`,
+// which needs absence to be observable. Both read the same conversation, so the read has to
+// answer empty and the `in` test has to answer false -- which is what an empty value plus a key
+// test give.
+//
+// Turning the missing-field return into an error passed the whole chat, server and cmd suites:
+// TestMessagesCarryToolCalls exercises the opposite guarantee (the field is always present), so
+// nothing reached this branch. The loop object is the convenient subject, since it carries only
+// the documented loop variables and any other name is absent.
+func TestReadMissingFieldIsEmpty(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "a"}}
+
+	// Reading a field that is not there yields empty text, not an error.
+	if got := render(t, `{% for m in messages %}{{ loop.not_a_loop_variable }}{% endfor %}`, msgs, Inputs{}); got != "" {
+		t.Errorf("reading an absent field rendered %q, want empty", got)
+	}
+	// The same read is false in a condition, which is how `not m.tool_calls` works.
+	if got := render(t, `{% for m in messages %}{% if loop.not_a_loop_variable %}T{% else %}F{% endif %}{% endfor %}`, msgs, Inputs{}); got != "F" {
+		t.Errorf("an absent field was truthy: rendered %q, want F", got)
+	}
+	// And a field that IS there still reads, so the empty answer is about absence rather
+	// than about attribute access in general.
+	if got := render(t, `{% for m in messages %}{{ loop.index }}{% endfor %}`, msgs, Inputs{}); got != "1" {
+		t.Errorf("reading loop.index rendered %q, want 1", got)
+	}
+	// A bracket on a mapping is the stricter form: it names a key that must exist.
+	tpl, err := Parse(`{% for m in messages %}{{ loop['not_a_loop_variable'] }}{% endfor %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := tpl.Render(msgs, Inputs{}); err == nil {
+		t.Error("a bracket read of an absent key was accepted; the two forms differ by design")
+	}
+}

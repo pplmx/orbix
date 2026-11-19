@@ -3061,3 +3061,45 @@ func TestFinishReasonMapping(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamReportsAMidStreamError covers what a client gets when the engine fails after the
+// response has started.
+//
+// A status code is no longer available once the first event is written, so the failure has to
+// travel inside the stream: a chunk carrying finish_reason "error" and the message, then the end of
+// the connection. The existing stream tests all drive successful generations, so this path was
+// never exercised -- it could report a finish_reason of "stop" and nothing would notice.
+//
+// streamResponse takes the event channel directly, which is what makes the case expressible: the
+// engine's errors come from a failed prefill or decode, and a fixture cannot be asked to fail on
+// demand.
+func TestStreamReportsAMidStreamError(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ch := make(chan engine.Event, 2)
+	ch <- engine.Event{HasToken: true, Token: 4} // one token, so the response has started
+	ch <- engine.Event{Err: errors.New("prefill failed")}
+	close(ch)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
+	srv.streamResponse(w, r, ch, "req-1", false, nil, false, 3)
+
+	body := w.Body.String()
+	// The error has to be visible to the client, not only in a log.
+	if !strings.Contains(body, `"finish_reason":"error"`) {
+		t.Errorf("no error finish_reason in the stream:\n%s", body)
+	}
+	if !strings.Contains(body, "prefill failed") {
+		t.Errorf("the engine's message is not in the stream:\n%s", body)
+	}
+	// And the token that did arrive is not lost, so a client sees the partial answer plus the
+	// failure rather than only one of them.
+	if !strings.Contains(body, `"text":"a"`) {
+		t.Errorf("the first chunk was dropped:\n%s", body)
+	}
+	// The stream ends without the sentinel: the connection closing is the signal. Asserted so a
+	// change to either half is a visible decision.
+	if strings.Contains(body, "[DONE]") {
+		t.Errorf("the error path wrote the [DONE] sentinel:\n%s", body)
+	}
+}

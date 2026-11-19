@@ -1716,3 +1716,44 @@ func TestAndOrShortCircuit(t *testing.T) {
 		}
 	}
 }
+
+// TestListNeverEqualsAString covers the list check in equalValues.
+//
+// A list carries an empty text field, so comparing by the string form without first checking
+// that both sides are lists makes an empty list equal to the empty string: `messages == ”`
+// came out true. Dropping the check passed every other chat test, because the comparisons the
+// templates make compare two lists or two strings and never a list against a string.
+//
+// `true == 'false'` is the same defect in the boolean branch next door, which has its own test
+// and its own comment; this is the half that was left out.
+func TestListNeverEqualsAString(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "a"}}
+	// The empty string is the interesting operand: it matches the empty text a list carries,
+	// which is what made the missing check invisible.
+	for _, c := range []struct{ name, src, want string }{
+		{"list against empty string", `{% if messages == '' %}T{% else %}F{% endif %}`, "F"},
+		{"list against some string", `{% if messages == 'x' %}T{% else %}F{% endif %}`, "F"},
+		{"the != form agrees", `{% if messages != '' %}T{% else %}F{% endif %}`, "T"},
+		{"an empty list is still not a string", `{% if messages[1:] == '' %}T{% else %}F{% endif %}`, "F"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, err := tpl.Render(msgs, Inputs{})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("Render = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	// Two lists of the same length still compare by shape, so the check is about type rather
+	// than about refusing every list comparison.
+	if got := render(t, `{% if messages == messages %}T{% else %}F{% endif %}`, msgs, Inputs{}); got != "T" {
+		t.Errorf("a list did not equal itself: %q", got)
+	}
+}

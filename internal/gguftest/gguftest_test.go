@@ -259,3 +259,90 @@ func TestByteLevelVocabularySpelling(t *testing.T) {
 		t.Error("SentencePiece vocabulary has no space marker")
 	}
 }
+
+// TestWindowLenAndAddBOSReachTheFile covers two options nothing used.
+//
+// The fixture offers them, and neither had a Set call anywhere in the repository's tests: a field that
+// writes a key no one reads is a field whose write may never have worked. Both are read back through
+// the packages a checkpoint goes through, so the assertion is about the file rather than about the
+// struct.
+func TestWindowLenAndAddBOSReachTheFile(t *testing.T) {
+	t.Run("WindowLen writes sliding_window", func(t *testing.T) {
+		path := Model{
+			NoEOS:      true,
+			ContextLen: 32,
+			WindowLen:  8,
+		}.Write(t, t.TempDir())
+
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		cfg, err := llama.LoadConfig(f)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.WindowLen != 8 {
+			t.Errorf("WindowLen = %d, want the fixture's 8", cfg.WindowLen)
+		}
+
+		// Zero means the key is omitted, which is what every model without a window gets.
+		plain := Model{NoEOS: true, ContextLen: 32}.Write(t, t.TempDir())
+		pf, err := gguf.Open(plain)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		pcfg, err := llama.LoadConfig(pf)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if pcfg.WindowLen != 0 {
+			t.Errorf("WindowLen = %d without the option, want 0", pcfg.WindowLen)
+		}
+	})
+
+	t.Run("AddBOS writes add_bos_token", func(t *testing.T) {
+		off := false
+		path := Model{NoEOS: true, ContextLen: 32, AddBOS: &off}.Write(t, t.TempDir())
+
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tok, err := tokenize.New(f)
+		if err != nil {
+			t.Fatalf("tokenize.New: %v", err)
+		}
+		// The tokenizer honours the key, so encoding with addSpecial must not prepend BOS.
+		// The fixture writes BOS id 1 by default; the tokenizer's own accessor is unexported, so the
+		// assertion goes through the ids it produces and the config's declaration.
+		cfg, err := llama.LoadConfig(f)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		ids := tok.Encode("a", true)
+		if len(ids) != 0 && int(ids[0]) == cfg.BOSID {
+			t.Errorf("Encode(addSpecial) prepended BOS despite add_bos_token = false: %v", ids)
+		}
+
+		// With the pointer nil the key is omitted, and the model's own default applies.
+		on := true
+		pathOn := Model{NoEOS: true, ContextLen: 32, AddBOS: &on}.Write(t, t.TempDir())
+		fOn, err := gguf.Open(pathOn)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		tokOn, err := tokenize.New(fOn)
+		if err != nil {
+			t.Fatalf("tokenize.New: %v", err)
+		}
+		cfgOn, err := llama.LoadConfig(fOn)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		idsOn := tokOn.Encode("a", true)
+		if len(idsOn) == 0 || int(idsOn[0]) != cfgOn.BOSID {
+			t.Errorf("Encode(addSpecial) did not prepend BOS despite add_bos_token = true: %v", idsOn)
+		}
+	})
+}

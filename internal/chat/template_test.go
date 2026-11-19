@@ -2006,3 +2006,27 @@ func TestDanglingBooleanOperatorIsARefusal(t *testing.T) {
 		}
 	}
 }
+
+// TestDanglingBinaryOperatorIsARefusal covers the same defect one precedence level down.
+//
+// Every binary level collects its right operand and propagates the error: or/and (covered
+// above), the comparisons, and concatenation. Dropping the propagation at any of them makes the
+// template parse with a nil child, and the nil reaches the evaluator's type switch at render
+// time instead of being refused here.
+//
+// The cases list one operator from each level and both sides, so a fix that special-cased one
+// loop cannot pass. `in` is included because it is parsed by the comparison level but spelled
+// like a filter would be, which is where a hand-written operand check tends to miss it.
+func TestDanglingBinaryOperatorIsARefusal(t *testing.T) {
+	operators := []string{"or", "and", "==", "!=", "in", "+"}
+	for _, op := range operators {
+		for _, src := range []string{
+			`{% if a ` + op + ` %}{% endif %}`,
+			`{{ a ` + op + ` }}`,
+		} {
+			if _, err := Parse(src); err == nil {
+				t.Errorf("Parse(%q) accepted a dangling %q", src, op)
+			}
+		}
+	}
+}

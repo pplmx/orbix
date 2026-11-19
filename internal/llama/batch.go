@@ -231,6 +231,17 @@ func (m *Model) Prefill(cache Cache, tokens []int32, startPos int) ([]float32, e
 }
 
 // addBiasBatch applies the attention projections' biases to every row of a batch.
+//
+// The gguftest fixture declares no attention biases, so this body never runs in the package's own
+// tests: the first check returns for every layer, and reducing the row count from n to 1 changes
+// nothing measurable. A model that has them -- Qwen2's checkpoints among others -- takes a path
+// this package's default suite cannot exercise, which is worth knowing before assuming the two
+// implementations agree because both compile.
+//
+// Measured what it takes to see the difference: over a four-token prefill on Qwen2-0.5B, changing
+// n to 1 moves the first eight logits from 98.21 to 78.77. Llama 3.2-1B, TinyLlama and tiny
+// Mixtral declare no biases, so a checkpoint alone is not enough -- the architecture has to be one
+// that uses them.
 func addBiasBatch(b *batch, layer *layer, n int) error {
 	if layer.qBias == nil && layer.kBias == nil && layer.vBias == nil {
 		return nil

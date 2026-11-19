@@ -1103,3 +1103,70 @@ func TestFilterErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestLexString covers every escape and both error paths lexString has.
+//
+// Only \n, \t and \" were exercised, and the errors were not: the parse tests that mention an
+// unterminated string reach the tag scanner first, which reports an unclosed "{{" before the
+// expression lexer ever sees the literal. So the function's own refusals had no witness.
+//
+// \\ is the escape a Windows path needs, and \' is what a single-quoted string containing an
+// apostrophe writes. Both are ordinary in the templates this package evaluates.
+//
+// The escape set is smaller than Python's, which Jinja2 follows. Measured against Jinja2 3.1:
+// 'a\\b' renders with a backspace and 'C:\\temp' keeps its backslash, while this package turns the
+// first into "ab" and the second into "C:<TAB>emp". \b, \f, \a, \v, \0 and \xNN are the missing
+// ones. No template in the cross-check corpus or in reference_cases.go uses any of them, so this
+// test pins the current set rather than the correct one; widening it is a separate change.
+func TestLexString(t *testing.T) {
+	cases := []struct {
+		src     string
+		want    string
+		wantLen int
+	}{
+		{`'plain'`, "plain", 7},
+		{`"double"`, "double", 8},
+		{`'a\nb'`, "a\nb", 6},
+		{`'a\tb'`, "a\tb", 6},
+		{`'a\rb'`, "a\rb", 6},
+		{`'a\\b'`, `a\b`, 6},
+		{`'it\'s'`, "it's", 7},
+		{`"say \"hi\""`, `say "hi"`, 12},
+		// \t is a known escape, so a Windows-looking path decodes with a tab in it. That is
+		// Python's rule too (Jinja2 renders 'C:\\temp' with the backslash only because the
+		// doubled form is what a template must write); the difference is in the escape set,
+		// noted at the top.
+		{`'C:\temp'`, "C:\temp", 9},
+		{`'\q'`, `\q`, 4},
+		// Empty, and the closing quote immediately after the opening one.
+		{`''`, "", 2},
+	}
+	for _, c := range cases {
+		got, n, err := lexString(c.src)
+		if err != nil {
+			t.Errorf("lexString(%q): %v", c.src, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("lexString(%q) = %q, want %q", c.src, got, c.want)
+		}
+		if n != c.wantLen {
+			t.Errorf("lexString(%q) consumed %d bytes, want %d", c.src, n, c.wantLen)
+		}
+	}
+
+	t.Run("errors", func(t *testing.T) {
+		// A trailing backslash: the escape has nothing to consume.
+		if _, _, err := lexString(`'abc\`); err == nil {
+			t.Error("a string ending with a backslash was accepted")
+		} else if !strings.Contains(err.Error(), "backslash") {
+			t.Errorf("error = %q, want it to mention the backslash", err)
+		}
+		// No closing quote at all.
+		if _, _, err := lexString(`'abc`); err == nil {
+			t.Error("an unterminated string was accepted")
+		} else if !strings.Contains(err.Error(), "unterminated") {
+			t.Errorf("error = %q, want it to say unterminated", err)
+		}
+	})
+}

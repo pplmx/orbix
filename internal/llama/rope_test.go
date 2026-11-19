@@ -274,6 +274,14 @@ func TestRopeMatchesReferenceLogprobs(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	cfg := m.Config()
+	// The expected values below are stories15M's, so another checkpoint produces different
+	// logprobs for reasons that have nothing to do with the rotation. Checked rather than left
+	// to the caller: passing Llama 3.2 by mistake reported the three tokens off by up to 12
+	// nats, which reads as a broken RoPE implementation rather than as the wrong input.
+	if cfg.VocabSize != 32000 || cfg.Layers != 6 {
+		t.Skipf("the expected values are stories15M's (vocab 32000, 6 layers); this file has vocab %d and %d layers",
+			cfg.VocabSize, cfg.Layers)
+	}
 	cache, err := NewKVCache(cfg, cfg.ContextLen)
 	if err != nil {
 		t.Fatal(err)

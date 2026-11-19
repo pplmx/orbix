@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -728,4 +729,67 @@ func TestWholePromptHitProducesIdenticalLogits(t *testing.T) {
 				"to a cold one", i, got[i], wantLogits[i])
 		}
 	}
+}
+
+// TestRememberFullBlockRefusesInconsistentState covers its two preconditions.
+//
+// Both describe states the caller cannot reach by accident -- a block that was never allocated, or a
+// token slice shorter than the block being published -- and neither had a test, so removing either
+// check passed. They are reachable from a test because the method takes the token slice as an argument
+// rather than reading it from cache state: a prefill that passes the wrong slice is exactly the
+// mistake the second guard catches, and getting it wrong publishes a block whose key covers tokens
+// nobody checked.
+func TestRememberFullBlockRefusesInconsistentState(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	newCache := func(t *testing.T) *PagedKVCache {
+		t.Helper()
+		pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 4})
+		if err != nil {
+			t.Fatalf("NewBlockPool: %v", err)
+		}
+		pool.EnablePrefixCache()
+		cache := pool.New()
+		t.Cleanup(func() { _ = cache.Reset() })
+		return cache
+	}
+
+	t.Run("a block that was never allocated", func(t *testing.T) {
+		cache := newCache(t)
+		// Position 1 completes block 0, which ensureBlocks has not created.
+		err := cache.rememberFullBlock([]int32{1, 2}, 1)
+		if err == nil {
+			t.Fatal("rememberFullBlock published a block that does not exist")
+		}
+		// The block and the position, which together say which prefill went wrong.
+		for _, want := range []string{"block 0", "position 1", "not allocated"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("a token slice shorter than the block", func(t *testing.T) {
+		cache := newCache(t)
+		if err := cache.ensureBlocks(1); err != nil {
+			t.Fatalf("ensureBlocks: %v", err)
+		}
+		// Block 0 covers positions 0 and 1, so it needs two tokens.
+		err := cache.rememberFullBlock([]int32{1}, 1)
+		if err == nil {
+			t.Fatal("rememberFullBlock published a block from a short token slice")
+		}
+		// The count it needs and the count it got.
+		for _, want := range []string{"needs tokens up to 2", "have 1"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
 }

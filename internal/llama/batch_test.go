@@ -643,14 +643,28 @@ func TestDecodeStepRejectsBadInput(t *testing.T) {
 	if _, err := m.DecodeStep([]Cache{cache}, nil); err == nil {
 		t.Error("DecodeStep accepted mismatched token and cache counts")
 	}
+	// The other direction matters for the comparison: a count check written as len(caches) < n
+	// rejects only the more-caches case, and this is the one that reads caches[i] past the end.
+	if _, err := m.DecodeStep(nil, []int32{1}); err == nil {
+		t.Error("DecodeStep accepted more tokens than caches")
+	}
 	if _, err := m.DecodeStep([]Cache{cache}, []int32{int32(cfg.VocabSize)}); err == nil {
 		t.Error("DecodeStep accepted a token past the vocabulary")
 	}
 	if _, err := m.DecodeStep([]Cache{nil}, []int32{1}); err == nil {
 		t.Error("DecodeStep accepted a nil cache")
 	}
-	// A full cache cannot take another position.
-	full, _ := NewKVCache(cfg, 2)
+	// A full cache cannot take another position. The capacity is smaller than the rope table
+	// on purpose: a cache that also sits at the table's end would be caught by the next check
+	// down, and a test that cannot tell the two apart would pass with this one removed.
+	full, err := NewKVCache(cfg, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.rope.cos) <= 2 {
+		t.Fatalf("the fixture's rope table has %d positions, so a 2-position cache cannot "+
+			"distinguish the capacity check from the table check", len(m.rope.cos))
+	}
 	if _, err := m.Prefill(full, []int32{1, 2}, 0); err != nil {
 		t.Fatal(err)
 	}

@@ -3220,3 +3220,21 @@ func whyPhrase(field string) string {
 		"best_of":      "several candidates",
 	}[field]
 }
+
+// TestIdlePollShiftValue pins the backoff ceiling, which nothing else observes.
+//
+// The constant sets the longest an idle pump sleeps: 1ms << idlePollShift. Changing it in either
+// direction passed every test, because the only timing assertion is "a request after an idle period
+// takes under a second" -- a ceiling of 1ms satisfies that, and a ceiling of about 1.02s sits close
+// enough to the bound that the request may arrive before the sleep ends either way.
+//
+// The value is documented in the constant's comment and decides the latency floor for the first
+// request after a quiet spell, so it is asserted against a literal rather than left implicit.
+func TestIdlePollShiftValue(t *testing.T) {
+	// 3 makes the ceiling 8ms: long enough to keep an idle server off a core, short enough not to be
+	// noticed by the first request that arrives.
+	if idlePollShift != 3 {
+		t.Errorf("idlePollShift = %d, want the documented 3 (a %v ceiling)",
+			idlePollShift, time.Millisecond<<idlePollShift)
+	}
+}

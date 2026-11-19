@@ -242,3 +242,74 @@ func TestGenerateOptionHandling(t *testing.T) {
 type fixedSampler struct{ tok int32 }
 
 func (s fixedSampler) Next([]float32) int32 { return s.tok }
+
+// TestGreedyPicksTheLowestIndexOnATie pins the determinism the rest of the package assumes.
+//
+// Next keeps the first index whose value is strictly greater than the running best, so equal
+// logits resolve to the lowest index. Changing that comparison to >= -- which reads like the
+// same argmax -- passes every existing test in llama and engine, because random weights
+// rarely produce an exact tie across the whole row. The tie is not exotic though: a padded or
+// masked row, or any externally supplied logits, can carry several equal maxima, and the
+// chosen id is what a caller compares to decide two runs agreed.
+//
+// This is the property behind "reproducible output makes a wrong forward pass obvious" in the
+// type's own comment, and behind the worker-count invariance the CLI documents: if the winner
+// depended on scan direction or on which of several equal maxima was hit, parallelism could
+// change the answer.
+func TestGreedyPicksTheLowestIndexOnATie(t *testing.T) {
+	cases := []struct {
+		name   string
+		logits []float32
+		want   int32
+	}{
+		{"single maximum", []float32{0, 1, 2, 3}, 3},
+		{"maximum first", []float32{9, 0, 0, 0}, 0},
+		{"two equal maxima", []float32{0, 5, 0, 5}, 1},
+		{"all equal", []float32{2, 2, 2, 2}, 0},
+		{"trailing equal maxima", []float32{0, 0, 7, 7, 7}, 2},
+		{"negative values", []float32{-3, -2, -1}, 2},
+		// -0 and +0 compare equal, so the lower index wins rather than whichever
+		// comparison operator happens to be used.
+		{"signed zero", []float32{0, float32(math.Copysign(0, -1))}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := (Greedy{}).Next(c.logits); got != c.want {
+				t.Errorf("Greedy.Next(%v) = %d, want %d", c.logits, got, c.want)
+			}
+		})
+	}
+}
+
+// TestGreedyNeverSelectsNaN covers the second half of Next's contract.
+//
+// NaN never compares greater, so a NaN entry cannot win even when it is the only
+// non-negative value in the row. Without this a NaN produced by a broken kernel could
+// become the chosen token rather than being skipped, which turns a numerical fault into
+// plausible-looking output.
+func TestGreedyNeverSelectsNaN(t *testing.T) {
+	nan := float32(math.NaN())
+	cases := []struct {
+		name   string
+		logits []float32
+		want   int32
+	}{
+		{"NaN beside a maximum", []float32{0, nan, 3, nan}, 2},
+		{"trailing NaN", []float32{1, -1, nan}, 0},
+		// A leading NaN is the case the contract does NOT move off index 0 for: the scan
+		// starts with best=0, and every later value fails v > logits[0] because any
+		// comparison against NaN is false. So index 0 stays chosen even though it is NaN.
+		// That is the cost of the comparison rule rather than a second bug, and it is worth
+		// pinning so a future change to the seed value has to think about it.
+		{"leading NaN keeps index 0", []float32{nan, 1, -1}, 0},
+		// Every entry NaN: nothing compares greater, so the scan never moves off index 0.
+		{"only NaN", []float32{nan, nan, nan}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := (Greedy{}).Next(c.logits); got != c.want {
+				t.Errorf("Greedy.Next(%v) = %d, want %d", c.logits, got, c.want)
+			}
+		})
+	}
+}

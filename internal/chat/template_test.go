@@ -1197,3 +1197,66 @@ func TestKwargValueErrorsAreReported(t *testing.T) {
 		}
 	}
 }
+
+// TestInOperatorTargets covers the three things `in` can search.
+//
+// A mapping is tested by key, a list by element, and a string by substring -- all three are
+// spelled the same way in a template and the right one is decided by the right operand's shape.
+// The list arm was unexecuted: the corpus's if_in puts a string on the right, and no template in
+// reference_cases.go tests membership in a list.
+//
+// The map arm is what "{% if 'tool_calls' in message %}" means in the tool-call branches, and the
+// string arm is what "'user' in message['role']" means. The list arm appears in templates that
+// test a name against a list of names.
+func TestInOperatorTargets(t *testing.T) {
+	cases := []struct {
+		src  string
+		in   Inputs
+		want string
+	}{
+		// Map: key membership.
+		{`{% if 'role' in messages[0] %}Y{% else %}N{% endif %}`, Inputs{}, "Y"},
+		{`{% if 'absent' in messages[0] %}Y{% else %}N{% endif %}`, Inputs{}, "N"},
+		// String: substring.
+		{`{% if 'us' in 'user' %}Y{% else %}N{% endif %}`, Inputs{}, "Y"},
+		{`{% if 'zz' in 'user' %}Y{% else %}N{% endif %}`, Inputs{}, "N"},
+	}
+	for _, c := range cases {
+		got := render(t, c.src, []Message{{Role: "user", Content: "hi"}}, c.in)
+		if got != c.want {
+			t.Errorf("render(%q, tools=%d) = %q, want %q", c.src, len(c.in.Tools), got, c.want)
+		}
+	}
+}
+
+// TestInOperatorListMembership covers the list arm of `in` directly.
+//
+// A template cannot write a list literal here, and every list the render inputs expose holds
+// mappings, so a string is never equal to an element -- which makes a rendered assertion pass
+// whether or not the walk happens. My first version used tools for this and deleting the walk
+// changed nothing. Evaluating the expression against a hand-built scope reaches the arm with an
+// element that can match.
+func TestInOperatorListMembership(t *testing.T) {
+	sc := newScope(map[string]value{
+		"xs": listValue([]value{strValue("a"), strValue("b")}),
+	})
+	b := binaryExpr{op: "in", left: litExpr{val: "a"}, right: varExpr{name: "xs"}}
+	got, err := evalBinary(b, sc)
+	if err != nil {
+		t.Fatalf("evalBinary: %v", err)
+	}
+	if !got.truthy() {
+		t.Error(`'a' in ['a','b'] was false`)
+	}
+
+	// A miss has to report false rather than fall through to the substring arm, which would
+	// also be false here but for a different reason.
+	b = binaryExpr{op: "in", left: litExpr{val: "zz"}, right: varExpr{name: "xs"}}
+	got, err = evalBinary(b, sc)
+	if err != nil {
+		t.Fatalf("evalBinary: %v", err)
+	}
+	if got.truthy() {
+		t.Error(`'zz' in ['a','b'] was true`)
+	}
+}

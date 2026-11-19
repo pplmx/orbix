@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -121,4 +122,81 @@ func TestJSONValueKeepsTheDeclaredWidth(t *testing.T) {
 	if _, ok := got.(string); !ok {
 		t.Errorf("an array projected to %T, want the summary string", got)
 	}
+}
+
+// TestErrWriterRemembersTheFirstFailure covers the "check once instead of at every call site"
+// contract that errWriter's comment describes.
+//
+// Two behaviours matter and neither was tested. After a write fails, every later write must
+// return that same error rather than trying the underlying writer again -- a sequence of prints
+// that kept calling a broken writer would report the failure N times, or (worse, if the writer
+// recovered) not at all. And a successful write must clear nothing: the first error is the one
+// reported, because it is the one that explains the truncated output.
+func TestErrWriterRemembersTheFirstFailure(t *testing.T) {
+	first := errors.New("first failure")
+	second := errors.New("second failure")
+
+	t.Run("a failure is remembered and not retried", func(t *testing.T) {
+		inner := &countingWriter{err: first}
+		ew := &errWriter{w: inner}
+
+		if _, err := ew.Write([]byte("a")); !errors.Is(err, first) {
+			t.Fatalf("first write returned %v, want the underlying error", err)
+		}
+		calls := inner.calls
+		for i := range 3 {
+			_, err := ew.Write([]byte("b"))
+			if !errors.Is(err, first) {
+				t.Fatalf("write %d after a failure returned %v, want the remembered error", i+2, err)
+			}
+		}
+		// The stored error is what a caller checks once at the end, and the inner writer was
+		// not asked again: retrying a broken writer is what the memo exists to prevent.
+		if ew.err != first {
+			t.Errorf("errWriter.err = %v, want the first error", ew.err)
+		}
+		if inner.calls != calls {
+			t.Errorf("the underlying writer was called %d more times after it failed", inner.calls-calls)
+		}
+	})
+
+	t.Run("the first error wins", func(t *testing.T) {
+		// A writer that fails differently each time: only the first may be reported.
+		inner := &countingWriter{err: first}
+		ew := &errWriter{w: inner}
+		if _, err := ew.Write(nil); !errors.Is(err, first) {
+			t.Fatalf("first write returned %v", err)
+		}
+		inner.err = second
+		if _, err := ew.Write(nil); !errors.Is(err, first) {
+			t.Errorf("after a later failure errWriter reported %v, want the first one", err)
+		}
+	})
+
+	t.Run("success passes through", func(t *testing.T) {
+		var buf bytes.Buffer
+		ew := &errWriter{w: &buf}
+		for _, s := range []string{"a", "b", "c"} {
+			if _, err := ew.Write([]byte(s)); err != nil {
+				t.Fatalf("Write(%q) = %v", s, err)
+			}
+		}
+		if got := buf.String(); got != "abc" {
+			t.Errorf("wrote %q, want abc", got)
+		}
+		if ew.err != nil {
+			t.Errorf("a successful run left err = %v", ew.err)
+		}
+	})
+}
+
+// countingWriter fails with err and counts how many times it was asked to write.
+type countingWriter struct {
+	err   error
+	calls int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return 0, w.err
 }

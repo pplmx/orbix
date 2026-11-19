@@ -1255,3 +1255,77 @@ func TestUsageAndDispatchAgree(t *testing.T) {
 		t.Error("an unknown command was accepted")
 	}
 }
+
+// TestVersionAcceptsBothFlagSpellings covers the alias the earlier version test missed.
+//
+// The defect this command had was that `version --json` printed the human report and exited
+// zero -- a build script piping it into a JSON parser got a parse error where the flag said
+// success. The test written for it called `version -json`, the single-dash spelling, so adding
+// the other spelling to the case was never checked: narrowing it back to `-json` alone passes.
+//
+// Both spellings are used elsewhere in this CLI (every command's -h and --help are one case),
+// which is what makes the single-dash-only version a defect rather than a choice.
+func TestVersionAcceptsBothFlagSpellings(t *testing.T) {
+	for _, flag := range []string{"-json", "--json"} {
+		t.Run(flag, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				if err := run([]string{"version", flag}); err != nil {
+					t.Fatalf("version %s: %v", flag, err)
+				}
+			})
+			var got map[string]any
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("version %s did not produce JSON: %v\n%s", flag, err, out)
+			}
+			if _, ok := got["version"]; !ok {
+				t.Errorf("version %s produced no version field: %v", flag, got)
+			}
+		})
+	}
+
+	for _, flag := range []string{"-h", "--help"} {
+		t.Run(flag, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				if err := run([]string{"version", flag}); err != nil {
+					t.Fatalf("version %s: %v", flag, err)
+				}
+			})
+			if !strings.Contains(out, "Usage:") {
+				t.Errorf("version %s printed %q, want the usage line", flag, out)
+			}
+		})
+	}
+}
+
+// TestVersionJSONOmitsAnUnknownCgoEnabled covers the omitempty on cgo_enabled.
+//
+// The field is a pointer so a binary with no build info to read it from can leave it out
+// entirely rather than report a false. Dropping omitempty would print `"cgo_enabled": null`,
+// which a script reading the field would have to special-case -- and `cgo` already answers the
+// question for every binary, so null is worse than absent.
+//
+// The condition cannot be forced in-process, since a test binary always has build info. What is
+// pinned instead is the encoding contract itself: a nil pointer produces no key, which is what
+// the struct's tag asks for.
+func TestVersionJSONOmitsAnUnknownCgoEnabled(t *testing.T) {
+	type probe struct {
+		CgoEnabled *string `json:"cgo_enabled,omitempty"`
+	}
+	b, err := json.Marshal(probe{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(b), "cgo_enabled") {
+		t.Errorf("a nil cgo_enabled was encoded as %s, want the key absent", b)
+	}
+
+	// And when it is known, it is present as a string.
+	v := "0"
+	b, err = json.Marshal(probe{CgoEnabled: &v})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"cgo_enabled":"0"`) {
+		t.Errorf("a known cgo_enabled encoded as %s", b)
+	}
+}

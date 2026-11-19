@@ -230,10 +230,7 @@ func cmdServe(args []string) error {
 	srv.StartPump(ctx)
 
 	fmt.Printf("orbix serving %s on %s\n", cfg, url)
-	queued := *maxQueued
-	if queued <= 0 {
-		queued = 8 * *maxActive
-	}
+	queued := defaultQueued(*maxQueued, *maxActive)
 	fmt.Printf("scheduling: %d active, %d queued max, %s policy\n", *maxActive, queued, schedPolicy)
 	// Say what the contiguous cache costs, which nothing else reports. A paged cache prints
 	// its pool size below from the pool itself; a contiguous one reserves a whole context per
@@ -440,4 +437,18 @@ func reservationWarning(cfg llama.Config, maxActive, queued int) string {
 			"written, so resident memory will look smaller than the figure above until long " +
 			"requests touch the whole context. Use --blocks and --block-size to share one " +
 			"pool instead of reserving a context per request.")
+}
+
+// defaultQueued is how many requests may wait when --max-queued is unset.
+//
+// Eight times the active slots rather than a fixed number because the useful backlog scales with the
+// service: a server admitting 4 at a time wants a different depth from one admitting 64, and a
+// constant would either starve the small one's retries or let the large one accept work it will not
+// reach for minutes. The multiplication is the whole rule, so it is stated once and tested rather
+// than living in the middle of the startup banner where nothing could reach it.
+func defaultQueued(maxQueued, maxActive int) int {
+	if maxQueued > 0 {
+		return maxQueued
+	}
+	return 8 * maxActive
 }

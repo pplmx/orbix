@@ -717,3 +717,34 @@ func TestServeRefusesAnUnknownLogFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultQueued covers the backlog depth when --max-queued is unset.
+//
+// The rule was three lines inside the startup banner, where no test could reach it: the value is
+// printed and then never observed. Moving it out is what made both of its branches testable, and the
+// arithmetic is worth pinning because it decides how much work the server accepts before refusing --
+// too small and a burst of retries is turned away, too large and the queue holds requests it cannot
+// reach.
+func TestDefaultQueued(t *testing.T) {
+	t.Run("unset scales with the active slots", func(t *testing.T) {
+		for _, active := range []int{1, 4, 8, 32} {
+			if got, want := defaultQueued(0, active), 8*active; got != want {
+				t.Errorf("defaultQueued(0, %d) = %d, want %d", active, got, want)
+			}
+		}
+	})
+
+	t.Run("an explicit value wins", func(t *testing.T) {
+		if got := defaultQueued(5, 32); got != 5 {
+			t.Errorf("defaultQueued(5, 32) = %d, want the explicit 5", got)
+		}
+	})
+
+	t.Run("a negative value falls back like an unset one", func(t *testing.T) {
+		// The flag's documentation says a non-positive value means "pick one", and the startup code
+		// compared with <= 0, so a negative has to behave like zero rather than meaning "no queue".
+		if got, want := defaultQueued(-1, 4), 8*4; got != want {
+			t.Errorf("defaultQueued(-1, 4) = %d, want %d", got, want)
+		}
+	})
+}

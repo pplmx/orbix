@@ -822,10 +822,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 		"completion_tokens": len(out),
 		"total_tokens":      len(promptTokens) + len(out),
 	}
-	stopReason := "stop"
-	if reason == "length" || reason == "cancel" {
-		stopReason = "length"
-	}
+	stopReason := finishReasonFor(reason)
 
 	if p.chat {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -1038,10 +1035,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 			return
 		}
 	}
-	stopReason := "stop"
-	if reason == "length" || reason == "cancel" {
-		stopReason = "length"
-	}
+	stopReason := finishReasonFor(reason)
 	// One final chunk carries the finish reason and an empty delta, then the
 	// sentinel every OpenAI stream ends with. Clients that accumulate deltas see no
 	// text change from either.
@@ -1437,4 +1431,36 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 		body.Error.Type = "server_error"
 	}
 	writeJSON(w, status, body)
+}
+
+// finishReasonFor maps an engine finish reason to the value the OpenAI schema carries.
+//
+// The two vocabularies are not the same size. The engine distinguishes stop, length, cancel,
+// abandoned and error, because a caller reading /metrics needs to tell a client that walked away
+// from one that ran out of budget. The response schema has three values, and only two of them are
+// meaningful here:
+//
+//   - "stop" is the model emitting its end token, or the request being cut by a stop string.
+//   - "length" is the token budget or the context window running out.
+//   - "tool_calls" does not apply: this server does not parse tool calls.
+//
+// cancel maps to "length" rather than "stop" because the generation did not complete on its own:
+// the sequence was cut short by the client leaving. The schema has no value for that, and the
+// client that caused it has already gone, so the response is read by a log or a proxy.
+//
+// abandoned follows the same reasoning but keeps "stop", which is the mapping that was in place
+// before this function existed. Changing it is a behavioural change rather than a consolidation and
+// is not made here.
+//
+// error maps to "stop" because the schema has no failure value; the stream carries an error event
+// separately for the case that matters, and a non-streaming error is a 500 rather than a completion.
+//
+// One function rather than two copies, which is what the duplicated expression had become: the
+// streaming and non-streaming paths must agree, and a mapping written twice is a mapping that can
+// disagree.
+func finishReasonFor(reason string) string {
+	if reason == "length" || reason == "cancel" {
+		return "length"
+	}
+	return "stop"
 }

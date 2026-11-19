@@ -3017,3 +3017,47 @@ func cfgBOS(t *testing.T, srv *Server) bool {
 	t.Helper()
 	return srv.eng.Model().Config().BOSID >= 0
 }
+
+// TestFinishReasonMapping covers the translation between the engine's five reasons and the three
+// the response schema carries.
+//
+// The expression was written twice, once for the streaming path and once for the non-streaming one,
+// and neither copy had a test: the existing cases cover "stop" and "length" only, which are the two
+// the engine produces most often and the two that need no translation. What went untested is exactly
+// the part where the two vocabularies disagree.
+//
+// cancel maps to length rather than stop: the schema has no value for "the client left", and the
+// generation did not end on its own. abandoned keeps stop, which is what the code did before this
+// function existed -- the consolidation did not change it.
+func TestFinishReasonMapping(t *testing.T) {
+	cases := []struct{ reason, want string }{
+		// The schema's own values pass through.
+		{"stop", "stop"},
+		{"length", "length"},
+		// No schema value exists for either; both were mapped by the code being pinned.
+		{"cancel", "length"},
+		{"abandoned", "stop"},
+		{"error", "stop"},
+		// Anything unrecognised falls back rather than producing an invalid enum value, which a
+		// strict client would reject outright.
+		{"something-new", "stop"},
+		{"", "stop"},
+	}
+	for _, c := range cases {
+		if got := finishReasonFor(c.reason); got != c.want {
+			t.Errorf("finishReasonFor(%q) = %q, want %q", c.reason, got, c.want)
+		}
+	}
+
+	// Every value the schema defines has to be reachable from some engine reason, or a client
+	// branching on them would see a case that never occurs.
+	seen := map[string]bool{}
+	for _, c := range cases {
+		seen[finishReasonFor(c.reason)] = true
+	}
+	for _, want := range []string{"stop", "length"} {
+		if !seen[want] {
+			t.Errorf("no engine reason maps to %q", want)
+		}
+	}
+}

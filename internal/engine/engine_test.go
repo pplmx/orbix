@@ -1953,3 +1953,52 @@ func TestRoundCountsPumpCalls(t *testing.T) {
 		t.Errorf("Round = %d on an idle Pump, want it to keep advancing past %d", got, after)
 	}
 }
+
+// TestQueueFullReturnsNoChannel covers the other half of a rejected Submit.
+//
+// The contract is an error and a nil channel. A caller that ranges over the channel after an
+// error would block forever if it were the sequence's own -- and that sequence is discarded when
+// the request is refused, so nothing would ever close it. The existing queue-full tests assert
+// the error and discard the channel, so returning an unusable one passed.
+//
+// This is the shape of defect a caller discovers in production: the happy path returns a channel
+// that works, and only the refusal is different.
+func TestQueueFullReturnsNoChannel(t *testing.T) {
+	const maxActive, maxQueued = 1, 1
+	e, tok, _ := loadModelPath(t, Options{MaxActive: maxActive, MaxQueued: maxQueued})
+	prompt := tok.Encode("Once upon a time", true)
+
+	for range maxActive + maxQueued {
+		if _, err := e.Submit(Request{Prompt: prompt, MaxTokens: 20}); err != nil {
+			t.Fatalf("filling the engine: %v", err)
+		}
+	}
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 20})
+	if !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("Submit = %v, want ErrQueueFull", err)
+	}
+	if ch != nil {
+		t.Error("a refused Submit returned a non-nil channel; a caller ranging over it would " +
+			"block on a sequence that was never published")
+	}
+
+	// The three input refusals have the same contract, and each is a place a caller could make
+	// the same mistake.
+	for _, c := range []struct {
+		name string
+		req  Request
+	}{
+		{"empty prompt", Request{Prompt: nil, MaxTokens: 1}},
+		{"prompt past the context", Request{Prompt: make([]int32, 100000), MaxTokens: 1}},
+		{"negative budget", Request{Prompt: prompt, MaxTokens: -1}},
+	} {
+		ch, err := e.Submit(c.req)
+		if err == nil {
+			t.Errorf("%s was accepted", c.name)
+			continue
+		}
+		if ch != nil {
+			t.Errorf("%s returned a non-nil channel alongside its error", c.name)
+		}
+	}
+}

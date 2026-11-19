@@ -439,6 +439,13 @@ func TestMetricsRejectsNonGet(t *testing.T) {
 
 // TestFormatFloat pins the value formatting: Prometheus prints whole numbers without a
 // decimal point, and matching that keeps the output readable next to other exporters.
+//
+// The large integers are the part that discriminates. Every case used to be small enough that
+// %g and %d agree, so replacing the whole function with `fmt.Sprintf("%g", v)` passed this
+// test and the rest of the server suite. The two only diverge where %g switches to exponent
+// notation, at a million -- and orbix_tokens_generated_total passes that within minutes of
+// real traffic, so a scrape would start reporting "1e+06" where every other exporter in the
+// process reports a plain integer.
 func TestFormatFloat(t *testing.T) {
 	tests := []struct {
 		in   float64
@@ -449,6 +456,19 @@ func TestFormatFloat(t *testing.T) {
 		{1672, "1672"},
 		{0.5, "0.5"},
 		{0.125, "0.125"},
+		// The exponent threshold: %g writes 1e+06 here, Prometheus writes 1000000.
+		{999999, "999999"},
+		{1e6, "1000000"},
+		{1e9, "1000000000"},
+		{1e12, "1000000000000"},
+		// Still exact at the top of int64's exact range for float64.
+		{1e18, "1000000000000000000"},
+		// Past it, int64(v) overflows and the equality check fails, so %g is the honest
+		// answer rather than a wrapped negative. Nothing counts that high, but the branch
+		// exists and returning a negative total would be worse than a rounded one.
+		{1e21, "1e+21"},
+		// Negative counters are not meaningful either, and the same path handles them.
+		{-5, "-5"},
 	}
 	for _, tc := range tests {
 		if got := formatFloat(tc.in); got != tc.want {

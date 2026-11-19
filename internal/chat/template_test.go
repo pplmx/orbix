@@ -1170,3 +1170,30 @@ func TestLexString(t *testing.T) {
 		}
 	})
 }
+
+// TestKwargValueErrorsAreReported covers parseKwarg's error return.
+//
+// It is the arm that reports a keyword argument whose value does not parse: "tojson(indent=)"
+// has the name and the '=' but nothing after it. The return was unexecuted because every
+// argument in the tests is well formed -- the rejection list in
+// TestParseRejectsUnsupportedConstructs tests whole constructs, not a filter argument.
+//
+// The message is the inner expression error rather than a wrapper, so a reader sees what was
+// wrong with the value and not only that some argument was.
+func TestKwargValueErrorsAreReported(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{{ x | tojson(indent=) }}`, `unexpected ")"`},
+		{`{{ x | tojson(indent=(1) }}`, "missing ')'"},
+		{`{{ x | tojson(indent=1+) }}`, `unexpected ")"`},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a keyword argument with no value", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+		}
+	}
+}

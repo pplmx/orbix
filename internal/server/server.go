@@ -48,10 +48,15 @@ type Config struct {
 	//
 	// A request cannot ask for zero tokens: max_tokens is an int rather than a pointer, so
 	// an explicit 0 is indistinguishable from the field being absent and both take this
-	// default. Measured: {"max_tokens": 0} and a body with no max_tokens both generated 123
-	// tokens against a 128-position context. The engine itself treats 0 as "no tokens" and
-	// finishes immediately, which is why the CLI's --max-tokens 0 does produce nothing --
-	// the two layers disagree, and the server is the one that cannot express the request.
+	// default. Measured against stories15M (128 positions): with the prompt "Once upon a
+	// time" -- five tokens -- both a body carrying {"max_tokens": 0} and one omitting the
+	// field generated 123 tokens, the whole remaining window. The count follows the prompt,
+	// so "hi" yields 126 from the same server; what the measurement establishes is that the
+	// two spellings agree, not that 123 is a constant.
+	//
+	// The engine itself treats 0 as "no tokens" and finishes immediately, which is why the
+	// CLI's --max-tokens 0 does produce nothing -- the two layers disagree, and the server
+	// is the one that cannot express the request.
 	MaxTokens int
 
 	// ContextLen caps prompt+output tokens for one request. It comes from the

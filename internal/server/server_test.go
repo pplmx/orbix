@@ -2913,3 +2913,39 @@ func TestCutAtStop(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxTokensZeroTakesTheDefault covers the value the API cannot spell.
+//
+// max_tokens is an int, so decoding {\"max_tokens\": 0} and omitting the field produce the same
+// struct: both leave the field at its zero value. The server therefore treats an explicit 0 as
+// "use MaxTokens", and the two bodies have to generate the same completion rather than one of
+// them returning an empty result. The engine does the opposite -- 0 there means no tokens -- which
+// is why the CLI's --max-tokens 0 emits nothing and this test is about the server's layer only.
+//
+// The assertion is equality of the two responses, not a specific token count: the count follows
+// the prompt and the window, and pinning a number would make this a test of the fixture.
+func TestMaxTokensZeroTakesTheDefault(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	withZero := decodeBody[completionResponse](t,
+		post(t, h, "/v1/completions", `{"prompt": "hi", "max_tokens": 0}`))
+	without := decodeBody[completionResponse](t,
+		post(t, h, "/v1/completions", `{"prompt": "hi"}`))
+
+	if withZero.Usage.CompletionTokens != without.Usage.CompletionTokens {
+		t.Errorf("explicit 0 generated %d tokens, omitting the field generated %d; the server "+
+			"cannot distinguish them, so they must agree",
+			withZero.Usage.CompletionTokens, without.Usage.CompletionTokens)
+	}
+	if withZero.Usage.CompletionTokens == 0 {
+		t.Error("an explicit 0 produced no tokens, so it was not read as the default")
+	}
+	if got, want := withZero.Choices[0].Text, without.Choices[0].Text; got != want {
+		t.Errorf("the two bodies produced different text: %q vs %q", got, want)
+	}
+	if withZero.Choices[0].FinishReason != "length" {
+		t.Errorf("finish reason %q, want \"length\": the default budget outlasts the window",
+			withZero.Choices[0].FinishReason)
+	}
+}

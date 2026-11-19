@@ -1100,6 +1100,7 @@ func TestEmitDistinguishesSlowFromGone(t *testing.T) {
 	})
 
 	t.Run("unread, cancelled: cancel unblocks the send", func(t *testing.T) {
+		startedAt := time.Now()
 		e, tok, _ := loadModelPath(t, Options{MaxActive: 1})
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1123,6 +1124,16 @@ func TestEmitDistinguishesSlowFromGone(t *testing.T) {
 		case <-done:
 		case <-time.After(20 * time.Second):
 			t.Fatal("cancel did not unblock a full event buffer")
+		}
+		// The cancel has to be what ended the round, not the deadline. A round released by the
+		// cancel finishes in a poll interval; one released by abandonGrace's timer takes about two
+		// seconds from here. Both close done, which is why the timing is the assertion.
+		//
+		// The bound is half the grace: wide enough to absorb scheduling noise on a loaded machine,
+		// narrow enough that a timer-released round cannot pass.
+		if elapsed := time.Since(startedAt); elapsed >= abandonGrace/2 {
+			t.Errorf("the subtest took %v, at or past half of abandonGrace (%v): the buffer was "+
+				"released by the deadline, so the cancel signal did not do it", elapsed, abandonGrace/2)
 		}
 	})
 }

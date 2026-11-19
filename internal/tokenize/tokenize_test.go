@@ -577,3 +577,55 @@ func TestBpeUnescapePassthrough(t *testing.T) {
 		}
 	}
 }
+
+// TestBigramQueueTieBreaks covers the two left-index tie-breaks in bigramQueue.less.
+//
+// Both orderings end by comparing left, which is what makes the merge order deterministic: two
+// pairs with the same rank or the same score would otherwise come out in whatever order the heap
+// happened to arrange them, and the tokenization of text with repeated pairs would stop being
+// reproducible. The score-mode tie-break was reached by the existing encode tests; the rank-mode
+// one was not, because no fixture has two distinct pairs sharing a rank.
+//
+// The first branch -- two entries disagreeing about byRank -- is left uncovered on purpose. The
+// comment says why: byRank comes from the tokenizer, so one queue never mixes the two orderings,
+// and the comparison exists only to stay total if it ever did.
+func TestBigramQueueTieBreaks(t *testing.T) {
+	t.Run("rank mode ties break on left", func(t *testing.T) {
+		q := bigramQueue{
+			{byRank: true, rank: 5, left: 10},
+			{byRank: true, rank: 5, left: 3},
+		}
+		if !q.less(1, 0) {
+			t.Error("left=3 did not sort before left=10 at equal rank")
+		}
+		if q.less(0, 1) {
+			t.Error("left=10 sorted before left=3")
+		}
+		// Rank still outranks left, so a lower rank wins even with a larger left.
+		q2 := bigramQueue{
+			{byRank: true, rank: 9, left: 0},
+			{byRank: true, rank: 1, left: 99},
+		}
+		if !q2.less(1, 0) {
+			t.Error("rank 1 did not sort before rank 9")
+		}
+	})
+
+	t.Run("score mode ties break on left", func(t *testing.T) {
+		q := bigramQueue{
+			{score: 2.5, left: 10},
+			{score: 2.5, left: 3},
+		}
+		if !q.less(1, 0) {
+			t.Error("left=3 did not sort before left=10 at equal score")
+		}
+		// A larger score wins, which is the unigram direction.
+		q2 := bigramQueue{
+			{score: 1, left: 0},
+			{score: 2, left: 99},
+		}
+		if !q2.less(1, 0) {
+			t.Error("score 2 did not sort before score 1")
+		}
+	})
+}

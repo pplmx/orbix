@@ -1329,3 +1329,76 @@ func TestVersionJSONOmitsAnUnknownCgoEnabled(t *testing.T) {
 		t.Errorf("a known cgo_enabled encoded as %s", b)
 	}
 }
+
+// captureStderr is captureStdout for the half of a report that goes to stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		done <- buf.String()
+	}()
+
+	defer func() {
+		os.Stderr = old
+	}()
+	fn()
+	w.Close()
+	os.Stderr = old
+	return <-done
+}
+
+// TestRunStatsReport covers `run --stats`, which is the only place a caller sees the model's
+// parameter count, its load time, and whether the window is what stopped generation.
+//
+// None of it had a test: reading the whole output as the completion, dropping the prompt
+// prefix, or reporting a parameter count of zero all passed the cmd suite. The window note is
+// the part a reader needs most -- a run that asked for 16 tokens and produced 9 otherwise looks
+// like the model stopped early.
+func TestRunStatsReport(t *testing.T) {
+	// A 64-position window, so a prompt of a few tokens plus a large budget fills it and the
+	// note has to appear.
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+
+	var stdout string
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			if err := run([]string{"run", "--model", path, "--stats", "--max-tokens", "200", "hi"}); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+		})
+	})
+
+	// The stats block goes to stderr, so stdout is the completion alone.
+	for _, want := range []string{"model:", "params:", "load:", "prompt:", "gen:", "cache:"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stats report is missing %q:\n%s", want, stderr)
+		}
+	}
+	// A parameter count of zero would be a fabricated number; the fixture has weights.
+	if strings.Contains(stderr, "params: 0\n") {
+		t.Errorf("stats report claims zero parameters:\n%s", stderr)
+	}
+
+	// The completion on stdout must not repeat the prompt: the prompt is echoed only with
+	// --echo, which is not set here.
+	if strings.Contains(stdout, "hi") && strings.Count(stdout, "hi") > 0 {
+		// The fixture's output may coincidentally contain "hi", so this is checked through the
+		// prompt's own words instead: the whole prompt would appear as a prefix.
+		if strings.HasPrefix(stdout, "hi") {
+			t.Errorf("stdout starts with the prompt, so the completion slice is wrong: %q", stdout)
+		}
+	}
+
+	// The window note appears when the budget was cut by the window rather than by EOS.
+	if !strings.Contains(stderr, "window is full") {
+		t.Errorf("a run that filled the window did not say so:\n%s", stderr)
+	}
+}

@@ -23,13 +23,19 @@ import (
 // realTokenizer loads the checkpoint named by MODEL.
 func realTokenizer(t *testing.T) *Tokenizer {
 	t.Helper()
-	p := os.Getenv("MODEL")
-	if p == "" {
+	return realTokenizerAt(t, os.Getenv("MODEL"))
+}
+
+// realTokenizerAt loads path, or skips when it is empty so a machine without that
+// checkpoint still runs the rest of the suite.
+func realTokenizerAt(t *testing.T, path string) *Tokenizer {
+	t.Helper()
+	if path == "" {
 		t.Skip("set MODEL to a GGUF file to run the round-trip checks")
 	}
-	f, err := gguf.Open(p)
+	f, err := gguf.Open(path)
 	if err != nil {
-		t.Fatalf("Open(%s): %v", p, err)
+		t.Fatalf("Open(%s): %v", path, err)
 	}
 	tok, err := New(f)
 	if err != nil {
@@ -38,14 +44,35 @@ func realTokenizer(t *testing.T) *Tokenizer {
 	return tok
 }
 
-// TestRoundTripEveryRune encodes and decodes each code point on its own.
+// TestRoundTripEveryRuneByteLevel is TestRoundTripEveryRune against a byte-level vocabulary.
 //
-// One rune at a time is the right granularity for this: it isolates a mapping error to the
-// character that has it, and it exercises every byte of the vocabulary's escaping table
-// without needing a corpus. A mismatch names the code point, which is what turns "some text
-// comes back wrong" into a fixable report.
-func TestRoundTripEveryRune(t *testing.T) {
-	tok := realTokenizer(t)
+// The whole-code-point sweep is the check that found the escaping-table bugs, and it only
+// has teeth on a byte-level vocabulary: bpeBytes is read by the GPT-2 path alone, so a wrong
+// entry there is invisible to a SentencePiece checkpoint. Verified by swapping the table's
+// 0xC3 and 0xC4 entries: MODEL=stories15M (SentencePiece) passed all 1,112,064 code points,
+// while MODEL=qwen2 reported "U+00C0 \"À\" round-trips to \"Ā\"" and the rest of the block.
+//
+// The documented gated run sets MODEL to the stories model, which means the table was only
+// ever checked there -- on the one vocabulary that cannot fail. This runs the same sweep
+// against QWEN2_MODEL, so both vocabulary families are covered by the standard command.
+//
+// Gated on QWEN2_MODEL and skipped when the file at MODEL is the byte-level one, so a
+// machine holding a single byte-level checkpoint does not run the sweep twice.
+func TestRoundTripEveryRuneByteLevel(t *testing.T) {
+	path := os.Getenv("QWEN2_MODEL")
+	tok := realTokenizerAt(t, path)
+	if !tok.byteLevel {
+		t.Skipf("%s is not a byte-level vocabulary", path)
+	}
+	if path == os.Getenv("MODEL") {
+		t.Skip("MODEL and QWEN2_MODEL are the same file; TestRoundTripEveryRune covers it")
+	}
+	roundTripEveryRune(t, tok)
+}
+
+// roundTripEveryRune is the sweep both vocabulary families run.
+func roundTripEveryRune(t *testing.T, tok *Tokenizer) {
+	t.Helper()
 	// A failure per code point would be thousands of lines; report a bounded sample and a
 	// count, which is enough to see whether it is one mapping or a whole block.
 	const maxReport = 12
@@ -78,6 +105,16 @@ func TestRoundTripEveryRune(t *testing.T) {
 	if failures > reported {
 		t.Errorf("%d code points failed in total (%d shown)", failures, reported)
 	}
+}
+
+// TestRoundTripEveryRune encodes and decodes each code point on its own.
+//
+// One rune at a time is the right granularity for this: it isolates a mapping error to the
+// character that has it, and it exercises every byte of the vocabulary's escaping table
+// without needing a corpus. A mismatch names the code point, which is what turns "some text
+// comes back wrong" into a fixable report.
+func TestRoundTripEveryRune(t *testing.T) {
+	roundTripEveryRune(t, realTokenizer(t))
 }
 
 // TestRoundTripText checks whole strings, which is where a mapping that is right per

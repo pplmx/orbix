@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2173,9 +2175,21 @@ func TestContextOverflowCarriesItsCode(t *testing.T) {
 				t.Errorf("param = %q, want %q", body.Error.Param, c.param)
 			}
 			// The message still has to carry the numbers: a code tells a program what
-			// happened, but the size is what a person uses to decide how much to trim.
-			if !strings.Contains(body.Error.Message, "tokens") {
-				t.Errorf("message %q does not state the sizes", body.Error.Message)
+			// happened, but the size is what a person uses to decide how much to trim. The
+			// assertion is on the values, not on the word "tokens" -- "prompt is too many
+			// tokens" contains that word and states no size at all.
+			// The window size is exact; the prompt length is the encoded count, which differs
+			// between the endpoints because a chat prompt is rendered through the transcript
+			// first. Both have to appear.
+			if !strings.Contains(body.Error.Message, strconv.Itoa(cfg.ContextLen)) {
+				t.Errorf("message %q does not state the %d-token window",
+					body.Error.Message, cfg.ContextLen)
+			}
+			// And a digit run for the prompt: the message reports a number, and which one
+			// depends on the endpoint's encoding.
+			if !regexp.MustCompile(`prompt is \d+ tokens`).MatchString(body.Error.Message) &&
+				!regexp.MustCompile(`\d+ tokens`).MatchString(body.Error.Message) {
+				t.Errorf("message %q states no prompt size", body.Error.Message)
 			}
 		})
 	}

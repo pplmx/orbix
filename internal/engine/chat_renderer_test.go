@@ -261,3 +261,50 @@ func TestChatRendererDefaultsAnEmptyRoleToUser(t *testing.T) {
 		t.Errorf("RenderChatPrompt with an empty role = %q, want %q", got, want)
 	}
 }
+
+// TestSpecialPieceTextEmptyPaths covers the two guards in specialPieceText.
+//
+// It looks a token id up in the vocabulary because a template interpolates bos_token as
+// text, and a file can name an id that its own vocabulary does not contain -- a truncated
+// file, or one converted with a different tokenizer. Returning "" is what keeps that from
+// panicking during a render, and "" is also what a template sees when the key is absent
+// entirely, so the two paths have to agree.
+func TestSpecialPieceTextEmptyPaths(t *testing.T) {
+	t.Run("key absent", func(t *testing.T) {
+		f := buildFileWithMeta([]kvPair{
+			{name: "tokenizer.ggml.tokens", kind: gguf.TypeArray, strs: []string{"<s>", "</s>"}},
+		})
+		if got := specialPieceText(f, "tokenizer.ggml.bos_token_id"); got != "" {
+			t.Errorf("specialPieceText without the key = %q, want empty", got)
+		}
+	})
+
+	t.Run("id past the vocabulary", func(t *testing.T) {
+		f := buildFileWithMeta([]kvPair{
+			{name: "tokenizer.ggml.tokens", kind: gguf.TypeArray, strs: []string{"<s>", "</s>"}},
+			{name: "tokenizer.ggml.bos_token_id", kind: gguf.TypeUint32, num: 99},
+		})
+		if got := specialPieceText(f, "tokenizer.ggml.bos_token_id"); got != "" {
+			t.Errorf("specialPieceText for id 99 of 2 = %q, want empty", got)
+		}
+	})
+
+	t.Run("vocabulary absent", func(t *testing.T) {
+		f := buildFileWithMeta([]kvPair{
+			{name: "tokenizer.ggml.bos_token_id", kind: gguf.TypeUint32, num: 0},
+		})
+		if got := specialPieceText(f, "tokenizer.ggml.bos_token_id"); got != "" {
+			t.Errorf("specialPieceText without a vocabulary = %q, want empty", got)
+		}
+	})
+
+	t.Run("normal", func(t *testing.T) {
+		f := buildFileWithMeta([]kvPair{
+			{name: "tokenizer.ggml.tokens", kind: gguf.TypeArray, strs: []string{"<s>", "</s>"}},
+			{name: "tokenizer.ggml.bos_token_id", kind: gguf.TypeUint32, num: 0},
+		})
+		if got := specialPieceText(f, "tokenizer.ggml.bos_token_id"); got != "<s>" {
+			t.Errorf("specialPieceText for id 0 = %q, want %q", got, "<s>")
+		}
+	})
+}

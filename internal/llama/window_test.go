@@ -2,6 +2,7 @@ package llama
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -392,5 +393,97 @@ func TestSlidingWindowOnTheBatchPaths(t *testing.T) {
 		if math.IsNaN(float64(v)) {
 			t.Fatalf("decode-windowed logit[%d] is NaN", i)
 		}
+	}
+}
+
+// TestAttendRefusesInconsistentArguments covers the five preconditions attend checks before it
+// touches memory.
+//
+// attend is the inner loop of every decoder layer and takes slices from three different caches,
+// so a caller passing a short score buffer, an output of the wrong width, or spans whose rows do
+// not add up would otherwise get a forward pass that reads or writes out of bounds. The checks
+// turn that into an error naming the mismatch.
+//
+// The span cases are the ones a refactor produces without touching a length: spans that each look
+// valid but together cover one position too few. Enlarging a bound from != to < passes every
+// existing test, because nothing in the suite ever calls attend with an argument it would refuse.
+func TestAttendRefusesInconsistentArguments(t *testing.T) {
+	const width = 2
+	data := make([]float32, 8)
+	// One span covering two positions, stride 4 so the rows are distinct slices.
+	good := []span{{data: data, stride: 4, rows: 2, width: width}}
+	q := make([]float32, width)
+	out := make([]float32, width)
+	scores := make([]float32, 2)
+
+	// The happy path first, so a refusal below is about the argument rather than about attend.
+	if err := attend(q, good, good, 2, scores, out, 0.5); err != nil {
+		t.Fatalf("attend with consistent arguments: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		n      int
+		keys   []span
+		values []span
+		scores []float32
+		out    []float32
+		want   string
+	}{
+		{
+			name: "no positions", n: 0, keys: good, values: good,
+			scores: scores, out: out, want: "attention over 0 positions",
+		},
+		{
+			name: "negative positions", n: -1, keys: good, values: good,
+			scores: scores, out: out, want: "attention over",
+		},
+		{
+			name: "score buffer too short", n: 2, keys: good, values: good,
+			scores: make([]float32, 1), out: out, want: "score buffer holds 1",
+		},
+		{
+			name: "output narrower than the query", n: 2, keys: good, values: good,
+			scores: scores, out: make([]float32, width-1), want: "attention output is 1 wide",
+		},
+		{
+			name: "output wider than the query", n: 2, keys: good, values: good,
+			scores: scores, out: make([]float32, width+1), want: "attention output is 3 wide",
+		},
+		{
+			name: "keys cover too few positions", n: 2,
+			keys: []span{{data: data, stride: 4, rows: 1, width: width}}, values: good,
+			scores: scores, out: out, want: "keys cover 1 positions",
+		},
+		{
+			name: "values cover too few positions", n: 2, keys: good,
+			values: []span{{data: data, stride: 4, rows: 1, width: width}},
+			scores: scores, out: out, want: "values cover 1 positions",
+		},
+		{
+			// More rows than positions is the case a "<" comparison accepts: the extra rows
+			// would be written to scores[n] and past it, which the n = 2 buffer does not have.
+			name: "keys cover too many positions", n: 2,
+			keys: []span{{data: data, stride: 4, rows: 2, width: width},
+				{data: data, stride: 4, rows: 1, width: width}}, values: good,
+			scores: scores, out: out, want: "keys cover 3 positions",
+		},
+		{
+			name: "values cover too many positions", n: 2, keys: good,
+			values: []span{{data: data, stride: 4, rows: 2, width: width},
+				{data: data, stride: 4, rows: 1, width: width}},
+			scores: scores, out: out, want: "values cover 3 positions",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := attend(q, c.keys, c.values, c.n, c.scores, c.out, 0.5)
+			if err == nil {
+				t.Fatalf("attend accepted %s", c.name)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not say %q", err, c.want)
+			}
+		})
 	}
 }

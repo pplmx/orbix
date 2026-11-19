@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"errors"
 	"math"
 	"slices"
 	"testing"
@@ -222,6 +223,43 @@ func TestGenerateOptionHandling(t *testing.T) {
 		}
 		if len(seen) == 0 {
 			t.Error("OnToken was never called")
+		}
+	})
+
+	t.Run("an OnToken error stops generation and is returned", func(t *testing.T) {
+		// OnToken is the caller's stop signal -- a streaming client that went away, a
+		// consumer that has what it needs, a context that was cancelled. Generate must
+		// return that error with the tokens produced so far, not swallow it and keep
+		// decoding. Ignoring the return value passed the whole llama and engine suites:
+		// the only OnToken test returned nil, so nothing exercised the error path.
+		m := newModel(t)
+		cache, err := NewKVCache(m.Config(), m.Config().ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		wantErr := errors.New("consumer stopped")
+		calls := 0
+		out, err := m.Generate(cache, []int32{0, 1}, Greedy{}, GenerateOptions{
+			MaxTokens: 8,
+			OnToken: func(int32) error {
+				calls++
+				if calls == 2 {
+					return wantErr
+				}
+				return nil
+			},
+		})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Generate returned %v, want the OnToken error", err)
+		}
+		// The failing token is reported before the error, so the caller keeps everything it
+		// was told about: prompt plus the two tokens OnToken saw.
+		if want := 2 + 2; len(out) != want {
+			t.Errorf("Generate returned %d tokens %v, want %d (prompt plus the tokens OnToken saw)",
+				len(out), out, want)
+		}
+		if calls > 2 {
+			t.Errorf("OnToken called %d times after returning an error, want it to stop at 2", calls)
 		}
 	})
 

@@ -1395,8 +1395,9 @@ func TestIfTagErrors(t *testing.T) {
 		{`{% if x %}a{% elif 1+ %}b{% endif %}`, "expression ends early"},
 		// An if that is never closed.
 		{`{% if x %}a`, "never closed"},
-		// An if closed by the wrong tag.
-		{`{% if x %}a{% endfor %}`, "closed by"},
+		// An if closed by the wrong tag. The message names the tag that closed it, which is how a
+		// reader finds the line: "closed by" alone says something is wrong and not what.
+		{`{% if x %}a{% endfor %}`, "closed by {% endfor %}"},
 	}
 	for _, c := range cases {
 		_, err := Parse(c.src)
@@ -2406,6 +2407,35 @@ func TestTojsonMatchesPythonsEscaping(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("tojson(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+}
+
+// TestParseErrorsNameTheOffendingTag covers the three parse refusals whose message carries the tag or
+// header it rejected.
+//
+// "unexpected closing statement" tells a template author that something is unbalanced and not which
+// line to look at, and a file with ten blocks leaves them to find it. The messages already name the
+// statement; nothing asserted the name, so dropping it from the format string passed.
+func TestParseErrorsNameTheOffendingTag(t *testing.T) {
+	cases := []struct{ src, want string }{
+		// A closing tag with nothing open.
+		{`{% endfor %}`, "unexpected {% endfor %}"},
+		{`{% endif %}`, "unexpected {% endif %}"},
+		// A statement this parser does not implement, quoted so a typo is visible.
+		{`{% macro x %}`, `unsupported template statement "macro"`},
+		// A for tag with no in clause: the header is what has to be corrected.
+		{`{% for %}`, "for  %} has no 'in' clause"},
+		{`{% for x %}{% endfor %}`, "for x %} has no 'in' clause"},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a malformed statement", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
 		}
 	}
 }

@@ -14,11 +14,16 @@
 //
 // Architecture differences are a table, not a type hierarchy. archSpecs maps an
 // architecture name to the handful of properties that actually differ -- the RoPE pairing
-// convention, whether attention carries a bias, the sliding-window length. A Go type per
+// convention and whether attention carries a bias, which is the whole of it. A Go type per
 // family would duplicate the forward pass per family; the table keeps one forward pass and
-// makes the differences enumerable in eleven lines. The cost is that a genuine structural
+// makes the differences enumerable at a glance. The cost is that a genuine structural
 // difference has no home here, which is the point at which a second implementation is
 // cheaper than more flags.
+//
+// The table is not the only place architecture varies. The sliding window is a metadata key
+// (attention.sliding_window) read straight into Config, and the expert count likewise: both
+// are per-file numbers rather than per-family switches, which is why they are not spec
+// fields.
 //
 // Two RoPE layouts, because the models disagree on how dimensions pair. RopeNormal
 // pairs dimension i with i+1, as Llama does; RopeNeox pairs i with i+dims/2, as the

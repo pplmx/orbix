@@ -266,6 +266,10 @@ func TestParserRejectsStructuralCorruption(t *testing.T) {
 		if !strings.Contains(err.Error(), "dimensions") {
 			t.Errorf("error %q does not say the dimension count is the problem", err)
 		}
+		// The count is what tells a writer how far over the limit the shape is.
+		if !strings.Contains(err.Error(), "9") {
+			t.Errorf("error %q does not state the dimension count", err)
+		}
 	})
 
 	t.Run("unknown tensor name", func(t *testing.T) {
@@ -343,8 +347,19 @@ func TestReadRejectsBadInput(t *testing.T) {
 
 	badVersion := append([]byte(nil), good...)
 	badVersion[4] = 2
-	if _, err := Read(bytes.NewReader(badVersion)); err == nil || !strings.Contains(err.Error(), "version") {
-		t.Errorf("Read(version 2) = %v, want a version error", err)
+	_, verr := Read(bytes.NewReader(badVersion))
+	if verr == nil || !strings.Contains(verr.Error(), "version") {
+		t.Errorf("Read(version 2) = %v, want a version error", verr)
+	}
+	// Both the version found and the one supported belong in the message: a reader who sees only
+	// "unsupported version" has to decode the header themselves to learn which number was wrong.
+	if verr != nil {
+		if !strings.Contains(verr.Error(), "2") {
+			t.Errorf("error %q does not state the version found", verr)
+		}
+		if !strings.Contains(verr.Error(), strconv.Itoa(Version)) {
+			t.Errorf("error %q does not state the version supported", verr)
+		}
 	}
 }
 
@@ -357,8 +372,17 @@ func TestOpenMissingFile(t *testing.T) {
 func TestReadRejectsInvalidAlignment(t *testing.T) {
 	// alignment 0 would divide by zero when padding the data section.
 	data := buildFile([]kv{{"general.alignment", u32Val(0)}}, nil, 0, nil)
-	if _, err := Read(bytes.NewReader(data)); err == nil {
+	_, err := Read(bytes.NewReader(data))
+	if err == nil {
 		t.Fatal("Read(alignment 0) succeeded, want error")
+	}
+	// The message names the alignment: "invalid alignment" leaves the reader to find which key
+	// in the metadata file was wrong, and this one carries the value that has to change.
+	if !strings.Contains(err.Error(), "general.alignment") {
+		t.Errorf("error %q does not name the key", err)
+	}
+	if !strings.Contains(err.Error(), "0") {
+		t.Errorf("error %q does not state the value", err)
 	}
 }
 
@@ -738,8 +762,18 @@ func TestRefusesOversizedMetadataValue(t *testing.T) {
 	before := allocDelta(t, func() {
 		if _, err := Read(bytes.NewReader(data)); err == nil {
 			t.Error("Read accepted a 1 GiB string claim")
-		} else if !strings.Contains(err.Error(), "refusing to allocate") {
-			t.Errorf("error %q does not say the size is the problem", err)
+		} else {
+			if !strings.Contains(err.Error(), "refusing to allocate") {
+				t.Errorf("error %q does not say the size is the problem", err)
+			}
+			// The message states the refused size and the limit; the comment above has always
+			// claimed it names the number, and nothing checked. Both are what a reader uses to
+			// tell a corrupt file from one that merely exceeds a policy.
+			for _, want := range []string{"1073741824", "67108864"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not state %s", err, want)
+				}
+			}
 		}
 	})
 	// The bound is what saves the memory, so assert on memory rather than on the error

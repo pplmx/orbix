@@ -1396,3 +1396,71 @@ func TestLoadConfigRejectsWrongDimensionCount(t *testing.T) {
 		t.Errorf("error = %v, want it to print the dims it found", err)
 	}
 }
+
+// TestLoadConfigReadsRopeBaseAndScale covers the two rope fields that override a default.
+//
+// Both were unread: the value from the metadata was assigned to a field no test ever populated from a
+// file, so dropping either assignment changed nothing observable. The rope tests set the struct field
+// directly, which tests the rotation and not the reading.
+//
+// The defaults are the other half: 10000 and 1 are what a model without the keys gets, and they are
+// assigned before the lookup rather than after, so a merge bug would leave them unset instead.
+func TestLoadConfigReadsRopeBaseAndScale(t *testing.T) {
+	t.Run("values from the file", func(t *testing.T) {
+		c := defaultTiny()
+		kvs := append(c.kvs(),
+			kv{"llama.rope.freq_base", f32Val(500000)},
+			kv{"llama.rope.scale_linear", f32Val(4)},
+		)
+		f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		cfg, err := LoadConfig(f)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.RopeBase != 500000 {
+			t.Errorf("RopeBase = %v, want the file's 500000", cfg.RopeBase)
+		}
+		if cfg.RopeScale != 4 {
+			t.Errorf("RopeScale = %v, want the file's 4", cfg.RopeScale)
+		}
+	})
+
+	t.Run("defaults without the keys", func(t *testing.T) {
+		c := defaultTiny()
+		f, err := gguf.Read(bytes.NewReader(buildFile(c.kvs(), c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		cfg, err := LoadConfig(f)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.RopeBase != 10000 {
+			t.Errorf("RopeBase = %v, want the default 10000", cfg.RopeBase)
+		}
+		if cfg.RopeScale != 1 {
+			t.Errorf("RopeScale = %v, want the default 1", cfg.RopeScale)
+		}
+	})
+
+	t.Run("a non-positive scale keeps the default", func(t *testing.T) {
+		// The guard is `ok && v > 0`: a zero or negative scale is ignored rather than refused, since
+		// scaling by zero would collapse every position onto one and the schema has no "off" value.
+		c := defaultTiny()
+		kvs := append(c.kvs(), kv{"llama.rope.scale_linear", f32Val(0)})
+		f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		cfg, err := LoadConfig(f)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.RopeScale != 1 {
+			t.Errorf("RopeScale = %v, want the default 1 for a zero value", cfg.RopeScale)
+		}
+	})
+}

@@ -327,3 +327,70 @@ func TestSlidingWindowOnThePagedPath(t *testing.T) {
 		}
 	}
 }
+
+// TestSlidingWindowOnTheBatchPaths covers the two trims in batch.go.
+//
+// A window has to be applied in four places, one per attention implementation: forward.go's
+// attention (covered by TestSlidingWindowChangesAttention), attention.go's attentionCached
+// (covered by TestSlidingWindowOnThePagedPath), and batch.go's attentionBatch and its decode
+// sibling, which serve Prefill and DecodeStep. The last two had no test with a window at all.
+//
+// The batch versions matter because the engine always goes through them: every server request
+// and every bench run prefills and decodes in batches, so a window applied on the single-sequence
+// paths but not here would leave the sliding-window behaviour exercised only by `orbix run`.
+func TestSlidingWindowOnTheBatchPaths(t *testing.T) {
+	c := defaultTiny()
+	c.ctx = 32
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	// Two positions, and a prompt longer than that, so the trim has something to drop.
+	m.W.Config.WindowLen = 2
+
+	tokens := make([]int32, 8)
+	for i := range tokens {
+		tokens[i] = int32(i % 11)
+	}
+
+	cache, err := NewKVCache(m.Config(), c.ctx)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	logits, err := m.Prefill(cache, tokens, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	if len(logits) != cfg.VocabSize {
+		t.Fatalf("logits length = %d, want %d", len(logits), cfg.VocabSize)
+	}
+	for i, v := range logits {
+		if math.IsNaN(float64(v)) {
+			t.Fatalf("batch-windowed logit[%d] is NaN", i)
+		}
+	}
+
+	// Then decode two sequences in one batch, which is the other trim site.
+	cache2, err := NewKVCache(m.Config(), c.ctx)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	if _, err := m.Prefill(cache2, tokens[:4], 0); err != nil {
+		t.Fatalf("Prefill (second): %v", err)
+	}
+	next, err := m.DecodeStep([]Cache{cache, cache2}, []int32{1, 2})
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+	// One vocabulary's worth of logits per sequence in the batch.
+	if len(next) != 2*cfg.VocabSize {
+		t.Fatalf("decode logits length = %d, want %d for two sequences", len(next), 2*cfg.VocabSize)
+	}
+	for i, v := range next {
+		if math.IsNaN(float64(v)) {
+			t.Fatalf("decode-windowed logit[%d] is NaN", i)
+		}
+	}
+}

@@ -319,3 +319,56 @@ func TestInspectSurvivesAFileWithNoMetadata(t *testing.T) {
 		t.Errorf("an unknown-but-named architecture did not print its name:\n%s", out)
 	}
 }
+
+// TestInspectMarksAnUnsizeableTypePartial covers the "(partial)" suffix on a row whose byte count
+// could not be computed.
+//
+// The suffix exists so a reader is not told a confident number for a type this build cannot size:
+// the count of tensors is still exact, the size is not. Nothing tested it -- removing the suffix and
+// forcing the flag false both passed.
+//
+// The file is hand-built because the fixture writer only emits F32 tensors, and the condition is a
+// type the package does not know.
+func TestInspectMarksAnUnsizeableTypePartial(t *testing.T) {
+	var b []byte
+	b = append(b, []byte("GGUF")...)
+	var u32 [4]byte
+	var u64 [8]byte
+	binary.LittleEndian.PutUint32(u32[:], 3)
+	b = append(b, u32[:]...)
+	binary.LittleEndian.PutUint64(u64[:], 1) // one tensor
+	b = append(b, u64[:]...)
+	binary.LittleEndian.PutUint64(u64[:], 0) // no metadata
+	b = append(b, u64[:]...)
+	// The tensor: name, one dimension, an unknown type id, offset.
+	var nameLen [8]byte
+	binary.LittleEndian.PutUint64(nameLen[:], 1)
+	b = append(b, nameLen[:]...)
+	b = append(b, 'w')
+	binary.LittleEndian.PutUint32(u32[:], 1)
+	b = append(b, u32[:]...)
+	binary.LittleEndian.PutUint64(u64[:], 4) // one dimension: 4
+	b = append(b, u64[:]...)
+	binary.LittleEndian.PutUint32(u32[:], 9999) // not a type this build knows
+	b = append(b, u32[:]...)
+	binary.LittleEndian.PutUint64(u64[:], 0) // offset
+	b = append(b, u64[:]...)
+
+	path := filepath.Join(t.TempDir(), "odd.gguf")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := run([]string{"model", "inspect", path}); err != nil {
+			t.Errorf("inspect refused a file with an unknown tensor type: %v", err)
+		}
+	})
+	if !strings.Contains(out, "(partial)") {
+		t.Errorf("a row whose size could not be computed is not marked partial:\n%s", out)
+	}
+	// And the tensor itself still appears, so the reader knows how many there are.
+	if !strings.Contains(out, "w") {
+		t.Errorf("the tensor is missing from the report:\n%s", out)
+	}
+}

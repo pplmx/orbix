@@ -1245,3 +1245,82 @@ func TestHugeDimensionsDoNotWrap(t *testing.T) {
 		t.Errorf("Bytes() = %d, %v, want 24, true", b, ok)
 	}
 }
+
+// TestValueScalarTypes covers every scalar metadata type the reader decodes.
+//
+// Six of the twelve were unexecuted: int8, uint16, int16, int64, float64, and the unknown-type
+// rejection. The ones with tests were the types the fixtures happen to use, which is a weak
+// guarantee -- a real checkpoint stores token_type and score arrays in types the synthetic builder
+// never picked, and a decoding bug in int16 would have surfaced as a wrong hyperparameter rather
+// than as a test failure.
+//
+// Each case asserts the decoded fields, including the Num mirror, because that is what a caller
+// reading a number without knowing its width uses.
+func TestValueScalarTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		val  Value
+		// want is the fields the decoded value must carry.
+		want Value
+	}{
+		{"uint8", Value{Type: TypeUint8, Uint: 200}, Value{Type: TypeUint8, Uint: 200, Num: 200}},
+		{"int8 negative", Value{Type: TypeInt8, Int: -100}, Value{Type: TypeInt8, Int: -100, Num: -100}},
+		{"uint16", Value{Type: TypeUint16, Uint: 60000}, Value{Type: TypeUint16, Uint: 60000, Num: 60000}},
+		{"int16 negative", Value{Type: TypeInt16, Int: -30000}, Value{Type: TypeInt16, Int: -30000, Num: -30000}},
+		{"uint32", Value{Type: TypeUint32, Uint: 4000000000}, Value{Type: TypeUint32, Uint: 4000000000, Num: 4000000000}},
+		{"int32 negative", Value{Type: TypeInt32, Int: -2000000000}, Value{Type: TypeInt32, Int: -2000000000, Num: -2000000000}},
+		{"uint64", Value{Type: TypeUint64, Uint: 1 << 60}, Value{Type: TypeUint64, Uint: 1 << 60, Num: float64(1 << 60)}},
+		{"int64 negative", Value{Type: TypeInt64, Int: -(1 << 60)}, Value{Type: TypeInt64, Int: -(1 << 60), Num: float64(-(1 << 60))}},
+		{"float32", Value{Type: TypeFloat32, Float: 0.5}, Value{Type: TypeFloat32, Float: 0.5, Num: 0.5}},
+		{"float64", Value{Type: TypeFloat64, Float: 1.25}, Value{Type: TypeFloat64, Float: 1.25, Num: 1.25}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw := buildFile([]kv{{key: "k", val: c.val}}, nil, 0, nil)
+			f, err := Read(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			got, ok := f.Metadata["k"]
+			if !ok {
+				t.Fatal("key was not decoded")
+			}
+			c.want.Type = c.val.Type
+			if got.Type != c.val.Type {
+				t.Errorf("Type = %d, want %d", got.Type, c.val.Type)
+			}
+			if got.Uint != c.want.Uint {
+				t.Errorf("Uint = %d, want %d", got.Uint, c.want.Uint)
+			}
+			if got.Int != c.want.Int {
+				t.Errorf("Int = %d, want %d", got.Int, c.want.Int)
+			}
+			if got.Float != c.want.Float {
+				t.Errorf("Float = %v, want %v", got.Float, c.want.Float)
+			}
+			if got.Num != c.want.Num {
+				t.Errorf("Num = %v, want %v", got.Num, c.want.Num)
+			}
+		})
+	}
+
+	t.Run("unknown type is rejected", func(t *testing.T) {
+		// A type id past the last one. Hand-built rather than through buildFile, since
+		// encodeValue panics on a type it does not know.
+		var b bytes.Buffer
+		b.WriteString(Magic)
+		_ = binary.Write(&b, binary.LittleEndian, uint32(Version))
+		_ = binary.Write(&b, binary.LittleEndian, uint64(0)) // tensors
+		_ = binary.Write(&b, binary.LittleEndian, uint64(1)) // one kv
+		_ = binary.Write(&b, binary.LittleEndian, uint64(1)) // key length
+		b.WriteString("k")
+		_ = binary.Write(&b, binary.LittleEndian, uint32(200)) // the bogus type
+		_, err := Read(bytes.NewReader(b.Bytes()))
+		if err == nil {
+			t.Fatal("an unknown metadata value type was accepted")
+		}
+		if !strings.Contains(err.Error(), "unknown metadata value type") {
+			t.Errorf("error = %q, want it to name the unknown type", err)
+		}
+	})
+}

@@ -1355,3 +1355,66 @@ func TestTensorDataOpenError(t *testing.T) {
 		t.Fatal("TensorData on a missing tensor succeeded")
 	}
 }
+
+// TestBoolMetadataDecodesAnyNonZeroByte pins the rule the GGUF spec leaves implicit.
+//
+// A bool is one byte, and the format says nothing about which non-zero values mean true -- so
+// the decoder must accept any of them. Tightening `b[0] != 0` to `b[0] == 1` passed the whole
+// gguf suite: every test that reaches a bool goes through the Value literal in builder_test.go,
+// which supplies a Go bool and never the encoded byte. There was no decoding test for the type
+// at all.
+//
+// A writer that emits 0xff or 0x02 for true is conformant, and a loader that read it as false
+// would silently disable a feature the file asked for.
+func TestBoolMetadataDecodesAnyNonZeroByte(t *testing.T) {
+	build := func(encoded byte) []byte {
+		var b bytes.Buffer
+		u32 := func(v uint32) {
+			var x [4]byte
+			binary.LittleEndian.PutUint32(x[:], v)
+			b.Write(x[:])
+		}
+		u64 := func(v uint64) {
+			var x [8]byte
+			binary.LittleEndian.PutUint64(x[:], v)
+			b.Write(x[:])
+		}
+		b.WriteString(Magic)
+		u32(Version)
+		u64(0) // no tensors
+		u64(1) // one metadata entry
+		u64(uint64(len("k")))
+		b.WriteString("k")
+		u32(uint32(TypeBool))
+		b.WriteByte(encoded)
+		for b.Len()%32 != 0 {
+			b.WriteByte(0)
+		}
+		return b.Bytes()
+	}
+
+	for _, encoded := range []byte{1, 2, 0x7f, 0xff} {
+		f, err := Read(bytes.NewReader(build(encoded)))
+		if err != nil {
+			t.Fatalf("Read with bool byte %#02x: %v", encoded, err)
+		}
+		v, ok := f.Get[bool]("k")
+		if !ok {
+			t.Fatalf("bool byte %#02x: key is absent or the wrong type", encoded)
+		}
+		if !v {
+			t.Errorf("bool byte %#02x decoded as false; any non-zero byte means true", encoded)
+		}
+	}
+
+	// Zero is the only false.
+	f, err := Read(bytes.NewReader(build(0)))
+	if err != nil {
+		t.Fatalf("Read with bool byte 0: %v", err)
+	}
+	if v, ok := f.Get[bool]("k"); !ok {
+		t.Fatal("bool byte 0: key is absent or the wrong type")
+	} else if v {
+		t.Error("bool byte 0 decoded as true")
+	}
+}

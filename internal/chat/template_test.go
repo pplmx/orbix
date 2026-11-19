@@ -2323,3 +2323,46 @@ func TestEvaluationRefusesNonNumericOperands(t *testing.T) {
 		t.Errorf("messages[0:] = %q, %v", got, err)
 	}
 }
+
+// TestNodeEvaluationErrorsPropagate covers the error returns of set and for.
+//
+// A statement that fails while computing its operand must stop the render and report the cause.
+// The two cases use an expression that fails at render time -- a non-numeric slice bound -- rather
+// than a parse error, because a parse error never reaches these nodes.
+//
+// The set case with a statement that assigns successfully is the other half: the failure happens
+// before the assignment, so the name must not be bound. A template that continued with an empty
+// binding would render a prompt with a hole in it, which is the failure this package's design
+// notes single out.
+func TestNodeEvaluationErrorsPropagate(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "x"}}
+
+	for _, c := range []struct{ name, src string }{
+		{"set", `{% set x = messages['a':] %}{{ x }}`},
+		{"for", `{% for m in messages['a':] %}{{ m.role }}{% endfor %}`},
+		{"if body", `{% if messages %}x{% endif %}{% set y = messages['a':] %}{{ y }}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := tpl.Render(msgs, Inputs{})
+			if err == nil {
+				t.Fatalf("%q rendered %q, want the operand's error", c.src, out)
+			}
+			if !strings.Contains(err.Error(), "slice start") {
+				t.Errorf("error %q does not carry the operand's failure", err)
+			}
+		})
+	}
+
+	// A set whose operand succeeds still binds, so the refusal is about the operand.
+	tpl, err := Parse(`{% set x = messages[0].content %}{{ x }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, err := tpl.Render(msgs, Inputs{}); err != nil || got != "x" {
+		t.Errorf("set with a good operand = %q, %v", got, err)
+	}
+}

@@ -1177,3 +1177,67 @@ func TestQwen2WithoutBiasTensorsIsRefused(t *testing.T) {
 		t.Fatalf("a qwen2 file with attention bias did not load: %v", err)
 	}
 }
+
+// TestGQABiasWidthsAreCheckedPerTensor covers the k and v bias shapes on a model whose key/value
+// heads are fewer than its query heads.
+//
+// The check requires KVHeads*HeadDim for k and v, Heads*HeadDim for q. With Heads equal to KVHeads
+// -- which every other fixture in this package has -- the two constraints are the same, so widening
+// the k requirement to the query width changed nothing measurable. A 4-head model with 2 kv heads
+// makes the two widths different numbers, and a file whose k bias is the query width has to be
+// refused.
+func TestGQABiasWidthsAreCheckedPerTensor(t *testing.T) {
+	c := tinyConfig{hidden: 16, layers: 1, heads: 4, kvHeads: 2, ffn: 32, ctx: 32, vocab: 11}
+	headDim := c.headDim() // 16/4 = 4, so q is 16 wide and k/v are 8 wide.
+
+	// qwen2, because that is the architecture the bias table marks as biased.
+	kvs := []kv{{"general.architecture", strVal("qwen2")}, {"general.name", strVal("gqa")}}
+	for _, k := range c.kvs()[2:] {
+		// Rewrite the llama.<key> prefix on the metadata the config reader looks for.
+		name, ok := strings.CutPrefix(k.key, "llama.")
+		if !ok {
+			t.Fatalf("unexpected key %q", k.key)
+		}
+		kvs = append(kvs, kv{"qwen2." + name, k.val})
+	}
+
+	// Correct widths first, so a refusal below is about the shape.
+	good := c.tensors()
+	for i := range c.layers {
+		p := "blk." + string(rune('0'+i)) + "."
+		good = append(good,
+			gguf.TensorInfo{Name: p + "attn_q.bias", Dims: []uint64{uint64(c.heads * headDim)}, Type: gguf.F32},
+			gguf.TensorInfo{Name: p + "attn_k.bias", Dims: []uint64{uint64(c.kvHeads * headDim)}, Type: gguf.F32},
+			gguf.TensorInfo{Name: p + "attn_v.bias", Dims: []uint64{uint64(c.kvHeads * headDim)}, Type: gguf.F32},
+		)
+	}
+	if _, err := LoadConfig(mustParse(t, buildFile(kvs, good, nil))); err != nil {
+		t.Fatalf("a GQA file with correct bias widths was refused: %v", err)
+	}
+
+	// The k bias widened to the query width: same value count as q, different from what k needs.
+	// Only the k tensor changes, so the failure has to be attributed to it.
+	wide := append([]gguf.TensorInfo(nil), good...)
+	for i := range wide {
+		if strings.HasSuffix(wide[i].Name, ".attn_k.bias") {
+			wide[i].Dims = []uint64{uint64(c.heads * headDim)}
+		}
+	}
+	_, err := LoadConfig(mustParse(t, buildFile(kvs, wide, nil)))
+	if err == nil {
+		t.Fatal("a GQA file with a query-width k bias was accepted")
+	}
+	if !strings.Contains(err.Error(), "attn_k.bias") {
+		t.Errorf("error %q does not name the k bias tensor", err)
+	}
+}
+
+// mustParse reads a built file or fails.
+func mustParse(t *testing.T, raw []byte) *gguf.File {
+	t.Helper()
+	f, err := gguf.Read(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	return f
+}

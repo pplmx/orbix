@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -60,5 +61,64 @@ func TestInspectReportsPreTokenizer(t *testing.T) {
 		if c.want == "implemented" && strings.Contains(out, "NOT implemented") {
 			t.Errorf("pre=%q: reported as implemented but the output warns it is not:\n%s", c.pre, out)
 		}
+	}
+}
+
+// TestJSONValueKeepsTheDeclaredWidth covers the type projection behind `model inspect --json`.
+//
+// The switch is on the GGUF type rather than on the field that happens to be populated,
+// because the type is what the file records: a uint64 holding 5 is still an unsigned integer,
+// and a script comparing against a Go int should see the width the file declares. Three of the
+// eight type cases were unexercised -- uint64, int64 and float64 -- and dropping any of them
+// passed the cmd suite, because every fixture and checkpoint the tests use carries only
+// uint32/int32/float32 metadata.
+//
+// Dropping one does not fail loudly: the value falls to the default, which renders the summary
+// form as a STRING. A JSON consumer then gets "1099511627776" instead of the number, and a
+// comparison against a bound either misparses or silently types differently.
+func TestJSONValueKeepsTheDeclaredWidth(t *testing.T) {
+	cases := []struct {
+		name string
+		in   gguf.Value
+		want any
+	}{
+		{"uint8", gguf.Value{Type: gguf.TypeUint8, Uint: 200}, uint64(200)},
+		{"uint16", gguf.Value{Type: gguf.TypeUint16, Uint: 65535}, uint64(65535)},
+		{"uint32", gguf.Value{Type: gguf.TypeUint32, Uint: 1 << 31}, uint64(1 << 31)},
+		// Above int64's range, so a narrower handling would show up as a wrong number rather
+		// than merely a different width.
+		{"uint64", gguf.Value{Type: gguf.TypeUint64, Uint: 1 << 63}, uint64(1 << 63)},
+		{"int8", gguf.Value{Type: gguf.TypeInt8, Int: -128}, int64(-128)},
+		{"int16", gguf.Value{Type: gguf.TypeInt16, Int: -32768}, int64(-32768)},
+		{"int32", gguf.Value{Type: gguf.TypeInt32, Int: -1 << 31}, int64(-1 << 31)},
+		{"int64", gguf.Value{Type: gguf.TypeInt64, Int: -1 << 62}, int64(-1 << 62)},
+		// The value a float32 actually holds: the reader widens the stored bits and keeps
+		// the full float64 expansion, so a projection that widened it unchanged would emit
+		// 9.999999747378752e-06 for a file that says 1e-5. FormatFloat narrows to 32 bits
+		// before formatting, which is why the expected value is the round number.
+		{"float32", gguf.Value{Type: gguf.TypeFloat32, Float: float64(float32(1e-5))}, 1e-5},
+		{"float64", gguf.Value{Type: gguf.TypeFloat64, Float: 1e-300}, 1e-300},
+		{"bool", gguf.Value{Type: gguf.TypeBool, Bool: true}, true},
+		{"string", gguf.Value{Type: gguf.TypeString, Str: "hi"}, "hi"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := jsonValue(c.in)
+			// The dynamic type matters as much as the value: that is what the width of the
+			// JSON number follows from.
+			if got != c.want {
+				t.Errorf("jsonValue(%v) = %#v, want %#v", c.in.Type, got, c.want)
+			}
+			if wantT, gotT := reflect.TypeOf(c.want), reflect.TypeOf(got); wantT != gotT {
+				t.Errorf("jsonValue(%v) returned %v, want %v", c.in.Type, gotT, wantT)
+			}
+		})
+	}
+
+	// The default keeps an array as its summary text, so a script can still see that a key
+	// holds an array rather than getting a silently empty value.
+	got := jsonValue(gguf.Value{Type: gguf.TypeArray, ElemType: gguf.TypeInt32})
+	if _, ok := got.(string); !ok {
+		t.Errorf("an array projected to %T, want the summary string", got)
 	}
 }

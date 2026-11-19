@@ -2655,3 +2655,44 @@ func TestStreamStopsWhenWritesFail(t *testing.T) {
 		t.Errorf("made %d writes after the first failure; the loop should have returned", w.n)
 	}
 }
+
+// noFlushWriter is a ResponseWriter that does not implement http.Flusher, which is what a
+// ResponseWriter wrapped by some middleware looks like from the handler's side.
+type noFlushWriter struct {
+	http.ResponseWriter
+}
+
+// TestStreamRefusesAConnectionItCannotFlush covers streamResponse's type assertion.
+//
+// Server-sent events only work if each chunk reaches the client as it is written, so a
+// ResponseWriter without Flush is refused rather than silently buffered into a response that
+// arrives all at once. That is a real deployment shape: a middleware that wraps the writer
+// without forwarding Flush produces exactly this, and the failure is invisible until someone
+// notices the stream is not streaming.
+//
+// Asserted on the status code and the message, because the point is that the client learns why
+// rather than receiving an empty 200.
+func TestStreamRefusesAConnectionItCannotFlush(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ch := make(chan engine.Event, 1)
+	ch <- engine.Event{Done: true, FinishReason: "length"}
+	close(ch)
+
+	rec := httptest.NewRecorder()
+	srv.streamResponse(&noFlushWriter{ResponseWriter: rec},
+		httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+		ch, "cmpl-test", false, nil, false, 0)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	body := decodeBody[errorBody](t, rec.Result())
+	if !strings.Contains(body.Error.Message, "streaming is not supported") {
+		t.Errorf("message = %q, want it to say streaming is unsupported", body.Error.Message)
+	}
+	// And it must not have written a partial event stream first: the header is set only
+	// after the assertion passes.
+	if strings.Contains(rec.Body.String(), "data:") {
+		t.Errorf("body starts an event stream despite refusing: %q", rec.Body.String())
+	}
+}

@@ -239,3 +239,71 @@ func TestForwardReadsAttentionBias(t *testing.T) {
 	t.Error("zeroing the attention biases did not change Forward's logits, so the " +
 		"single-token path is not reading them")
 }
+
+// TestPrefillAppliesAttentionBiasToEveryRow covers the row count addBiasBatch is given.
+//
+// The two existing bias tests compare a biased run against a zeroed one, which is satisfied as
+// long as *some* row reads the bias. Passing 1 instead of n applies it to the first row only and
+// every existing test stayed green -- measured, with both the full suite and the bias tests alone.
+//
+// The rows are distinguished by comparing a multi-position prefill against the same positions run
+// one at a time. Prefill writes each row from the same weights and the same bias, so the last
+// position's logits have to match whether the earlier tokens arrived in one batched pass or in
+// several; if the batch applies the bias to row 0 only, the second and later positions feed
+// un-biased keys and values into the attention of the position that is compared.
+func TestPrefillAppliesAttentionBiasToEveryRow(t *testing.T) {
+	path := gguftest.Model{
+		Arch:       "qwen2",
+		AttnBias:   true,
+		NoEOS:      true,
+		ContextLen: 128,
+	}.Write(t, t.TempDir())
+
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if !cfg.AttnBias {
+		t.Fatal("the fixture did not load as a model with attention bias")
+	}
+	tokens := fixtureTokens(cfg, 6)
+
+	// One pass over all six positions.
+	batched, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := m.Prefill(batched, tokens, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	wantLast := append([]float32(nil), want...)
+
+	// The same six positions, accumulated one at a time. Each single-token pass has n == 1, so a
+	// row-count bug in the batched path cannot hide here.
+	stepwise, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range tokens {
+		got, err := m.Prefill(stepwise, tokens[i:i+1], i)
+		if err != nil {
+			t.Fatalf("Prefill at %d: %v", i, err)
+		}
+		if i == len(tokens)-1 {
+			// Exact equality, not a tolerance: both paths run the same arithmetic on the same
+			// inputs, so the only way they differ is a row that did not get its bias.
+			if len(got) != len(wantLast) {
+				t.Fatalf("logit counts differ: %d and %d", len(got), len(wantLast))
+			}
+			for j := range wantLast {
+				if got[j] != wantLast[j] {
+					t.Fatalf("logit %d differs between one batched pass (%v) and six single "+
+						"passes (%v); the batched prefill applied the attention bias to fewer "+
+						"rows than it processed", j, wantLast[j], got[j])
+				}
+			}
+		}
+	}
+}

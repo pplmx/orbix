@@ -535,3 +535,50 @@ func TestParamsCountsExpertWeights(t *testing.T) {
 			share*100)
 	}
 }
+
+// TestSplitExpertsDegenerateInputs covers the guard in front of the division.
+//
+// `per := len(stacked) / experts` is undefined for experts == 0, and the guard is what turns
+// that into a nil return rather than a panic. No caller can reach it today -- LoadWeights only
+// splits when Config.Experts > 0 -- so widening the guard from `experts <= 0` to `experts < 0`
+// passed the llama and engine suites. It is pinned anyway because the function is exported to the
+// rest of the package and a panic from a division is a worse failure than a nil result the caller
+// already has to handle for the mismatched-size case.
+func TestSplitExpertsDegenerateInputs(t *testing.T) {
+	cases := []struct {
+		name     string
+		stacked  []float32
+		experts  int
+		wantNone bool
+	}{
+		{"no experts", []float32{1, 2, 3, 4}, 0, true},
+		{"negative experts", []float32{1, 2, 3, 4}, -1, true},
+		{"no weights", nil, 2, true},
+		{"empty weights", []float32{}, 2, true},
+		{"one element one expert", []float32{7}, 1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// A panic here is the failure mode the guard exists to prevent, so it is caught
+			// rather than left to fail the whole run.
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("splitExperts(%v, %d) panicked: %v", c.stacked, c.experts, r)
+				}
+			}()
+			got := splitExperts(c.stacked, c.experts)
+			if c.wantNone {
+				if got != nil {
+					t.Errorf("splitExperts(%v, %d) = %v, want nil", c.stacked, c.experts, got)
+				}
+				return
+			}
+			if len(got) != c.experts {
+				t.Fatalf("split into %d parts, want %d", len(got), c.experts)
+			}
+			if len(got[0]) != len(c.stacked) {
+				t.Errorf("one expert has %d values, want %d", len(got[0]), len(c.stacked))
+			}
+		})
+	}
+}

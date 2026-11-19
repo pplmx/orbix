@@ -608,3 +608,54 @@ func TestAdoptRollsBackOnFailure(t *testing.T) {
 		t.Errorf("RefCount(%d) changed on a first-block rejection: %d, want %d", valid, got, before)
 	}
 }
+
+// TestPagedSpansRejectsPositionsBeyondTheAllocatedBlocks covers the ceiling-division guard.
+//
+// spans computes need = ceil(n/block) and refuses when that exceeds the blocks the cache
+// holds, so a query cannot read rows that were never allocated. The check is written with
+// ceiling division precisely because the last block of a query is usually partial; replace it
+// with n/block and every whole-block count still behaves, which is why the existing
+// "more positions than the cache holds" case in the table test above does not catch it --
+// that test uses a CONTIGUOUS cache, whose spans has no block arithmetic at all.
+//
+// Verified by substituting n/block in the guard: the whole llama and engine suites passed.
+// The case that exposes it is a query one position past the last allocated block: with a
+// 4-position block and 2 blocks held, n=9 needs ceil(9/4)=3 but integer division gives 2,
+// which reads as "fits" and then indexes c.blocks[2], which does not exist.
+func TestPagedSpansRejectsPositionsBeyondTheAllocatedBlocks(t *testing.T) {
+	cfg := testConfig()
+	const blockSize = 4
+	pool := pagedPool(t, cfg, blockSize)
+	c := pool.New()
+
+	dim := cfg.kvDim()
+	k := make([]float32, dim)
+	v := make([]float32, dim)
+	// Allocate exactly two blocks by writing eight positions.
+	for pos := range 2 * blockSize {
+		for l := range cfg.Layers {
+			if _, _, err := c.appendKV(l, k, v, pos); err != nil {
+				t.Fatalf("appendKV(%d): %v", pos, err)
+			}
+		}
+		c.setLen(pos + 1)
+	}
+	if got := c.BlocksHeld(); got != 2 {
+		t.Fatalf("cache holds %d blocks, want 2", got)
+	}
+
+	// Exactly the allocated positions is fine.
+	if _, _, err := c.spans(0, 0, 2*blockSize); err != nil {
+		t.Errorf("spans over the allocated positions failed: %v", err)
+	}
+	// One position more needs a third block and must be refused rather than index past
+	// the end. 9/4 is 2, so the guard only rejects this if it divides with a ceiling.
+	if _, _, err := c.spans(0, 0, 2*blockSize+1); err == nil {
+		t.Error("spans accepted one position past the allocated blocks")
+	}
+	// And a whole extra block's worth, which both spellings reject, so the test would
+	// still fail above even if only the partial case regressed.
+	if _, _, err := c.spans(0, 0, 3*blockSize); err == nil {
+		t.Error("spans accepted a third block's worth of positions")
+	}
+}

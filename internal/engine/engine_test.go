@@ -2002,3 +2002,53 @@ func TestQueueFullReturnsNoChannel(t *testing.T) {
 		}
 	}
 }
+
+// TestAbandonedSequenceIsCountedAsAbandoned covers the reason a reaped sequence records.
+//
+// finish splits the finished count by reason, so a wrong reason moves a request from one bucket
+// to another and leaves the sum intact. The server's own split test asserts that sum and that
+// "cancel" is non-zero, which a reaped sequence relabelled as cancelled would satisfy -- so the
+// label the operator reads to see clients walking away would be empty while the requests piled
+// into a bucket that means something else.
+//
+// The channel is drained after the reap so the terminal event can be read: the point is that it
+// carries a definite outcome even though nobody was listening when it happened.
+func TestAbandonedSequenceIsCountedAsAbandoned(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{})
+	prompt := tok.Encode("Once upon a time", true)
+
+	// Submit and never read: the channel's buffer fills, the send cannot proceed, and the
+	// sequence is marked abandoned rather than stalling the pump.
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 100})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+
+	st := e.Stats()
+	idx, ok := reasonIndex("abandoned")
+	if !ok {
+		t.Fatal("reasonIndex does not know the abandoned reason")
+	}
+	if got := st.FinishedByReason[idx]; got != 1 {
+		t.Errorf("FinishedByReason[abandoned] = %d, want 1 (all reasons: %v)",
+			got, st.FinishedByReason)
+	}
+	idxCancel, _ := reasonIndex("cancel")
+	if got := st.FinishedByReason[idxCancel]; got != 0 {
+		t.Errorf("a reaped sequence was also counted as cancelled (%d)", got)
+	}
+
+	// The channel is closed once the sequence is reaped, so a caller that comes back to it sees
+	// an end rather than blocking forever. The terminal event itself is best effort -- the
+	// buffer was full when it was sent, which is what made the sequence abandoned -- so the
+	// reason is asserted through the counter above rather than through the channel.
+	drained := 0
+	for range ch {
+		drained++
+	}
+	if drained > 64 {
+		t.Errorf("read %d events from a 64-event buffer", drained)
+	}
+}

@@ -456,7 +456,7 @@ positions) has nothing to attach: `/stats` reports the positions actually reused
 ```bash
 orbix run --model ./model.gguf "Once upon a time"
 orbix run --model ./model.gguf --stats --max-tokens 64 "Explain KV caching."
-orbix run --model ./model.gguf --workers 32 "Explain KV caching."   # 3.9x on a 1-worker default
+orbix run --model ./model.gguf --workers 32 "Explain KV caching."   # see below on the ratio
 orbix run --model ./model.gguf Once upon a time    # the same prompt, unquoted
 
 orbix chat --model ./model.gguf
@@ -883,6 +883,12 @@ row-partitioned product could not use more workers than the batch had rows. The 
 here rather than deleted because the way it went stale is worth knowing -- the split axis
 decides which bound applies, and changing one silently invalidated the measurement of the
 other.
+
+The same knob on one stream instead of eight: stories15M q4_0 (19 MB, 6 layers, 288 hidden),
+128 tokens from one prompt, five interleaved runs. One worker gave 64.2-65.1 tok/s and 32 gave
+228.7-236.2, a ratio of 3.52x to 3.67x. The `run` example in the CLI section used to say 3.9x,
+which is what the synthetic fixture produces -- its projection is large next to the per-round
+overhead -- and a 19 MB model does not reach that.
 
 For scale: the 128k-window Llama 3.2 checkpoint in this repository's test set reserves
 8 GiB per request that way (`context_length x kv_heads x head_dim x 2 x 4 x layers`;

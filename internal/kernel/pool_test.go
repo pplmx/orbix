@@ -344,6 +344,11 @@ func TestMatMulTransposedSplitsTheAxisThatHasWork(t *testing.T) {
 			why: "64 columns cannot fill 64 workers, 4096 rows can",
 		},
 		{
+			name: "square", m: 2048, n: 2048, wantRows: false,
+			why: "neither axis has more to divide, so the column default stands; a square " +
+				"projection is an ordinary shape (attention output to output)",
+		},
+		{
 			name: "serial product", m: 1, n: 8, wantRows: false,
 			why: "below the parallel threshold, so the axis does not arise",
 		},
@@ -489,5 +494,54 @@ func TestParallelCoversEveryIndexExactlyOnce(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestPartsPinsTheThresholds checks the two tuning constants through the predicate that
+// applies them.
+//
+// parts decides how many goroutines a product gets, from a measured crossover: below
+// minParallelWork the spawn-and-join costs more than the arithmetic, and each worker beyond
+// the first needs workPerWorker of the product to pay for itself. Both numbers are records of
+// a measurement, so the test asserts the shape of the decision rather than re-deriving the
+// constants from a benchmark that would not gate.
+//
+// The boundary case is the point. `work < minParallelWork` and `work <= minParallelWork`
+// agree everywhere except exactly at the threshold, and `<=` passed the whole kernel, llama
+// and engine suites -- a one-bit change to a constant that is otherwise only exercised well
+// away from it on either side.
+func TestPartsPinsTheThresholds(t *testing.T) {
+	r := NewRunner(64)
+
+	cases := []struct {
+		name string
+		work int
+		want int
+		why  string
+	}{
+		{"nothing", 0, 1, "no product at all stays serial"},
+		{"one below the crossover", minParallelWork - 1, 1, "spawning would cost more than the work"},
+		{"exactly the crossover", minParallelWork, 2, "at the threshold the parallel form breaks even, so it runs"},
+		{"one worker's worth", workPerWorker, 1, "one worker's worth is not two workers' worth"},
+		{"two workers' worth", 2 * workPerWorker, 2, "each worker needs workPerWorker of the product"},
+		{"many workers' worth", 64 * workPerWorker, 64, "bounded by the configured worker count"},
+		{"more than every worker", 1 << 30, 64, "the cap is the runner's own count"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := r.parts(c.work); got != c.want {
+				t.Errorf("parts(%d) = %d, want %d: %s", c.work, got, c.want, c.why)
+			}
+		})
+	}
+
+	// A nil Runner and a one-worker Runner both mean serial, and neither may divide by a
+	// worker count it does not have.
+	var nilRunner *Runner
+	if got := nilRunner.parts(1 << 30); got != 1 {
+		t.Errorf("nil Runner parts = %d, want 1", got)
+	}
+	if got := NewRunner(1).parts(1 << 30); got != 1 {
+		t.Errorf("one-worker parts = %d, want 1", got)
 	}
 }

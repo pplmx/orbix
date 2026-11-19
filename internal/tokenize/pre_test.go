@@ -3349,10 +3349,10 @@ func TestTrailingSpaceAppliesToEveryFragment(t *testing.T) {
 // have been wrong here before.
 //
 // The table in pre_reference_cases.go holds one representative per defect class rather than a
-// random sample, because that is what makes it cheap to keep: 126 strings that between them
-// cover every mistake the port has made -- a digit class that was too wide, a boundary test
-// that looked at the wrong side, a run split by count instead of offset, a rule applied to the
-// sequence instead of to each fragment.
+// random sample, which is what makes it cheap to keep: 126 cases that between them cover every
+// mistake the port has made -- a digit class that was too wide, a boundary test that looked at the
+// wrong side, a run split by count instead of offset, a rule applied to the sequence instead of to
+// each fragment. The count is asserted below so it cannot drift from the table without a failure.
 //
 // Every expectation comes from applying llama.cpp's own expressions as sequential passes. A
 // failure means a rule has drifted from the reference, which is the only thing this package
@@ -3360,6 +3360,18 @@ func TestTrailingSpaceAppliesToEveryFragment(t *testing.T) {
 func TestPreReferenceCases(t *testing.T) {
 	if len(preReferenceCases) == 0 {
 		t.Fatal("the reference table is empty")
+	}
+	// The file is described elsewhere by its size, so the size is pinned here: a reader who trusts
+	// the description should find that many cases, and losing most of them to an edit would
+	// otherwise only show up as a corpus that still passes.
+	cases := 0
+	for _, fc := range preReferenceCases {
+		cases += len(fc.cases)
+	}
+	// 126 is the number the file's own description states; sixteen families carry them.
+	if cases < 126 {
+		t.Errorf("the reference corpus holds %d cases across %d families, want at least 126",
+			cases, len(preReferenceCases))
 	}
 	for _, fc := range preReferenceCases {
 		tok := &Tokenizer{pre: fc.pre}

@@ -2112,3 +2112,47 @@ func TestPromptThatFillsTheContextIsAcceptedButCannotGenerate(t *testing.T) {
 		t.Error("Submit accepted a prompt one token longer than the context")
 	}
 }
+
+// TestFinishReasonsListsExactlyTheDefinedReasons covers the exported list's bounds.
+//
+// The loop runs r < FinishReasonCount, and FinishReasonCount is one past the last reason by
+// definition. Running it to <= instead appends FinishReason(FinishReasonCount), whose String is
+// "unknown" -- measured, the list becomes six entries ending in a reason no request can have.
+//
+// The consumer that matters is the metrics export: it iterates this list to emit one sample per
+// reason, so an extra element is a label that appears in every scrape and never moves. The server's
+// own test compares its output against this function, which keeps the two in step but cannot notice
+// this function being wrong.
+func TestFinishReasonsListsExactlyTheDefinedReasons(t *testing.T) {
+	got := FinishReasons()
+	if len(got) != int(FinishReasonCount) {
+		t.Fatalf("FinishReasons returned %d reasons, want %d", len(got), int(FinishReasonCount))
+	}
+	for i, r := range got {
+		if int(r) != i {
+			t.Errorf("position %d holds FinishReason(%d), want %d: the list is in index order",
+				i, int(r), i)
+		}
+		if r.String() == "unknown" {
+			t.Errorf("position %d holds a reason with no name", i)
+		}
+	}
+
+	// The last defined reason is present, so a loop that stops one early is caught too.
+	if last := FinishReasons()[len(FinishReasons())-1]; last != FinishReasonCount-1 {
+		t.Errorf("the list ends at %d, want %d", int(last), int(FinishReasonCount)-1)
+	}
+
+	// Every reason the list holds must round-trip through its name, which is the property the
+	// metric label depends on.
+	for _, r := range got {
+		idx, ok := reasonIndex(r.String())
+		if !ok {
+			t.Errorf("%q has no index", r)
+			continue
+		}
+		if idx != r {
+			t.Errorf("%q maps to %d, want %d", r, int(idx), int(r))
+		}
+	}
+}

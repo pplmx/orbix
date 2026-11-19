@@ -415,3 +415,40 @@ func TestStreamDecoderSplitBytesBuiltVocab(t *testing.T) {
 		}
 	}
 }
+
+// TestTokenTypeOutOfRange covers both bounds of TokenType's guard.
+//
+// It is an exported accessor over the type table, so a caller walking ids -- a UI listing the
+// control tokens, say -- can reach either bound with a value it computed rather than one it
+// meant. Returning Undefined is what keeps that a lookup miss instead of a panic, and it is
+// the same value a token the file marks 0 gets, which is the honest answer for both.
+func TestTokenTypeOutOfRange(t *testing.T) {
+	path := gguftest.Model{NoEOS: true}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if got := tok.TokenType(-1); got != Undefined {
+		t.Errorf("TokenType(-1) = %v, want Undefined", got)
+	}
+	if got := tok.TokenType(int32(len(tok.types))); got != Undefined {
+		t.Errorf("TokenType(%d) = %v, want Undefined at the past-the-end index",
+			len(tok.types), got)
+	}
+	// Large as well as one-past, in case the guard is written as an equality.
+	if got := tok.TokenType(1 << 20); got != Undefined {
+		t.Errorf("TokenType(1<<20) = %v, want Undefined", got)
+	}
+	// And the in-range case still answers from the table, so this is a bound test and not a
+	// test that everything returns Undefined.
+	if len(tok.types) > 0 {
+		if got := tok.TokenType(0); got != tok.types[0] {
+			t.Errorf("TokenType(0) = %v, want the table's %v", got, tok.types[0])
+		}
+	}
+}

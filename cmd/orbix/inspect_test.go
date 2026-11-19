@@ -200,3 +200,57 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	w.calls++
 	return 0, w.err
 }
+
+// TestModelSubcommandDispatch covers the three ways `orbix model` can be called and the three
+// spellings of its help.
+//
+// Every alias has to work: an operator who types `orbix model help` after a failed first
+// attempt must not be told the subcommand is unknown. Narrowing the case to just `-h` passed the
+// cmd suite, because nothing called cmdModel at all -- the inspect tests go straight to the
+// function below it.
+func TestModelSubcommandDispatch(t *testing.T) {
+	t.Run("no subcommand names what to type", func(t *testing.T) {
+		err := cmdModel(nil)
+		if err == nil {
+			t.Fatal("cmdModel accepted an empty argument list")
+		}
+		if !strings.Contains(err.Error(), "inspect") {
+			t.Errorf("error %q does not name the subcommand to use", err)
+		}
+	})
+
+	t.Run("an unknown subcommand is named", func(t *testing.T) {
+		err := cmdModel([]string{"inspekt"})
+		if err == nil {
+			t.Fatal("cmdModel accepted an unknown subcommand")
+		}
+		if !strings.Contains(err.Error(), "inspekt") {
+			t.Errorf("error %q does not quote what was typed", err)
+		}
+		if !strings.Contains(err.Error(), "inspect") {
+			t.Errorf("error %q does not name the subcommand to use", err)
+		}
+	})
+
+	t.Run("every help spelling prints the usage", func(t *testing.T) {
+		for _, spelling := range []string{"help", "--help", "-h"} {
+			// cmdModel prints to os.Stdout, so this capture does not see it; what is asserted
+			// is that the call succeeds rather than returning "unknown subcommand".
+			if err := cmdModel([]string{spelling}); err != nil {
+				t.Errorf("model %s: %v", spelling, err)
+			}
+		}
+	})
+
+	t.Run("a flag after the path is reported as ordering", func(t *testing.T) {
+		// Go's flag package stops at the first non-flag, so `inspect path --json` parses no
+		// flags and counts --json as a second path. "got 2" would not say that.
+		err := cmdModelInspect([]string{"unused.gguf", "--json"})
+		if err == nil {
+			t.Fatal("model inspect accepted a flag after the path")
+		}
+		if !strings.Contains(err.Error(), "flags must come before") {
+			t.Errorf("error %q does not explain the ordering", err)
+		}
+	})
+}

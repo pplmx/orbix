@@ -571,3 +571,94 @@ func TestRowLine(t *testing.T) {
 		}
 	})
 }
+
+// TestPrefixRowsActuallyDiffer covers the one comparison the suite exists to make.
+//
+// "prefix no reuse" and "prefix reuse x4" are printed as a pair, and the note says so: the
+// reader is meant to compare them. Making them measure the same thing would leave the table
+// looking correct while saying nothing -- the reuse row would report the same throughput for
+// the same reason, and nothing distinguishes that from "reuse is having no effect".
+//
+// Every setting runSequential needs is checked here through the engine's own counter rather
+// than through timing, so the assertion does not depend on how fast the machine is. Changing
+// MaxActive from 1, shrinking the prompt-repetition target to one block, or dropping
+// PrefixCache from the second row each made the two rows identical.
+func TestPrefixRowsActuallyDiffer(t *testing.T) {
+	o := testSuiteOptions(t)
+
+	byName := map[string]scenario{}
+	for _, sc := range scenarioList() {
+		byName[sc.name] = sc
+	}
+	off, ok := byName["prefix no reuse"]
+	if !ok {
+		t.Fatal("the suite has no \"prefix no reuse\" row")
+	}
+	on, ok := byName["prefix reuse x4"]
+	if !ok {
+		t.Fatal("the suite has no \"prefix reuse x4\" row")
+	}
+
+	// Sequential order, so the two runs do not interfere through shared timing.
+	offRes, err := off.run(o)
+	if err != nil {
+		t.Fatalf("%s: %v", off.name, err)
+	}
+	onRes, err := on.run(o)
+	if err != nil {
+		t.Fatalf("%s: %v", on.name, err)
+	}
+
+	// Reuse off must reuse nothing -- that is what makes the row a baseline rather than a
+	// second measurement of the same thing.
+	if offRes.prefixReused != 0 {
+		t.Errorf("the reuse-off row reported %d reused positions, want 0", offRes.prefixReused)
+	}
+	// Reuse on must reuse something. A zero here means either the cache was never enabled for
+	// this row, or the requests arrived together and had nothing to reuse from.
+	if onRes.prefixReused == 0 {
+		t.Errorf("the reuse-on row reported 0 reused positions; the pair cannot be compared")
+	}
+	// And both rows still did the same work, so the difference is the cache and not the load.
+	if onRes.tokens != offRes.tokens {
+		t.Errorf("the rows generated %d and %d tokens; they must do the same work",
+			onRes.tokens, offRes.tokens)
+	}
+}
+
+// TestRunSequentialRepeatsAShortPrompt covers the loop that makes a short prompt reusable.
+//
+// A block is published only when its last position is written, so a prompt shorter than one
+// block never produces a reusable prefix and the reuse row measures zero however the cache is
+// configured. The suite's own prompt is 90 tokens against a 16-position block, so that loop
+// never runs in the table -- the protection is for a caller who passes something short, which is
+// exactly the case a reader would not think to try.
+//
+// The assertion is on the engine's reuse counter rather than on the repeated text, because the
+// count is what the row prints.
+func TestRunSequentialRepeatsAShortPrompt(t *testing.T) {
+	o := testSuiteOptions(t)
+	// Three tokens against a 16-position block: nothing can be published without repeating.
+	if len(o.prompt) < 3 {
+		t.Fatalf("the suite prompt is only %d tokens", len(o.prompt))
+	}
+	o.prompt = o.prompt[:3]
+
+	const blockSize = 16
+	res, err := runSequential(o, 4, engine.Options{
+		Workers: 2, BlockSize: blockSize, Blocks: 4096, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("runSequential: %v", err)
+	}
+	if res.prefixReused == 0 {
+		t.Errorf("a 3-token prompt against a %d-position block reused nothing; the prompt has "+
+			"to be repeated before anything can be published", blockSize)
+	}
+	// At least one whole block's worth of positions came from the shared prefix, which cannot
+	// happen unless the prompt spans one.
+	if res.prefixReused < blockSize {
+		t.Errorf("reused %d positions, want at least one %d-position block",
+			res.prefixReused, blockSize)
+	}
+}

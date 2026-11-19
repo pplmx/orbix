@@ -38,8 +38,14 @@ func TestQwen2Config(t *testing.T) {
 	}
 	// The head dimension and grouped-query ratio are what the layout arithmetic
 	// depends on, so they are worth pinning to real numbers for this checkpoint.
+	//
+	// The numbers are Qwen2.5-0.5B's, so a different Qwen2 file fails here despite
+	// satisfying every architectural assertion above. The message says which file the
+	// shape belongs to; without that, "unexpected shape" reads as a loader bug rather
+	// than as the wrong checkpoint.
 	if cfg.Hidden != 896 || cfg.Layers != 24 || cfg.Heads != 14 || cfg.KVHeads != 2 {
-		t.Errorf("unexpected shape: %d hidden, %d layers, %d heads, %d kv",
+		t.Errorf("unexpected shape: %d hidden, %d layers, %d heads, %d kv; "+
+			"this test pins Qwen2.5-0.5B (896/24/14/2)",
 			cfg.Hidden, cfg.Layers, cfg.Heads, cfg.KVHeads)
 	}
 	if got := m.W.Layers[0].qBias; len(got) != cfg.Heads*cfg.HeadDim {

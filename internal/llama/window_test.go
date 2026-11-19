@@ -2,6 +2,7 @@ package llama
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -660,6 +661,108 @@ func TestPrefillWithPrefixRefusesInconsistentState(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not state %s", err, want)
 			}
+		}
+	})
+}
+
+// TestForwardRefusesOutOfRangeArguments covers Forward's four preconditions.
+//
+// They were exercised only as "an error came back": the vocabulary, the cache capacity, the cache's
+// own length and the rope table each have a message carrying two numbers, and replacing any of them
+// with a sentence passed. The numbers are what tells a caller which side of an off-by-one it is on,
+// and Forward is reached through engine code that computes positions rather than from a prompt.
+func TestForwardRefusesOutOfRangeArguments(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+
+	t.Run("a token past the vocabulary", func(t *testing.T) {
+		cache, err := NewKVCache(cfg, c.ctx)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		_, err = m.Forward(cache, cfg.VocabSize, 0)
+		if err == nil {
+			t.Fatal("Forward accepted a token equal to the vocabulary size")
+		}
+		if !strings.Contains(err.Error(), "outside the vocabulary") {
+			t.Errorf("error %q does not say what is wrong", err)
+		}
+		// Both the token and the size, so the reader knows how far past it the value is.
+		for _, want := range []string{strconv.Itoa(cfg.VocabSize), strconv.Itoa(cfg.VocabSize)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %s", err, want)
+			}
+		}
+	})
+
+	t.Run("a position past the cache", func(t *testing.T) {
+		cache, err := NewKVCache(cfg, 4)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		_, err = m.Forward(cache, 1, 9)
+		if err == nil {
+			t.Fatal("Forward accepted a position past the cache")
+		}
+		// The position and the capacity.
+		if !strings.Contains(err.Error(), "position 9") || !strings.Contains(err.Error(), "(4)") {
+			t.Errorf("error %q does not state both numbers", err)
+		}
+	})
+
+	t.Run("a position past the rope table", func(t *testing.T) {
+		// A cache wider than the rope table: NewKVCache does not compare the two, because a
+		// paged pool sizes itself from block counts rather than positions.
+		rope := len(m.rope.cos)
+		cache, err := NewKVCache(cfg, rope+10)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		// Fill it to the table's length so the cache-length check agrees with the position and
+		// this one is what fires.
+		toks := make([]int32, rope)
+		for i := range toks {
+			toks[i] = 1
+		}
+		if _, err := m.Prefill(cache, toks, 0); err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		_, err = m.Forward(cache, 1, rope)
+		if err == nil {
+			t.Fatal("Forward accepted a position at the end of the rope table")
+		}
+		// The position and the table's length.
+		if !strings.Contains(err.Error(), "rope table") {
+			t.Errorf("error %q does not name the table", err)
+		}
+		for _, want := range []string{strconv.Itoa(rope) + " outside", "(" + strconv.Itoa(rope) + ")"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("a cache that disagrees with the position", func(t *testing.T) {
+		cache, err := NewKVCache(cfg, c.ctx)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		if _, err := m.Forward(cache, 1, 0); err != nil {
+			t.Fatalf("Forward: %v", err)
+		}
+		// The cache holds one position, so asking for 0 is a rewind.
+		_, err = m.Forward(cache, 1, 0)
+		if err == nil {
+			t.Fatal("Forward accepted a position behind the cache")
+		}
+		// How many positions are held and where the caller wanted to write.
+		if !strings.Contains(err.Error(), "holds 1 position") || !strings.Contains(err.Error(), "at 0") {
+			t.Errorf("error %q does not state both numbers", err)
 		}
 	})
 }

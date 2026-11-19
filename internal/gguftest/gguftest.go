@@ -73,6 +73,11 @@ type Model struct {
 	// that accepts the default does; a non-nil value states it explicitly.
 	AddBOS *bool
 
+	// WindowLen sets <arch>.attention.sliding_window, the per-layer attention window a
+	// sliding-window model like Mistral uses. Zero omits the key, which the loader reads as
+	// unbounded -- the same meaning an absent key has in a real file.
+	WindowLen int
+
 	// AttnBias adds the q, k, and v bias tensors the Qwen2 family uses and Llama does
 	// not. The loader infers the flag from the tensors' presence, so writing them is the
 	// whole of what a fixture needs to be a Qwen2-shaped model.
@@ -365,6 +370,9 @@ func (m Model) kvs() []kv {
 			u32KV(a+".expert_count", m.Experts),
 			u32KV(a+".expert_used_count", m.ExpertUsed),
 		)
+	}
+	if m.WindowLen > 0 {
+		out = append(out, u32KV(a+".attention.sliding_window", m.WindowLen))
 	}
 	model := m.TokenizerModel
 	if model == "" {

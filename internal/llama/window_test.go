@@ -266,3 +266,64 @@ func TestMistralPromptWithinWindowMatchesLlama(t *testing.T) {
 		t.Fatal("a two-position window produced identical logits to no window")
 	}
 }
+
+// TestSlidingWindowOnThePagedPath covers attentionCached's window trim.
+//
+// There are two attention implementations that each trim for a window: forward.go's attention
+// serves Model.Forward and a contiguous cache, and attention.go's attentionCached serves
+// PrefillWithPrefix through a PagedKVCache. TestSlidingWindowChangesAttention exercises the
+// first; the second requires a paged pool with a prefix index and a prompt the index matches in
+// full, because logitsForCached only runs when every position is already cached.
+//
+// Worth its own test rather than trusting the pair to stay in step: the two functions are
+// near-identical copies, and a window applied on one path but not the other means the same
+// prompt attends differently depending on whether --blocks is set.
+func TestSlidingWindowOnThePagedPath(t *testing.T) {
+	c := defaultTiny()
+	c.ctx = 32
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	cfg.WindowLen = 2
+	m.W.Config.WindowLen = cfg.WindowLen
+
+	// Two blocks of two positions, so a four-token prompt fills them and is published.
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 4})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+
+	tokens := []int32{0, 1, 2, 3}
+	// First pass fills the pool and remembers the prefix.
+	first := pool.New()
+	if _, err := m.PrefillWithPrefix(first, tokens, 0); err != nil {
+		t.Fatalf("PrefillWithPrefix (fill): %v", err)
+	}
+	_ = first.Reset()
+
+	// Second pass over the same prompt: the index matches every block, so the whole prompt is
+	// cached and logitsForCached runs the last position through attentionCached.
+	second := pool.New()
+	defer func() { _ = second.Reset() }()
+	logits, err := m.PrefillWithPrefix(second, tokens, 0)
+	if err != nil {
+		t.Fatalf("PrefillWithPrefix (reuse): %v", err)
+	}
+	if len(logits) != cfg.VocabSize {
+		t.Fatalf("logits length = %d, want %d", len(logits), cfg.VocabSize)
+	}
+	if second.ReusedPositions() == 0 {
+		t.Fatal("nothing was reused, so logitsForCached did not run")
+	}
+	// A windowed model must not produce NaN here: trimming to two positions leaves attention
+	// with something to read, but an off-by-one in the trim would not.
+	for i, v := range logits {
+		if math.IsNaN(float64(v)) {
+			t.Fatalf("windowed logit[%d] is NaN", i)
+		}
+	}
+}

@@ -837,9 +837,4 @@ func TestSiLUBeyondTheClampIsZeroEitherWay(t *testing.T) {
 		}
 	}
 
-	// The two are equal in sign and value at the boundary, which is the property the comment
-	// relies on.
-	if got := float32(-0.0); got != 0 {
-		t.Errorf("-0 != 0 in this build, so the clamp could change a value: %v", got)
-	}
 }

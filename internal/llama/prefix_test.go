@@ -538,3 +538,68 @@ func TestPrefixEvictionPreservesReuseUnderPressure(t *testing.T) {
 		t.Errorf("pool has %d of %d blocks free at the end, want all", free, pool.Blocks())
 	}
 }
+
+// TestPrefixIndexEvictsAtCapacity covers the eviction that Remember performs when the index is
+// full.
+//
+// The pool is bounded for a reason: a server that runs long enough sees more distinct prompt
+// prefixes than maxPrefixEntries, and without this eviction the index would grow without limit
+// while the index is also the thing holding block references. Every other eviction test drives
+// evictOne directly, which exercises the same function but not the call Remember makes.
+//
+// Rather than fill a pool with 1025 blocks, the same block is remembered under 1024 different
+// token runs: Remember retains whatever block it is given, so one held block can be named by many
+// entries. That is the same state the cap check sees.
+func TestPrefixIndexEvictsAtCapacity(t *testing.T) {
+	cfg := testConfig()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := pool.EnablePrefixCache()
+	size := pool.BlockSize()
+
+	// One cache holds the block that every entry will name, so retain succeeds throughout.
+	holder := pool.New()
+	for pos := range 4 {
+		if err := holder.ensureBlocks(pos); err != nil {
+			t.Fatalf("ensureBlocks: %v", err)
+		}
+	}
+	block := holder.blocks[0]
+
+	remember := func(n int) {
+		t.Helper()
+		// Distinct token runs give distinct keys; the values only need to hash apart.
+		tokens := make([]int32, size)
+		for i := range tokens {
+			tokens[i] = int32(n*size + i)
+		}
+		if err := idx.Remember(tokens, block, 0); err != nil {
+			t.Fatalf("Remember(%d): %v", n, err)
+		}
+	}
+
+	for n := range maxPrefixEntries {
+		remember(n)
+	}
+	if got := idx.Len(); got != maxPrefixEntries {
+		t.Fatalf("index holds %d entries after %d remembers, want %d",
+			got, maxPrefixEntries, maxPrefixEntries)
+	}
+
+	// One more must evict rather than exceed the bound.
+	before := pool.RefCount(block)
+	remember(maxPrefixEntries)
+	if got := idx.Len(); got != maxPrefixEntries {
+		t.Errorf("index holds %d entries after one past the cap, want it held at %d",
+			got, maxPrefixEntries)
+	}
+	// The eviction released one reference and the new entry took one, so the count is unchanged.
+	// A run that grew past the cap would have taken an extra retain and the count would rise; a
+	// run that failed to release would too.
+	if got := pool.RefCount(block); got != before {
+		t.Errorf("RefCount = %d after the eviction, want %d: the tail was not released",
+			got, before)
+	}
+}

@@ -3141,3 +3141,34 @@ func TestEmptyPromptIsRefusedAfterEncoding(t *testing.T) {
 		t.Errorf("message %q does not mention the messages", env.Error.Message)
 	}
 }
+
+// TestStreamingClientGoneReleasesTheSequence covers what a real connection adds.
+//
+// Every other test in this package uses httptest.ResponseRecorder, whose Write never fails. That
+// makes the streaming path's write-failure returns unreachable here, and those returns are the only
+// thing that notices a client which stopped reading. A real listener is needed for the distinction
+// between "the handler wrote and moved on" and "the handler's write failed".
+//
+// The assertion is that the engine's sequence is released, which is what a leaked stream would keep
+// alive. It is the same property TestClientDisconnectStopsGeneration checks for the blocking path;
+// the streaming path reaches it through a write error rather than through the request context.
+func TestStreamingClientGoneReleasesTheSequence(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 2048})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/completions", "application/json",
+		strings.NewReader(`{"prompt":"Once upon a time","max_tokens":500,"stream":true}`))
+	if err != nil {
+		t.Fatalf("starting the stream: %v", err)
+	}
+	// Read one chunk and hang up, so the server is mid-generation when the connection closes.
+	buf := make([]byte, 32)
+	if _, err := resp.Body.Read(buf); err != nil {
+		t.Fatalf("reading the first chunk: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	waitFor(t, 10*time.Second, func() bool { return srv.eng.Active() == 0 },
+		"the engine still holds a sequence after the client hung up")
+}

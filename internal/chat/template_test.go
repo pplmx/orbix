@@ -1323,3 +1323,54 @@ func TestAttributeAndIndexErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestCallExpressionsAreRefused covers parseCall's error paths and the runtime refusal of a call.
+//
+// This subset implements no functions, so a call is either a syntax error or a refusal that names
+// the function -- never a silent empty string. The corpus exercises namespace(x=1), which reaches
+// the refusal through a well-formed call, but no test covered a call that is malformed: an unclosed
+// argument list, a missing comma, or an argument that does not parse.
+//
+// The distinction matters for the same reason the unsupported-construct list exists: a template
+// using range() should be refused with a message naming range, not rendered as if the function had
+// returned nothing.
+func TestCallExpressionsAreRefused(t *testing.T) {
+	t.Run("a well-formed call is refused at evaluation", func(t *testing.T) {
+		tpl, err := Parse(`{{ range(5) }}`)
+		if err != nil {
+			// Refusing at parse time would also be acceptable; this asserts the other arm.
+			t.Skipf("range() refused at parse time: %v", err)
+		}
+		_, err = tpl.Render(nil, Inputs{})
+		if err == nil {
+			t.Fatal("a call to an unimplemented function rendered without an error")
+		}
+		if !strings.Contains(err.Error(), "no function is implemented") {
+			t.Errorf("error = %q, want it to say no function is implemented", err)
+		}
+		if !strings.Contains(err.Error(), "range") {
+			t.Errorf("error = %q, want it to name the function", err)
+		}
+	})
+
+	t.Run("syntax errors", func(t *testing.T) {
+		cases := []struct{ src, want string }{
+			// The argument list never closes.
+			{`{{ f(1 }}`, `is not closed`},
+			// Two arguments with no separator.
+			{`{{ f(1 2) }}`, `expected "," or ")"`},
+			// An argument that does not parse, reported by the inner expression.
+			{`{{ f(1+) }}`, `unexpected ")"`},
+		}
+		for _, c := range cases {
+			_, err := Parse(c.src)
+			if err == nil {
+				t.Errorf("Parse(%q) accepted a malformed call", c.src)
+				continue
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+			}
+		}
+	})
+}

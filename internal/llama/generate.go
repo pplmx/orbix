@@ -177,8 +177,11 @@ func nucleus(candidates []int, logits []float32, temp, p float32) []int {
 		sum += e
 	}
 	if sum == 0 {
-		// Only reachable through a degenerate input (a NaN logit poisons the max). One
-		// candidate is still a valid answer and is better than dividing by zero.
+		// Unreachable, and kept as a guard on the division below. The caller sorts candidates by
+		// descending logit, so the first term is exp(0) = 1 and the sum is at least that -- measured
+		// with NaN logits, -Inf logits and a zero temperature, all of which give NaN rather than zero.
+		// The comment here used to say a NaN logit poisoned the max into a zero sum, which it does
+		// not; the branch is cheaper to keep than to prove to the compiler's satisfaction.
 		return candidates[:1]
 	}
 	var acc float64

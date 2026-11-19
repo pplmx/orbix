@@ -351,3 +351,31 @@ func TestGreedyNeverSelectsNaN(t *testing.T) {
 		})
 	}
 }
+
+// TestNucleusEdges covers the two branches nucleus reaches with a degenerate candidate set.
+//
+// Both are asserted directly rather than through Temperature.Next, because neither is observable from
+// the outside: a single candidate produces the same choice whatever the trimming does, and a NaN logit
+// makes the draw meaningless. The function's own contract -- always return a non-empty run -- is what
+// is being pinned.
+func TestNucleusEdges(t *testing.T) {
+	t.Run("a single candidate is returned as is", func(t *testing.T) {
+		logits := []float32{1}
+		got := nucleus([]int{0}, logits, 1, 0.5)
+		if len(got) != 1 || got[0] != 0 {
+			t.Errorf("nucleus(single) = %v, want the one candidate", got)
+		}
+	})
+
+	t.Run("an empty candidate list stays empty", func(t *testing.T) {
+		if got := nucleus(nil, []float32{1}, 1, 0.5); len(got) != 0 {
+			t.Errorf("nucleus(nil) = %v, want empty", got)
+		}
+	})
+
+	// The sum == 0 branch is not tested because it cannot be reached. Every candidate is exponentiated
+	// relative to the first one, which the caller guarantees is the maximum, so the first term is
+	// exp(0) = 1 and the sum is at least that. NaN and -Inf logits and a zero temperature were all
+	// measured: they give NaN, not zero. The comment there says a NaN logit poisons the max into a
+	// zero sum, which is wrong, and is recorded rather than tested.
+}

@@ -2430,6 +2430,13 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 					t.Errorf("message %q does not name %q", body.Error.Message, want)
 				}
 			}
+			// The reason is what lets the caller decide what to do instead of guessing: "not
+			// implemented" alone says nothing about which alternative would work. The assertion
+			// is on the reason's own words, not on the template around them, which is why it has
+			// to name a phrase from the why text rather than the fixed prefix.
+			if !strings.Contains(body.Error.Message, whyPhrase(c.field)) {
+				t.Errorf("message %q does not explain why %q is refused", body.Error.Message, c.field)
+			}
 		})
 	}
 
@@ -3176,4 +3183,20 @@ func TestStreamingClientGoneReleasesTheSequence(t *testing.T) {
 
 	waitFor(t, 10*time.Second, func() bool { return srv.eng.Active() == 0 },
 		"the engine still holds a sequence after the client hung up")
+}
+
+// whyPhrase returns a phrase the refusal reason must contain for a given shape field.
+//
+// The values come from the shapeField table: each explains why the field cannot be honoured, and a
+// caller reads that to pick an alternative. Asserting on the fixed "does not implement" prefix
+// instead left the reasons untested.
+func whyPhrase(field string) string {
+	return map[string]string{
+		"n":            "several sequences",
+		"logprobs":     "log-probabilities",
+		"top_logprobs": "alternative-token",
+		"echo":         "never includes the prompt",
+		"suffix":       "suffix generation is not implemented",
+		"best_of":      "several candidates",
+	}[field]
 }

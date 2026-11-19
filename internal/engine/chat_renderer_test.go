@@ -233,3 +233,31 @@ func TestChatRendererHasTemplateSeparatesTheTwoFallbacks(t *testing.T) {
 		// HasTemplate true and UsesModelTemplate false: this is the pair the REPL reports.
 	})
 }
+
+// TestChatRendererDefaultsAnEmptyRoleToUser pins the substitution Render makes before the
+// template sees the turn.
+//
+// Both renderers map "" to "user" -- RenderChatPrompt does it inline and this one does it
+// while building the message list -- so the template never sees an empty role. Worth pinning
+// because a template that branches on the role would otherwise fall into its else arm and
+// render an unattributed turn as something other than the user's, which is a difference no
+// percentage of ordinary conversations would show.
+func TestChatRendererDefaultsAnEmptyRoleToUser(t *testing.T) {
+	// The else arm is what an empty role would hit if the substitution did not happen.
+	const src = `{% for m in messages %}{% if m.role == "user" %}U:{% else %}O:{% endif %}{{ m.content }}{% endfor %}`
+	f := buildFileWithMeta([]kvPair{
+		{name: "tokenizer.chat_template", kind: gguf.TypeString, str: src},
+	})
+	r, err := NewChatRenderer(f)
+	if err != nil {
+		t.Fatalf("NewChatRenderer: %v", err)
+	}
+	if got, want := r.Render([]Turn{{Role: "", Text: "hi"}}), "U:hi"; got != want {
+		t.Errorf("Render with an empty role = %q, want %q: the role must reach the template "+
+			"as \"user\"", got, want)
+	}
+	// The neutral transcript makes the same substitution, so the two agree.
+	if got, want := RenderChatPrompt([]Turn{{Role: "", Text: "hi"}}), "User: hi\nAssistant:"; got != want {
+		t.Errorf("RenderChatPrompt with an empty role = %q, want %q", got, want)
+	}
+}

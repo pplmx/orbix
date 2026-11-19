@@ -1402,3 +1402,42 @@ func TestRunStatsReport(t *testing.T) {
 		t.Errorf("a run that filled the window did not say so:\n%s", stderr)
 	}
 }
+
+// TestBenchRefusesAPromptPastTheContext covers both bench paths that encode the prompt.
+//
+// The single-measurement path and --suite each encode the prompt and refuse one that fills the
+// window. Neither had a test: the refusal is a plain length comparison, but it is the difference
+// between an error naming both numbers and an engine failure from inside the prefill, and the two
+// paths duplicate it, so a fix to one would not reach the other.
+//
+// The prompt is long enough to encode past the fixture's 128-position window whatever the
+// tokenizer does with it.
+func TestBenchRefusesAPromptPastTheContext(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+	// Exactly 128 tokens once encoded -- measured, not derived -- so the >= boundary is what the
+	// test exercises. A prompt far past the window cannot distinguish >= from >.
+	long := strings.Repeat("a ", 123) + "done"
+
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"single", []string{"bench", "--model", path, "--prompt", long}},
+		{"suite", []string{"bench", "--model", path, "--suite", "--prompt", long}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := run(c.args)
+			if err == nil {
+				t.Fatal("bench accepted a prompt past the context")
+			}
+			// Both numbers belong in the message: the prompt's length alone does not say the
+			// window is smaller.
+			if !strings.Contains(err.Error(), "context is 128") {
+				t.Errorf("error %q does not name the context", err)
+			}
+			if !strings.Contains(err.Error(), "prompt is") {
+				t.Errorf("error %q does not name the prompt's length", err)
+			}
+		})
+	}
+}

@@ -1960,3 +1960,49 @@ func TestNotNestsAndReportsErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestDanglingBooleanOperatorIsARefusal covers the right operand of and/or when it cannot be
+// parsed at all.
+//
+// The operator loop collects the right side and propagates its error. Dropping that propagation
+// makes `{% if true or %}` PARSE successfully -- measured -- with a nil right operand, so the
+// template is accepted and the failure moves to render time, where a nil expr reaches the
+// evaluator's type switch. A template error at parse time is what the package promises; the same
+// defect one stage later is not.
+//
+// The cases cover a missing operand, an unclosed group and a stray keyword on either side of the
+// operator, so an implementation that only checked for one shape cannot pass.
+func TestDanglingBooleanOperatorIsARefusal(t *testing.T) {
+	for _, src := range []string{
+		`{% if true or %}{% endif %}`,
+		`{% if true and %}{% endif %}`,
+		`{% if true or ( %}{% endif %}`,
+		`{% if true and ( %}{% endif %}`,
+		`{{ true or }}`,
+		`{{ true and }}`,
+	} {
+		if _, err := Parse(src); err == nil {
+			t.Errorf("Parse(%q) accepted a dangling operator", src)
+		}
+	}
+
+	// The chains themselves still build left to right, and short-circuit as before.
+	for _, c := range []struct{ src, want string }{
+		{`{% if true and true and false %}T{% else %}F{% endif %}`, "F"},
+		{`{% if false or false or true %}T{% else %}F{% endif %}`, "T"},
+		{`{% if false and true or true %}T{% else %}F{% endif %}`, "T"},
+		{`{% if true or false and false %}T{% else %}F{% endif %}`, "T"},
+	} {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", c.src, err)
+		}
+		got, err := tpl.Render(nil, Inputs{})
+		if err != nil {
+			t.Fatalf("Render(%q): %v", c.src, err)
+		}
+		if got != c.want {
+			t.Errorf("%q = %q, want %q", c.src, got, c.want)
+		}
+	}
+}

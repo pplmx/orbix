@@ -531,3 +531,114 @@ func TestDrainChatEvents(t *testing.T) {
 type failingWriter struct{ err error }
 
 func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// TestChatCommandStatsAndHistory covers the two commands whose output is a computed summary.
+//
+// Both have an arithmetic step that nothing checked. /stats divides the history length by two
+// to report turns, and /history pairs messages two at a time; a session that just answered one
+// question has two entries, and a session interrupted between the user line and the reply has
+// three. Reporting the raw length as a turn count is off by that factor, and stepping the
+// pairing loop by one prints each message twice.
+//
+// The nil-stats case is the one a test session hits: a session built without an engine counter
+// has to say so rather than print zeroes that look like a measurement.
+func TestChatCommandStatsAndHistory(t *testing.T) {
+	historyOf := func(n int) []chatTurn {
+		out := make([]chatTurn, n)
+		for i := range out {
+			if i%2 == 0 {
+				out[i] = chatTurn{role: "user", text: fmt.Sprintf("q%d", i/2+1)}
+			} else {
+				out[i] = chatTurn{role: "assistant", text: fmt.Sprintf("a%d", i/2+1)}
+			}
+		}
+		return out
+	}
+
+	t.Run("turns counts exchanges, not messages", func(t *testing.T) {
+		history := historyOf(4) // two exchanges
+		var out bytes.Buffer
+		st := engine.Stats{TokensGenerated: 7, PrefixReused: 32}
+		if _, err := chatCommand(&out, "/stats", &history, func() engine.Stats { return st }); err != nil {
+			t.Fatalf("chatCommand: %v", err)
+		}
+		got := out.String()
+		if !strings.Contains(got, "turns:      2") {
+			t.Errorf("/stats reported %q, want 2 turns for four messages", got)
+		}
+		if !strings.Contains(got, "tokens:     7 generated") {
+			t.Errorf("/stats did not report the token count:\n%s", got)
+		}
+		if !strings.Contains(got, "reused:     32 prompt positions") {
+			t.Errorf("/stats did not report the reuse count:\n%s", got)
+		}
+	})
+
+	t.Run("no stats reports that rather than zeroes", func(t *testing.T) {
+		history := historyOf(2)
+		var out bytes.Buffer
+		if _, err := chatCommand(&out, "/stats", &history, nil); err != nil {
+			t.Fatalf("chatCommand: %v", err)
+		}
+		got := out.String()
+		if !strings.Contains(got, "not available") {
+			t.Errorf("/stats with no counter said %q, want it to say stats are unavailable", got)
+		}
+		// A zero would read as a measurement of zero.
+		if strings.Contains(got, "tokens:") {
+			t.Errorf("/stats printed a token count with no counter to read:\n%s", got)
+		}
+	})
+
+	t.Run("history pairs each question with its answer", func(t *testing.T) {
+		history := historyOf(4)
+		var out bytes.Buffer
+		if _, err := chatCommand(&out, "/history", &history, nil); err != nil {
+			t.Fatalf("chatCommand: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"user: q1", "assistant: a1", "user: q2", "assistant: a2"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("/history does not show %q:\n%s", want, got)
+			}
+		}
+		// Stepping by one does not repeat the text -- it mislabels it, printing the answer as
+		// the next question. Counting occurrences of one string therefore says nothing; what
+		// has to be asserted is that every printed line is a role paired with its own text.
+		for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+			line = strings.TrimSpace(line)
+			role, text, ok := strings.Cut(line, ": ")
+			if !ok {
+				t.Fatalf("/history printed a line with no role: %q", line)
+			}
+			// The fixture names questions qN and answers aN, so the role decides which the
+			// text must be.
+			wantPrefix := "q"
+			if role == "assistant" {
+				wantPrefix = "a"
+			}
+			if !strings.HasPrefix(text, wantPrefix) {
+				t.Errorf("/history printed %q, but a %s line must carry an %s: the pairing is off",
+					line, role, wantPrefix)
+			}
+		}
+	})
+
+	t.Run("history with a reply still pending", func(t *testing.T) {
+		// Three entries: two exchanges' worth would be four. The last question has no answer
+		// yet, and printing nothing for it is correct -- but the loop must not read past the
+		// end to find one.
+		history := historyOf(3)
+		var out bytes.Buffer
+		if _, err := chatCommand(&out, "/history", &history, nil); err != nil {
+			t.Fatalf("chatCommand: %v", err)
+		}
+		got := out.String()
+		if !strings.Contains(got, "user: q2") {
+			t.Errorf("/history dropped the unanswered question:\n%s", got)
+		}
+		if strings.Contains(got, "assistant: a2") {
+			t.Errorf("/history invented an answer that is not in the history:\n%s", got)
+		}
+	})
+}

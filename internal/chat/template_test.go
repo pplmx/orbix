@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -908,5 +909,46 @@ func TestParseHandlesDeepNesting(t *testing.T) {
 	}
 	if out != "x" {
 		t.Errorf("rendered %q, want %q", out, "x")
+	}
+}
+
+// TestWriteJSONStringEscapesNonASCII covers the escaping added for Jinja2 parity.
+//
+// Python's json.dumps defaults to ensure_ascii=True, so Jinja2's tojson spells every non-ASCII
+// character as \uXXXX and a code point above U+FFFF as a surrogate pair. A tool definition with a
+// translated description otherwise reached the model as UTF-8 where the template it was trained
+// against expected escapes -- the same class of difference the separators were already matched
+// for.
+//
+// The check that found the original bug was in scripts/jinja_diff.py, so it only runs when
+// someone runs that script; the package's own tests had no case with non-ASCII JSON at all, which
+// is why the arms were unexecuted.
+func TestWriteJSONStringEscapesNonASCII(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// ASCII passes through, including the characters json.Marshal escapes itself.
+		{"plain", `"plain"`},
+		{`q"b\s`, `"q\"b\\s"`},
+		// A two-byte BMP rune, one escape per code point.
+		{"\u4f60\u597d", `"\u4f60\u597d"`},
+		// A four-byte rune becomes a surrogate pair, as Python writes it, not \U0001f389.
+		{"\U0001f389", `"\ud83c\udf89"`},
+		{"hi \U0001f389 \u4f60", `"hi \ud83c\udf89 \u4f60"`},
+	}
+	for _, c := range cases {
+		var b strings.Builder
+		writeJSONString(&b, c.in)
+		if got := b.String(); got != c.want {
+			t.Errorf("writeJSONString(%q) = %s, want %s", c.in, got, c.want)
+		}
+		// The result must still parse as JSON and decode back to the input, so the escaping is
+		// a spelling change and not a corruption.
+		var back string
+		if err := json.Unmarshal([]byte(b.String()), &back); err != nil {
+			t.Errorf("writeJSONString(%q) produced unparseable JSON %s: %v", c.in, b.String(), err)
+			continue
+		}
+		if back != c.in {
+			t.Errorf("round trip of %q = %q", c.in, back)
+		}
 	}
 }

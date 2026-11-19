@@ -1042,3 +1042,66 @@ func TestAttentionBuffersDoNotScaleWithWorkers(t *testing.T) {
 			ratio, few, many)
 	}
 }
+
+// TestPrefillRejectsATokenOutsideTheVocabulary covers the guard every batched entry point
+// depends on.
+//
+// Prefill checks each token against the vocabulary before it reaches the embedding, and that
+// check is what makes the equivalent one inside embedBatch unreachable: removing either passes
+// the suite, because the other still stops the prompt. The message names the index as well as
+// the token, which is the part worth pinning -- a prompt is a list, and "token 363 is bad"
+// does not say which of a thousand entries to fix.
+//
+// Every test that feeds Prefill builds its tokens from fixtureTokens, so nothing exercised the
+// refusal. The lower bound is the half that would panic rather than return: a negative token
+// makes the offset negative while offset+Hidden can still be inside the table, so a guard
+// written against the sum alone lets it through.
+func TestPrefillRejectsATokenOutsideTheVocabulary(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	bad := int32(cfg.VocabSize)
+
+	cases := []struct {
+		tokens []int32
+		index  string
+	}{
+		{[]int32{-1, 0}, "index 0"},
+		{[]int32{0, -32}, "index 1"},
+		{[]int32{bad}, "index 0"},
+		{[]int32{0, bad}, "index 1"},
+		{[]int32{0, 1, bad + 100}, "index 2"},
+	}
+	for _, c := range cases {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		_, err = m.Prefill(cache, c.tokens, 0)
+		if err == nil {
+			t.Errorf("Prefill accepted %v, one of which is outside the vocabulary of %d",
+				c.tokens, cfg.VocabSize)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "outside the vocabulary") {
+			t.Errorf("Prefill(%v) error %q does not name the problem", c.tokens, msg)
+		}
+		if !strings.Contains(msg, c.index) {
+			t.Errorf("Prefill(%v) error %q does not name %s", c.tokens, msg, c.index)
+		}
+	}
+
+	// A prompt of legal tokens must still work, so the guard cannot be satisfied by
+	// refusing everything.
+	cache, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	if _, err := m.Prefill(cache, []int32{0, 1, 2}, 0); err != nil {
+		t.Errorf("Prefill of legal tokens failed: %v", err)
+	}
+}

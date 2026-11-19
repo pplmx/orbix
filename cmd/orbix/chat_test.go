@@ -135,6 +135,24 @@ func TestChatClearAndHistory(t *testing.T) {
 	if !strings.Contains(out, "user: Once upon a time") {
 		t.Errorf("/history did not show the conversation:\n%s", out)
 	}
+	// The assistant half as well, and non-empty. /history is rendered from the same chatTurn
+	// list the next turn's prompt is built from, so a reply that never reaches it is not a
+	// display problem: every later turn asks the model to continue a conversation it has
+	// only seen one side of. Only the user line was asserted, so emptying both places that
+	// append generated text to the reply buffer -- the drain and the final-drain loop --
+	// passed the whole cmd suite.
+	if !strings.Contains(out, "  assistant: ") {
+		t.Errorf("/history shows no assistant reply:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(line, "  assistant: ")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(rest) == "" {
+			t.Errorf("/history recorded an empty assistant reply for a turn that generated text")
+		}
+	}
 	if !strings.Contains(out, "history cleared") {
 		t.Errorf("/clear did not confirm:\n%s", out)
 	}

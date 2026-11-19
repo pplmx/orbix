@@ -362,7 +362,12 @@ func TestDrainAndStopStopsThePumpAfterTheDrain(t *testing.T) {
 		handlerEndedAt time.Time
 		pumpStoppedAt  time.Time
 	)
+	// entered is closed once the handler is running, so the drain cannot begin before there is
+	// something to drain. A fixed sleep here is a race: on a slow machine the request may not have
+	// reached the handler yet, and the order assertion would then be measuring nothing.
+	entered := make(chan struct{})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
 		// Stand in for a streaming response that needs the pump for one more token: a short
 		// wait, then the write the old ordering would never have reached in time.
 		time.Sleep(60 * time.Millisecond)
@@ -394,8 +399,13 @@ func TestDrainAndStopStopsThePumpAfterTheDrain(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		got <- string(b)
 	}()
-	// Let the request be accepted and reach the handler before the drain begins.
-	time.Sleep(20 * time.Millisecond)
+	// Wait for the handler to have started rather than guessing at a delay. The timeout is only a
+	// hang guard; it is not part of what the test measures.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started")
+	}
 
 	if err := drainAndStop(httpSrv, stopPump, 5*time.Second); err != nil {
 		t.Fatalf("drainAndStop: %v", err)

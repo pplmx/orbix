@@ -1324,3 +1324,34 @@ func TestValueScalarTypes(t *testing.T) {
 		}
 	})
 }
+
+// TestTensorDataOpenError covers the file-open refusal in openReaderAt.
+//
+// TensorData opens the file itself so a single tensor can be read without holding a handle, which
+// means it can fail before it ever looks at the directory: a path that has been moved or deleted
+// between Open and the read. The closing of the handle in the stat branch was documented and left
+// alone -- a file that opens and then cannot be stat'd is not something a test can arrange without
+// a fake filesystem -- but the plain open failure is a case any caller can hit.
+func TestTensorDataOpenError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.gguf")
+	if err := os.WriteFile(path, sampleModel(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "gone.gguf")
+	if _, err := f.TensorData(missing, "token_embd.weight"); err == nil {
+		t.Fatal("TensorData on a missing file succeeded")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("error = %v, want it to wrap os.ErrNotExist", err)
+	}
+
+	// The directory entry is real; the close-on-failure path is what keeps the descriptor from
+	// leaking when the tensor is not there.
+	if _, err := f.TensorData(path, "nope"); err == nil {
+		t.Fatal("TensorData on a missing tensor succeeded")
+	}
+}

@@ -3460,3 +3460,71 @@ func TestIsWordRune(t *testing.T) {
 		}
 	}
 }
+
+// TestPrevRuneStartBoundaries covers the offset helper the rule splitters use to look one
+// character back.
+//
+// The zero end is the case that matters: the caller then checks `prev >= start` before slicing,
+// so a returned offset below zero must come with ok=false or the slice panics. Writing the guard
+// as `end < 0` instead of `end <= 0` makes prevRuneStart("abc", 0) return (-1, true) -- measured
+// -- and the caller's `text[prev:]` is then a negative index.
+//
+// A continuation byte is the other half: the walk back has to skip bytes whose top two bits are
+// 10, or a three-byte character reports its middle as the start and the caller slices through
+// it.
+func TestPrevRuneStartBoundaries(t *testing.T) {
+	t.Run("ASCII", func(t *testing.T) {
+		cases := []struct {
+			end    int
+			want   int
+			wantOk bool
+		}{
+			{-1, 0, false},
+			// Nothing precedes the start, so there is no offset to report.
+			{0, 0, false},
+			{1, 0, true},
+			{2, 1, true},
+			{3, 2, true},
+		}
+		for _, c := range cases {
+			got, ok := prevRuneStart("abc", c.end)
+			if got != c.want || ok != c.wantOk {
+				t.Errorf("prevRuneStart(%q, %d) = %d, %v; want %d, %v",
+					"abc", c.end, got, ok, c.want, c.wantOk)
+			}
+		}
+	})
+
+	t.Run("multi-byte", func(t *testing.T) {
+		// "北" is three bytes; the rune before "x" therefore starts two bytes back.
+		text := "北x"
+		if n := len(text); n != 4 {
+			t.Fatalf("fixture is %d bytes, expected 4", n)
+		}
+		if got, ok := prevRuneStart(text, 3); !ok || got != 0 {
+			t.Errorf("prevRuneStart(%q, 3) = %d, %v; want the start of the three-byte rune",
+				text, got, ok)
+		}
+		if got, ok := prevRuneStart(text, 4); !ok || got != 3 {
+			t.Errorf("prevRuneStart(%q, 4) = %d, %v; want 3", text, got, ok)
+		}
+	})
+
+	t.Run("a negative offset is never ok", func(t *testing.T) {
+		// The property the callers depend on, stated once: what comes back is either a
+		// non-negative offset or a false.
+		for _, text := range []string{"", "a", "北", "北x", "ab北"} {
+			for end := -1; end <= len(text); end++ {
+				got, ok := prevRuneStart(text, end)
+				if ok && got < 0 {
+					t.Errorf("prevRuneStart(%q, %d) = %d, true; an ok result must be non-negative",
+						text, end, got)
+				}
+				if ok && got >= max(end, 0) && end > 0 {
+					t.Errorf("prevRuneStart(%q, %d) = %d, true; the start must precede the end",
+						text, end, got)
+				}
+			}
+		}
+	})
+}

@@ -1260,3 +1260,66 @@ func TestInOperatorListMembership(t *testing.T) {
 		t.Error(`'zz' in ['a','b'] was true`)
 	}
 }
+
+// TestAttributeAndIndexErrors covers the four refusals in evalExpr's attribute and index arms,
+// and the asymmetry between them that templates depend on.
+//
+// Reading a missing field with a dot yields empty, because Qwen2 writes "not message.tool_calls"
+// and that has to be true for a conversation with no tool calls; reading one with a bracket is an
+// error, because a template that says messages[0]['nosuchkey'] is asking for something the caller
+// did not supply and an empty string would silently fill a hole. Both behaviours were described in
+// comments -- one of them by a test's doc comment about a real defect where a missing field made
+// every render fall back to the neutral transcript -- but neither was asserted.
+func TestAttributeAndIndexErrors(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+
+	t.Run("a missing field by dot is empty", func(t *testing.T) {
+		got := render(t, `[{{ messages[0].nosuchfield }}]`, msgs, Inputs{})
+		if got != "[]" {
+			t.Errorf("render = %q, want an empty value for a missing field", got)
+		}
+		// And it counts as false, which is the property Qwen2's template relies on.
+		got = render(t, `{% if not messages[0].nosuchfield %}Y{% else %}N{% endif %}`, msgs, Inputs{})
+		if got != "Y" {
+			t.Errorf("not of a missing field rendered %q, want Y", got)
+		}
+	})
+
+	t.Run("a missing field by bracket is an error", func(t *testing.T) {
+		tpl, err := Parse(`{{ messages[0]['nosuchfield'] }}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if _, err := tpl.Render(msgs, Inputs{}); err == nil {
+			t.Fatal("a missing field by bracket rendered without an error")
+		} else if !strings.Contains(err.Error(), "mapping has no field") {
+			t.Errorf("error = %q, want it to name the missing field", err)
+		}
+	})
+
+	t.Run("errors", func(t *testing.T) {
+		cases := []struct{ src, want string }{
+			// A dot on something that is not a mapping.
+			{`{{ messages[0].role.nosuchfield }}`, "read from a non-mapping"},
+			// A bracket with a non-numeric index on a sequence.
+			{`{{ messages['x'] }}`, "is not a number"},
+			// A bracket on a scalar.
+			{`{{ messages[0].role[0] }}`, "non-sequence"},
+		}
+		for _, c := range cases {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Errorf("Parse(%q): %v", c.src, err)
+				continue
+			}
+			_, err = tpl.Render(msgs, Inputs{})
+			if err == nil {
+				t.Errorf("Render(%q) succeeded, want an error", c.src)
+				continue
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("Render(%q) error = %q, want it to contain %q", c.src, err, c.want)
+			}
+		}
+	})
+}

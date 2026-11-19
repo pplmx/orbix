@@ -188,3 +188,48 @@ func TestChatRendererReportsARenderFailure(t *testing.T) {
 		t.Error("no reason was recorded for the render failure")
 	}
 }
+
+// TestChatRendererHasTemplateSeparatesTheTwoFallbacks pins the pair the REPL needs.
+//
+// UsesModelTemplate answers "is the template in use", which is false both for a model that
+// declared no template and for one whose template failed on this conversation. HasTemplate
+// answers "was there a template at all", which distinguishes them. The REPL needs the
+// difference to decide whether a fallback is news: a model with no template already said so in
+// its banner, so announcing a render-time failure on every turn of such a session describes
+// something that never happened.
+func TestChatRendererHasTemplateSeparatesTheTwoFallbacks(t *testing.T) {
+	t.Run("no template declared", func(t *testing.T) {
+		f := buildFileWithMeta(nil)
+		r, err := NewChatRenderer(f)
+		if err != nil {
+			t.Fatalf("NewChatRenderer: %v", err)
+		}
+		if r.HasTemplate() {
+			t.Error("HasTemplate = true for a file that declares no template")
+		}
+		if r.UsesModelTemplate() {
+			t.Error("UsesModelTemplate = true for a file that declares no template")
+		}
+		// Both false: nothing to report, which is what makes this case quiet.
+	})
+
+	t.Run("template fails to render", func(t *testing.T) {
+		// Parses, then fails: iterating bos_token, which is not a sequence.
+		const src = `{%- for x in bos_token %}{{ x }}{%- endfor %}`
+		f := buildFileWithMeta([]kvPair{
+			{name: "tokenizer.chat_template", kind: gguf.TypeString, str: src},
+		})
+		r, err := NewChatRenderer(f)
+		if err != nil {
+			t.Fatalf("NewChatRenderer: %v", err)
+		}
+		r.Render([]Turn{{Role: "user", Text: "hi"}})
+		if !r.HasTemplate() {
+			t.Error("HasTemplate = false, but the file did declare a template that parsed")
+		}
+		if r.UsesModelTemplate() {
+			t.Error("UsesModelTemplate = true after the render failed")
+		}
+		// HasTemplate true and UsesModelTemplate false: this is the pair the REPL reports.
+	})
+}

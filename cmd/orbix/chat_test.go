@@ -8,8 +8,10 @@ import (
 	"testing"
 
 	"github.com/pplmx/orbix/internal/engine"
+	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // The chat REPL is driven through its session function rather than through the
@@ -447,3 +449,85 @@ func TestChatRefusesABlockBiggerThanTheContext(t *testing.T) {
 		}
 	}
 }
+
+// TestDrainChatEvents covers the three exits of the REPL's event pump.
+//
+// The function had no test at all. Its happy path runs on every chat turn, but the exits are
+// what a broken terminal takes: a write that fails must be reported rather than looped on, an
+// engine error must surface instead of being dropped, and the held-back tail has to be
+// flushed when the channel closes -- that last one is the only place a partially completed
+// multi-byte character is rendered.
+func TestDrainChatEvents(t *testing.T) {
+	newDecoder := func(t *testing.T) *tokenize.StreamDecoder {
+		t.Helper()
+		gf, err := gguf.Open(gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir()))
+		if err != nil {
+			t.Fatalf("gguf.Open: %v", err)
+		}
+		tok, err := tokenize.New(gf)
+		if err != nil {
+			t.Fatalf("tokenize.New: %v", err)
+		}
+		return tok.Seq()
+	}
+
+	t.Run("tokens are written and collected", func(t *testing.T) {
+		ch := make(chan engine.Event, 4)
+		ch <- engine.Event{HasToken: true, Token: 3}
+		ch <- engine.Event{HasToken: true, Token: 4}
+		close(ch)
+
+		var out strings.Builder
+		var reply strings.Builder
+		if err := drainChatEvents(ch, &out, newDecoder(t), &reply); err != nil {
+			t.Fatalf("drainChatEvents: %v", err)
+		}
+		// Whatever the fixture's pieces spell, the display and the gathered reply agree:
+		// that equality is what makes /history show what the user saw.
+		if out.String() != reply.String() {
+			t.Errorf("displayed %q but collected %q", out.String(), reply.String())
+		}
+	})
+
+	t.Run("an engine error is returned", func(t *testing.T) {
+		wantErr := errors.New("engine gave up")
+		ch := make(chan engine.Event, 1)
+		ch <- engine.Event{Err: wantErr}
+		close(ch)
+
+		var out, reply strings.Builder
+		err := drainChatEvents(ch, &out, newDecoder(t), &reply)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("drainChatEvents returned %v, want the engine error", err)
+		}
+	})
+
+	t.Run("a write error is returned rather than ignored", func(t *testing.T) {
+		wantErr := errors.New("broken pipe")
+		ch := make(chan engine.Event, 1)
+		ch <- engine.Event{HasToken: true, Token: 3}
+		close(ch)
+
+		var reply strings.Builder
+		// A writer that refuses everything: the terminal has gone away.
+		err := drainChatEvents(ch, failingWriter{err: wantErr}, newDecoder(t), &reply)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("drainChatEvents returned %v, want the write error", err)
+		}
+	})
+
+	t.Run("returns when the channel has nothing ready", func(t *testing.T) {
+		// An open, empty channel: the default branch must return rather than block, or the
+		// REPL would hang between turns.
+		ch := make(chan engine.Event)
+		var out, reply strings.Builder
+		if err := drainChatEvents(ch, &out, newDecoder(t), &reply); err != nil {
+			t.Fatalf("drainChatEvents: %v", err)
+		}
+	})
+}
+
+// failingWriter reports a fixed error instead of accepting bytes.
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }

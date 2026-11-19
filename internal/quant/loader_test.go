@@ -726,7 +726,7 @@ func TestOpenLoaderReportsAMalformedFile(t *testing.T) {
 	}
 }
 
-// TestTensorAndTensorReaderWrapTheOffsetError covers the two call sites that turn dataStart's error
+// TestTensorAndTensorReaderWrapTheOffsetError covers the call sites that turn dataStart's error
 // into a message naming the tensor.
 //
 // dataStart itself is tested; the wrapping around it was not, so replacing either wrapper with the bare
@@ -743,6 +743,8 @@ func TestTensorAndTensorReaderWrapTheOffsetError(t *testing.T) {
 	}{
 		{"Tensor", func(l *Loader) error { _, err := l.Tensor(ti.Name); return err }},
 		{"TensorReader", func(l *Loader) error { _, err := l.TensorReader(ti.Name); return err }},
+		// TensorInto is the third caller of dataStart, and it wraps the error the same way.
+		{"TensorInto", func(l *Loader) error { return l.TensorInto(ti.Name, make([]float32, 4)) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l, err := OpenLoader(path)

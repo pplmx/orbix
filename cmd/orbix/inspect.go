@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/tokenize"
@@ -335,14 +336,29 @@ func formatBytes(n int64) string {
 
 // formatValue renders a metadata value compactly, collapsing long arrays to a
 // count so one table stays readable.
+//
+// The cut is measured in bytes but must land on a rune boundary: a metadata string is
+// arbitrary UTF-8 -- a checkpoint name in Chinese, a template with an emoji -- and slicing at
+// a fixed byte offset splits a multi-byte character, which writes invalid UTF-8 to the
+// terminal and makes the --json output fail to parse downstream. Measured before this: a
+// 61-byte name whose first character is ASCII produced a 60-byte result that
+// utf8.ValidString rejected. The truncation budget includes the ellipsis, so the result
+// stays inside the same width the fixed cut had.
 func formatValue(v gguf.Value) string {
 	if v.Type == gguf.TypeArray {
 		return fmt.Sprintf("%d values", len(v.Array))
 	}
 	const max = 60
-	if s := v.String(); len(s) > max {
-		return s[:max-3] + "..."
-	} else {
+	s := v.String()
+	if len(s) <= max {
 		return s
 	}
+	// Keep max-3 bytes plus the ellipsis, retreating to the start of the last rune that
+	// would otherwise be split. utf8.RuneStart walks back over continuation bytes, whose
+	// top two bits are 10.
+	keep := max - 3
+	for keep > 0 && !utf8.RuneStart(s[keep]) {
+		keep--
+	}
+	return s[:keep] + "..."
 }

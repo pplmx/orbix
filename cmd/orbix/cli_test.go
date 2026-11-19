@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
 
 	"github.com/pplmx/orbix/internal/llama"
@@ -1047,5 +1049,49 @@ func TestRunPromptIsEveryRemainingWord(t *testing.T) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	if _, err := promptFromArgs(fs); err == nil {
 		t.Error("promptFromArgs accepted no arguments")
+	}
+}
+
+// TestFormatValueKeepsUTF8Whole covers the metadata table's truncation.
+//
+// formatValue cuts long values to a fixed byte width so one row stays readable, and the
+// offset it used to cut at had no relation to rune boundaries. A metadata string is
+// arbitrary UTF-8 -- a checkpoint name in Chinese, a chat template with an emoji -- so
+// slicing at byte 57 can land inside a three-byte character and produce a string that is not
+// valid UTF-8. Measured before the fix: "a" followed by twenty "中" is 61 bytes, and the
+// result was 60 bytes that utf8.ValidString rejected. It reaches the terminal as mojibake and
+// breaks a pipeline that parses the --json output.
+//
+// The sweep is over the byte lengths around the boundary rather than one case, because the
+// previous cut was correct whenever the boundary happened to fall on a character edge: a
+// single example could pass while the bug was present.
+func TestFormatValueKeepsUTF8Whole(t *testing.T) {
+	// Every prefix length from 0 to 2 and every count of three-byte characters that puts the
+	// total within a few bytes of the 60-byte limit.
+	for prefix := 0; prefix < 3; prefix++ {
+		for n := 18; n <= 21; n++ {
+			in := strings.Repeat("a", prefix) + strings.Repeat("中", n)
+			got := formatValue(gguf.Value{Type: gguf.TypeString, Str: in})
+			if !utf8.ValidString(got) {
+				t.Errorf("formatValue(%d-byte %q) = %q, which is not valid UTF-8", len(in), in, got)
+			}
+			if len(got) > 60 {
+				t.Errorf("formatValue(%d-byte input) = %d bytes, want at most 60", len(in), len(got))
+			}
+			// A value that fits is returned unchanged, multibyte or not.
+			if len(in) <= 60 {
+				if got != in {
+					t.Errorf("formatValue(%q) = %q, want it unchanged", in, got)
+				}
+			} else if !strings.HasSuffix(got, "...") {
+				t.Errorf("formatValue(%d-byte input) = %q, want an ellipsis suffix", len(in), got)
+			}
+		}
+	}
+
+	// The array form is a count, not a truncation, and stays as it was.
+	got := formatValue(gguf.Value{Type: gguf.TypeArray, Array: make([]gguf.Value, 7)})
+	if got != "7 values" {
+		t.Errorf("formatValue(array) = %q, want \"7 values\"", got)
 	}
 }

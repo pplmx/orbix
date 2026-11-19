@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"math"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -715,5 +717,48 @@ func TestSuiteReuseRowPadsAShortPrompt(t *testing.T) {
 		t.Errorf("a %d-token prompt reported %d reused positions; padding to one block instead of "+
 			"two reports 48, so the prompt was padded to one block and the NOTE's \"two blocks\" "+
 			"disagrees with the measurement", len(prompt), res.prefixReused)
+	}
+}
+
+// TestResolveWorkers covers the default the printed header reports.
+//
+// The count is measurement metadata: a table pasted into a document says how many kernel workers
+// produced it, so the header has to agree with what the run actually used. Zero and negative both mean
+// "one per CPU", which is what the engine does when given none.
+func TestResolveWorkers(t *testing.T) {
+	cpus := runtime.GOMAXPROCS(0)
+
+	// Spelled out rather than table-driven, because the default's value is the machine's CPU count and
+	// a literal in a table would pin this test to the machine it was written on.
+	if got := resolveWorkers(0); got != cpus {
+		t.Errorf("resolveWorkers(0) = %d, want the CPU count %d", got, cpus)
+	}
+	if got := resolveWorkers(-5); got != cpus {
+		t.Errorf("resolveWorkers(-5) = %d, want the CPU count %d", got, cpus)
+	}
+	// An explicit count is used as given, including one below the CPU count and one above it.
+	if got := resolveWorkers(1); got != 1 {
+		t.Errorf("resolveWorkers(1) = %d, want 1", got)
+	}
+	if got := resolveWorkers(cpus + 7); got != cpus+7 {
+		t.Errorf("resolveWorkers(%d) = %d, want it unchanged", cpus+7, got)
+	}
+}
+
+// TestResolveWorkersIsWhatTheHeaderPrints ties the helper to the line a reader sees.
+//
+// The header line is the only place this value surfaces, so a helper that returns the right number
+// while the header interpolates something else would still be wrong.
+func TestResolveWorkersIsWhatTheHeaderPrints(t *testing.T) {
+	src, err := os.ReadFile("bench_suite.go")
+	if err != nil {
+		t.Fatalf("reading bench_suite.go: %v", err)
+	}
+	// The printf that emits the header must take its fourth argument from resolveWorkers' result.
+	if !strings.Contains(string(src), "workers := resolveWorkers(o.workers)") {
+		t.Error("the suite header no longer derives its worker count from resolveWorkers")
+	}
+	if strings.Contains(string(src), "workers := o.workers") {
+		t.Error("the suite still uses the raw option for its header")
 	}
 }

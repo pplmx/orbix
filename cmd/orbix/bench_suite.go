@@ -180,6 +180,18 @@ func rowNote(sc scenario, res result) string {
 	return note
 }
 
+// resolveWorkers picks the kernel worker count a run uses.
+//
+// Zero or negative means one per CPU, which is what the engine does when it is given none. The
+// printed header has to agree with the run, or a table pasted elsewhere claims a worker count its
+// numbers were not produced with.
+func resolveWorkers(workers int) int {
+	if workers > 0 {
+		return workers
+	}
+	return runtime.GOMAXPROCS(0)
+}
+
 func runSuite(o suiteOptions) error {
 	return runScenarios(o, scenarioList())
 }
@@ -197,10 +209,7 @@ func runScenarios(o suiteOptions, scenarios []scenario) error {
 	// copies the table into a document: a throughput figure without them cannot be
 	// compared against anything, and a reader has no way to tell whether two runs
 	// differed because of the code or because of the hardware.
-	workers := o.workers
-	if workers <= 0 {
-		workers = runtime.GOMAXPROCS(0)
-	}
+	workers := resolveWorkers(o.workers)
 	fmt.Printf("machine:     %s/%s, %d CPUs, %d kernel workers\n",
 		runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), workers)
 	fmt.Printf("go:          %s\n\n", runtime.Version())

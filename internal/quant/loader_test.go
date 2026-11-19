@@ -483,3 +483,41 @@ func TestLoaderRejectsAnUnsupportedQuantType(t *testing.T) {
 		t.Error("Tensor accepted an unsupported tensor type")
 	}
 }
+
+// TestLoaderRejectsTensorExtendingPastTheEnd covers the length half of dataStart's range check.
+//
+// The existing test takes an offset that is past the end (5000 in a 1000-byte file), which the
+// start > size comparison alone catches. The case that needs the nbytes term is different: the
+// start is inside the file and only the extent runs past it, so a check written as
+// `start > size` accepts and the reader is handed fewer bytes than the tensor needs.
+//
+// Removing the nbytes and size-start terms left every test green -- measured -- which is the same
+// shape as the wrapping-offset defect the comment above describes: a range test that looks like it
+// covers the range but only guards one end.
+func TestLoaderRejectsTensorExtendingPastTheEnd(t *testing.T) {
+	l := &Loader{size: 1000}
+	l.file = &gguf.File{TensorDataLoc: 100}
+
+	// Start at 100 + 884 = 984, inside the file, with 16 bytes needed and 16 available.
+	// Growing the length by one has to fail.
+	inFile := gguf.TensorInfo{Name: "w", Offset: 884, Dims: []uint64{4}, Type: gguf.F32}
+	if _, err := l.dataStart(inFile, 16); err != nil {
+		t.Fatalf("the exact fit was refused: %v", err)
+	}
+	if _, err := l.dataStart(inFile, 17); err == nil {
+		t.Error("dataStart accepted a tensor needing 17 bytes in the 16 the file has left")
+	} else if !strings.Contains(err.Error(), "past end") {
+		t.Errorf("error %q does not say the tensor is past the end", err)
+	}
+
+	// A start at the very end with any positive length is the extreme of the same case.
+	atEnd := gguf.TensorInfo{Name: "w", Offset: 900, Dims: []uint64{4}, Type: gguf.F32}
+	if _, err := l.dataStart(atEnd, 1); err == nil {
+		t.Error("dataStart accepted one byte at the end of the file")
+	}
+
+	// A negative length is refused rather than treated as zero.
+	if _, err := l.dataStart(inFile, -1); err == nil {
+		t.Error("dataStart accepted a negative byte count")
+	}
+}

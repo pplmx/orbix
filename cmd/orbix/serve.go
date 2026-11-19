@@ -75,7 +75,7 @@ func cmdServe(args []string) error {
 	if err := resolveModel(fs, model); err != nil {
 		return err
 	}
-	if err := cache.validate("serve"); err != nil {
+	if err := cache.validate("serve", false); err != nil {
 		return err
 	}
 	if *maxActive < 1 {

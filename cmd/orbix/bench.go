@@ -83,7 +83,7 @@ func cmdBench(args []string) error {
 				strings.Join(ignored, ", "))
 		}
 	}
-	if err := cache.validate("bench"); err != nil {
+	if err := cache.validate("bench", false); err != nil {
 		return err
 	}
 	total := *requests

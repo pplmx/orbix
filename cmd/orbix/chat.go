@@ -42,7 +42,7 @@ func cmdChat(args []string) error {
 	if err := resolveModel(fs, model); err != nil {
 		return err
 	}
-	if err := cache.validate("chat"); err != nil {
+	if err := cache.validate("chat", true); err != nil {
 		return err
 	}
 	// Sampling is switched on by "temp > 0" and top-k applies at "topK > 0", so a negative

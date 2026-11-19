@@ -78,7 +78,12 @@ func registerCacheFlags(fs *flag.FlagSet, workers bool) cacheFlags {
 
 // validate rejects negative cache settings, which would otherwise reach the pool
 // constructor as a confusing error far from the flag that caused it.
-func (c cacheFlags) validate(prefix string) error {
+//
+// autoBlocks says the caller sizes a pool itself when --blocks is unset, which chat does from
+// the model's own context because a REPL wants paging plus prefix reuse by default. For it a
+// block size alone is meaningful; for serve and bench it is not, because the engine keeps its
+// contiguous cache and the number never reaches anything.
+func (c cacheFlags) validate(prefix string, autoBlocks bool) error {
 	// Named separately rather than as one "the cache flags" sentence: a caller who typed
 	// `--blocks -1` and is told that "--blocks and --block-size must not be negative" has to
 	// re-read their own command line to work out which of the two they got wrong.
@@ -95,7 +100,7 @@ func (c cacheFlags) validate(prefix string) error {
 	//
 	// Checked here rather than in each command so a command that registers these flags cannot
 	// forget it: chat did, and silently ignored a block size nobody could see was unused.
-	if *c.blockSize > 0 && *c.blocks == 0 {
+	if !autoBlocks && *c.blockSize > 0 && *c.blocks == 0 {
 		return fmt.Errorf("%s: --block-size needs --blocks; without a pool there are no "+
 			"blocks to size, and each request still reserves a whole context", prefix)
 	}

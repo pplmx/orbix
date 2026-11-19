@@ -1612,3 +1612,56 @@ func TestRunRefusesAFileWithNoTokenizer(t *testing.T) {
 		t.Errorf("error %q does not name the tokenizer", err)
 	}
 }
+
+// TestRunRefusesContextAndPromptThatDoNotFit covers run's two size checks.
+//
+// Both are refusals a user meets on the first command they type: --ctx larger than the model's
+// trained window, and a prompt longer than the window it is being run against. Neither had a test,
+// so either could be removed and the failure would move into the cache or the forward pass, where
+// the message names a slice length rather than the flag or the prompt.
+//
+// The two numbers in each message are what a reader needs to pick a smaller value, so both are
+// asserted.
+func TestRunRefusesContextAndPromptThatDoNotFit(t *testing.T) {
+	const ctx = 128
+	path := gguftest.Model{NoEOS: true, ContextLen: ctx}.Write(t, t.TempDir())
+
+	t.Run("ctx past the trained window", func(t *testing.T) {
+		err := run([]string{"run", "--model", path, "--ctx", "999", "--max-tokens", "1", "hi"})
+		if err == nil {
+			t.Fatal("run accepted --ctx past the trained window")
+		}
+		if !strings.Contains(err.Error(), "999") || !strings.Contains(err.Error(), "128") {
+			t.Errorf("error %q does not give both numbers", err)
+		}
+		// The reason going beyond is refused, so the message does not read as an arbitrary limit.
+		if !strings.Contains(err.Error(), "rope scaling") {
+			t.Errorf("error %q does not say why the limit exists", err)
+		}
+	})
+
+	t.Run("prompt longer than the context", func(t *testing.T) {
+		long := strings.Repeat("word ", 300)
+		err := run([]string{"run", "--model", path, "--max-tokens", "1", long})
+		if err == nil {
+			t.Fatal("run accepted a prompt longer than the context")
+		}
+		if !strings.Contains(err.Error(), "context is 128") {
+			t.Errorf("error %q does not name the context", err)
+		}
+		if !strings.Contains(err.Error(), "prompt is") {
+			t.Errorf("error %q does not name the prompt's length", err)
+		}
+	})
+
+	// A prompt that fits still runs, so the refusals are about the sizes rather than about the
+	// command being broken.
+	out := captureStdout(t, func() {
+		if err := run([]string{"run", "--model", path, "--max-tokens", "1", "Once upon a time"}); err != nil {
+			t.Fatalf("a short prompt was refused: %v", err)
+		}
+	})
+	if out == "" {
+		t.Error("a short prompt produced no output")
+	}
+}

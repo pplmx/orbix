@@ -2030,3 +2030,52 @@ func TestDanglingBinaryOperatorIsARefusal(t *testing.T) {
 		}
 	}
 }
+
+// TestTojsonIndentReportsTheUndefinedName covers the diagnostic quality of a failing indent
+// argument.
+//
+// Both the keyword and the positional form evaluate their argument before converting it. If the
+// evaluation error is dropped, the empty value it produces fails the conversion instead, and the
+// render reports `tojson indent "" is not a number` -- measured -- where the template's real
+// problem is that `indent=nosuchvar` names a variable that does not exist. A template author
+// reading the first message looks for a number where there is a typo.
+//
+// The test asserts the message names the undefined variable, which only holds if the evaluation
+// error is propagated rather than replaced.
+func TestTojsonIndentReportsTheUndefinedName(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	for _, c := range []struct{ name, src string }{
+		{"keyword form", `{{ messages|tojson(indent=nosuchvar) }}`},
+		{"positional form", `{{ messages|tojson(nosuchvar) }}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			_, err = tpl.Render(msgs, Inputs{})
+			if err == nil {
+				t.Fatalf("%q rendered without error", c.src)
+			}
+			if !strings.Contains(err.Error(), "undefined variable") {
+				t.Errorf("error %q does not name the undefined variable", err)
+			}
+			if !strings.Contains(err.Error(), "nosuchvar") {
+				t.Errorf("error %q does not quote the name the template used", err)
+			}
+		})
+	}
+
+	// A real indent still applies, so the error path is not standing in for a broken filter.
+	tpl, err := Parse(`{{ messages|tojson(indent=2) }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := tpl.Render(msgs, Inputs{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(out, "\n") {
+		t.Errorf("tojson(indent=2) produced %q, which is not indented", out)
+	}
+}

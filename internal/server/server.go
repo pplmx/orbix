@@ -299,6 +299,11 @@ type chatRequest struct {
 	// Seed makes a sampled reply reproducible: the same prompt, settings and seed produce
 	// the same text. It is ignored when temperature is 0, because greedy is already
 	// deterministic and spending a generator on it would only slow the request down.
+	//
+	// Zero means "pick one", and it is what an absent field decodes to -- the field is a
+	// plain int64 rather than a pointer, so an omitted seed and an explicit 0 are the same
+	// request. That matches the API's own reading of an absent seed, and it is why the
+	// sampler substitutes the clock rather than seeding a generator with zero.
 	Seed int64 `json:"seed"`
 }
 
@@ -340,9 +345,8 @@ type completionRequest struct {
 	// StreamOptions is OpenAI's stream_options; see chatRequest.
 	StreamOptions *streamOptions `json:"stream_options"`
 
-	// Seed makes a sampled reply reproducible: the same prompt, settings and seed produce
-	// the same text. It is ignored when temperature is 0, because greedy is already
-	// deterministic and spending a generator on it would only slow the request down.
+	// Seed makes a sampled reply reproducible, and zero means "pick one"; see
+	// chatRequest's Seed for why zero and absent are the same request.
 	Seed int64 `json:"seed"`
 }
 

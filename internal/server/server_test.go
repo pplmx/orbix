@@ -2542,3 +2542,53 @@ func TestWriteRequestErrorFallback(t *testing.T) {
 		}
 	})
 }
+
+// TestSeedZeroMeansRandom pins the branch TestSeedMakesSamplingReproducible cannot reach.
+//
+// That test always sends a non-zero seed, so seed == 0 -- the branch that substitutes the
+// clock -- never ran. It is reachable with ordinary input: the field is a plain int64, so an
+// omitted seed and an explicit 0 are the same value, and the OpenAI clients send 0 to mean
+// "pick your own" often enough that it is the documented meaning of an absent seed.
+//
+// Two consequences worth asserting: the same request twice gives different text, and the
+// branch does not leak into the non-sampling path (temperature 0 is greedy and ignores it).
+func TestSeedZeroMeansRandom(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	post0 := func() string {
+		t.Helper()
+		resp := post(t, h, "/v1/completions", fmt.Sprintf(
+			`{"model": %q, "prompt": "Once upon a time", "max_tokens": 16, "temperature": 1.5, "seed": 0}`,
+			srv.cfg.ModelName))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		out := decodeBody[completionResponse](t, resp)
+		if len(out.Choices) == 0 {
+			t.Fatal("no choices")
+		}
+		return out.Choices[0].Text
+	}
+	// A population statement, like the reproducibility test's: one collision on one pair is
+	// possible, five identical results from a clock-seeded sampler is not.
+	seen := map[string]bool{}
+	for range 5 {
+		seen[post0()] = true
+	}
+	if len(seen) == 1 {
+		t.Error("five seed=0 requests produced identical text: the clock branch did not run")
+	}
+
+	// Temperature 0 is greedy, so it must not depend on the seed at all.
+	greedy := func(seed int) string {
+		t.Helper()
+		resp := post(t, h, "/v1/completions", fmt.Sprintf(
+			`{"model": %q, "prompt": "Once upon a time", "max_tokens": 8, "temperature": 0, "seed": %d}`,
+			srv.cfg.ModelName, seed))
+		out := decodeBody[completionResponse](t, resp)
+		return out.Choices[0].Text
+	}
+	if a, b := greedy(0), greedy(12345); a != b {
+		t.Errorf("greedy output differs by seed: %q vs %q", a, b)
+	}
+}

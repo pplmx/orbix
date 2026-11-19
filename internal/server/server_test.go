@@ -2450,3 +2450,48 @@ func TestValidationErrorsNameTheField(t *testing.T) {
 		})
 	}
 }
+
+// TestSingleTokenStopReachesTheEngine covers the half of stop-string handling the other two
+// tests deliberately avoid.
+//
+// The engine can only early-out on a stop string that is exactly one token, so stopTokenIDs
+// hands it those and drops the rest; the rest are found later in the decoded text by
+// cutAtStop. Both existing stop tests cut inside the continuation, so the append in
+// stopTokenIDs -- the one branch that produces a usable id -- never ran.
+//
+// Asserted on stopTokenIDs directly rather than through a request: a stop that fails to reach
+// the engine still stops, just later, after the token was generated and cut out of the text,
+// so the request path cannot tell the two apart. The fixture's random weights make the
+// continuation unmatchable text, which is why the end-to-end version of this was skipped.
+func TestSingleTokenStopReachesTheEngine(t *testing.T) {
+	srv, tok := newTestServer(t)
+
+	// A candidate the fixture's tokenizer maps to exactly one id. Checked rather than
+	// assumed, so a tokenizer change fails loudly instead of silently making this pass for
+	// the wrong reason.
+	var stopText string
+	var stopID int32
+	for _, cand := range []string{"a", "e", "t", "o", "n", " ", ","} {
+		if enc := tok.Encode(cand, false); len(enc) == 1 {
+			stopText, stopID = cand, enc[0]
+			break
+		}
+	}
+	if stopText == "" {
+		t.Skip("no single-token candidate in the fixture's vocabulary")
+	}
+	if got := srv.stopTokenIDs([]string{stopText}); len(got) != 1 || got[0] != stopID {
+		t.Errorf("stopTokenIDs(%q) = %v, want [%d]", stopText, got, stopID)
+	}
+
+	// And the multi-token and empty cases still drop out, which is what keeps the engine from
+	// being handed an id it cannot match.
+	if got := srv.stopTokenIDs([]string{""}); got != nil {
+		t.Errorf("stopTokenIDs([\"\"]) = %v, want nil", got)
+	}
+	if enc := tok.Encode(" the quick", false); len(enc) > 1 {
+		if got := srv.stopTokenIDs([]string{" the quick"}); got != nil {
+			t.Errorf("stopTokenIDs of a multi-token string = %v, want nil", got)
+		}
+	}
+}

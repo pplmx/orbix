@@ -20,7 +20,18 @@ func availableMemory() int64 {
 	if err != nil {
 		return 0
 	}
-	for line := range strings.SplitSeq(string(data), "\n") {
+	return parseMemAvailable(string(data))
+}
+
+// parseMemAvailable extracts MemAvailable from the text of /proc/meminfo, or zero when the field is
+// missing or unusable.
+//
+// Split out so the failure modes are testable: the file itself cannot be substituted in a unit test,
+// and every one of these branches means "do not budget" rather than "budget zero bytes". A missing
+// field, an empty one, a non-numeric one and a zero all have to reach the caller as the same 0, since
+// a wrong guess here sizes a pool the process may not be able to fault in.
+func parseMemAvailable(text string) int64 {
+	for line := range strings.SplitSeq(text, "\n") {
 		rest, ok := strings.CutPrefix(line, "MemAvailable:")
 		if !ok {
 			continue

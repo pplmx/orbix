@@ -952,3 +952,69 @@ func TestWriteJSONStringEscapesNonASCII(t *testing.T) {
 		}
 	}
 }
+
+// TestEqualValuesTypeArms covers the two arms of equalValues that comparison tests skip.
+//
+// Text form is the default so that "{% if m.role == 'user' %}" works, with two exceptions. A
+// boolean equals only another boolean, which is what the isBool flag exists for: it is the
+// distinction between a bool and the string "true". A list never equals a non-list, because
+// their text forms are unrelated.
+//
+// The boolean arm was wrong and this test found it. It compared truth values, so `true ==
+// 'false'` was true -- a non-empty string is truthy. Jinja2 compares a bool and a str strictly:
+// measured, `{{ true == "true" }}` renders False. Neither arm had a test, and the one equality
+// case in the file compares two strings.
+func TestEqualValuesTypeArms(t *testing.T) {
+	t.Run("a boolean equals only a boolean", func(t *testing.T) {
+		// The regression this pins: text differs and truth is the same, so a truth-value
+		// comparison says equal where Jinja2 says not.
+		if equalValues(boolValue(true), strValue("false")) {
+			t.Error(`bool true equalled the string "false"`)
+		}
+		if equalValues(boolValue(true), strValue("true")) {
+			t.Error(`bool true equalled the string "true"`)
+		}
+		if equalValues(strValue("false"), boolValue(false)) {
+			t.Error(`the string "false" equalled bool false`)
+		}
+		// Two booleans compare by value, in both directions.
+		if !equalValues(boolValue(true), boolValue(true)) {
+			t.Error("true != true")
+		}
+		if equalValues(boolValue(true), boolValue(false)) {
+			t.Error("true == false")
+		}
+		if !equalValues(boolValue(false), boolValue(false)) {
+			t.Error("false != false")
+		}
+	})
+
+	t.Run("a list never equals a non-list", func(t *testing.T) {
+		list := listValue([]value{strValue("a")})
+		if equalValues(list, strValue("a")) {
+			t.Error("a list equalled a string")
+		}
+		if equalValues(strValue("a"), list) {
+			t.Error("a string equalled a list in the other argument order")
+		}
+		// Two lists compare by text, which is what makes "{% if messages == other %}" work.
+		if !equalValues(list, listValue([]value{strValue("a")})) {
+			t.Error("two lists with the same text did not compare equal")
+		}
+	})
+}
+
+// TestBooleanComparisonMatchesJinja2 renders the templates rather than calling equalValues, so
+// the fix is pinned at the level a template author sees.
+//
+// Measured against Jinja2 3.1: the three cases below render F|F|T. Before the fix orbix gave
+// T|T|T, because every comparison against a non-empty string was true.
+func TestBooleanComparisonMatchesJinja2(t *testing.T) {
+	src := `{% if true == 'false' %}T{% else %}F{% endif %}` +
+		`|{% if true == 'true' %}T{% else %}F{% endif %}` +
+		`|{% if messages[0]['role'] == 'user' %}T{% else %}F{% endif %}`
+	got := render(t, src, []Message{{Role: "user", Content: "hi"}}, Inputs{})
+	if want := "F|F|T"; got != want {
+		t.Errorf("render = %q, want %q (Jinja2 3.1 agrees)", got, want)
+	}
+}

@@ -571,10 +571,17 @@ func evalBinary(b binaryExpr, sc *scope) (value, error) {
 	}
 }
 
-// equalValues compares two values by their string form, except for lists.
+// equalValues compares two values by their string form, except for booleans and lists.
 func equalValues(a, b value) bool {
 	if a.isBool || b.isBool {
-		return a.truthy() == b.truthy()
+		// A boolean equals only another boolean, and then by its value. Comparing by truth
+		// value instead -- which is what this did -- throws away the distinction isBool
+		// exists to make: a non-empty string is truthy, so `true == 'false'` came out true.
+		// Jinja2 compares strictly here, because the literals are bool and str.
+		if a.isBool != b.isBool {
+			return false
+		}
+		return a.boolean == b.boolean
 	}
 	if a.isList != b.isList {
 		return false

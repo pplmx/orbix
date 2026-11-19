@@ -107,6 +107,11 @@ SUBSET = {
     "if_and": """{% if add_generation_prompt and messages %}both{% else %}one{% endif %}""",
     "if_or": """{% if not add_generation_prompt or messages %}sat{% else %}unsat{% endif %}""",
     "if_in": """{% if 'user' in messages[0]['role'] %}has-user{% endif %}""",
+    # A bool and a str are never equal in Jinja2, which is how the Go side got this wrong: it
+    # compared truth values, and every non-empty string is truthy.
+    "if_eq_bool_str": """{% if true == 'false' %}T{% else %}F{% endif %}""",
+    "if_eq_bool_str2": """{% if true == 'true' %}T{% else %}F{% endif %}""",
+    "if_eq_bool_bool": """{% if true == true %}T{% else %}F{% endif %}""",
     "if_isdefined": """{% if bos_token is defined %}bos-set{% else %}bos-absent{% endif %}""",
     "for_index": """{% for m in messages %}{{ loop.index }}{{ m['role'] }};{% endfor %}""",
     "for_index0": """{% for m in messages %}{{ loop.index0 }}{% endfor %}""",

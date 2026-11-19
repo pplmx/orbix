@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -993,5 +994,58 @@ func TestBenchSuiteRunsEndToEnd(t *testing.T) {
 		if !strings.Contains(out, name) {
 			t.Errorf("output missing the %q row:\n%s", name, out)
 		}
+	}
+}
+
+// TestRunRefusesFlagsAfterThePrompt covers the shape flag.Parse accepts silently.
+//
+// Go's flag package stops at the first non-flag, so `orbix run "Once upon a time" --stats`
+// parsed no flags at all: it generated the default 128 tokens where 8 were asked for, with
+// no stats line, and exited 0. Neither the ignored budget nor the missing output says which
+// argument was the problem. `model inspect` already refuses this shape; run now does too,
+// and the message names the flag that landed after the prompt.
+func TestRunRefusesFlagsAfterThePrompt(t *testing.T) {
+	err := cmdRun([]string{"--model", "unused.gguf", "Once upon a time", "--max-tokens", "8"})
+	if err == nil {
+		t.Fatal("run accepted a flag after the prompt, which flag.Parse silently drops")
+	}
+	for _, want := range []string{"--max-tokens", "after"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// TestRunPromptIsEveryRemainingWord covers the other half: a prompt typed without quotes.
+//
+// `orbix run Once upon a time` used to prefill only "Once" and discard the rest, which shows
+// up as a prompt token count of 2 rather than 5 and is easy to mistake for tokenizer
+// behaviour. The words are joined instead, and a single quoted word still yields itself.
+func TestRunPromptIsEveryRemainingWord(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"Once", "upon", "a", "time"}, "Once upon a time"},
+		{[]string{"Once upon a time"}, "Once upon a time"},
+		{[]string{"Once"}, "Once"},
+	}
+	for _, c := range cases {
+		fs := flag.NewFlagSet("run", flag.ContinueOnError)
+		if err := fs.Parse(c.args); err != nil {
+			t.Fatalf("Parse(%v): %v", c.args, err)
+		}
+		got, err := promptFromArgs(fs)
+		if err != nil {
+			t.Fatalf("promptFromArgs(%v): %v", c.args, err)
+		}
+		if got != c.want {
+			t.Errorf("promptFromArgs(%v) = %q, want %q", c.args, got, c.want)
+		}
+	}
+
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	if _, err := promptFromArgs(fs); err == nil {
+		t.Error("promptFromArgs accepted no arguments")
 	}
 }

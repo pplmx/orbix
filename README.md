@@ -454,6 +454,7 @@ turn's KV blocks instead of prefilling the whole conversation again.
 orbix run --model ./model.gguf "Once upon a time"
 orbix run --model ./model.gguf --stats --max-tokens 64 "Explain KV caching."
 orbix run --model ./model.gguf --workers 32 "Explain KV caching."   # 3.9x on a 1-worker default
+orbix run --model ./model.gguf Once upon a time    # the same prompt, unquoted
 
 orbix chat --model ./model.gguf
 

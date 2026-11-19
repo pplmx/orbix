@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -32,9 +33,9 @@ func cmdRun(args []string) error {
 	if err := resolveModel(fs, model); err != nil {
 		return err
 	}
-	prompt := fs.Arg(0)
-	if prompt == "" {
-		return fmt.Errorf("run: missing prompt")
+	prompt, err := promptFromArgs(fs)
+	if err != nil {
+		return err
 	}
 	// Both of these are compared with "> 0" to decide whether sampling applies at all, so a
 	// negative value silently means the same as zero: greedy decoding, and a top-k that is
@@ -174,4 +175,32 @@ func cmdRun(args []string) error {
 		}
 	}
 	return nil
+}
+
+// promptFromArgs assembles the prompt from everything after the flags.
+//
+// Go's flag package stops at the first non-flag, so `orbix run "Once upon a time" --stats`
+// parsed no flags at all: the run produced 123 tokens where 8 were asked for and printed no
+// stats, and the flag after the prompt was not merely ignored but silently so. `model
+// inspect` already refuses that shape, and the same rule belongs here -- except that run has
+// to say what was wrong rather than count arguments, because a prompt legitimately arrives
+// as more than one word.
+//
+// The words are joined rather than taking args[0] alone, which is the second half of the
+// bug: with a prompt past the flags, `orbix run Once upon a time` prefilled the single token
+// "Once" (2 tokens including BOS) and threw the rest away. Joining a single quoted word
+// changes nothing, so the documented usage keeps working.
+func promptFromArgs(fs *flag.FlagSet) (string, error) {
+	words := fs.Args()
+	if len(words) == 0 {
+		return "", fmt.Errorf("run: missing prompt")
+	}
+	for _, w := range words {
+		// Only a leading dash is treated as a flag: a prompt may contain "-" anywhere else,
+		// and "the word starts a flag" is exactly what flag.Parse would have decided too.
+		if strings.HasPrefix(w, "-") {
+			return "", fmt.Errorf("run: flags must come before the prompt, got %q after it", w)
+		}
+	}
+	return strings.Join(words, " "), nil
 }

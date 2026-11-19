@@ -2130,3 +2130,45 @@ func TestLexerErrorsReachTheTemplateAuthor(t *testing.T) {
 		t.Errorf("rendering a valid expression = %q, %v", got, err)
 	}
 }
+
+// TestDanglingMinusIsARefusal covers the arithmetic level's right operand.
+//
+// Subtracting a missing operand parses successfully when the operand's error is dropped --
+// measured -- and the template then fails at render time with "internal error: unknown
+// expression <nil>". That message says the engine has a bug, which is the wrong thing to tell a
+// template author whose expression is incomplete.
+//
+// The arithmetic operator is the one a chat template is least likely to use, which is why nothing
+// reached it; the same loop shape is used by every other binary level, so a refusal here is
+// consistent with the rest.
+func TestDanglingMinusIsARefusal(t *testing.T) {
+	for _, src := range []string{
+		`{{ 1 - }}`,
+		`{% if 1 - %}{% endif %}`,
+		`{{ a - }}`,
+		`{{ (1 - ) }}`,
+	} {
+		_, err := Parse(src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a dangling minus", src)
+			continue
+		}
+		// A parse-time refusal, not an internal error surfaced later.
+		if strings.Contains(err.Error(), "internal error") {
+			t.Errorf("Parse(%q) reported an internal error: %v", src, err)
+		}
+	}
+
+	// Subtraction still works, and is left-associative: 10-3-2 is 5, not 9.
+	tpl, err := Parse(`{{ 10 - 3 - 2 }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := tpl.Render(nil, Inputs{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got != "5" {
+		t.Errorf("10 - 3 - 2 = %q, want 5 (left-associative)", got)
+	}
+}

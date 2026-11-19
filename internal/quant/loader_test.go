@@ -435,3 +435,51 @@ func TestPreloadConcurrentReads(t *testing.T) {
 		}
 	}
 }
+
+// TestLoaderRejectsAnUnsupportedQuantType covers the type check in TensorInto and
+// TensorReader.
+//
+// Both look up the tensor, ask QuantType.Size for its byte length, and refuse when it returns
+// false -- which is what an unrecognised type produces. Deleting either check passed the quant
+// and llama suites: every fixture the tests build is F32, so the false branch never ran.
+//
+// The consequence is not subtle once reached. Size returns (0, false) for an unknown type, so
+// the unchecked version computes a zero-byte range, reads nothing, and hands Decode a slice it
+// cannot size. Under the old grammar this was the "unsupported type" path of a file written by
+// a newer quantizer, which is exactly when a loader needs to say so rather than proceed.
+func TestLoaderRejectsAnUnsupportedQuantType(t *testing.T) {
+	// Type 4096 is beyond every value GGUF defines, and the bytes are only there so the file
+	// passes the reader's own checks.
+	unknown := gguf.QuantType(4096)
+	path := writeModel(t, []gguf.TensorInfo{
+		{Name: "mystery.weight", Dims: []uint64{4}, Type: unknown},
+	}, make([]byte, 64))
+
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	// The type must be unrecognised to this package, or the test is not exercising the guard.
+	if _, ok := unknown.Size(4); ok {
+		t.Fatalf("quant type %d is supported, so this test cannot reach the guard", unknown)
+	}
+
+	if err := l.TensorInto("mystery.weight", make([]float32, 4)); err == nil {
+		t.Error("TensorInto accepted an unsupported tensor type")
+	} else if !strings.Contains(err.Error(), "unsupported type") {
+		t.Errorf("TensorInto error %q does not name the type", err)
+	}
+
+	if _, err := l.TensorReader("mystery.weight"); err == nil {
+		t.Error("TensorReader accepted an unsupported tensor type")
+	} else if !strings.Contains(err.Error(), "unsupported type") {
+		t.Errorf("TensorReader error %q does not name the type", err)
+	}
+
+	// Tensor goes through the same lookup and must agree.
+	if _, err := l.Tensor("mystery.weight"); err == nil {
+		t.Error("Tensor accepted an unsupported tensor type")
+	}
+}

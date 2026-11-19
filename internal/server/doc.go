@@ -9,12 +9,12 @@
 // code, flushing a stream, and noticing that a client hung up.
 //
 // "Makes no inference decisions" is a statement about the work, not about the size: this
-// package has the third-largest number of functions in the repository, behind tokenize and
-// llama, because the OpenAI schema is wide and refusing unsupported fields one by one is
-// most of it. It is the fourth by lines of code, behind chat, which is why the count is
-// named rather than left as "large" -- a reader comparing the packages would otherwise get
-// a different answer depending on which number they measured. The thinness that matters is that
-// none of those lines can change what the model computes.
+// package has the fourth-largest number of functions in the repository, behind tokenize,
+// llama and chat, because the OpenAI schema is wide and refusing unsupported fields one by
+// one is most of it. By lines it is also fourth, a little behind chat -- there are many
+// small functions here and few long ones, which is what a schema-shaped layer looks like
+// next to a decoder. The thinness that matters is that none of those lines can change what
+// the model computes.
 //
 // The API shape is OpenAI's, which is the de-facto interface for local inference.
 // Implementing it means the server can be driven by the OpenAI client libraries and

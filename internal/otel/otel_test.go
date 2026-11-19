@@ -825,3 +825,62 @@ func TestEncodeDoesNotEscapeHTML(t *testing.T) {
 	// The escaping must not have been turned off to the point of producing invalid JSON.
 	unmarshalRequest(t, body)
 }
+
+// TestExporterTreatsNon2xxAsFailure pins both ends of the success range.
+//
+// send accepts 200..299 and reports anything else. The upper half of that guard is what these
+// cases pin: the only refusal test in the suite used 400, so covering 3xx and 5xx says the
+// comparison is against a range rather than against one value.
+//
+// The lower comparison, `resp.StatusCode < 200`, cannot be proved here and is not claimed to
+// be. net/http treats a 1xx WriteHeader as an interim response, so an httptest handler cannot
+// hand the client a bare 199 to answer; simplifying the guard to `>= 300` still passes this
+// test and every other. The comparison stays in the code because 200..299 is the range that
+// is actually meant, and one comparison would be wrong the first time an interim status
+// reached an HTTP/2 client -- but a test that passes for the wrong reason is worse than an
+// honest note.
+func TestExporterTreatsNon2xxAsFailure(t *testing.T) {
+	// 1xx is deliberately absent: net/http treats a 1xx WriteHeader as an interim response
+	// rather than the final one, so an httptest server cannot hand the client a bare 199.
+	// The lower comparison is still worth having in the code -- the range is 200..299, and
+	// writing it as one comparison would be wrong even where no test can reach it -- but it
+	// is not something this suite can prove, and pretending otherwise would be a test that
+	// passes for the wrong reason.
+	for _, code := range []int{300, 418, 500} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer srv.Close()
+
+			exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+			if err != nil {
+				t.Fatalf("NewExporter: %v", err)
+			}
+			defer func() { _ = exp.Close() }()
+
+			exp.Record(testSpan(t, "chat"))
+			if err := exp.Flush(context.Background()); err == nil {
+				t.Errorf("Flush reported success for status %d", code)
+			}
+			if got := exp.Dropped(); got != 1 {
+				t.Errorf("dropped %d spans after a %d, want 1", got, code)
+			}
+		})
+	}
+
+	// The accepting side, so a guard that rejects everything cannot pass either.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+	exp.Record(testSpan(t, "chat"))
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Errorf("Flush failed against a 204: %v", err)
+	}
+}

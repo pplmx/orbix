@@ -1241,3 +1241,35 @@ func mustParse(t *testing.T, raw []byte) *gguf.File {
 	}
 	return f
 }
+
+// TestWindowLargerThanTheContextIsAccepted pins what an oversized sliding window does.
+//
+// sliding_window is unsigned in GGUF, so a file can write it as 0xFFFFFFFF. Get[int] converts
+// that to 4294967295 -- it is below MaxInt64, so the overflow guard does not apply -- and the
+// loader keeps it rather than clamping. That is deliberate: a window wider than every position
+// the model can reach is the same as no window, and trimSpans returns its input unchanged once
+// keep >= total.
+//
+// The alternative, rejecting or clamping, would have to pick a context length to clamp against
+// at load time, and the assertion here is that not doing so changes nothing observable.
+func TestWindowLargerThanTheContextIsAccepted(t *testing.T) {
+	c := defaultTiny()
+	kvs := append(c.kvs(), kv{"llama.attention.sliding_window", u32Val(0xFFFFFFFF)})
+	f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig refused an oversized window: %v", err)
+	}
+	if want := int(0xFFFFFFFF); cfg.WindowLen != want {
+		t.Errorf("WindowLen = %d, want %d", cfg.WindowLen, want)
+	}
+	// Larger than any context the fixture declares, which is the property that makes it a
+	// no-op rather than a bound.
+	if cfg.WindowLen <= cfg.ContextLen {
+		t.Errorf("the window (%d) is not larger than the context (%d), so this case does not "+
+			"exercise what it claims", cfg.WindowLen, cfg.ContextLen)
+	}
+}

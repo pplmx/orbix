@@ -282,6 +282,13 @@ func LoadConfig(f *gguf.File) (Config, error) {
 
 	// The sliding window is per-architecture, and a missing key means unbounded: a
 	// Mistral fine-tune that trained with full attention sets it to 0 or omits it.
+	//
+	// A value larger than the context is not rejected, because it is not wrong: a window
+	// wider than every position the model can reach is the same as no window, and trimSpans
+	// returns the spans unchanged once keep >= total. The cost of getting there is one
+	// spanRows call per head, which is why it is noted rather than guarded -- a file that
+	// writes the key as uint32 0xFFFFFFFF loads with WindowLen 4294967295 and attends
+	// normally.
 	if v, ok := f.Get[int](arch + ".attention.sliding_window"); ok && v > 0 {
 		cfg.WindowLen = v
 	}

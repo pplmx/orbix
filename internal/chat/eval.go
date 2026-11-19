@@ -102,9 +102,19 @@ func (v value) truthy() bool {
 
 // scope is a variable environment with one level of nesting for loops.
 //
-// Assignments write to the outermost frame, which is what Jinja does for {% set %}
-// inside a for body: the variable survives the loop. Reading walks inward, so the loop
-// variable shadows an outer name of the same kind.
+// Reading walks inward, so the loop variable shadows an outer name of the same kind.
+//
+// Assignments write to the outermost frame, which is NOT what Jinja 3.1 does and the
+// comment here said it was. Measured against jinja2 3.1.6: "{% set x = 'before' %}{% for
+// m in messages %}{% set x = 'inside' %}{% endfor %}{{ x }}" renders "before" there and
+// "inside" here, and a name first assigned inside a loop renders empty there and survives
+// here. Jinja scopes a for body, so an assignment in one does not escape it.
+//
+// Kept as it is because the published templates this package was written for do not
+// depend on either reading: Llama 3's assigns and reads are both inside the body, which
+// the two agree on. Changing it would mean a second frame kind for a difference no
+// template in the corpus shows -- but the disagreement is recorded here rather than
+// described as agreement.
 type scope struct {
 	vars   map[string]value
 	parent *scope

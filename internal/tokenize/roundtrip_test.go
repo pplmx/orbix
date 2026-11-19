@@ -120,8 +120,34 @@ func TestRoundTripEveryRune(t *testing.T) {
 // TestRoundTripText checks whole strings, which is where a mapping that is right per
 // character can still be wrong in sequence: chunk boundaries, merges, and the space
 // conventions all only exist between characters.
+//
+// Gated on MODEL, and the same family gap applies as to the sweep above: with the byte
+// table's 0xC3 and 0xC4 entries swapped this passes on a SentencePiece checkpoint and
+// reports "naïve round-trips to naįve" on a byte-level one. TestRoundTripTextByteLevel
+// covers the other family.
 func TestRoundTripText(t *testing.T) {
-	tok := realTokenizer(t)
+	roundTripText(t, realTokenizer(t))
+}
+
+// TestRoundTripTextByteLevel is TestRoundTripText against a byte-level vocabulary.
+//
+// It shares the inputs rather than restating them, so the two families cannot drift into
+// being tested on different strings.
+func TestRoundTripTextByteLevel(t *testing.T) {
+	path := os.Getenv("QWEN2_MODEL")
+	tok := realTokenizerAt(t, path)
+	if !tok.byteLevel {
+		t.Skipf("%s is not a byte-level vocabulary", path)
+	}
+	if path == os.Getenv("MODEL") {
+		t.Skip("MODEL and QWEN2_MODEL are the same file; TestRoundTripText covers it")
+	}
+	roundTripText(t, tok)
+}
+
+// roundTripText is the string corpus both vocabulary families round-trip.
+func roundTripText(t *testing.T, tok *Tokenizer) {
+	t.Helper()
 	inputs := []string{
 		// The one that found the leading-space split.
 		"a", " a", "  a", " ", "  ", "a ", " a ", "a b", "a  b",

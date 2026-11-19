@@ -2,7 +2,10 @@ package llama
 
 import (
 	"math"
+	"slices"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // TestNucleusTrimsToTheMassCoveringSet checks top-p against hand-computed probabilities.
@@ -122,3 +125,120 @@ func TestNucleusSortsUnsortedCandidates(t *testing.T) {
 			"not by the order the logits happen to arrive in", got)
 	}
 }
+
+// TestGenerateOptionHandling covers the four branches in Generate that no test reached.
+//
+// Every existing caller passes a non-nil Greedy and sets neither StopTokens nor OnToken, and the
+// tiny fixture defines no end-of-sequence id, so the nil-sampler default, both sides of the stop
+// set, and the callback were all unexecuted. The negative budget is here too: the engine rejects
+// it before calling, but Generate is reachable without the engine.
+func TestGenerateOptionHandling(t *testing.T) {
+	newModel := func(t *testing.T) *Model {
+		t.Helper()
+		// NoEOS false so the fixture carries a real end-of-sequence id; greedy keeps every run
+		// deterministic.
+		path := gguftest.Model{ContextLen: 64}.Write(t, t.TempDir())
+		m, err := New(path)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return m
+	}
+	run := func(t *testing.T, m *Model, sampler Sampler, opts GenerateOptions) []int32 {
+		t.Helper()
+		cache, err := NewKVCache(m.Config(), m.Config().ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		out, err := m.Generate(cache, []int32{0, 1}, sampler, opts)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		return out
+	}
+	eos := int32(newModel(t).Config().EOSID)
+	if eos < 0 {
+		t.Fatal("the fixture defines no end-of-sequence id")
+	}
+
+	t.Run("nil sampler means greedy", func(t *testing.T) {
+		m := newModel(t)
+		withNil := run(t, m, nil, GenerateOptions{MaxTokens: 6})
+		withGreedy := run(t, newModel(t), Greedy{}, GenerateOptions{MaxTokens: 6})
+		if !slices.Equal(withNil, withGreedy) {
+			t.Errorf("nil sampler gave %v, Greedy gave %v", withNil, withGreedy)
+		}
+	})
+
+	t.Run("a stop token ends generation", func(t *testing.T) {
+		m := newModel(t)
+		// Learn what the model emits, then ask it to stop on that token.
+		free := run(t, newModel(t), Greedy{}, GenerateOptions{MaxTokens: 6})
+		if len(free) <= 2 {
+			t.Skipf("the fixture generated only the prompt (%v)", free)
+		}
+		target := free[2]
+		stopped := run(t, m, Greedy{}, GenerateOptions{MaxTokens: 6, StopTokens: []int32{target}})
+		// The prompt is two tokens, so a stop on the first generated token leaves exactly those.
+		if len(stopped) >= len(free) {
+			t.Errorf("stopping on %d produced %v, not shorter than %v", target, stopped, free)
+		}
+		if !slices.Equal(stopped, free[:len(stopped)]) {
+			t.Errorf("stopped output %v is not a prefix of %v", stopped, free)
+		}
+	})
+
+	t.Run("the end-of-sequence id is stopped on without being passed", func(t *testing.T) {
+		// A sampler that always answers EOS, so the implicit stop entry is what ends the run.
+		// Greedy cannot be used here: on random weights it settles on one token and never emits
+		// EOS, which is why the first version of this subtest measured nothing.
+		m := newModel(t)
+		out := run(t, m, fixedSampler{tok: eos}, GenerateOptions{MaxTokens: 32})
+		// Prompt only: the first sampled token was EOS, and EOS is never appended.
+		if len(out) != 2 {
+			t.Errorf("output = %v, want just the 2 prompt tokens: EOS %d should stop the run", out, eos)
+		}
+		// The same sampler on a token that is not EOS must keep going, or the test would pass
+		// for a run that ignores its sampler.
+		other := int32(0)
+		if other == eos {
+			other = 1
+		}
+		out2 := run(t, newModel(t), fixedSampler{tok: other}, GenerateOptions{MaxTokens: 4})
+		if len(out2) != 6 {
+			t.Errorf("output with a non-EOS sampler = %v, want the prompt plus 4", out2)
+		}
+	})
+
+	t.Run("OnToken sees every generated token", func(t *testing.T) {
+		m := newModel(t)
+		var seen []int32
+		out := run(t, m, Greedy{}, GenerateOptions{
+			MaxTokens: 4,
+			OnToken:   func(tok int32) error { seen = append(seen, tok); return nil },
+		})
+		if !slices.Equal(seen, out[2:]) {
+			t.Errorf("OnToken saw %v, the continuation was %v", seen, out[2:])
+		}
+		if len(seen) == 0 {
+			t.Error("OnToken was never called")
+		}
+	})
+
+	t.Run("a negative budget is an error", func(t *testing.T) {
+		m := newModel(t)
+		cache, err := NewKVCache(m.Config(), m.Config().ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		if _, err := m.Generate(cache, []int32{0}, Greedy{}, GenerateOptions{MaxTokens: -1}); err == nil {
+			t.Error("Generate accepted a negative budget")
+		}
+	})
+}
+
+// fixedSampler always answers the same token, so a test can put a specific id where Generate's
+// stop set looks at it.
+type fixedSampler struct{ tok int32 }
+
+func (s fixedSampler) Next([]float32) int32 { return s.tok }

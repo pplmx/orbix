@@ -873,3 +873,69 @@ func TestChatRefusesABlockWiderThanTheContext(t *testing.T) {
 		}
 	}
 }
+
+// TestChatTurnsPutsTheSystemPromptFirst covers the conversion from a session to turns.
+//
+// --system has no other test: it is read into a local, passed through chatTurnOnce and rendered, and
+// nothing observed the result. Dropping the assignment and forcing it empty both passed every test,
+// which means the flag's whole effect was untested.
+//
+// The order is the part worth pinning rather than the presence: a system turn appended after the
+// history would still produce a prompt, and still be wrong -- the model would read it as a remark made
+// later in the conversation.
+func TestChatTurnsPutsTheSystemPromptFirst(t *testing.T) {
+	history := []chatTurn{
+		{role: "user", text: "first"},
+		{role: "assistant", text: "reply"},
+	}
+
+	t.Run("with a system prompt", func(t *testing.T) {
+		got := chatTurns("You are terse.", history, "second")
+		if len(got) != len(history)+2 {
+			t.Fatalf("chatTurns returned %d turns, want %d", len(got), len(history)+2)
+		}
+		if got[0].Role != "system" || got[0].Text != "You are terse." {
+			t.Errorf("first turn = %+v, want the system prompt", got[0])
+		}
+		if got[len(got)-1].Role != "user" || got[len(got)-1].Text != "second" {
+			t.Errorf("last turn = %+v, want the new message", got[len(got)-1])
+		}
+		// The history sits between the two, in order.
+		for i, want := range history {
+			if got[i+1].Role != want.role || got[i+1].Text != want.text {
+				t.Errorf("turn %d = %+v, want %+v", i+1, got[i+1], want)
+			}
+		}
+	})
+
+	// The session reads --system into a local before the loop, so this also covers that
+	// assignment: with it dropped, every session would behave as if no system prompt were given.
+	t.Run("reaches the session", func(t *testing.T) {
+		model := chatModel(t)
+		var out bytes.Buffer
+		if err := chatSession(strings.NewReader("/exit\n"), &out, chatOptions{
+			model:  model,
+			system: "You are terse.",
+		}); err != nil {
+			t.Fatalf("chatSession: %v", err)
+		}
+		// The REPL does not echo the system prompt, so what is observable is that the session runs
+		// at all with one -- and that it did not treat the text as a message.
+		if strings.Contains(out.String(), "You are terse.") {
+			t.Errorf("the system prompt was echoed to the user: %q", out.String())
+		}
+	})
+
+	t.Run("without one", func(t *testing.T) {
+		got := chatTurns("", history, "second")
+		if len(got) != len(history)+1 {
+			t.Fatalf("chatTurns returned %d turns, want %d -- an empty prompt adds none",
+				len(got), len(history)+1)
+		}
+		for _, turn := range got {
+			if turn.Role == "system" {
+				t.Errorf("an empty --system produced a system turn: %+v", turn)
+			}
+		}
+	})
+}

@@ -391,3 +391,92 @@ func TestDecodeStepAppliesAttentionBiasToEverySequence(t *testing.T) {
 		}
 	}
 }
+
+// TestEachAttentionBiasReachesTheOutput checks that q, k and v are each read, one at a time.
+//
+// The existing tests clear all three vectors together and assert the output changes, which is
+// satisfied by any one of them being read. Skipping the q bias entirely -- passing 0 instead of
+// rows in addBias -- left the whole suite green, the same weakness the per-row tests fixed for
+// the batched paths.
+//
+// Each run clears one vector and compares against the same forward pass with all three in place.
+// The three are independent inputs to the same projection, so all three have to change the
+// result; a run where one is ignored makes exactly that comparison equal.
+func TestEachAttentionBiasReachesTheOutput(t *testing.T) {
+	path := gguftest.Model{
+		Arch:       "qwen2",
+		AttnBias:   true,
+		NoEOS:      true,
+		ContextLen: 128,
+	}.Write(t, t.TempDir())
+
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if !cfg.AttnBias {
+		t.Fatal("the fixture did not load as a model with attention bias")
+	}
+	tokens := fixtureTokens(cfg, 4)
+
+	// Forward, not Prefill: addBias is the single-token path's call, and a prefill goes through
+	// addBiasBatch instead, so a test built on Prefill would pass with addBias's q call removed.
+	run := func() []float32 {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var last []float32
+		for i, tok := range tokens {
+			logits, err := m.Forward(cache, int(tok), i)
+			if err != nil {
+				t.Fatalf("Forward at %d: %v", i, err)
+			}
+			last = append([]float32(nil), logits...)
+		}
+		return last
+	}
+
+	// Save the vectors, then clear one at a time and restore, so every run differs from the
+	// baseline in exactly one vector.
+	type vecs struct{ q, k, v [][]float32 }
+	saved := vecs{}
+	for i := range m.W.Layers {
+		saved.q = append(saved.q, append([]float32(nil), m.W.Layers[i].qBias...))
+		saved.k = append(saved.k, append([]float32(nil), m.W.Layers[i].kBias...))
+		saved.v = append(saved.v, append([]float32(nil), m.W.Layers[i].vBias...))
+	}
+	restore := func() {
+		for i := range m.W.Layers {
+			copy(m.W.Layers[i].qBias, saved.q[i])
+			copy(m.W.Layers[i].kBias, saved.k[i])
+			copy(m.W.Layers[i].vBias, saved.v[i])
+		}
+	}
+	baseline := run()
+
+	for _, c := range []struct {
+		name  string
+		clear func(i int)
+	}{
+		{"q", func(i int) { clear(m.W.Layers[i].qBias) }},
+		{"k", func(i int) { clear(m.W.Layers[i].kBias) }},
+		{"v", func(i int) { clear(m.W.Layers[i].vBias) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for i := range m.W.Layers {
+				c.clear(i)
+			}
+			got := run()
+			restore()
+			for i := range baseline {
+				if got[i] != baseline[i] {
+					return // this vector reaches the output
+				}
+			}
+			t.Errorf("clearing the %s bias changed no logit, so the forward pass does not "+
+				"read it", c.name)
+		})
+	}
+}

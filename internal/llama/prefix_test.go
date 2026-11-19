@@ -660,3 +660,72 @@ func TestPrefixIndexRejectsACollidingHit(t *testing.T) {
 		t.Errorf("Match on the genuine tokens returned %d positions, want 4", n)
 	}
 }
+
+// TestWholePromptHitProducesIdenticalLogits covers the branch where every token is cached.
+//
+// PrefillWithPrefix has two reuse paths. When part of the prompt is cached it prefills the
+// remainder and returns that pass's logits; when ALL of it is cached it runs no forward pass
+// over the prompt at all and instead calls logitsForCached, which recomputes only the last
+// position against the adopted blocks. The existing credit test uses a 9-token prompt with a
+// 4-position block, so its match is 8 -- strictly fewer than the prompt -- and it exercises
+// the first path twice.
+//
+// That leaves the interesting branch untested, and it is the one where a mistake is silent:
+// the blocks come from somebody else's request, so a wrong position or a wrong token there
+// still produces finite logits of the right length. Measured on the fixture: 8 tokens, two
+// whole blocks, reused 8, and the logits equal the cold run bit for bit. Swapping the position
+// or the embedded token makes both alternatives fail.
+func TestWholePromptHitProducesIdenticalLogits(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	const blockSize = 4
+	// Exactly two whole blocks, so the match can be the entire prompt.
+	prompt := fixtureTokens(cfg, 2*blockSize)
+
+	// The reference: no reuse at all.
+	cold, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := m.Prefill(cold, prompt, 0)
+	if err != nil {
+		t.Fatalf("cold Prefill: %v", err)
+	}
+	wantLogits := append([]float32(nil), want...)
+
+	pool := pagedPool(t, cfg, blockSize)
+	pool.EnablePrefixCache()
+
+	first := pool.New()
+	if _, err := m.PrefillWithPrefix(first, prompt, 0); err != nil {
+		t.Fatalf("PrefillWithPrefix (filling): %v", err)
+	}
+	if got := first.ReusedPositions(); got != 0 {
+		t.Fatalf("the request that filled the index reused %d positions, want 0", got)
+	}
+
+	second := pool.New()
+	got, err := m.PrefillWithPrefix(second, prompt, 0)
+	if err != nil {
+		t.Fatalf("PrefillWithPrefix (whole prompt cached): %v", err)
+	}
+	// The whole prompt, not merely a block of it: this is what makes it the cached-logits
+	// branch rather than the prefill-the-remainder one.
+	if n := second.ReusedPositions(); n != len(prompt) {
+		t.Fatalf("reused %d of %d positions; this test needs the whole prompt cached "+
+			"to reach logitsForCached", n, len(prompt))
+	}
+	if len(got) != len(wantLogits) {
+		t.Fatalf("logits are %d wide, want %d", len(got), len(wantLogits))
+	}
+	for i := range wantLogits {
+		if got[i] != wantLogits[i] {
+			t.Fatalf("logit[%d] = %v, want %v: a fully cached prompt must score identically "+
+				"to a cold one", i, got[i], wantLogits[i])
+		}
+	}
+}

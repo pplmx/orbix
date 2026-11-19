@@ -2801,3 +2801,55 @@ func TestNewDefaultsAnEmptyConfig(t *testing.T) {
 		t.Errorf("MaxTokens = %d, want 256", srv.cfg.MaxTokens)
 	}
 }
+
+// TestPromptExactlyFillingTheContextIsRefused pins the eq part of the context bound.
+//
+// generate refuses `len(promptTokens) >= s.cfg.ContextLen`, and the asymmetry with the clamp
+// below it is deliberate: a prompt that fills the window leaves no room for even one
+// generated token, so accepting it produces a response with an empty completion and
+// finish_reason "length", which reads as a successful request that happened to generate
+// nothing. Changing >= to > passed the whole server suite, because the only overflow test
+// uses a prompt far past the window -- so both the refused side and the accepted side of the
+// boundary were unpinned.
+//
+// The prompt is fixed and the context is derived from its measured length, rather than the
+// other way round: growing a string to an exact token count is not reliable, because the
+// fixture vocabulary merges repeated runs and a added word can cost one token or several.
+func TestPromptExactlyFillingTheContextIsRefused(t *testing.T) {
+	srv, tok := newTestServerModel(t, gguftest.Model{ContextLen: 32, NoEOS: true})
+	prompt := "Once upon a time"
+	promptLen := len(tok.Encode(prompt, true))
+	if promptLen < 2 {
+		t.Fatalf("prompt encodes to %d tokens, too few to leave a boundary", promptLen)
+	}
+
+	// A window one bigger than the prompt leaves exactly one position to generate into.
+	// The engine the server already holds was built for the fixture's window, so only the
+	// handler's own bound changes; that is the comparison this test is about.
+	srv.cfg.ContextLen = promptLen + 1
+	resp := post(t, srv.Handler(), "/v1/completions",
+		fmt.Sprintf(`{"prompt": %s, "max_tokens": 5}`, quoteJSON(prompt)))
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("a %d-token prompt in a %d window: status %d, want 200",
+			promptLen, promptLen+1, resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// A window exactly the prompt's length leaves nothing, so the request must be refused
+	// rather than answered with an empty completion.
+	srv.cfg.ContextLen = promptLen
+	resp = post(t, srv.Handler(), "/v1/completions",
+		fmt.Sprintf(`{"prompt": %s, "max_tokens": 5}`, quoteJSON(prompt)))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a prompt filling the %d-token window: status %d, want 400",
+			promptLen, resp.StatusCode)
+	}
+	var body errorBody
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "context_length_exceeded" {
+		t.Errorf("code = %q, want context_length_exceeded", body.Error.Code)
+	}
+}

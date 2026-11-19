@@ -725,3 +725,44 @@ func TestOpenLoaderReportsAMalformedFile(t *testing.T) {
 		t.Errorf("error %q does not say the format is the problem", err)
 	}
 }
+
+// TestTensorAndTensorReaderWrapTheOffsetError covers the two call sites that turn dataStart's error
+// into a message naming the tensor.
+//
+// dataStart itself is tested; the wrapping around it was not, so replacing either wrapper with the bare
+// error passed everything. The tensor name is what tells a reader which of a checkpoint's hundreds of
+// tensors has a bad offset, and it comes only from that wrapper.
+func TestTensorAndTensorReaderWrapTheOffsetError(t *testing.T) {
+	// The tensor's bytes start inside the file and run past its end, which dataStart reports.
+	ti := gguf.TensorInfo{Name: "blk.3.attn_k.weight", Offset: 100, Dims: []uint64{4}, Type: gguf.F32}
+	path := writeModel(t, []gguf.TensorInfo{ti}, make([]byte, 8))
+
+	for _, c := range []struct {
+		name string
+		call func(*Loader) error
+	}{
+		{"Tensor", func(l *Loader) error { _, err := l.Tensor(ti.Name); return err }},
+		{"TensorReader", func(l *Loader) error { _, err := l.TensorReader(ti.Name); return err }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, err := OpenLoader(path)
+			if err != nil {
+				t.Fatalf("OpenLoader: %v", err)
+			}
+			defer func() { _ = l.Close() }()
+
+			err = c.call(l)
+			if err == nil {
+				t.Fatalf("%s accepted a tensor past the end of the file", c.name)
+			}
+			// The wrapper's contribution: the tensor's name.
+			if !strings.Contains(err.Error(), ti.Name) {
+				t.Errorf("error %q does not name the tensor", err)
+			}
+			// dataStart's own message survives the wrapping, rather than being replaced by it.
+			if !strings.Contains(err.Error(), "past end") {
+				t.Errorf("error %q does not carry dataStart's reason", err)
+			}
+		})
+	}
+}

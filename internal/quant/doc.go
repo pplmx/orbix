@@ -51,9 +51,12 @@
 // scale field read from the wrong offset and not a bit-plane off by one. The SHA-256
 // comparison above is what covers the finer errors, which is why both exist.
 //
-// The one format this did not reach is F16: none of the available checkpoints is stored
-// in it. Its conversion has unit tests over the boundaries and subnormals, but no
-// external cross-check, and saying so is more useful than implying the coverage is total.
+// The one format the SHA-256 comparison did not reach is F16: none of the available
+// checkpoints is stored in it. That gap is closed by a different kind of check rather than
+// left open -- internal/f16 verifies all 65536 half-precision patterns against a decoder
+// rebuilt from the field layout with math.Ldexp, so the two agreeing means the arithmetic
+// and not merely the bit shifts. It is a stronger check than a tensor comparison would be,
+// since it covers every input rather than one checkpoint's worth.
 //
 // IQ4_NL uses a lookup table, not arithmetic. Its 4-bit values are a non-linear
 // codebook of sixteen signed values, so decoding is a table lookup. Deriving the values

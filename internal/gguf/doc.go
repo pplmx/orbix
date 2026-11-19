@@ -49,7 +49,7 @@
 // the format. Six checkpoints were parsed twice -- once here, once by the independent
 // Python gguf package -- and each tensor's bytes compared by SHA-256: a 15M Llama
 // (Q4_0/Q8_0/F32), a TinyLlama in K-quants, Qwen2 (Q8_0/F32), a Mixtral-format MoE file
-// whose expert weights are 3-D tensors, Llama 3.2 (Q2_K through Q4_K), and a 1.9 GB
+// whose expert weights are 3-D tensors, Llama 3.2 (Q2_K through Q6_K), and a 1.9 GB
 // all-F32 checkpoint. 1009 tensors across eight formats, every one byte-identical, as were
 // the shapes, the quantisation types and the byte counts.
 //

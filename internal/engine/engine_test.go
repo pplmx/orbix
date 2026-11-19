@@ -2166,3 +2166,33 @@ func TestFinishReasonsListsExactlyTheDefinedReasons(t *testing.T) {
 		}
 	}
 }
+
+// TestBudgetIsNeverExceededByOne pins the pair of checks that enforce MaxTokens.
+//
+// decode refuses to sample when the budget is spent, and the batch decode loop finishes a sequence
+// that has reached it. The two are redundant on purpose -- the first stops before spending, the
+// second catches a sequence that reached the budget while the round was in flight -- and that
+// redundancy is what hides a wrong comparison from a single mutation: changing either >= to > still
+// yields the right count, because the other one fires.
+//
+// Measured: flipping both produces budget+1 tokens. Every budget from 1 to 5 is asserted exactly, so
+// the off-by-one cannot hide at a boundary the test happens to skip.
+func TestBudgetIsNeverExceededByOne(t *testing.T) {
+	for budget := 1; budget <= 5; budget++ {
+		e, tok := loadModel(t)
+		ch, err := e.Submit(Request{Prompt: tok.Encode("Once upon a time", true), MaxTokens: budget})
+		if err != nil {
+			t.Fatalf("budget %d: Submit: %v", budget, err)
+		}
+		for e.Pump() > 0 {
+		}
+		out, reason := collect(t, ch)
+		if len(out) != budget {
+			t.Errorf("budget %d produced %d tokens; the cap is exact, not approximate",
+				budget, len(out))
+		}
+		if reason != "length" {
+			t.Errorf("budget %d stopped with reason %q, want length", budget, reason)
+		}
+	}
+}

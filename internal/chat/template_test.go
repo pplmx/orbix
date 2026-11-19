@@ -1804,3 +1804,51 @@ func TestPrintingAContainerIsRefused(t *testing.T) {
 		t.Errorf("printing a scalar gave %q, want a", got)
 	}
 }
+
+// TestForOverANonSequenceIsRefused covers the check that a for loop iterates a sequence.
+//
+// The failure mode without the check is worse than an error: a string is not a list, so the
+// loop body would run zero times and the template would render an empty section where the model
+// expects a list of turns -- a prompt with a hole in it, which is the quiet half-rendering this
+// package exists to avoid.
+//
+// This is deliberately stricter than Jinja2 for a string. Measured against jinja2 3.1.6:
+// iterating "abc" yields the characters a, b, c, and only a non-iterable like 1 raises. Orbix
+// does not implement string iteration, and refusing says so where silently yielding zero turns
+// would not -- a chat template that loops over a string is a mistake in the template, and the
+// empty section it would otherwise produce is the wrong answer to it.
+//
+// Deleting the check passed the whole chat suite: every real template iterates `messages` or a
+// list built from it, so nothing reached the refusal.
+func TestForOverANonSequenceIsRefused(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+
+	for _, c := range []struct{ name, src string }{
+		{"a string literal", `{% for x in "abc" %}{{ x }}{% endfor %}`},
+		{"a scalar field", `{% for x in messages[0].role %}{{ x }}{% endfor %}`},
+		{"a number", `{% for x in 1 %}{{ x }}{% endfor %}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := tpl.Render(msgs, Inputs{})
+			if err == nil {
+				t.Fatalf("%q rendered %q; iterating a non-sequence must be refused", c.src, out)
+			}
+			if !strings.Contains(err.Error(), "non-sequence") {
+				t.Errorf("error %q does not say the operand is not a sequence", err)
+			}
+			if out != "" {
+				t.Errorf("%q produced %q alongside its error", c.src, out)
+			}
+		})
+	}
+
+	// A real sequence still iterates, so the check is about the operand rather than about for
+	// loops in general.
+	if got := render(t, `{% for m in messages %}{{ m.role }}{% endfor %}`, msgs, Inputs{}); got != "user" {
+		t.Errorf("iterating messages gave %q, want user", got)
+	}
+}

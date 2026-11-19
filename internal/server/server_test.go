@@ -410,7 +410,13 @@ func collectStream(t *testing.T, body io.ReadCloser) string {
 }
 
 func TestStreamingEndsWithFinishReason(t *testing.T) {
-	srv, _ := newTestServer(t)
+	// NoEOS and an exact budget, so the request is guaranteed to end on "length" rather
+	// than on whichever of stop or length this fixture happens to produce. The assertion
+	// used to accept either, which is how the streaming half of the stopReason mapping went
+	// unchecked: changing it to report "stop" for a budget-limited sequence passed every
+	// server test. The non-streaming mapping had precise coverage already; this is the
+	// stream's.
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 64})
 	resp := post(t, srv.Handler(), "/v1/chat/completions", `{
 		"messages": [{"role": "user", "content": "Once"}],
 		"max_tokens": 3, "stream": true
@@ -441,8 +447,8 @@ func TestStreamingEndsWithFinishReason(t *testing.T) {
 	if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil {
 		reason = *chunk.Choices[0].FinishReason
 	}
-	if reason != "length" && reason != "stop" {
-		t.Errorf("finish_reason = %q, want length or stop", reason)
+	if reason != "length" {
+		t.Errorf("finish_reason = %q, want length: the sequence hit its 3-token budget", reason)
 	}
 }
 

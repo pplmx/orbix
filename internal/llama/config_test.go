@@ -925,3 +925,85 @@ func TestBlockCountIsBoundedByTensorCount(t *testing.T) {
 		t.Errorf("error %q does not say how many tensors the file holds", err)
 	}
 }
+
+// TestConfigStringVariants covers the two flags Config.String appends.
+//
+// The summary is the first thing a user reads -- bench and serve both print it -- and it is where
+// a model's shape differences are visible. Both variants were unexecuted: TestConfigString checks
+// the numbers on one config and asserts nothing about the two trailing fields, so a run whose
+// summary said "separate output projection" for a tied model, or omitted the attention bias, would
+// have looked correct.
+//
+// Tied embeddings change what is loaded and how much memory the output projection costs;
+// attention bias is the Qwen2 shape and is what separates two models with otherwise identical
+// numbers.
+func TestConfigStringVariants(t *testing.T) {
+	base := testConfig()
+
+	t.Run("separate projection by default", func(t *testing.T) {
+		c := base
+		c.TiedEmbeddings, c.AttnBias = false, false
+		s := c.String()
+		if !strings.Contains(s, "separate output projection") {
+			t.Errorf("String() = %q, want it to say the projection is separate", s)
+		}
+		if strings.Contains(s, "tied") {
+			t.Errorf("String() = %q, mentions tying for an untied model", s)
+		}
+		if strings.Contains(s, "attention bias") {
+			t.Errorf("String() = %q, mentions bias for a model without one", s)
+		}
+	})
+
+	t.Run("tied embeddings", func(t *testing.T) {
+		c := base
+		c.TiedEmbeddings = true
+		s := c.String()
+		if !strings.Contains(s, "tied embeddings") {
+			t.Errorf("String() = %q, want it to say the embeddings are tied", s)
+		}
+		if strings.Contains(s, "separate output projection") {
+			t.Errorf("String() = %q, says both tied and separate", s)
+		}
+	})
+
+	t.Run("attention bias", func(t *testing.T) {
+		c := base
+		c.AttnBias = true
+		s := c.String()
+		if !strings.Contains(s, ", attention bias") {
+			t.Errorf("String() = %q, want it to name the attention bias", s)
+		}
+	})
+
+	t.Run("both", func(t *testing.T) {
+		// The two suffixes are appended in one format string, so the pair has to read correctly
+		// too: ", attention bias" after "tied embeddings".
+		c := base
+		c.TiedEmbeddings, c.AttnBias = true, true
+		s := c.String()
+		if !strings.Contains(s, "tied embeddings, attention bias") {
+			t.Errorf("String() = %q, want the two suffixes adjacent", s)
+		}
+	})
+}
+
+// TestRopeLayoutString covers both names RopeLayout.String can return.
+//
+// It lands inside Config.String, which bench and serve print, so "normal" printed for a neox
+// model would misreport the layout the rope is actually using -- and the two layouts pair
+// different dimensions, so the number would explain nothing about the output.
+func TestRopeLayoutString(t *testing.T) {
+	if got := RopeNormal.String(); got != "normal" {
+		t.Errorf("RopeNormal.String() = %q, want normal", got)
+	}
+	if got := RopeNeox.String(); got != "neox" {
+		t.Errorf("RopeNeox.String() = %q, want neox", got)
+	}
+	// And the value reaches the summary, which is where a reader sees it.
+	c := testConfig()
+	c.RopeLayout = RopeNeox
+	if s := c.String(); !strings.Contains(s, "neox") {
+		t.Errorf("String() = %q, want it to name the neox layout", s)
+	}
+}

@@ -1852,3 +1852,65 @@ func TestForOverANonSequenceIsRefused(t *testing.T) {
 		t.Errorf("iterating messages gave %q, want user", got)
 	}
 }
+
+// TestJinjaIsTests covers the four type tests this subset implements.
+//
+// "is mapping" and "is iterable" decide whether a value can be indexed or looped over, and a
+// template that branches on them takes the wrong arm if either is answered for the wrong shape.
+// "is none" is the one with a non-obvious definition here: a value that is not a bool and not a
+// container and whose text is empty counts as none, because the subset has no separate null.
+//
+// The attribute form on a non-mapping had no test either: `messages[0].role.nosuchfield is
+// defined` asks whether a field exists on a string, and the answer is false rather than an
+// error, since a template guarding a nested field should get the guard's answer.
+//
+// Three of these answers differ from Jinja2, measured against jinja2 3.1.6, and the tests pin
+// THIS package's semantics rather than the reference's:
+//
+//   - a dict is iterable in Jinja2 and not here, because this subset iterates only sequences;
+//   - a string is iterable in Jinja2 and not here, for the same reason as the for-loop case;
+//   - an absent field is none here and not none in Jinja2, where reading a missing key yields
+//     Undefined rather than None.
+//
+// The third follows from the subset having no separate null: an absent field reads as an empty
+// value, and "is none" reports that. No published chat template uses these three forms -- the
+// differential corpus has no case for them either -- so the differences are pinned rather than
+// fixed, and changing one would be a deliberate change to the subset's semantics.
+func TestJinjaIsTests(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	cases := []struct {
+		src  string
+		want string
+		why  string
+	}{
+		// mapping
+		{`{% if messages is mapping %}T{% else %}F{% endif %}`, "F", "a sequence is not a mapping"},
+		{`{% if messages[0] is mapping %}T{% else %}F{% endif %}`, "T", "a message is"},
+		{`{% if messages[0].role is mapping %}T{% else %}F{% endif %}`, "F", "a string is not"},
+		// iterable
+		{`{% if messages is iterable %}T{% else %}F{% endif %}`, "T", "a sequence is"},
+		{`{% if messages[0] is iterable %}T{% else %}F{% endif %}`, "F", "a mapping is not, in this subset"},
+		{`{% if messages[0].role is iterable %}T{% else %}F{% endif %}`, "F", "a string is not"},
+		// none -- empty text is the subset's null
+		{`{% if messages[0].nosuchfield is none %}T{% else %}F{% endif %}`, "T", "an absent field is none"},
+		{`{% if messages[0].role is none %}T{% else %}F{% endif %}`, "F", "a non-empty string is not"},
+		{`{% if messages is none %}T{% else %}F{% endif %}`, "F", "a sequence is not, even when empty"},
+		// defined on a non-mapping
+		{`{% if messages[0].role.nosuchfield is defined %}T{% else %}F{% endif %}`, "F",
+			"a field read from a string is not defined"},
+		{`{% if messages[0].role is defined %}T{% else %}F{% endif %}`, "T", "a real field is"},
+	}
+	for _, c := range cases {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", c.src, err)
+		}
+		got, err := tpl.Render(msgs, Inputs{})
+		if err != nil {
+			t.Fatalf("Render(%q): %v", c.src, err)
+		}
+		if got != c.want {
+			t.Errorf("%q = %q, want %q (%s)", c.src, got, c.want, c.why)
+		}
+	}
+}

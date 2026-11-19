@@ -2271,3 +2271,55 @@ func TestKwargNameMustBeAnIdentifier(t *testing.T) {
 		t.Errorf("indent=2 did not indent: %q", out)
 	}
 }
+
+// TestEvaluationRefusesNonNumericOperands covers the two conversions that can fail at render
+// time and neither had a test.
+//
+// A slice bound and an arithmetic operand both come from an expression, so either can be a
+// string or a mapping the template supplied. Refusing names the operand, which is what a
+// template author needs; converting with a zero instead would render a silently wrong number --
+// `messages['a':]` becoming the whole list, or `'a' - 1` becoming -1.
+//
+// The mapping case is worth seeing: a container carries empty text, so the message quotes "" for
+// it, and the test pins that rather than assuming a name is printed.
+func TestEvaluationRefusesNonNumericOperands(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "x"}}
+
+	for _, c := range []struct{ name, src, want string }{
+		{"slice bound", `{{ messages['a':] }}`, `slice start "a" is not a number`},
+		{"string operand", `{{ 'a' - 1 }}`, `arithmetic on non-numeric "a" and "1"`},
+		{"mapping operand", `{{ messages - 1 }}`, `arithmetic on non-numeric`},
+		{"number after mapping", `{{ 1 - messages }}`, `arithmetic on non-numeric`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := tpl.Render(msgs, Inputs{})
+			if err == nil {
+				t.Fatalf("%q rendered %q, want a refusal", c.src, out)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not say %q", err, c.want)
+			}
+			if out != "" {
+				t.Errorf("%q produced %q alongside the error", c.src, out)
+			}
+		})
+	}
+
+	// Numeric operands still compute, so the refusal is about the operands rather than about
+	// arithmetic.
+	if got := render(t, `{{ 7 - 2 }}`, msgs, Inputs{}); got != "5" {
+		t.Errorf("7 - 2 = %q, want 5", got)
+	}
+	// And a numeric slice bound still slices.
+	tpl, err := Parse(`{% for m in messages[0:] %}{{ m.role }}{% endfor %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, err := tpl.Render(msgs, Inputs{}); err != nil || got != "user" {
+		t.Errorf("messages[0:] = %q, %v", got, err)
+	}
+}

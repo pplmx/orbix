@@ -1409,3 +1409,53 @@ func TestIfTagErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestSetAndStatementErrors covers parseSet's three refusals and splitStatement's one.
+//
+// A set tag is small enough to look like it cannot fail, but each refusal is a hand-edit mistake:
+// dropping the '=', naming the variable something that is not an identifier, or leaving the
+// expression unfinished. None had a test, and neither did a completely empty {% %}.
+//
+// The identifier rule is the one worth pinning: it decides whether a name is a variable or a
+// number, and a template writing {% set 1x = 2 %} should be told the name is invalid rather than
+// silently binding a variable no expression can then read.
+func TestSetAndStatementErrors(t *testing.T) {
+	cases := []struct{ src, want string }{
+		// No '=' at all.
+		{`{% set x %}a{% endset %}`, "has no '='"},
+		// A name that is not an identifier.
+		{`{% set 1x = 2 %}a`, "invalid name"},
+		{`{% set x-y = 2 %}a`, "invalid name"},
+		// An operand that does not parse.
+		{`{% set x = 1+ %}a`, "expression ends early"},
+		// An empty statement.
+		{`{% %}a`, "empty template statement"},
+		{`{%%}a`, "empty template statement"},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a malformed statement", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+		}
+	}
+}
+
+// TestIsIdentifier pins the name rule the set tag and the expression parser share.
+func TestIsIdentifier(t *testing.T) {
+	valid := []string{"x", "_x", "x1", "x_y", "X", "_", "a1b2", "toolCalls"}
+	for _, s := range valid {
+		if !isIdentifier(s) {
+			t.Errorf("isIdentifier(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{"", "1x", "x-y", "x.y", "a b", "x[0]", "工具"}
+	for _, s := range invalid {
+		if isIdentifier(s) {
+			t.Errorf("isIdentifier(%q) = true, want false", s)
+		}
+	}
+}

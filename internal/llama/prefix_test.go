@@ -603,3 +603,60 @@ func TestPrefixIndexEvictsAtCapacity(t *testing.T) {
 			got, before)
 	}
 }
+
+// TestPrefixIndexRejectsACollidingHit covers the guard that makes a hash collision cost a
+// missed hit rather than a wrong result.
+//
+// The index is keyed on hashTokens, and Match checks the stored token run with sameTokens
+// before trusting a hit. That check is the only thing standing between a collision and
+// attaching another prompt's keys and values, which produces fluent-looking garbage rather
+// than an error -- the failure mode this whole package's tests exist to catch, per its own
+// doc comment.
+//
+// A 64-bit FNV collision cannot be found by search in a test, so the colliding entry is
+// installed directly: the same key Remember would compute, holding a different token run.
+// What this pins is the behaviour Match must have when one is present, which is the part
+// that could regress; whether FNV can collide is arithmetic, not a property of this code.
+func TestPrefixIndexRejectsACollidingHit(t *testing.T) {
+	cfg := testConfig()
+	pool := pagedPool(t, cfg, 4)
+	idx := pool.EnablePrefixCache()
+
+	// Fill one block so there is a real id to point the fake entry at.
+	dim := cfg.kvDim()
+	k := make([]float32, dim)
+	v := make([]float32, dim)
+	c := pool.New()
+	tokens := []int32{10, 20, 30, 40}
+	for pos := range 4 {
+		for l := range cfg.Layers {
+			if _, _, err := c.appendKV(l, k, v, pos); err != nil {
+				t.Fatalf("appendKV: %v", err)
+			}
+		}
+		c.setLen(pos + 1)
+		if err := c.rememberFullBlock(tokens, pos); err != nil {
+			t.Fatalf("rememberFullBlock(%d): %v", pos, err)
+		}
+	}
+	if n, _ := idx.Match(tokens); n != 4 {
+		t.Fatalf("the remembered block does not match itself: %d positions", n)
+	}
+
+	// Install an entry under the key a DIFFERENT block's tokens hash to, holding the
+	// first block's tokens. This is the state a collision leaves behind.
+	impostor := []int32{41, 42, 43, 44}
+	colliding := prefixEntry{tokens: tokens, block: c.blocks[0], hasParent: false}
+	idx.entries[hashTokens(impostor)] = colliding
+
+	// Match must reject it, because the stored run is not the queried run.
+	if n, blocks := idx.Match(impostor); n != 0 {
+		t.Errorf("Match accepted a colliding entry: matched %d positions (%v), want 0",
+			n, blocks)
+	}
+	// And the block that really is remembered still matches, so the guard rejects only
+	// the impostor rather than disabling the index.
+	if n, _ := idx.Match(tokens); n != 4 {
+		t.Errorf("Match on the genuine tokens returned %d positions, want 4", n)
+	}
+}

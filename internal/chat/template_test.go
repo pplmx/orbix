@@ -2079,3 +2079,54 @@ func TestTojsonIndentReportsTheUndefinedName(t *testing.T) {
 		t.Errorf("tojson(indent=2) produced %q, which is not indented", out)
 	}
 }
+
+// TestLexerErrorsReachTheTemplateAuthor covers the two ways an expression can fail to lex.
+//
+// An empty expression and an unexpected character both have to be reported with the text that
+// caused them. The messages are the only thing a template author sees, and the alternative --
+// an empty token list or a silently dropped character -- turns a typo into a template that
+// renders something plausible and wrong.
+//
+// The unparseable characters here are the ones a chat format might use for something else: `$`
+// and `~` appear in shell syntax and Jinja's own concatenation operator respectively. `~` is
+// worth a case of its own because it is a real Jinja operator this subset does not implement, so
+// the message has to name it rather than treat the expression as empty.
+func TestLexerErrorsReachTheTemplateAuthor(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{`{{ }}`, "empty expression"},
+		{`{% if %}{% endif %}`, "empty expression"},
+		{`{{ $ }}`, `unexpected "$"`},
+		{`{{ a $ b }}`, `unexpected "$"`},
+		{`{% if $ %}{% endif %}`, `unexpected "$"`},
+		// Jinja's concatenation operator, which this subset does not implement.
+		{`{{ 'a' ~ 'b' }}`, `unexpected "~"`},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted it", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error %q does not say %q", c.src, err, c.want)
+		}
+		// The message quotes the expression itself, which is how a reader finds the position
+		// in a template they did not write in this session.
+		if c.want != "empty expression" && !strings.Contains(err.Error(), "in expression") {
+			t.Errorf("Parse(%q) error %q does not name the expression", c.src, err)
+		}
+	}
+
+	// A valid expression still lexes, so the refusal is about the input rather than about the
+	// lexer being broken.
+	tpl, err := Parse(`{{ 'a' + 'b' }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, err := tpl.Render(nil, Inputs{}); err != nil || got != "ab" {
+		t.Errorf("rendering a valid expression = %q, %v", got, err)
+	}
+}

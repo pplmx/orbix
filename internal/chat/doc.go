@@ -30,8 +30,17 @@
 // The is-tests cover four of Jinja2's, and three of them answer differently from it. A dict
 // and a string are both iterable in Jinja2; here only a sequence is, because that is the only
 // thing {% for %} can walk. And an absent field reads as empty rather than as Undefined, so
-// `field is none` is true here where Jinja2 says false. No published template uses any of the
-// three, and the answers are pinned by tests rather than left to drift.
+// `field is none` is true here where Jinja2 says false. The answers are pinned by tests rather
+// than left to drift.
+//
+// The difference is not dormant: llama 3.2's template guards a tool message with
+// `message.content is mapping or message.content is iterable`, and message.content is a
+// string. Jinja2 takes the first branch and emits {{ content | tojson }}, which quotes it;
+// here the guard is false and the content is printed as it stands. For a tool message carrying
+// JSON -- the case the branch exists for -- printing it unquoted is the more useful answer, so
+// this reading is preferable to Jinja2's even though it was arrived at by a rule about
+// sequences rather than by intent. An earlier version of this paragraph said no published
+// template used any of the three, which the llama 3.2 file in testdata disproves.
 //
 // One gap in that guarantee is worth stating. A field read from a mapping that is not
 // there evaluates to empty rather than to an error, because templates disagree about how

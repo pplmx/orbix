@@ -234,3 +234,45 @@ func TestLlama32TemplateWithoutTools(t *testing.T) {
 		t.Errorf("the user's message is missing:\n%s", got)
 	}
 }
+
+// TestLlama32ToolMessageContentIsNotQuoted covers the branch the tools test above never reaches.
+//
+// The template guards a tool message with `message.content is mapping or message.content is
+// iterable` before choosing between {{ content | tojson }} and {{ content }}. message.content
+// is always a string, and this package treats only sequences as iterable, so the guard is false
+// where Jinja2 would make it true -- which is the difference doc.go records under the is-tests.
+// Either way the content is printed as it stands rather than as a quoted JSON string, and that
+// is what a tool result carrying JSON needs: the model has to read the object, not a string
+// holding one.
+//
+// Nothing tested this before: TestLlama32TemplateWithTools submits a user turn only, so the
+// tool-message branch was parsed but never rendered.
+func TestLlama32ToolMessageContentIsNotQuoted(t *testing.T) {
+	parsed, err := Parse(loadTestTemplate(t, "llama32-instruct.jinja"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// A tool turn whose content is JSON: the shape the branch exists for.
+	const payload = `{"temp_c": 21}`
+	got, err := parsed.Render(
+		[]Message{
+			{Role: "user", Content: "What is the weather in Paris?"},
+			{Role: "tool", Content: payload},
+		},
+		Inputs{BOSToken: "<|begin_of_text|>", EOSToken: "<|eot_id|>"},
+	)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// The payload has to appear verbatim. A quoted rendering would show \"temp_c\".
+	if !strings.Contains(got, payload) {
+		t.Errorf("the tool payload was not emitted as it stands; got:\n%s", got)
+	}
+	if strings.Contains(got, `\"temp_c\"`) {
+		t.Errorf("the tool payload was JSON-encoded into a string; got:\n%s", got)
+	}
+	// The ipython header is that branch's marker, so the run actually took it.
+	if !strings.Contains(got, "ipython") {
+		t.Errorf("the tool branch was not taken; got:\n%s", got)
+	}
+}

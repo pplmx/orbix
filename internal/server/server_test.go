@@ -3560,3 +3560,51 @@ func TestEveryErrorCarriesACode(t *testing.T) {
 		})
 	}
 }
+
+// TestCutAtStopChoosesTheLeftmostMatch pins the rule when several stop strings could apply.
+//
+// The integration tests each use one stop string, so nothing said what happens with several:
+// a list of alternatives reaches this function as a set, and the only defensible reading is
+// that generation halts where the output would first contain any of them. Taking the first
+// list entry that happens to match would make the result depend on the order the client wrote
+// its list in, which is not a property of the output at all.
+//
+// Measured: "xxabyyabc" against ["abc", "ab"] cuts at 2, and the same text against ["ab",
+// "abc"] also cuts at 2 -- the shorter string wins because it starts earlier, not because it
+// was listed first. The final cases put two matches at the same position, where the answer is
+// the same whichever wins, and the assertion is only that the cut point agrees.
+func TestCutAtStopChoosesTheLeftmostMatch(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		text    string
+		stop    []string
+		want    string
+		wantCut bool
+	}{
+		{"shorter listed second, matches first", "xxabyyabc", []string{"abc", "ab"}, "xx", true},
+		{"shorter listed first, matches first", "xxabyyabc", []string{"ab", "abc"}, "xx", true},
+		{"longer matches first", "xxabcyyab", []string{"ab", "abc"}, "xx", true},
+		{"three alternatives, middle matches first", "..b..c..d", []string{"d", "c", "b"}, "..", true},
+		// Same start position: the cut is at the same place, so the answer does not depend on
+		// which one is chosen.
+		{"same position, longer listed first", "ab", []string{"ab", "a"}, "", true},
+		{"same position, shorter listed first", "ab", []string{"a", "ab"}, "", true},
+		// An empty string must not cut anything: it is present in every text at offset 0.
+		{"empty entry alone", "hello", []string{""}, "hello", false},
+		{"empty entry beside a real one", "helloEND", []string{"", "END"}, "hello", true},
+		{"no match at all", "hello", []string{"x", "y"}, "hello", false},
+		{"no stop list", "hello", nil, "hello", false},
+		// A match at the very start leaves nothing, which is a successful cut rather than a
+		// miss.
+		{"match at position zero", "END world", []string{"END"}, "", true},
+		{"match at the end keeps the prefix", "hello END", []string{"END"}, "hello ", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, cut := cutAtStop(c.text, c.stop)
+			if got != c.want || cut != c.wantCut {
+				t.Errorf("cutAtStop(%q, %q) = (%q, %v), want (%q, %v)",
+					c.text, c.stop, got, cut, c.want, c.wantCut)
+			}
+		})
+	}
+}

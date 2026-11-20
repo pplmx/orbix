@@ -2,7 +2,9 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -268,8 +270,15 @@ func TestParseReportsPosition(t *testing.T) {
 	if err == nil {
 		t.Fatal("Parse succeeded on an unterminated tag")
 	}
-	if !strings.Contains(err.Error(), "offset") && !strings.Contains(err.Error(), "unclosed") {
-		t.Errorf("error %q does not name a position", err)
+	// The offset is asserted as a value, not as the presence of the word. The previous form
+	// accepted any message containing "offset" or "unclosed", so a hardcoded offset -- or the
+	// right word attached to the wrong number -- passed it; measured, a message ending in
+	// "at offset 999" satisfied the old assertion. The template above opens its tag at byte 6.
+	if !strings.Contains(err.Error(), "offset 6") {
+		t.Errorf("error %q does not place the unterminated tag at offset 6", err)
+	}
+	if strings.Contains(err.Error(), "offset 0") {
+		t.Errorf("error %q reports offset 0 for a tag that starts at byte 6", err)
 	}
 }
 
@@ -2585,4 +2594,57 @@ func TestIndexErrorsShowTheIndex(t *testing.T) {
 			t.Errorf("error %q does not say what the index should be", err)
 		}
 	})
+}
+
+// TestRenderIsSafeForConcurrentUse pins the concurrency contract the type documents.
+//
+// The callers share one Template across goroutines: engine.ChatRenderer is built once per
+// model and the HTTP server renders from every request handler that arrives. Nothing in the
+// type changes after Parse today -- the node tree is read-only and Render builds a fresh
+// scope and buffer -- but that is a property of the code rather than of an assertion, and a
+// field added later that a render writes to would be a data race in production with no test
+// to notice.
+//
+// Run with -race, which is what makes this a check rather than a smoke test: a shared buffer
+// or a cached scope fails the detector here. The output is compared as well, so a render that
+// were merely race-free but produced another goroutine's text would still fail.
+func TestRenderIsSafeForConcurrentUse(t *testing.T) {
+	// A template that exercises a loop, a conditional, a set and a filter, so a shared scope
+	// would have something to corrupt rather than only a shared buffer.
+	src := `{% set greet = "hi" %}` +
+		`{% for m in messages %}{{ greet }} {{ m.role }}: {{ m.content | trim }}` + "\n" +
+		`{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}`
+	tmpl, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	const goroutines = 32
+	var wg sync.WaitGroup
+	failures := make(chan error, goroutines)
+	for i := range goroutines {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Each goroutine renders its own content, so a value crossing between them is
+			// visible as a mismatch rather than as a lucky match.
+			content := fmt.Sprintf("  message %d  ", i)
+			got, err := tmpl.Render(
+				[]Message{{Role: "user", Content: content}},
+				Inputs{AddGenerationPrompt: true})
+			if err != nil {
+				failures <- fmt.Errorf("goroutine %d: %w", i, err)
+				return
+			}
+			want := fmt.Sprintf("hi user: message %d\nassistant:", i)
+			if got != want {
+				failures <- fmt.Errorf("goroutine %d rendered %q, want %q", i, got, want)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
 }

@@ -17,7 +17,18 @@ type Message struct {
 	Content string
 }
 
-// Template is a compiled chat template.
+// Template is a compiled chat template. It is safe for concurrent use.
+//
+// Nothing in it changes after Parse: the node tree and the source text are read-only, and
+// Render builds a fresh scope and buffer per call. That matters because the callers share
+// one Template across goroutines -- engine.ChatRenderer is built once per model and the
+// HTTP server renders from every request handler -- so a field added here that a render
+// writes to would be a data race in production and nowhere in the tests.
+//
+// TestRenderIsSafeForConcurrentUse pins it. The property is a claim about the shape of the
+// type rather than about any one output, so the test renders from many goroutines and runs
+// under -race; a shared buffer or a cached scope fails it under the detector rather than on
+// a value.
 type Template struct {
 	nodes []node
 	// source is the original template text, kept for error messages so a failure

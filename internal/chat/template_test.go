@@ -729,10 +729,19 @@ func TestQwen2TemplateRendersAConversation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	for _, want := range []string{"Paris.", "And of Italy?", "<|im_start|>assistant"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("prompt is missing %q:\n%s", want, got)
-		}
+	// The whole string, not three fragments. A Contains check for "Paris.",
+	// "And of Italy?" and the generation prompt passes for a prompt that reorders the
+	// turns, drops every <|im_end|>, or omits the system preamble -- each of which is a
+	// prompt the model was not trained on. The expected text is the measured output of
+	// the real template with this input, so a change to the renderer, the template
+	// constant, or the turn loop has to be argued for rather than absorbed.
+	want := "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n" +
+		"<|im_start|>user\nWhat is the capital of France?<|im_end|>\n" +
+		"<|im_start|>assistant\nParis.<|im_end|>\n" +
+		"<|im_start|>user\nAnd of Italy?<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	if got != want {
+		t.Errorf("prompt differs from the template's expected output:\ngot  %q\nwant %q", got, want)
 	}
 }
 

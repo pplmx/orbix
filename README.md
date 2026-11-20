@@ -216,16 +216,14 @@ orbix serve \
   --addr :8080
 ```
 
-The prefix is not decoration. `go install` uses whatever CGO_ENABLED the environment has, which
-is 1 on a machine with a C compiler, and a binary built that way reports `cgo: true` in
-`orbix version` — at odds with the only configuration this project supports. The code contains no
-`import "C"`, so such a build works, but it is not the artifact the project claims to ship.
+The prefix is not decoration: `go install` uses whatever CGO_ENABLED the environment has, which
+is 1 wherever a C compiler exists, and such a binary reports `cgo: true` in `orbix version`. The
+code has no `import "C"`, so that build works, but it is not the artifact this project ships.
 
-The server implements `/v1/chat/completions`, `/v1/completions` (both streaming
-and not), `/v1/models` (and `/v1/models/{id}`, which the SDKs' `models.retrieve` calls),
-`/healthz`, and `/metrics`. A path under `/v1` this server does not implement answers 404 in
-the API's JSON error envelope rather than Go's plain-text one, because the SDKs decode the body
-before they raise: a text 404 reaches the caller as a parse failure, not as a not-found.
+The server implements `/v1/chat/completions`, `/v1/completions` (streaming and not),
+`/v1/models` plus `/v1/models/{id}` for `models.retrieve`, `/healthz` and `/metrics`. An
+unimplemented path under `/v1` answers 404 in the API's JSON envelope rather than Go's
+plain-text one, because the SDKs decode the body before raising.
 
 Every error body carries a `code`, including the ones a client hits before any field is parsed:
 `invalid_json`, `unsupported_encoding`, `body_too_large`, `invalid_value`,
@@ -243,13 +241,12 @@ refused with a `400` naming it and `code: unsupported_parameter`: `n`, `logprobs
 a smaller response but a different one. Several at once are all named, so one round trip fixes
 the request.
 
-`max_completion_tokens` is refused for a third reason, and it is the only field here whose
-silent omission a client cannot notice at all. OpenAI's newer name for `max_tokens` has to be
-sent *instead of* it, so a client that has migrated sends only the new one; the server read
-`max_tokens`, found zero, and generated its default 256 tokens for a request that asked for 3.
-The reply parsed, the shape was right, and nothing said the length was wrong -- measured on
-both completions and chat. Ignoring a limit is worse than ignoring a sampling knob, so it gets
-the same 400 the response-shape fields do.
+`max_completion_tokens` is refused for a third reason, and it is the only field whose silent
+omission a client cannot notice. OpenAI's newer name for `max_tokens` has to be sent *instead of*
+it, so a migrated client sends only the new one; the server read `max_tokens`, found zero, and
+generated its default 256 tokens for a request that asked for 3 -- with a well-formed reply and
+nothing saying the length was wrong. Ignoring a limit is worse than ignoring a sampling knob, so
+it gets the same 400.
 
 `stream_options.include_usage` is honoured rather than ignored, because it is the only way a
 streaming caller learns what it spent: without it a streamed response reports no usage at all.
@@ -337,24 +334,15 @@ curl http://127.0.0.1:8080/v1/completions \
 ```
 
 This is a property of an unauthenticated API that also performs work, not a bug in the CORS
-decision. Adding CORS would not close it, because CORS governs who may read a response, not who
-may cause one; and checking the Content-Type would only narrow it, since the tolerance is what
-makes the `curl -d` form above usable in the first place. Measured with `--max-active 2`: six
-such requests from a page's origin were accepted in a row and generated 240 tokens between
-them, while the preflighted equivalent is already refused -- `OPTIONS` on these routes answers
-405, so a cross-origin `application/json` request never leaves the preflight.
+decision: CORS governs who may read a response, not who may cause one, and checking the
+Content-Type would break the `curl -d` form above. What closes it is binding to loopback or
+authenticating in front -- `--addr :8080` listens on every interface by default.
 
-What closes it is binding to loopback or authenticating in front. The default `--addr :8080`
-listens on every interface; a host reachable from elsewhere is an inference API anyone can
-spend.
-
-Request bodies are bounded, which limits how much work one connection can cause: the limit is
-`ContextLen` x 48 bytes with a 1 MiB floor, so 6 MiB for the 128k-context checkpoint. That
-number is not a tuning knob so much as the same constraint the context already imposes, seen
-from the request side -- a body larger than this cannot describe a prompt the model could
-attend over. Anything over the limit is answered `413` and the connection is closed without
-reading the rest. Without the bound the cost rose with the body: a 64 MiB request spent 82
-seconds being read and tokenized before the server could say it was too long.
+Request bodies are bounded to `ContextLen` x 48 bytes with a 1 MiB floor -- 6 MiB at 128k
+context. That is not a tuning knob so much as the context constraint seen from the request side:
+a larger body cannot describe a prompt the model could attend over. Anything over is answered
+`413` without reading the rest; unbounded, a 64 MiB request spent 82 seconds being read and
+tokenized before the server could say it was too long.
 
 ### Embedding it in a Go service
 
@@ -437,34 +425,25 @@ orbix model inspect ./model.gguf
 orbix model inspect --json ./model.gguf   # machine-readable; values keep their GGUF type
 ```
 
-`orbix model inspect` is also a learning tool: it prints the GGUF layout in a readable form.
+`orbix model inspect` prints the GGUF layout readably. Its tables cut a metadata value or tensor
+name at 60 bytes with a rune-safe `...`, since one long name otherwise pushes the later columns
+off screen; `--json` carries the whole name. `--json` also keeps each value the type the file
+declares, except that a NaN or infinite float becomes the string `"NaN"`, `"+Inf"` or `"-Inf"` --
+JSON has no token for either, and one such key would otherwise fail the whole document.
 
-The human-readable tables cut a metadata value or a tensor name at 60 bytes with a rune-safe
-`...`, because one long name otherwise pushes a table's later columns off screen. `--json`
-carries the whole name, since a script looking a tensor up needs the one the file records.
+`orbix bench --suite` prints every scenario as one table, pairing each mechanism with a control
+row -- paged against contiguous, prefix reuse against none, shortest against FIFO -- so a
+difference is attributable to that mechanism. How much reuse is worth depends on the mix: the
+pair shares 41 prompt tokens against 8 generated, and raising `--max-tokens` dilutes the saving
+because reuse does not touch generation.
 
-`--json` keeps each value the type the file declares, with one exception the format forces: a
-NaN or infinite float is emitted as the string `"NaN"`, `"+Inf"` or `"-Inf"`, because JSON has
-no token for either. Such a value is legal in GGUF, and the alternative was one such key
-failing the whole document.
+The suite fixes the settings its rows compare -- concurrency, request count, admission policy,
+cache shape -- so those flags are refused when `--suite` is given. `--model`, `--max-tokens`,
+`--prompt` and `--workers` still apply: they describe the machine and the workload.
 
-`orbix bench --suite` runs a fixed set of scenarios and prints them as one table. It pairs each
-mechanism with a control row -- paged against contiguous, prefix reuse against none, shortest
-against FIFO -- so a difference is attributable to that mechanism.
-
-How much prefix reuse is worth depends on the mix: the pair in the table shares 41 prompt tokens
-against 8 generated per request. Raising `--max-tokens` dilutes the saving, since reuse does not
-touch generation. A long prompt with a short answer is where it pays.
-
-The suite fixes the settings its rows compare -- concurrency, request count, admission
-policy, and cache shape -- so those flags are refused rather than ignored when `--suite` is
-given, and the error names every one that was passed. `--model`, `--max-tokens`, `--prompt`,
-and `--workers` still apply: they describe the machine and the workload, not the mechanism.
-
-One measurement, stated with everything needed to judge it: stories15M q4_0 (19 MB), a
-41-token prompt, 8 generated tokens per request, 8 kernel workers, on a 128-core AMD EPYC
-7742, Go 1.27.3, linux/amd64. `orbix bench --suite` prints these conditions itself, so a
-table you produce can be compared against this one instead of taken on faith:
+One measurement, with everything needed to judge it -- stories15M q4_0, 41-token prompt, 8
+generated per request, 8 workers, 128-core EPYC 7742, Go 1.27.3. A live run prints its own
+conditions, so a table you produce can be compared against this one:
 
 ```text
 SCENARIO         TOKENS  ELAPSED  TOK/S  FIRST  NOTE
@@ -667,20 +646,18 @@ logits -- a statement about the code, not about the file.
 
 ## Performance Expectations
 
-Orbix is a learning project, and it is honest about where it stands:
+Orbix is a learning project, and these are the shapes to expect:
 
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
 
-- **Prefill throughput improves with prompt length, within the window.** On Llama 3.2
-  1B Q2_K with 32 workers, the per-token cost fell from 52 ms at a 155-token prompt to
-  40 ms at 614 tokens (medians of five interleaved runs). Attention is O(n^2) but
-  parallelises over positions, while the projections are O(n) over columns that do not
-  grow, so the growing term is the one that gains workers as it grows.
+- **Prefill throughput improves with prompt length, within the window.** On Llama 3.2 1B Q2_K
+  with 32 workers, the per-token cost fell from 52 ms at a 155-token prompt to 40 ms at 614
+  (medians of five interleaved runs). Attention is O(n^2) but parallelises over positions, while
+  the projections are O(n) over columns that do not grow, so the growing term is the one that
+  gains workers.
 
-- **Treat the numbers above as indicative, not as a benchmark.** They were taken on a
-  shared machine whose load drifted enough that repeat runs varied by more than the
-  effects being measured. `orbix bench` prints its own conditions so a table taken
-  elsewhere can be judged.
+- **Treat the numbers here as indicative, not as a benchmark.** They came from a shared machine
+  whose load drifted more than the effects measured. `orbix bench` prints its own conditions.
 
 - **Reference kernels are not optimized per instruction.** No SIMD and no assembly, because a
   kernel that cannot be read in the repository's own language defeats the point. The speed
@@ -700,16 +677,11 @@ Orbix is a learning project, and it is honest about where it stands:
 
 - **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 with 32 generated tokens per request it goes 239 tok/s at one stream to 655 tok/s at sixteen, medians of seven interleaved runs. Per-stream speed still drops as streams are added, because the model is one shared resource.
 
-- **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a
-  request whose prompt starts with blocks the pool has already computed attaches them
-  instead of prefilling them again. The suite's reuse pair shows the effect end to end:
-  101.0 tok/s against 139.5 when four sequential requests share one prompt, with the row
-  reporting the 96 positions that came from the cache. Every `orbix bench` run with the
-  flag on prints how many positions were reused, so a run that shares nothing says so
-  instead of looking merely slow. This is the case a chat application actually has: a
-  system prompt and earlier turns are re-sent verbatim on every call.
-
-- **Benchmarks are self-run.** `orbix bench` is part of the CLI so you can measure on your own hardware, with your own model. It reports the worker count it actually used.
+- **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a request
+  whose prompt starts with blocks the pool already computed attaches them instead of prefilling
+  again: 101.0 tok/s against 139.5 for four sequential requests sharing one prompt, with the 96
+  reused positions reported. This is the case a chat application has -- a system prompt and
+  earlier turns re-sent verbatim.
 
 The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it take to make LLM inference work in pure Go, and what do I learn by building it?"
 
@@ -826,19 +798,15 @@ On one stream instead of eight: stories15M q4_0, 128 tokens from one prompt, 64.
 one worker against 228.7-236.2 at 32 (3.52x-3.67x). The synthetic fixture reaches 3.9x because
 its projection is large next to the per-round overhead; a 19 MB model does not.
 
-For scale: the 128k-window Llama 3.2 checkpoint in this repository's test set reserves
-8 GiB per request that way (`context_length x kv_heads x head_dim x 2 x 4 x layers`;
-131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes). The synthetic fixtures are 32 KiB by
-comparison, because their default window is 64 positions. Any model with a long window
-should be run with `--blocks`, where the total is the pool size and `--block-size`
-positions per block.
+For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that way
+(131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes), against 32 KiB for the synthetic fixtures.
+Any model with a long window should be run with `--blocks`.
 
 ## Development
 
-The commands below are [just](https://just.systems) recipes. `just` is a single binary and not
-usually preinstalled, so install it first — `cargo install just`, `brew install just`,
-`winget install --id Casey.Just --exact`, or a pre-built binary from its releases page. Every recipe in the block
-below is a short shell command; the justfile is the readable list of what they are.
+The commands below are [just](https://just.systems) recipes. `just` is not usually preinstalled:
+`cargo install just`, `brew install just`, `winget install --id Casey.Just --exact`, or a
+release binary. Each recipe is a short shell command; the justfile is the readable list.
 
 ```bash
 git clone https://github.com/pplmx/orbix

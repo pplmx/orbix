@@ -934,7 +934,12 @@ just test-race # the suite under the race detector; needs cgo, so it is separate
 ```
 
 `just check` is what a contributor runs before pushing; it needs only the Go toolchain and
-golangci-lint. `just docs` runs `rumdl check .` over the repository's Markdown -- which here is
+golangci-lint **v2**, because `.golangci.yml` is a v2 configuration and a v1 binary refuses to
+read one. The recipe checks the version and says so rather than letting the linter's own
+message about the config stand in for it -- that message names neither the toolchain nor the
+fix, and a mismatch turns the gate red on an otherwise clean tree.
+
+`just docs` runs `rumdl check .` over the repository's Markdown -- which here is
 the README and the pull-request template, since `.rumdl.toml` excludes `AGENTS.md` -- and needs
 rumdl. `just hooks` runs the pre-commit hooks through prek. Both are separate targets rather
 than part of `check` for the same reason: neither tool is in the Go toolchain, and `check`

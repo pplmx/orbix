@@ -99,12 +99,16 @@ func cmdRun(args []string) error {
 	}
 	// The rope table is built from the model's trained context, so a larger cache would ask for
 	// positions the table does not hold -- which surfaced as "position 128 outside the rope table"
-	// from inside the decode loop, after the prompt had already been processed. Extending a model
-	// past its trained window needs rope scaling, which this engine does not implement, so the
-	// answer is a refusal that says so rather than a cache that cannot be used.
+	// from inside the decode loop, after the prompt had already been processed.
+	//
+	// Extending the window is what rope scaling is for, and the scheme this engine applies is
+	// whatever the file specifies: rope.scale_linear is read into RopeScale, and any other
+	// rope.scaling.type is refused at load. There is no flag that adds scaling at run time, so a
+	// checkpoint without it cannot be stretched by --ctx, and the answer is a refusal rather than
+	// a cache that cannot be used.
 	if nCtx > cfg.ContextLen {
 		return fmt.Errorf("run: --ctx %d is past this model's trained context of %d;"+
-			" going beyond it needs rope scaling, which is not implemented",
+			" going beyond it needs rope scaling in the model file, and this one does not carry it",
 			nCtx, cfg.ContextLen)
 	}
 	cache, err := llama.NewKVCache(cfg, nCtx)

@@ -673,7 +673,8 @@ func TestEveryNumericFlagRefusesNegatives(t *testing.T) {
 // allowed. A larger one is not: the rope table is built from the trained context, so a bigger cache
 // asks it for positions it does not hold and the decode loop fails mid-run with "position 128 outside
 // the rope table" -- after the prompt has been processed and part of the answer printed. Extending a
-// model past its window needs rope scaling, which this engine does not implement.
+// model past its window needs rope scaling, and the engine applies only what the file carries:
+// rope.scale_linear is honoured, every other scheme is refused at load, and no flag adds one.
 //
 // Checked against a constructed model so the numbers are exact: the fixture's ContextLen is the
 // window, and one token past it is the smallest request that must be refused.

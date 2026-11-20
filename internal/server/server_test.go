@@ -4577,3 +4577,78 @@ func TestStartPumpRejectsANilContextByPanicking(t *testing.T) {
 	_ = ctx.Done() // the same operation s.run performs on its first iteration
 	_ = srv
 }
+
+// TestDisconnectReturnsTheBlocksToo covers the resource the existing disconnect tests do not.
+//
+// TestStreamingClientGoneReleasesTheSequence waits for Active() to reach zero, which is the
+// slot. A sequence holds two things: the admission slot and the KV blocks it was given. A
+// cancel path that finished the sequence but dropped its cache without releasing the blocks
+// would leave Active at zero and the pool permanently smaller -- and a paged deployment that
+// leaks a block per abandoned stream fails long before it fails loudly, which is the reason
+// /metrics exports the free count at all.
+//
+// Measured with 32 blocks of 16 positions: a stream read once and hung up leaves 32 of 32
+// free, so nothing was retained.
+func TestDisconnectReturnsTheBlocksToo(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 2, BlockSize: 16, Blocks: 32, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.StartPump(context.Background())
+	t.Cleanup(srv.Shutdown)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	before := eng.Stats()
+	if before.PoolBlocks != 32 {
+		t.Fatalf("the pool has %d blocks, want 32; the setup did not reach the paged cache",
+			before.PoolBlocks)
+	}
+
+	resp, err := http.Post(ts.URL+"/v1/completions", "application/json",
+		strings.NewReader(`{"prompt":"Once upon a time","max_tokens":30,"stream":true}`))
+	if err != nil {
+		t.Fatalf("starting the stream: %v", err)
+	}
+	// Read one chunk so the prompt has been prefilled -- blocks are allocated during prefill,
+	// so hanging up before it would test nothing.
+	buf := make([]byte, 32)
+	if _, err := resp.Body.Read(buf); err != nil {
+		t.Fatalf("reading the first chunk: %v", err)
+	}
+	if used := before.PoolFree - eng.Stats().PoolFree; used == 0 {
+		t.Fatalf("no blocks were allocated while the stream ran, so this run proves nothing")
+	}
+	_ = resp.Body.Close()
+
+	waitFor(t, 10*time.Second, func() bool { return eng.Active() == 0 },
+		"the engine still holds a sequence after the client hung up")
+	// Give the release a moment past the slot: the two happen together, but the assertion is
+	// about the pool and a polling wait would hide a leak that resolved later.
+	waitFor(t, 5*time.Second, func() bool {
+		return eng.Stats().PoolFree == before.PoolFree
+	}, "the pool did not return every block the abandoned stream held")
+
+	after := eng.Stats()
+	if after.PoolFree != before.PoolFree {
+		t.Errorf("%d of %d blocks are still out after the client hung up (was %d free)",
+			before.PoolFree-after.PoolFree, before.PoolBlocks, before.PoolFree)
+	}
+}

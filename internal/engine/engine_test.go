@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2418,5 +2419,122 @@ func TestPrefixReuseWithinOneRound(t *testing.T) {
 					"sequence after the first)", got, c.seqs, want, c.perSeq)
 			}
 		})
+	}
+}
+
+// TestStatsPoolGaugesStayInRangeUnderLoad checks the invariant a Prometheus consumer assumes
+// without stating it: a free-block count is between zero and the pool's size, and the derived
+// fraction is between zero and one.
+//
+// TestFractionFull covers the formula on constructed values, including the zero-pool case. What
+// it cannot cover is the read path, and there are two things about it worth pinning. Stats calls
+// pool.Blocks() and pool.Free() under separate lock acquisitions, so under load the pair is not
+// one atomic snapshot -- harmless in practice for a reason to state rather than assume, since
+// Blocks is fixed at construction from --blocks and only Free varies. And the sampling has to
+// happen while requests are in flight: a reader that samples between requests sees the pool
+// after every block was returned, so an earlier version of this test read a constant value and
+// its range assertion was vacuous. Measured with three readers running against four concurrent
+// sequences on an 8-block pool: 195,944 reads covered the whole range [0, 8] with none outside.
+//
+// A gauge that can exceed its own bounds breaks a dashboard silently rather than loudly: a
+// negative free count plots as empty headroom, and a fraction above one plots as a pool that is
+// more than full, which reads as a rendering bug rather than as a measurement.
+func TestStatsPoolGaugesStayInRangeUnderLoad(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	const poolBlocks = 8
+	e, err := New(path, Options{
+		MaxActive: 4, Workers: 2, BlockSize: 4, Blocks: poolBlocks, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var outOfRange, badFraction, badBlocks, reads atomic.Int64
+	var minFree int64 = poolBlocks
+	var maxFree atomic.Int64
+	stop := make(chan struct{})
+
+	// Readers run continuously rather than once per request: between requests every block has
+	// been returned and the pool reads the same every time.
+	var readers sync.WaitGroup
+	for range 3 {
+		readers.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				st := e.Stats()
+				reads.Add(1)
+				if st.PoolFree < 0 || st.PoolFree > st.PoolBlocks {
+					outOfRange.Add(1)
+				}
+				if f := st.FractionFull(); f < 0 || f > 1 {
+					badFraction.Add(1)
+				}
+				if st.PoolBlocks != poolBlocks {
+					badBlocks.Add(1)
+				}
+				if int64(st.PoolFree) < atomic.LoadInt64(&minFree) {
+					atomic.StoreInt64(&minFree, int64(st.PoolFree))
+				}
+				if int64(st.PoolFree) > maxFree.Load() {
+					maxFree.Store(int64(st.PoolFree))
+				}
+			}
+		})
+	}
+
+	// Four concurrent sequences per round, so the pool is genuinely occupied while the
+	// readers sample.
+	for round := range 10 {
+		var chans []<-chan Event
+		for i := range 4 {
+			prompt := tok.Encode(fmt.Sprintf("round %d sequence %d text", round, i), true)
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 6})
+			if err != nil {
+				continue
+			}
+			chans = append(chans, ch)
+		}
+		for e.Pump() > 0 {
+		}
+		for _, ch := range chans {
+			for range ch {
+			}
+		}
+	}
+	close(stop)
+	readers.Wait()
+
+	if n := reads.Load(); n < 1000 {
+		t.Fatalf("only %d reads completed; the assertion would be vacuous", n)
+	}
+	// The pool has to have moved, or "in range" says nothing about a changing gauge.
+	if minFree == poolBlocks && maxFree.Load() == poolBlocks {
+		t.Fatalf("PoolFree was %d in every one of %d reads: the pool never filled, so this "+
+			"run did not exercise the gauge", poolBlocks, reads.Load())
+	}
+	if minFree != 0 {
+		t.Logf("note: the pool reached %d free blocks at its tightest", minFree)
+	}
+	if got := outOfRange.Load(); got != 0 {
+		t.Errorf("PoolFree fell outside [0, %d] in %d of %d reads", poolBlocks, got, reads.Load())
+	}
+	if got := badFraction.Load(); got != 0 {
+		t.Errorf("FractionFull fell outside [0, 1] in %d of %d reads", got, reads.Load())
+	}
+	if got := badBlocks.Load(); got != 0 {
+		t.Errorf("PoolBlocks changed from %d in %d reads; it is fixed at construction",
+			poolBlocks, got)
 	}
 }

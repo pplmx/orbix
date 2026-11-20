@@ -50,8 +50,10 @@ from this output, and `--json` is not a full fidelity dump of the file.
 `orbix model inspect` prints the GGUF layout readably. Its tables cut a metadata value or tensor
 name at 60 bytes with a rune-safe `...`, since one long name otherwise pushes the later columns
 off screen; `--json` carries the whole name. `--json` also keeps each value the type the file
-declares, except that a NaN or infinite float becomes the string `"NaN"`, `"+Inf"` or `"-Inf"` --
-JSON has no token for either, and one such key would otherwise fail the whole document.
+declares, with two exceptions: a NaN or infinite float becomes the string `"NaN"`, `"+Inf"` or
+`"-Inf"` because JSON has no token for either and one such key would otherwise fail the whole
+document, and an array becomes a summary string like `"[151387 uint32]"` rather than a JSON array
+-- see the note above on what that costs a script.
 
 `orbix bench --suite` prints every scenario as one table, pairing each mechanism with a control
 row -- paged against contiguous, prefix reuse against none, shortest against FIFO -- so a

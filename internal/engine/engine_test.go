@@ -2550,3 +2550,89 @@ func TestStatsPoolGaugesStayInRangeUnderLoad(t *testing.T) {
 			poolBlocks, got)
 	}
 }
+
+// TestStopTokenIsNotDeliveredOrCounted covers what happens once the engine actually stops on a
+// stop token, which the server-side test only reaches the edge of.
+//
+// TestSingleTokenStopReachesTheEngine asserts that a single-token stop string becomes one id
+// for the engine. It does not follow the id through the round that matches it, so three
+// properties were unpinned: the stop token is not appended to the sequence's output, so the
+// decoded text cannot contain it and the server's cutAtStop has nothing left to cut; the event
+// carrying it is never emitted; and TokensGenerated counts only the tokens that were delivered.
+//
+// Measured on the fixture: a free run produces [107 342 184 107 342 184], and stopping on 184
+// produces [107 342] with TokensGenerated 2. If the stop token were appended and emitted, all
+// three properties would break at once -- a stop string visible in the reply, cutAtStop
+// cutting a second time, and a count one above what the caller got.
+func TestStopTokenIsNotDeliveredOrCounted(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+
+	// run submits one request with the given stop list and collects what was delivered. The
+	// reader is a separate goroutine because a handler-shaped reader that waits before pumping
+	// deadlocks: the engine only advances inside Pump.
+	run := func(stop []int32) (delivered []int32, generated uint64) {
+		t.Helper()
+		e, err := New(path, Options{MaxActive: 2})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ch, err := e.Submit(Request{Prompt: tok.Encode("hi", true), MaxTokens: 6, Stop: stop})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			for ev := range ch {
+				if ev.HasToken {
+					delivered = append(delivered, ev.Token)
+				}
+			}
+		})
+		for e.Pump() > 0 {
+		}
+		wg.Wait()
+		return delivered, e.Stats().TokensGenerated
+	}
+
+	baseline, _ := run(nil)
+	if len(baseline) < 4 {
+		t.Skipf("the fixture produced only %d tokens; too few to pick a stop from mid-stream",
+			len(baseline))
+	}
+	stopTok := baseline[2]
+
+	got, generated := run([]int32{stopTok})
+
+	// The output is the prefix before the stop token, and nothing else.
+	if len(got) != 2 {
+		t.Fatalf("with a stop on token %d the sequence delivered %v, want the two tokens "+
+			"before it", stopTok, got)
+	}
+	for i := range got {
+		if got[i] != baseline[i] {
+			t.Errorf("delivered[%d] = %d, want the baseline's %d: the tokens before a stop must "+
+				"be unchanged", i, got[i], baseline[i])
+		}
+	}
+	for _, id := range got {
+		if id == stopTok {
+			t.Errorf("the stop token %d was delivered; a reply must not contain the stop string "+
+				"that ended it, and the server would then cut the text a second time", stopTok)
+		}
+	}
+
+	// And the count follows what was delivered, not what was sampled.
+	if generated != uint64(len(got)) {
+		t.Errorf("TokensGenerated = %d with %d tokens delivered: the stop token was sampled but "+
+			"never given to the caller, so it is not one of \"the tokens a caller was told about\"",
+			generated, len(got))
+	}
+}

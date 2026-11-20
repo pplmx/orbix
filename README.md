@@ -588,6 +588,13 @@ model emitted its end-of-sequence token, and the suite says so in the `NOTE` col
 ("N request(s) stopped early on EOS") rather than leaving you to work out why two rows
 that should match do not.
 
+A single measurement (without `--suite`) reports the same kind of shortfall as a `note:`
+line, for the case the suite cannot hit: a prompt long enough that the model's window leaves
+less room than `--max-tokens` asks for. The header states the budget and the total is smaller,
+so the note names both — `the 4096-position window cut the budget: 6 of 100 requested tokens`.
+Without it the report was ambiguous in the worst way for a measurement: `finish: length` reads
+as "the budget was reached" whether the budget or the window ended the run.
+
 `orbix serve` also exports the same numbers over `/metrics` in Prometheus text format,
 so the suite's baseline and a live deployment's behaviour are the same measurements
 rather than two unrelated readings:

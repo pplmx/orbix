@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
@@ -199,26 +200,73 @@ func cmdBench(args []string) error {
 			}
 			chans[i] = ch
 		}
+		// Drain concurrently with pumping. The per-sequence buffer holds 64 events, and a
+		// budget larger than that fills it while Pump is still running: the engine then waits
+		// two seconds for a reader and retires the sequence as abandoned, so the run stops at
+		// 64 tokens and reports no finish reason at all. Measured before this fix, with
+		// --max-tokens 65, 100 and 200 against an idle fixture: every one generated exactly
+		// 64, printed no "finish:" line, and said nothing about why.
+		//
+		// The suite already drains this way and its comment names the reason. This path was
+		// left behind because its default budget is 32, which never reaches the buffer -- so
+		// the defect only appeared for a caller who asked for more than twice the default.
+		drained := make(chan error, batch)
+		var tokMu sync.Mutex
+		var tokCount int
+		var reasonMu sync.Mutex
+		for _, ch := range chans {
+			go func(ch <-chan engine.Event) {
+				var mine int
+				for ev := range ch {
+					if ev.Err != nil {
+						drained <- ev.Err
+						return
+					}
+					if ev.HasToken {
+						mine++
+					}
+					if ev.Done {
+						reasonMu.Lock()
+						reason[ev.FinishReason]++
+						reasonMu.Unlock()
+					}
+				}
+				tokMu.Lock()
+				tokCount += mine
+				tokMu.Unlock()
+				drained <- nil
+			}(ch)
+		}
 		for eng.Pump() > 0 {
 		}
-		for _, ch := range chans {
-			for ev := range ch {
-				if ev.Err != nil {
-					return fmt.Errorf("bench: %w", ev.Err)
-				}
-				if ev.HasToken {
-					generated++
-				}
-				if ev.Done {
-					reason[ev.FinishReason]++
-				}
+		for range chans {
+			if err := <-drained; err != nil {
+				return fmt.Errorf("bench: %w", err)
 			}
 		}
+		tokMu.Lock()
+		generated += tokCount
+		tokMu.Unlock()
 		done += batch
 	}
 
 	elapsed := time.Since(start)
 	perSec := float64(generated) / elapsed.Seconds()
+	// The window can cut the budget, and until this line existed the report did not say so:
+	// the header promised `--max-tokens` per request and the total came back smaller, with
+	// `finish: length` reading as "the budget was reached" in either case. Measured with a
+	// 4091-token prompt against a 4096-position window and --max-tokens 100: the header said
+	// "100 tokens x 1 requests" and the run generated 6, which a reader comparing two rows
+	// would take as a throughput difference rather than as two different budgets.
+	//
+	// `run --stats` has said this since the cut was noticed there; this is the same fact for
+	// the command whose whole purpose is measurement. Stated as a ratio of what was asked
+	// for, because the interesting number is how much of the budget the window left.
+	wanted := *maxTokens * total
+	shortfall := 0
+	if reason["length"] > 0 && generated < wanted {
+		shortfall = wanted - generated
+	}
 	fmt.Printf("generated:   %d tokens\n", generated)
 	fmt.Printf("elapsed:     %v\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("throughput:  %.1f tok/s\n", perSec)
@@ -233,6 +281,13 @@ func cmdBench(args []string) error {
 			parts = append(parts, fmt.Sprintf("%s=%d", k, reason[k]))
 		}
 		fmt.Printf("finish:      %s\n", strings.Join(parts, " "))
+	}
+	if shortfall > 0 {
+		// The position budget, not a model quirk: prompt + generated cannot exceed the window,
+		// so the engine stops at the boundary and reports "length". Naming both numbers is what
+		// makes the figure comparable with another run of the same shape.
+		fmt.Printf("note:        the %d-position window cut the budget: %d of %d requested tokens\n",
+			cfg.ContextLen, generated, wanted)
 	}
 	// Only when the flag was on, and only when there is something to report: a "0 reused" line
 	// on a run that could not have reused anything would read as a defect rather than as a

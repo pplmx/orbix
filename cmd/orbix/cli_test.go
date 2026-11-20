@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1734,4 +1735,80 @@ func TestRunRefusesAPromptOfExactlyTheContext(t *testing.T) {
 			t.Errorf("a prompt that leaves room was refused: %v", err)
 		}
 	})
+}
+
+// TestBenchGeneratesItsWholeBudgetPastTheEventBuffer covers a defect that only appeared for
+// a budget larger than the engine's per-sequence buffer.
+//
+// The single-measurement path pumped to exhaustion and drained the channels afterwards, so a
+// budget over 64 events filled the buffer while Pump was running. The engine then waits two
+// seconds for a reader and retires the sequence as abandoned, and the run reported 64 tokens,
+// no finish line, and no explanation. Measured on an idle fixture before the fix, with
+// --max-tokens 65, 100 and 200: every run generated exactly 64.
+//
+// The suite path already drained concurrently and its comment names this reason; this path was
+// missed because its default budget is 32, which never reaches the buffer.
+//
+// The assertion is the token count against the budget, at the boundary and past it, so a fix
+// that merely raised the buffer size would not pass.
+func TestBenchGeneratesItsWholeBudgetPastTheEventBuffer(t *testing.T) {
+	// A context large enough that the window is not what stops generation.
+	path := gguftest.Model{NoEOS: true, ContextLen: 4096}.Write(t, t.TempDir())
+	for _, budget := range []int{64, 65, 100} {
+		t.Run(strconv.Itoa(budget), func(t *testing.T) {
+			out := captureStdout(t, func() {
+				if err := cmdBench([]string{"--model", path, "--max-tokens", strconv.Itoa(budget),
+					"--concurrency", "1", "--requests", "1", "--workers", "2"}); err != nil {
+					t.Fatalf("cmdBench: %v", err)
+				}
+			})
+			if want := "generated:   " + strconv.Itoa(budget) + " tokens"; !strings.Contains(out, want) {
+				t.Errorf("a %d-token budget did not generate that many:\n%s", budget, out)
+			}
+			// The finish line is what the abandoned path lost, so its presence is the
+			// second half of the same fact.
+			if !strings.Contains(out, "finish:") {
+				t.Errorf("no finish line for a %d-token budget:\n%s", budget, out)
+			}
+		})
+	}
+}
+
+// TestBenchSaysWhenTheWindowCutTheBudget covers the report a reader uses to compare two runs.
+//
+// The header promises --max-tokens per request and the total can come back smaller when the
+// prompt leaves too little window. Before this line the report said nothing: the header read
+// "100 tokens x 1 requests" and the run produced 6, with finish "length" reading as "the
+// budget was reached" either way. A reader comparing that row against another would attribute
+// the difference to the model rather than to a budget the window had already reduced.
+func TestBenchSaysWhenTheWindowCutTheBudget(t *testing.T) {
+	// A 32-position window against a 100-token budget: the prompt leaves about 21 positions.
+	path := gguftest.Model{NoEOS: true, ContextLen: 32}.Write(t, t.TempDir())
+	out := captureStdout(t, func() {
+		if err := cmdBench([]string{"--model", path, "--max-tokens", "100",
+			"--concurrency", "1", "--requests", "1", "--workers", "2"}); err != nil {
+			t.Fatalf("cmdBench: %v", err)
+		}
+	})
+	if !strings.Contains(out, "window cut the budget") {
+		t.Errorf("a truncated run did not say why:\n%s", out)
+	}
+	// Both numbers, so the reader can tell how much of the budget survived.
+	if !strings.Contains(out, "of 100 requested tokens") {
+		t.Errorf("the note does not state the requested budget:\n%s", out)
+	}
+	if !strings.Contains(out, "32-position window") {
+		t.Errorf("the note does not state the window:\n%s", out)
+	}
+
+	// A run whose budget fits must not print it: a note on every report stops being read.
+	fits := captureStdout(t, func() {
+		if err := cmdBench([]string{"--model", path, "--max-tokens", "2",
+			"--concurrency", "1", "--requests", "1", "--workers", "2"}); err != nil {
+			t.Fatalf("cmdBench: %v", err)
+		}
+	})
+	if strings.Contains(fits, "window cut the budget") {
+		t.Errorf("a run that fit its budget reported a cut:\n%s", fits)
+	}
 }

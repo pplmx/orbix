@@ -609,3 +609,48 @@ func TestNewRopeRejectsANonPositiveContext(t *testing.T) {
 		t.Errorf("newRope refused a one-position context: %v", err)
 	}
 }
+
+// TestNewRopeTrustsTheConfigForDimensionBounds records where the bound on rope.dimension_count
+// is enforced, and what happens on the side that does not enforce it.
+//
+// newRope checks that the dimension count is even and that the context is positive, but not
+// that the count fits inside a head. That is deliberate rather than an oversight -- LoadConfig
+// already refuses a dimension count outside (0, head_dim], and forward.go is the only caller,
+// passing a Config that came from there. The division matters because the two checks would
+// otherwise look like a gap: a reader finding that newRope accepts rope_dim 32 for a 16-wide
+// head might add a third check, which would then have to be kept in step with the one in
+// LoadConfig.
+//
+// The test asserts both halves so the assumption is visible. The accepted case goes on to
+// panic in apply -- a slice index past the head -- and that is recorded rather than fixed: an
+// error return would be a contract change for a path no production caller can reach, and the
+// panic is the honest outcome for a Config that violates its own invariant.
+func TestNewRopeTrustsTheConfigForDimensionBounds(t *testing.T) {
+	cfg := testConfig()
+	headDim := 16
+	cfg.HeadDim = headDim
+	cfg.RopeDim = headDim * 2
+
+	// The layer below does not reject it...
+	r, err := newRope(cfg, 4)
+	if err != nil {
+		t.Fatalf("newRope rejected rope dim %d for head dim %d: the bound is meant to live in "+
+			"LoadConfig, so this layer's behaviour has changed", cfg.RopeDim, headDim)
+	}
+	// ...and applying it indexes past the vector rather than returning an error.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Errorf("apply with rope dim %d on a %d-wide head did not panic; if it now "+
+					"returns an error instead, this test should be updated to assert that",
+					cfg.RopeDim, headDim)
+			}
+		}()
+		_ = r.apply(make([]float32, headDim), 0)
+	}()
+
+	// The bound itself lives in LoadConfig and is already covered there by the case named
+	// "rope dim larger than head dim", which asserts both the offending value and the head
+	// dimension it exceeds. Repeating it here would be a second place to keep in step; what
+	// this test adds is the other half of the division.
+}

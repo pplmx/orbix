@@ -4627,15 +4627,18 @@ func TestDisconnectReturnsTheBlocksToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("starting the stream: %v", err)
 	}
-	// Read one chunk so the prompt has been prefilled -- blocks are allocated during prefill,
-	// so hanging up before it would test nothing.
+	// Wait for the prefill to have taken blocks before hanging up. Reading one chunk is not
+	// enough: the first chunk can be an empty delta or the SSE preamble, either of which may
+	// arrive before the prompt has been through the model. Sampling the pool once after one read
+	// made this test fail intermittently -- "no blocks were allocated while the stream ran" --
+	// which is the guard reporting a race in the test rather than a leak in the server.
 	buf := make([]byte, 32)
 	if _, err := resp.Body.Read(buf); err != nil {
 		t.Fatalf("reading the first chunk: %v", err)
 	}
-	if used := before.PoolFree - eng.Stats().PoolFree; used == 0 {
-		t.Fatalf("no blocks were allocated while the stream ran, so this run proves nothing")
-	}
+	waitFor(t, 5*time.Second, func() bool {
+		return eng.Stats().PoolFree < before.PoolFree
+	}, "no blocks were allocated while the stream ran, so this run proves nothing")
 	_ = resp.Body.Close()
 
 	waitFor(t, 10*time.Second, func() bool { return eng.Active() == 0 },

@@ -1405,3 +1405,75 @@ func TestCloseWaitsForAnInFlightTickerFlush(t *testing.T) {
 		t.Errorf("Close took %v waiting for an in-flight ticker flush with a %v budget", elapsed, budget)
 	}
 }
+
+// TestSpanFinishClearsAStaleMessage covers the second call on a span that already failed.
+//
+// Finish takes a value receiver, so each call returns an independent span and the second one
+// has to describe its own outcome rather than inherit the first's. It set Status back to 1 on
+// a nil error but left StatusMessage alone, so Finish(err) followed by Finish(nil) produced an
+// OK status carrying an error message -- a pairing OTLP reserves for failure, and one that
+// encodes: measured, the wire form was {"code":1,"message":"boom"}.
+//
+// The wire form is asserted rather than only the struct because the message reaches a backend
+// through encode.go's omitempty; a struct-level check would pass on a value the encoder drops.
+func TestSpanFinishClearsAStaleMessage(t *testing.T) {
+	tr := NewTracer()
+	s, ok := tr.StartTrace("request", 2)
+	if !ok {
+		t.Fatal("StartTrace failed")
+	}
+
+	failed := s.Finish(errors.New("boom"))
+	if failed.Status != 2 || failed.StatusMessage != "boom" {
+		t.Fatalf("after an error: status=%d message=%q, want 2 and boom",
+			failed.Status, failed.StatusMessage)
+	}
+
+	// The same span finished again with no error: it is now a success, and nothing of the
+	// previous failure may remain.
+	recovered := failed.Finish(nil)
+	if recovered.Status != 1 {
+		t.Errorf("status = %d after a nil error, want 1", recovered.Status)
+	}
+	if recovered.StatusMessage != "" {
+		t.Errorf("status message = %q after a nil error, want empty: an OK status carrying a "+
+			"message reads as a failure to anything filtering on it", recovered.StatusMessage)
+	}
+	// The earlier value is untouched, which is what a value receiver promises.
+	if failed.Status != 2 || failed.StatusMessage != "boom" {
+		t.Errorf("finishing again changed the earlier span: status=%d message=%q",
+			failed.Status, failed.StatusMessage)
+	}
+
+	// And the wire form carries no message for the recovered span.
+	body, err := Encode(tr.Resource(), []Span{recovered})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	var doc struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					Status struct {
+						Code    int    `json:"code"`
+						Message string `json:"message"`
+					} `json:"status"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	st := doc.ResourceSpans[0].ScopeSpans[0].Spans[0].Status
+	if st.Code != 1 {
+		t.Errorf("encoded code = %d, want 1", st.Code)
+	}
+	if st.Message != "" {
+		t.Errorf("encoded message = %q, want it omitted for an OK status", st.Message)
+	}
+	// The raw body must not contain the earlier error text at all.
+	if strings.Contains(string(body), "boom") {
+		t.Errorf("the encoded body still carries the earlier error: %s", body)
+	}
+}

@@ -198,6 +198,13 @@ func (t *Tracer) noteDropped() {
 // Finish sets the span's end time and status. It returns the span so a caller can write
 //
 //	span = span.Finish(err)
+//
+// The message is cleared on the success path rather than left alone: Finish takes a value
+// receiver, so calling it twice returns two independent spans, and the second call must
+// describe its own outcome. Measured before this, Finish(err) followed by Finish(nil) produced
+// status 1 with StatusMessage still holding the earlier error, which encodes as an OK status
+// carrying a message -- a combination OTLP reserves for an error, so a backend filtering on the
+// message would count a successful span as failed.
 func (s Span) Finish(err error) Span {
 	s.End = time.Now()
 	if err != nil {
@@ -205,6 +212,7 @@ func (s Span) Finish(err error) Span {
 		s.StatusMessage = err.Error()
 	} else {
 		s.Status = 1
+		s.StatusMessage = ""
 	}
 	return s
 }

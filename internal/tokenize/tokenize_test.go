@@ -322,10 +322,33 @@ func TestMergeReversingRankOrderChangesOutput(t *testing.T) {
 	ba := mergeFixture(t, []string{"b c", "a b"})
 	first := ab.Encode("abc", false)
 	second := ba.Encode("abc", false)
-	if len(first) == len(second) && len(first) == 2 &&
-		first[0] == second[0] && first[1] == second[1] {
-		t.Errorf("reversing the merge ranks produced the same tokens %v; "+
-			"rank order is not being used", first)
+
+	// The exact tokens, not merely "the two differ". A difference-only assertion passes
+	// for any bug that changes one side: an encoder that dropped a piece, or merged a
+	// whole run into "abc" on one order, would look like evidence rank order worked.
+	//
+	// When "a b" outranks "b c", "abc" can only form as "ab"+"c" -- the pieces the
+	// vocabulary holds for that split. Reversing the ranks gives "a"+"bc" instead.
+	wantFirst := []int32{ab.index["ab"], ab.index["c"]}
+	wantSecond := []int32{ba.index["a"], ba.index["bc"]}
+	for _, want := range []struct {
+		name string
+		got  []int32
+		exp  []int32
+	}{
+		{"a b before b c", first, wantFirst},
+		{"b c before a b", second, wantSecond},
+	} {
+		if len(want.got) != len(want.exp) {
+			t.Errorf("%s: Encode(abc) = %v, want %v", want.name, want.got, want.exp)
+			continue
+		}
+		for j := range want.exp {
+			if want.got[j] != want.exp[j] {
+				t.Errorf("%s: Encode(abc) = %v, want %v", want.name, want.got, want.exp)
+				break
+			}
+		}
 	}
 }
 

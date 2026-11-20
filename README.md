@@ -920,6 +920,23 @@ turn, and that is the one with a bound to quote: no sequence waits more than abo
 starving a request is the failure to avoid. `fair` is not the default for the same reason `fifo`
 is: a policy that bounds wait time is only useful if the operator asked for it.
 
+What those three do to the same queue, measured on the fixture with `MaxActive 1` and four
+requests whose budgets are 16, 8, 4 and 2 in submission order, as the round each got its
+first token:
+
+| Policy     | First-token rounds | What it did                                                          |
+| ---------- | ------------------ | -------------------------------------------------------------------- |
+| `fifo`     | 2, 19, 28, 33      | served in submission order, so each waited its turn                  |
+| `shortest` | 19, 10, 5, 2       | exactly inverted: the 2-token request moved from round 33 to round 2 |
+| `fair`     | 5, 6, 7, 8         | one turn apiece first, then round-robin from there                   |
+
+`shortest` is the one that changes the order most, and the inversion is the point: it looks
+purely at remaining work, so a request submitted last is served first when it is the smallest.
+`fair` does not reorder past the first turn -- it hands everyone a turn before repeating, which
+is why its first-token rounds are consecutive where `fifo`'s span the whole queue. Under `fair`
+each sequence then returns every `len(active)/MaxActive` rounds: with four sequences on one slot
+the measured round gap was exactly 4.
+
 The two cache layouts differ in what they reserve, and the difference is large enough to
 decide the flag. A contiguous cache reserves the whole context for every accepted request
 when it arrives, so the cost is `context x KV width x layers`, multiplied by the active

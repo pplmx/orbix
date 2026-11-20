@@ -1149,3 +1149,73 @@ func TestStreamRequestSetsTheStreamAttribute(t *testing.T) {
 		})
 	}
 }
+
+// TestShortestServesTheShortestFirstWhateverTheSubmissionOrder is the other half of
+// TestSchedulingPolicyKeepsShortRequestResponsive.
+//
+// That test submits the long request first and checks the short one is not starved, which
+// shortest achieves by noticing a small remaining budget. It cannot distinguish shortest from
+// a policy that merely picks the newest arrival: with two requests, "least remaining work" and
+// "last submitted" choose the same one. Submitting the requests in descending budget order
+// separates them, and it is the shape the policy's doc describes -- a queue of mixed-size
+// requests dominated by its longest member.
+//
+// Measured on the fixture with MaxActive 1 and budgets 16, 8, 4, 2 in submission order:
+// FIFO serves them on rounds 2, 19, 28, 33 while shortest serves 19, 10, 5, 2 -- the
+// two-token request moves from round 33 to round 2, and the sixteen-token one from 2 to 19.
+func TestShortestServesTheShortestFirstWhateverTheSubmissionOrder(t *testing.T) {
+	path := gguftest.Model{NoEOS: true}.Write(t, t.TempDir())
+	budgets := []int{16, 8, 4, 2}
+
+	firstRounds := func(t *testing.T, policy Priority) []int {
+		t.Helper()
+		e, tok := loadEngineAt(t, path, Options{MaxActive: 1, Workers: 2, Policy: policy})
+		prompt := tok.Encode("Once upon a time", true)
+		chans := make([]<-chan Event, len(budgets))
+		for i, b := range budgets {
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: b})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			chans[i] = ch
+		}
+		// Drain on every Pump round is unnecessary here: the channels are buffered for 64
+		// events and the longest budget is 16, so nothing blocks the pump.
+		for e.Pump() > 0 {
+		}
+		first := make([]int, len(budgets))
+		for i, ch := range chans {
+			for ev := range ch {
+				if ev.HasToken && first[i] == 0 {
+					first[i] = ev.Round
+				}
+			}
+		}
+		return first
+	}
+
+	fifo := firstRounds(t, PriorityFIFO)
+	shortest := firstRounds(t, PriorityShortest)
+
+	// FIFO serves in submission order, so the first-token rounds have to be increasing.
+	for i := 1; i < len(fifo); i++ {
+		if fifo[i] <= fifo[i-1] {
+			t.Fatalf("FIFO out of submission order: first-token rounds %v", fifo)
+		}
+	}
+	// Shortest serves the smallest budget first, so the rounds have to be decreasing: the
+	// last-submitted request (2 tokens) goes before the first-submitted one (16).
+	for i := 1; i < len(shortest); i++ {
+		if shortest[i] >= shortest[i-1] {
+			t.Errorf("shortest did not invert submission order: first-token rounds %v", shortest)
+		}
+	}
+	// The point of the policy, stated as the comparison a reader cares about: the smallest
+	// request arrives much sooner than submission order would have served it.
+	smallest := len(budgets) - 1
+	if shortest[smallest] >= fifo[smallest] {
+		t.Errorf("shortest served the 2-token request on round %d, FIFO on round %d: the "+
+			"policy changed nothing", shortest[smallest], fifo[smallest])
+	}
+	t.Logf("FIFO first-token rounds %v; shortest %v", fifo, shortest)
+}

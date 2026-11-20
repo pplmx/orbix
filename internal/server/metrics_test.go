@@ -808,3 +808,85 @@ func TestMetricsCountRefusedRequests(t *testing.T) {
 		t.Errorf("pool refusals = %v after backlog refusals, want 0", got)
 	}
 }
+
+// TestMetricsExpositionIsByteIdenticalAcrossScrapes pins a property the format does not
+// require but a reader depends on: an unchanged engine produces an unchanged body.
+//
+// TestMetricsExportsEveryFinishReason says in as many words that "order is not part of the
+// contract, so compare as sets". That is right about Prometheus -- a scraper keys samples by
+// name and labels, and nothing in the format promises an order -- and it is the reason this
+// one asserts something different rather than tightening that one. What it guards is the
+// consumer of a diff: a snapshot test, a `git diff` of a recorded scrape, or a person reading
+// two outputs side by side. Any of those treats a reordering as a change, and the reordering
+// would come from the encoder walking a map, which is the specific regression the ordered
+// reason list in handleMetrics exists to prevent.
+//
+// The whole body is compared rather than the reason labels alone, because the same hazard
+// applies to every family: the pool gauges are conditional, the trace counter is conditional,
+// and a future family assembled from a map would break this assertion at the moment it was
+// added rather than at the moment someone read a confusing diff.
+func TestMetricsExpositionIsByteIdenticalAcrossScrapes(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	first := readBody(t, get(t, h, "/metrics"))
+	if first == "" {
+		t.Fatal("the first scrape is empty")
+	}
+	for i := range 10 {
+		again := readBody(t, get(t, h, "/metrics"))
+		if again != first {
+			// Show where they diverge rather than dumping two long bodies.
+			line := 1
+			for j := 0; j < len(first) && j < len(again); j++ {
+				if first[j] == again[j] {
+					if first[j] == '\n' {
+						line++
+					}
+					continue
+				}
+				t.Fatalf("scrape %d differs at line %d:\n  first: %q\n  again: %q",
+					i, line, lineAt(first, line), lineAt(again, line))
+			}
+			t.Fatalf("scrape %d differs in length: %d vs %d", i, len(first), len(again))
+		}
+	}
+
+	// A request must change the numbers without reordering anything: the same body with
+	// different digits is what a working encoder produces, and a reordering would surface as
+	// a diff in a line that merely reports a new count.
+	readBody(t, post(t, h, "/v1/completions", `{"prompt": "Once upon a time", "max_tokens": 2}`))
+	after := readBody(t, get(t, h, "/metrics"))
+	beforeNames := familyNames(first)
+	afterNames := familyNames(after)
+	if len(beforeNames) != len(afterNames) {
+		t.Fatalf("families went from %d to %d after one request", len(beforeNames), len(afterNames))
+	}
+	for i := range beforeNames {
+		if beforeNames[i] != afterNames[i] {
+			t.Errorf("family %d was %q before the request and %q after: the order moved",
+				i, beforeNames[i], afterNames[i])
+		}
+	}
+}
+
+// familyNames returns the metric names in the order their HELP lines appear.
+func familyNames(body string) []string {
+	var names []string
+	for _, line := range strings.Split(body, "\n") {
+		if rest, ok := strings.CutPrefix(line, "# HELP "); ok {
+			name, _, _ := strings.Cut(rest, " ")
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// lineAt returns line n of s, 1-based, or "" when the line does not exist.
+func lineAt(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if n < 1 || n > len(lines) {
+		return ""
+	}
+	return lines[n-1]
+}

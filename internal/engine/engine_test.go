@@ -2636,3 +2636,129 @@ func TestStopTokenIsNotDeliveredOrCounted(t *testing.T) {
 			generated, len(got))
 	}
 }
+
+// TestEOSWinsInsideTheBudgetAndTheBudgetWinsAtItsEnd pins which reason a sequence reports when
+// an end-of-sequence token and the token budget meet.
+//
+// The two decisions are three lines apart in sample: the budget is checked before the sampler
+// runs, and the EOS token is checked after. That ordering is what makes the rule, and neither
+// branch had a test at the boundary -- TestModelEOSStopsGeneration sets an EOS that arrives
+// well inside a ten-token budget, which the ordering answers the same way either way.
+//
+// A sampler that returns filler until a chosen call and EOS from then on makes the position
+// exact instead of dependent on what random weights happen to pick. Measured across budgets and
+// positions: EOS at or before the budget reports "stop", EOS beyond it reports "length",
+// because generation never takes the sampling call that would have produced the token. Both
+// answers are right -- the reply is the same length either way -- and the reason is what tells
+// a client whether the model finished its thought or was cut off.
+func TestEOSWinsInsideTheBudgetAndTheBudgetWinsAtItsEnd(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	probe, err := New(path, Options{MaxActive: 2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := probe.Model().Config()
+	eos := int32(cfg.EOSID)
+	// A filler token that is not EOS and inside the vocabulary.
+	filler := int32(107)
+	if filler == eos || int(filler) >= cfg.VocabSize {
+		t.Skipf("filler token %d is not usable against vocab %d and eos %d",
+			filler, cfg.VocabSize, eos)
+	}
+
+	run := func(budget, eosAt int) (tokens int, reason string) {
+		t.Helper()
+		e, err := New(path, Options{MaxActive: 2})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		s := &nthSampler{eos: eos, filler: filler, n: eosAt}
+		ch, err := e.Submit(Request{
+			Prompt: tok.Encode("hi", true), MaxTokens: budget, Sampler: s,
+		})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			for ev := range ch {
+				if ev.HasToken {
+					tokens++
+				}
+				if ev.Done {
+					reason = ev.FinishReason
+				}
+			}
+		})
+		for e.Pump() > 0 {
+		}
+		wg.Wait()
+		return tokens, reason
+	}
+
+	cases := []struct {
+		name       string
+		budget     int
+		eosAt      int
+		wantTokens int
+		wantReason string
+	}{
+		// EOS on the call that would have produced token number eosAt, so eosAt-1 tokens
+		// reach the caller and the budget has not run out yet.
+		{"eos inside the budget", 3, 2, 1, "stop"},
+		{"eos on the last allowed call", 3, 3, 2, "stop"},
+		// One past the budget: the sampling call never happens.
+		{"budget runs out first", 3, 4, 3, "length"},
+		// The same rule at a budget of 2.
+		{"eos inside a two-token budget", 2, 2, 1, "stop"},
+		{"budget runs out at two", 2, 3, 2, "length"},
+		// EOS on the very first call, with budget left. This is the case that tells the two
+		// possible check orders apart: sampling before the budget check would still see EOS
+		// here and report "stop", but at a spent budget it would report "stop" with zero
+		// tokens delivered instead of "length" with a full reply.
+		{"eos on the first call", 3, 1, 0, "stop"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tokens, reason := run(c.budget, c.eosAt)
+			if reason != c.wantReason {
+				t.Errorf("finish reason = %q, want %q (budget %d, eos on sampling call %d)",
+					reason, c.wantReason, c.budget, c.eosAt)
+			}
+			if tokens != c.wantTokens {
+				t.Errorf("delivered %d tokens, want %d", tokens, c.wantTokens)
+			}
+			// No path may deliver the EOS token itself.
+			if tokens >= c.eosAt && reason != "length" {
+				t.Errorf("delivered %d tokens with EOS on call %d: the EOS token reached the "+
+					"caller", tokens, c.eosAt)
+			}
+		})
+	}
+}
+
+// nthSampler returns filler for its first n-1 calls, then eos on every call after.
+//
+// A sampler is the only way to place an EOS at an exact sampling call: the fixture's weights
+// are random, so where a real EOS lands is a property of those weights rather than of the code
+// under test.
+type nthSampler struct {
+	eos, filler int32
+	n, calls    int
+}
+
+func (s *nthSampler) Next([]float32) int32 {
+	s.calls++
+	if s.calls >= s.n {
+		return s.eos
+	}
+	return s.filler
+}

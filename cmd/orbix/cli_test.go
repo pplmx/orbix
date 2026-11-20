@@ -2001,3 +2001,114 @@ func TestNonFiniteSamplingFlagsAreRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestCacheFlagsAreValidatedBeforeTheModelLoads covers the three rejections in cacheFlags.
+//
+// They run before the model is opened, which is the point: an operator who mistyped a cache
+// size should be told about it in milliseconds rather than after a multi-gigabyte load. That
+// ordering is also what makes these testable without a model, which is why the table drives
+// validate directly instead of going through serve or chat.
+//
+// The block-size case is the one with a real defect behind it. --block-size alone was
+// accepted by chat and silently ignored: the flag sizes how a pool divides its blocks, and
+// without --blocks there is no pool, so the engine kept its contiguous cache and reserved a
+// whole context per request. The operator who passed the flag read "kv cache: contiguous" as
+// the size they asked for. autoBlocks now separates the commands that size a pool themselves
+// (chat, from the model's context) from the ones where the flag would do nothing.
+func TestCacheFlagsAreValidatedBeforeTheModelLoads(t *testing.T) {
+	build := func(t *testing.T, blocks, blockSize, workers int, registerWorkers bool) cacheFlags {
+		t.Helper()
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		c := registerCacheFlags(fs, registerWorkers)
+		if err := fs.Set("blocks", fmt.Sprint(blocks)); err != nil {
+			t.Fatalf("set blocks: %v", err)
+		}
+		if err := fs.Set("block-size", fmt.Sprint(blockSize)); err != nil {
+			t.Fatalf("set block-size: %v", err)
+		}
+		if registerWorkers {
+			if err := fs.Set("workers", fmt.Sprint(workers)); err != nil {
+				t.Fatalf("set workers: %v", err)
+			}
+		}
+		return c
+	}
+
+	t.Run("the zero value passes", func(t *testing.T) {
+		if err := build(t, 0, 0, 0, false).validate("t", false); err != nil {
+			t.Errorf("all-zero cache flags were refused: %v", err)
+		}
+	})
+
+	t.Run("blocks alone passes", func(t *testing.T) {
+		if err := build(t, 8, 0, 0, false).validate("t", false); err != nil {
+			t.Errorf("--blocks alone was refused: %v", err)
+		}
+	})
+
+	for _, c := range []struct {
+		name      string
+		blocks    int
+		blockSize int
+		want      string
+	}{
+		{"blocks negative", -1, 0, "--blocks must not be negative"},
+		{"block-size negative", 0, -1, "--block-size must not be negative"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := build(t, c.blocks, c.blockSize, 0, false).validate("t", false)
+			if err == nil {
+				t.Fatalf("validate accepted blocks=%d block-size=%d", c.blocks, c.blockSize)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not contain %q; a single sentence about "+
+					"\"the cache flags\" would leave the reader re-reading their command line",
+					err, c.want)
+			}
+		})
+	}
+
+	t.Run("workers negative", func(t *testing.T) {
+		err := build(t, 0, 0, -1, true).validate("t", false)
+		if err == nil {
+			t.Fatal("validate accepted a negative --workers")
+		}
+		if !strings.Contains(err.Error(), "--workers must not be negative") {
+			t.Errorf("error %q does not name --workers", err)
+		}
+	})
+
+	t.Run("block-size without blocks", func(t *testing.T) {
+		err := build(t, 0, 16, 0, false).validate("serve", false)
+		if err == nil {
+			t.Fatal("a block size with no pool to divide was accepted")
+		}
+		// The message has to explain the consequence, not just the rule: "needs --blocks"
+		// alone reads as a syntactic requirement rather than as memory being reserved.
+		for _, want := range []string{"--block-size needs --blocks", "whole context"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err, want)
+			}
+		}
+	})
+
+	t.Run("block-size alone is fine when the caller sizes the pool", func(t *testing.T) {
+		// chat computes --blocks from the model's context, so a block size on its own is
+		// meaningful there and the same command line must not be refused.
+		if err := build(t, 0, 16, 0, false).validate("chat", true); err != nil {
+			t.Errorf("a block size was refused for a command that sizes its own pool: %v", err)
+		}
+	})
+
+	t.Run("the prefix names the command", func(t *testing.T) {
+		// serve and chat register the same flags, so the prefix is the only thing that tells a
+		// reader which subcommand rejected them.
+		err := build(t, -1, 0, 0, false).validate("serve", false)
+		if err == nil {
+			t.Fatal("validate accepted negative --blocks")
+		}
+		if !strings.HasPrefix(err.Error(), "serve: ") {
+			t.Errorf("error %q does not start with the command name", err)
+		}
+	})
+}

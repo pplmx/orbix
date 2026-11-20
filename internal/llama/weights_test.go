@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -108,6 +109,49 @@ func TestQuantizedNaNAScaleIsRejectedAtLoad(t *testing.T) {
 			// The message has to name the tensor and the position: "the file is corrupt" alone
 			// leaves a user with a 4 GB file and no way to tell which part of it went wrong.
 			for _, want := range []string{name, "NaN", "non-finite"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestZeroRopeFrequencyIsRejectedAtLoad covers the value that is finite and still fatal.
+//
+// checkFinite guards rope_freqs against NaN and infinity, and the comment above it says why:
+// one bad factor poisons the rotation for every position, which is a run that exits zero and
+// prints valid-looking ids that spell nothing. Zero reaches the same failure by a different
+// route -- the rope divides each dimension's theta by its factor, and theta/0 is +Inf, whose
+// math.Cos is NaN. Measured with freqs {1, 0}: cos[pos=1][1] is NaN, and every position after
+// it carries the same NaN for that dimension pair.
+//
+// checkFinite passes zero, so the guard had to be separate. The index is asserted because a
+// file with eight factors and one zero is otherwise a search through the tensor.
+func TestZeroRopeFrequencyIsRejectedAtLoad(t *testing.T) {
+	ones := make([]float32, 8) // the fixture's rope dim is 16, so 8 pairs
+	for i := range ones {
+		ones[i] = 1
+	}
+
+	t.Run("all ones loads", func(t *testing.T) {
+		path := gguftest.Model{NoEOS: true, ContextLen: 64, RopeFreqs: ones}.Write(t, t.TempDir())
+		if _, err := New(path); err != nil {
+			t.Fatalf("a model with unit frequency factors was refused: %v", err)
+		}
+	})
+
+	for _, idx := range []int{0, len(ones) - 1} {
+		t.Run(fmt.Sprintf("zero at %d", idx), func(t *testing.T) {
+			freqs := append([]float32(nil), ones...)
+			freqs[idx] = 0
+			path := gguftest.Model{NoEOS: true, ContextLen: 64, RopeFreqs: freqs}.Write(t, t.TempDir())
+
+			_, err := New(path)
+			if err == nil {
+				t.Fatal("a zero frequency factor loaded, so every position's cos and sin are NaN")
+			}
+			for _, want := range []string{"rope_freqs", fmt.Sprintf("index %d", idx), "NaN"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not mention %q", err, want)
 				}

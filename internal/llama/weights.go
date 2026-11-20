@@ -110,6 +110,16 @@ func LoadWeights(path string) (*Weights, error) {
 		if err := checkFinite(map[string][]float32{"rope_freqs.weight": freqs}); err != nil {
 			return nil, err
 		}
+		// Zero is finite, so checkFinite passes it, and the rope divides this dimension's
+		// theta by it: theta/0 is +Inf, math.Cos(+Inf) is NaN, and every position's cos and
+		// sin for that dimension pair are NaN from the first token on. Measured with
+		// freqs {1, 0}: cos[pos=1][1] is NaN. It is the failure the check above exists to
+		// prevent, reached by a value that checks as finite.
+		if i := slices.Index(freqs, 0); i >= 0 {
+			return nil, fmt.Errorf("llama: rope_freqs.weight has a zero at index %d of %d;"+
+				" a zero factor divides the rotation angle by zero, so every position's"+
+				" cos and sin become NaN -- the file is corrupt", i, len(freqs))
+		}
 		cfg.RopeFreqs = freqs
 	}
 

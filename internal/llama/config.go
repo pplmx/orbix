@@ -2,6 +2,7 @@ package llama
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -240,8 +241,13 @@ func LoadConfig(f *gguf.File) (Config, error) {
 
 	cfg.RopeBase = 10000
 	if v, ok := f.Get[float32](arch + ".rope.freq_base"); ok {
-		if v <= 0 {
-			return Config{}, fmt.Errorf("llama: rope.freq_base %v must be positive", v)
+		// "v <= 0" is false for NaN, so a NaN base passed this guard and became the
+		// exponent's base: thetaScale was NaN, so every cos and sin past position 0 was
+		// NaN. +Inf also passed, and it is the quieter of the two -- every frequency
+		// collapses to 1, the rotation stops distinguishing positions, and nothing reports
+		// it. Both are refused by naming the actual problem rather than a range.
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) || v <= 0 {
+			return Config{}, fmt.Errorf("llama: rope.freq_base %v must be a finite positive number", v)
 		}
 		cfg.RopeBase = v
 	}
@@ -295,8 +301,10 @@ func LoadConfig(f *gguf.File) (Config, error) {
 
 	cfg.RMSNormEps = 1e-5
 	if v, ok := f.Get[float32](arch + ".attention.layer_norm_rms_epsilon"); ok {
-		if v <= 0 {
-			return Config{}, fmt.Errorf("llama: attention.layer_norm_rms_epsilon %v must be positive", v)
+		// Same gap as freq_base: a NaN epsilon is not "<= 0" and reached the norm, where
+		// every output became NaN. A zero epsilon is already refused by the range check.
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) || v <= 0 {
+			return Config{}, fmt.Errorf("llama: attention.layer_norm_rms_epsilon %v must be a finite positive number", v)
 		}
 		cfg.RMSNormEps = v
 	}

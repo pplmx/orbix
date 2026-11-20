@@ -448,7 +448,27 @@ func TestLoadConfigRejects(t *testing.T) {
 			mutate: func(c *tinyConfig) []kv {
 				return append(c.kvs(), kv{"llama.rope.freq_base", f32Val(0)})
 			},
-			want: "must be positive",
+			want: "must be a finite positive number",
+		},
+		{
+			// "v <= 0" is false for NaN, so this used to load and make every cos and sin
+			// past position 0 NaN. The exponent's base was the NaN itself.
+			name: "NaN rope base",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.rope.freq_base", f32Val(float32(math.NaN()))})
+			},
+			want:    "must be a finite positive number",
+			wantAll: []string{"NaN"},
+		},
+		{
+			// The quieter half: +Inf does not produce NaN, it collapses every frequency to
+			// 1, so the rotation stops telling positions apart and nothing reports it.
+			name: "infinite rope base",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.rope.freq_base", f32Val(float32(math.Inf(1)))})
+			},
+			want:    "must be a finite positive number",
+			wantAll: []string{"+Inf"},
 		},
 		{
 			name: "unsupported rope scaling",
@@ -462,7 +482,18 @@ func TestLoadConfigRejects(t *testing.T) {
 			mutate: func(c *tinyConfig) []kv {
 				return replaceKey(c.kvs(), "llama.attention.layer_norm_rms_epsilon", f32Val(0))
 			},
-			want: "must be positive",
+			want: "must be a finite positive number",
+		},
+		{
+			// Same gap as the rope base: a NaN epsilon is not "<=" anything, so the norm
+			// divided by it and every output became NaN.
+			name: "NaN epsilon",
+			mutate: func(c *tinyConfig) []kv {
+				return replaceKey(c.kvs(), "llama.attention.layer_norm_rms_epsilon",
+					f32Val(float32(math.NaN())))
+			},
+			want:    "must be a finite positive number",
+			wantAll: []string{"NaN"},
 		},
 	}
 	for _, tc := range tests {

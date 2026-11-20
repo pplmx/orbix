@@ -123,6 +123,13 @@ type Model struct {
 	// omits the tensor, which is what a model without rope scaling has. Its length must be
 	// RopeDim/2, since that is the shape the loader requires.
 	RopeFreqs []float32
+
+	// ExtraFloat, when set, writes one float32 metadata value under the given key, after
+	// the fixture's own keys. It exists so a test can put a value in the file that no
+	// accessor would construct -- a NaN in rope.freq_base, say -- and check what the loader
+	// does with it.
+	ExtraFloatKey   string
+	ExtraFloatValue float32
 }
 
 // DefaultVocab is a vocabulary of characters and a few words, enough for round trips and
@@ -510,6 +517,9 @@ func (m Model) kvs() []kv {
 				out[i] = u32KV(e.Key, NoEOSSentinel)
 			}
 		}
+	}
+	if m.ExtraFloatKey != "" {
+		out = append(out, f32KV(m.ExtraFloatKey, m.ExtraFloatValue))
 	}
 	return out
 }

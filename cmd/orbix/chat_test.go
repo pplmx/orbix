@@ -1270,3 +1270,60 @@ func TestChatTreatsEachLineAsATurn(t *testing.T) {
 			"this test documents has changed:\n%s", out)
 	}
 }
+
+// TestChatSystemPromptReachesTheModel checks the system prompt from the one place a REPL can
+// show it: the prompt the engine actually encoded.
+//
+// The existing test asserts chatTurns puts a system turn first and that the REPL does not echo
+// the text, which is structure and presentation. Neither would notice a renderer that dropped
+// system turns, because chatTurns is above the renderer and the echo is below it. Measured
+// against serve's equivalent earlier, a system prompt is worth tens of positions; the same
+// effect is visible here as reuse across two turns.
+//
+// Reuse rather than a token count: the figure is the positions the second turn attached from
+// the first, and it can only be larger when the first prompt carried the system text. On the
+// 512-position fixture with a 20-word message: 112 positions without a system prompt and 160
+// with a short one.
+func TestChatSystemPromptReachesTheModel(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	msg := strings.Repeat("word ", 20)
+
+	reuse := func(system string) int {
+		var in strings.Builder
+		in.WriteString(msg + "\n/stats\n" + msg + "\n/stats\n/exit\n")
+		var out strings.Builder
+		if err := chatSession(strings.NewReader(in.String()), &out, chatOptions{
+			model: path, maxTokens: 4, topK: 40, prefixCache: true, system: system,
+		}); err != nil {
+			t.Fatalf("chatSession: %v", err)
+		}
+		var counts []int
+		for _, line := range strings.Split(out.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.Contains(line, "prompt positions") {
+				continue
+			}
+			var n int
+			if _, err := fmt.Sscanf(line, "reused: %d prompt positions", &n); err == nil {
+				counts = append(counts, n)
+			}
+		}
+		if len(counts) != 2 {
+			t.Fatalf("saw %d /stats reports, want 2:\n%s", len(counts), out.String())
+		}
+		// The second turn's figure is the one that reflects the first turn's prompt.
+		return counts[1]
+	}
+
+	plain := reuse("")
+	withSystem := reuse("You are a terse assistant who answers in one word.")
+
+	if plain == 0 {
+		t.Fatalf("no reuse without a system prompt, so this measurement cannot compare")
+	}
+	// The system text lengthens every prompt, so the second turn attaches more whole blocks.
+	if withSystem <= plain {
+		t.Errorf("reuse is %d with a system prompt and %d without: a system prompt that never "+
+			"reached the model would look exactly like this", withSystem, plain)
+	}
+}

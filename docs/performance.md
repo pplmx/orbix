@@ -26,8 +26,11 @@ Orbix is a learning project, and these are the shapes to expect:
 
 - **A model runs in its trained context, and no larger.** The rope table is built for that
   window, so `--ctx` accepts a smaller value and refuses a larger one. Going past it needs rope
-  scaling, which this engine does not implement. A budget larger than the window is cut to fit,
-  and `--stats` says when that happened.
+  scaling beyond the linear one: `rope.scale_linear` is applied, and any other
+  `rope.scaling.type` is refused at load rather than ignored, because running a YaRN-trained
+  model on the plain rotation produces plausible text instead of an error. A budget larger than
+  the window is cut to fit, and `--stats` prints a note naming the window, the budget asked for
+  and the count actually produced.
 
 - **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 with 32 generated tokens per request it goes 239 tok/s at one stream to 655 tok/s at sixteen, medians of seven interleaved runs. Per-stream speed still drops as streams are added, because the model is one shared resource.
 

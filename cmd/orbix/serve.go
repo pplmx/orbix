@@ -277,7 +277,12 @@ func cmdServe(args []string) error {
 		fmt.Printf("traces:     %s (OTLP/HTTP)\n", *otlpEndpoint)
 	}
 	if accessLog != nil {
-		fmt.Printf("access log: %s\n", *logFormat)
+		// stderr is named because it is not where this banner goes. A deployment that captures
+		// only stdout -- which several container platforms do by default -- gets the banner and
+		// none of the access log, and this line is the only place the operator can learn that
+		// from the server itself. Measured: redirecting only stdout produced six banner lines
+		// and zero request records.
+		fmt.Printf("access log: %s (on stderr, not stdout)\n", *logFormat)
 	}
 	if renderer.UsesModelTemplate() {
 		fmt.Println("chat:       model template")

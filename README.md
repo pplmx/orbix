@@ -608,6 +608,33 @@ network or timeout problem rather than a model problem. The parts always sum to
 `orbix_requests_finished_total`; the tests assert that, so a reason missed in the engine
 breaks a test instead of quietly unbalancing a dashboard.
 
+### The access log
+
+`serve --log-format json` writes one record per request to **stderr**, not stdout -- the
+startup banner is the thing on stdout, so a platform that captures only stdout gets the
+banner and none of the requests. The banner names the stream for that reason. `text` is the
+same record rendered for a terminal, and `off` disables it while leaving the banner alone.
+
+```json
+{"time":"2026-11-20T12:09:28.085356937+08:00","level":"INFO","msg":"request",
+ "method":"POST","path":"/v1/completions","status":200,"duration":7033502,"bytes":232}
+```
+
+Five fields answer "what happened to that request": the method, the path, the status, the
+duration and the body's byte count. Two details are worth knowing before charting it.
+
+`duration` is **nanoseconds**, as a bare integer. That is `slog.Duration`'s JSON encoding,
+not a choice made here, and it is the field most likely to be misread -- a dashboard that
+assumes milliseconds is off by 1000x. The `text` format prints it with a unit (`643.921µs`)
+precisely because a bare number has none.
+
+`bytes` is what the handler actually wrote, which is what makes a streaming record useful:
+505 bytes for a five-chunk SSE response is a statement about the response, where a status
+alone would not distinguish it from an empty one. A 4xx is logged at `INFO` and only a 5xx
+at `WARN`, on the reasoning that a client's mistake is not a server failure and logging
+those as warnings teaches a reader to ignore the level. A `503` from a saturated queue
+*is* logged at `WARN`: capacity running out is the operator's problem.
+
 ## Supported Models and Quantization
 
 Orbix targets the GGUF ecosystem. Initial support:

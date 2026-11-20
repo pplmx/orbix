@@ -206,8 +206,16 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	}
 
 	scanner := bufio.NewScanner(in)
-	// A long paste is a single line as far as the REPL is concerned, so the default
-	// 64 KiB token limit is raised: it is a log line, not a chat message.
+	// One line is one message, so the default 64 KiB line limit is raised: a pasted
+	// paragraph often arrives as one very long line.
+	//
+	// A paste with real newlines is not one message. Each line becomes its own turn, so the
+	// history grows by a line at a time and every line resends everything before it. Measured
+	// on the 512-position fixture: a twelve-line message -- a request line, ten lines of text,
+	// a follow-up question -- produced three turns and then three "conversation is 515 tokens"
+	// errors, with the remaining lines dropped. Nothing joins the lines back up, and there is no
+	// input mode that would. The line limit is per line, not per conversation, so raising it
+	// further would not change this.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for {

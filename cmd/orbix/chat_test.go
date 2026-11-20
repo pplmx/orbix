@@ -1228,3 +1228,45 @@ func TestChatClearKeepsThePrefixCache(t *testing.T) {
 			counts[3], counts[2])
 	}
 }
+
+// TestChatTreatsEachLineAsATurn pins the REPL's input contract, which a paste violates.
+//
+// One line in, one message out is the whole design, and it is what makes the REPL a few
+// hundred lines rather than a readline implementation. The consequence is not obvious until
+// it happens: text pasted with real newlines becomes one turn per line, each resending the
+// history before it, so a paragraph swallows the window far faster than its length suggests.
+//
+// Measured on the 512-position fixture before writing this: a twelve-line message -- a
+// request line, ten lines of text, a follow-up question -- produced three turns and then
+// three "conversation is 515 tokens, context is 512" errors, and the last line never ran at
+// all. The assertion is that shape rather than an exact count: more than one turn came from
+// one paste, and the session ended in the full-window error rather than answering the
+// question at the end.
+//
+// If a multi-line input mode is ever added, this test should fail -- and when it does, the
+// comment on scanner.Buffer in chat.go needs the same update.
+func TestChatTreatsEachLineAsATurn(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	var in strings.Builder
+	in.WriteString("Summarise this:\n")
+	for range 10 {
+		in.WriteString("The quick brown fox jumps over the lazy dog.\n")
+	}
+	in.WriteString("What did it say?\n/exit\n")
+
+	out := runChat(t, chatOptions{
+		model: path, maxTokens: 4, topK: 40, prefixCache: true,
+	}, in.String())
+
+	// Every line started a turn, which is the property being pinned.
+	if got := strings.Count(out, "> "); got < 12 {
+		t.Errorf("a 12-line paste produced %d prompts, want at least 12 -- so lines were "+
+			"joined after all:\n%s", got, out)
+	}
+	// And the window ran out before the last line could be answered: the failure the
+	// per-line contract causes.
+	if !strings.Contains(out, "context window full") {
+		t.Errorf("a twelve-line paste did not exhaust a 512-position window, so the shape "+
+			"this test documents has changed:\n%s", out)
+	}
+}

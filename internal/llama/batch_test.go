@@ -1183,8 +1183,8 @@ func TestEmptyPromptThroughThePagedPathIsRefused(t *testing.T) {
 // with Hidden 8 and token -1: off is -8 and off+Hidden is 0, which is in range.
 //
 // Prefill checks every token before calling this, so the function is unreachable with a bad
-// token through the public API -- TestPrefillRejectsTokensOutsideTheVocabulary covers that
-// path. This test asserts the second line of defence on its own, because the comment's
+// token through the public API -- TestPrefillRejectsATokenOutsideTheVocabulary covers that
+// path, and asserts the message names both the token and its index. This test asserts the second line of defence on its own, because the comment's
 // reasoning is what stops a future edit from "simplifying" the check into the broken form,
 // and nothing was holding the reasoning in place.
 func TestEmbedBatchGuardsTheTokenNotTheOffset(t *testing.T) {

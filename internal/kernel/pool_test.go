@@ -282,7 +282,7 @@ func itoa(v int) string {
 // same numbers as a parallel one, which is the whole point of the split being over
 // independent elements. It passed for a release while single-stream decode had quietly
 // become 2.2x slower, because splitting over rows left m = 1 with one worker. The
-// worker-count assertion in TestRunnerUsesWorkersBeyondTheRowCount is what closes that
+// predicate assertion in TestMatMulTransposedSplitsTheAxisThatHasWork is what closes that
 // gap; this test keeps the values honest.
 func TestRunnerSplitsShortAndWideProducts(t *testing.T) {
 	r := rand.New(rand.NewSource(21))

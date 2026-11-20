@@ -583,6 +583,13 @@ func TestGenerateRejectsNegativeMaxTokens(t *testing.T) {
 // happened. Driving every numeric flag through the same wrong value is what turns that into a
 // check: the next flag added to any of these commands either rejects negatives or fails here.
 //
+// A sweep is only as good as its list, and this one had a hole: serve --max-tokens was never
+// in it, and that flag accepted -5, which server.Config replaced with the 256-token default.
+// Nothing failed, because the internal/server test that says "every command in cmd/orbix
+// refuses a negative --max-tokens" is a comment rather than a check. The lesson is worth more
+// than the row: the list is written by hand, so a command gaining a flag does not add itself,
+// and the comment asserting the property is what made the gap invisible.
+//
 // The assertion is deliberately on the message naming the flag, because an error from opening
 // the model would also be non-nil and would say nothing about the flag.
 func TestEveryNumericFlagRefusesNegatives(t *testing.T) {
@@ -618,6 +625,9 @@ func TestEveryNumericFlagRefusesNegatives(t *testing.T) {
 		{"serve --max-queued", func() error {
 			return cmdServe([]string{"--model", "unused.gguf", "--max-queued", "-1"})
 		}, "--max-queued"},
+		{"serve --max-tokens", func() error {
+			return cmdServe([]string{"--model", "unused.gguf", "--max-tokens", "-1"})
+		}, "--max-tokens"},
 		{"serve --workers", func() error {
 			return cmdServe([]string{"--model", "unused.gguf", "--workers", "-1"})
 		}, "--workers"},

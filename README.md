@@ -848,6 +848,15 @@ never published to the index, and `--prefix-cache` would reuse nothing while sti
 itself on. `serve`, `chat`, and `bench` all refuse that combination rather than start; the
 default of 16 is safe for any model with a context of 16 or more.
 
+`--max-tokens` is the one flag whose accepted range differs by command, and the difference is
+not arbitrary. `run` accepts 0, which prefills and prints nothing -- one command, and the
+absence of output is the result. `serve`, `chat`, and `bench` refuse 0: the server cannot
+express a request for zero tokens at all (a request's `max_tokens` is an integer, so 0 is
+indistinguishable from the field being absent and takes the server's default), a REPL turn that
+generates nothing answers with an empty line, and a benchmark of zero generated tokens is not a
+measurement. None of them accepts a negative value, which every other numeric flag on these
+commands refuses too.
+
 A config file is on the roadmap, not in the code: the interface block at the top of
 this file describes the target, and this table describes what exists.
 

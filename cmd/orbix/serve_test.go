@@ -297,6 +297,24 @@ func TestServeRejectsFlagCombinationsThatCannotWork(t *testing.T) {
 			want: "at least 1",
 			why:  "a round that can hold nothing accepts requests it will never advance",
 		},
+		{
+			name: "negative default budget",
+			args: []string{"--max-tokens", "-5"},
+			want: "--max-tokens",
+			why:  "server.Config replaces anything <= 0 with 256, so -5 became a 256-token default",
+		},
+		{
+			name: "zero default budget",
+			args: []string{"--max-tokens", "0"},
+			want: "--max-tokens",
+			why:  "a request's max_tokens 0 is indistinguishable from an absent field, so the default cannot be zero",
+		},
+		{
+			name: "unknown policy",
+			args: []string{"--policy", "bogus"},
+			want: "bogus",
+			why:  "the name was parsed after the checkpoint loaded, so a typo cost a full model load",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

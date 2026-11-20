@@ -36,12 +36,17 @@ func resolveModel(fs *flag.FlagSet, model *string) error {
 
 // maxTokensFlag registers --max-tokens with the one wording every command shares.
 //
-// run accepts 0, which prefills and generates nothing; bench refuses it, because a
-// measurement of zero generated tokens is not a measurement. The shared wording says so
-// rather than leaving the two commands to be discovered to disagree.
+// The commands do not all accept the same values, and the wording says which is which rather
+// than leaving them to be discovered to disagree: run accepts 0, which prefills and generates
+// nothing; bench refuses it, because a measurement of zero generated tokens is not a
+// measurement; serve and chat refuse it too, and for a different reason in each -- the server
+// cannot express a request for zero tokens at all, and a REPL turn that generates nothing is
+// an empty reply. The wording names the two that accept a value the others refuse; the
+// refusals carry their own explanations in the error, which is where a reader can act on them.
 func maxTokensFlag(fs *flag.FlagSet, def int) *int {
 	return fs.Int("max-tokens", def,
-		"cap on generated tokens, not counting the prompt; run accepts 0 (prefill only), bench needs 1 or more")
+		"cap on generated tokens, not counting the prompt; run accepts 0 (prefill only) and "+
+			"bench, serve and chat need 1 or more")
 }
 
 // cacheFlags are the paged-cache settings several commands share.

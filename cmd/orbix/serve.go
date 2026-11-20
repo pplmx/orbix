@@ -111,6 +111,31 @@ func cmdServe(args []string) error {
 	if *maxQueued < 0 {
 		return fmt.Errorf("serve: --max-queued must not be negative (0 means 8x --max-active)")
 	}
+	// The budget reaches server.Config, which replaces anything <= 0 with 256. So a negative
+	// value here is not "generate nothing" -- it is a server that hands every request which
+	// omits max_tokens the 256-token default, and reports the reply as ordinary. Measured
+	// against the 256-position fixture: `serve --max-tokens -5` started, answered a request
+	// with no max_tokens field, and returned 253 tokens with finish_reason "length".
+	//
+	// Zero is refused for the same reason, and this is where serve's meaning of zero differs
+	// from run's. run accepts 0 because it generates once into its own output, where "prefill
+	// only" is observable; the server cannot express a zero-token request, because max_tokens
+	// is an int in the request body and 0 is indistinguishable from the field being absent.
+	// Accepting the flag at 0 therefore configures a default no client can observe, which is
+	// the silent substitution this check exists to prevent rather than a budget of zero.
+	if *maxTokens < 1 {
+		return fmt.Errorf("serve: --max-tokens must be at least 1; it is the default for " +
+			"requests that send no max_tokens, and the server cannot express a zero-token " +
+			"request (a request's 0 is indistinguishable from an absent field)")
+	}
+	// The policy name is parsed here rather than after the model is opened, where it used to
+	// be: a typo cost a full checkpoint load first, and the error then arrived from
+	// engine.New rather than naming the flag. ParsePriority has no dependency on the model, so
+	// there is nothing to gain by checking it late; schedPolicy below is reused as-is.
+	schedPolicy, err := engine.ParsePriority(*policy)
+	if err != nil {
+		return err
+	}
 	if *prefixCache && *cache.blocks == 0 {
 		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
 			"optionally --block-size), or drop --prefix-cache")
@@ -148,10 +173,6 @@ func cmdServe(args []string) error {
 		return err
 	}
 	tok, err := tokenize.New(gf)
-	if err != nil {
-		return err
-	}
-	schedPolicy, err := engine.ParsePriority(*policy)
 	if err != nil {
 		return err
 	}

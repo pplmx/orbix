@@ -56,11 +56,20 @@ func cmdChat(args []string) error {
 	if *topP < 0 || *topP > 1 {
 		return fmt.Errorf("chat: --top-p must be between 0 and 1 (0 disables it)")
 	}
-	// The engine refuses this too, but only when a turn is submitted -- so the user typed a
-	// question, waited for the model to load, and then read an error about the flag. Checking
-	// it here reports it before the session starts.
-	if *maxTokens < 0 {
-		return fmt.Errorf("chat: --max-tokens must not be negative")
+	// The engine refuses a negative budget too, but only when a turn is submitted -- so the
+	// user typed a question, waited for the model to load, and then read an error about the
+	// flag. Checking it here reports it before the session starts.
+	//
+	// Zero is refused as well, which is where chat parts company with run. The engine accepts
+	// 0 as "no tokens" and finishes the sequence immediately, so a REPL with --max-tokens 0
+	// runs a whole session that answers every question with an empty line: measured against
+	// the fixture, a turn printed nothing between the prompt and the next "> ", and /stats
+	// then reported "tokens: 0 generated" as though that were a served turn. run's zero is
+	// observable -- it is one command that prefills and prints nothing -- while here it is a
+	// session that appears broken.
+	if *maxTokens < 1 {
+		return fmt.Errorf("chat: --max-tokens must be at least 1; a turn that generates " +
+			"nothing would answer every question with an empty line")
 	}
 
 	return chatSession(os.Stdin, os.Stdout, chatOptions{

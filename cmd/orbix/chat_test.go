@@ -305,6 +305,42 @@ func TestChatUsageErrors(t *testing.T) {
 	}
 }
 
+// TestChatRefusesABudgetThatGeneratesNothing covers the value chat accepts but cannot serve.
+//
+// The engine treats MaxTokens 0 as "no tokens" and finishes the sequence as soon as its
+// prompt is prefilled, so a session started with --max-tokens 0 ran to completion and
+// answered every question with an empty line: measured against the fixture, one turn printed
+// nothing between the "> " prompt and the next one, and /stats then reported "tokens: 0
+// generated" as if a turn had been served. Nothing failed, which is what made it a silent
+// misconfiguration rather than a bug report.
+//
+// The refusal is asserted on the flag's name and on the boundary, since the boundary is the
+// part an edit could move: 1 still has to start a session.
+func TestChatRefusesABudgetThatGeneratesNothing(t *testing.T) {
+	t.Run("zero is refused", func(t *testing.T) {
+		err := cmdChat([]string{"--model", "unused.gguf", "--max-tokens", "0"})
+		if err == nil {
+			t.Fatal("chat accepted --max-tokens 0, which answers every turn with nothing")
+		}
+		if !strings.Contains(err.Error(), "--max-tokens") {
+			t.Errorf("error %q does not name the flag", err)
+		}
+		if strings.Contains(err.Error(), "unused.gguf") {
+			t.Errorf("error %q came from opening the model, so the flag was not validated", err)
+		}
+	})
+
+	t.Run("one still starts a session", func(t *testing.T) {
+		// A real model, because the point is that 1 passes validation all the way into a
+		// session. The session is fed an immediate /exit so nothing is generated.
+		opts := chatOptions{model: chatModel(t), maxTokens: 1, topK: 40}
+		out := runChat(t, opts, "/exit\n")
+		if !strings.Contains(out, "orbix chat:") {
+			t.Errorf("--max-tokens 1 did not start a session:\n%s", out)
+		}
+	})
+}
+
 // TestChatAliasesEndTheSession checks the three spellings that mean "stop".
 //
 // They share one case in the switch, so the risk is not that one is implemented

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"slices"
 	"strconv"
 	"strings"
@@ -2832,5 +2833,58 @@ func TestStatsPoolFieldsComeFromThePoolLock(t *testing.T) {
 	case msg := <-bad:
 		t.Error(msg)
 	default:
+	}
+}
+
+// TestStatsConserveRequestsUnderRandomInterleaving covers the accounting identity that ties
+// the three request gauges together, checked while submits and rounds interleave randomly.
+//
+// The existing Stats tests each pin one field: queued is never negative, the pool gauges stay
+// in range, only rounds that did work are counted. None asserts the relation between them, and
+// that is the one a dashboard actually relies on -- every accepted request is in exactly one
+// of finished, active or queued. A leak in any of the three paths that move a sequence shows
+// up here as a sum that drifts, and it shows up only when the interleaving is unpredictable:
+// a scripted sequence of submits and pumps matches by construction, because the test author
+// wrote the transitions in the order the code expects.
+//
+// The check runs after every step rather than at the end, so the step that breaks it is the
+// one reported.
+func TestStatsConserveRequestsUnderRandomInterleaving(t *testing.T) {
+	e, tok := loadModel(t)
+	rng := rand.New(rand.NewSource(42))
+	prompt := tok.Encode("Once upon a time", false)
+
+	// A fixed number of steps makes a failure reproducible from this seed alone.
+	for step := range 300 {
+		switch rng.Intn(3) {
+		case 0:
+			// Submissions are expected to fail sometimes: the queue is bounded, and that is
+			// part of what the accounting has to survive.
+			if ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2}); err == nil {
+				go func() {
+					for range ch {
+					}
+				}()
+			}
+		case 1:
+			e.Pump()
+		default:
+			e.Pump()
+			e.Pump()
+		}
+
+		st := e.Stats()
+		if st.RequestsFinished > st.RequestsSubmitted {
+			t.Fatalf("step %d: finished %d exceeds submitted %d",
+				step, st.RequestsFinished, st.RequestsSubmitted)
+		}
+		if st.Active < 0 || st.Queued < 0 {
+			t.Fatalf("step %d: negative gauge: active %d, queued %d", step, st.Active, st.Queued)
+		}
+		// The identity: every accepted request is finished, active, or queued.
+		if got := st.RequestsFinished + uint64(st.Active) + uint64(st.Queued); got != st.RequestsSubmitted {
+			t.Fatalf("step %d: finished %d + active %d + queued %d = %d, want submitted %d",
+				step, st.RequestsFinished, st.Active, st.Queued, got, st.RequestsSubmitted)
+		}
 	}
 }

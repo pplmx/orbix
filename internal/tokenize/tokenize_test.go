@@ -705,3 +705,59 @@ func TestNewRejectsParallelArraysOfTheWrongLength(t *testing.T) {
 		}
 	})
 }
+
+// TestEncodeAddsTheDummyPrefixUnconditionally pins a rule that looks wrong until it is
+// checked against SentencePiece itself.
+//
+// " hello" encodes to one more token than "hello", which reads like a doubled space: the
+// prefix function is conditional on `first` and nothing else, so a caller who wrote a leading
+// space appears to get a second one. It was checked against the reference implementation
+// rather than reasoned about -- sentencepiece 0.2.3, a BPE model trained with
+// add_dummy_prefix=True and remove_extra_whitespaces=False, gives
+//
+//	'hello'   -> ['▁hello']
+//	' hello'  -> ['▁', '▁hello']
+//	'  hello' -> ['▁', '▁', '▁hello']
+//
+// so the prefix is unconditional there too, and the extra piece is the caller's own space
+// standing alone. The counts are asserted rather than the ids because the ids belong to the
+// fixture vocabulary; the property is that each additional leading space costs one token.
+//
+// A run of spaces on its own follows the same rule and is the case that makes it obvious:
+// n spaces encode to n+1 pieces, all of them the marker.
+func TestEncodeAddsTheDummyPrefixUnconditionally(t *testing.T) {
+	tok := newTestTokenizer(t)
+	if !tok.addSpacePrefix {
+		t.Skip("this fixture does not use a SentencePiece vocabulary")
+	}
+
+	// One token per character of "hello" plus the prefix.
+	base := len(tok.Encode("hello", false))
+	for _, c := range []struct {
+		text  string
+		extra int
+	}{
+		{"hello", 0},
+		{" hello", 1},
+		{"  hello", 2},
+		{"   hello", 3},
+	} {
+		got := len(tok.Encode(c.text, false))
+		if got != base+c.extra {
+			t.Errorf("Encode(%q) is %d tokens, want %d (%d + %d leading-space pieces)",
+				c.text, got, base+c.extra, base, c.extra)
+		}
+	}
+
+	// A string of nothing but spaces: every one is its own piece after the prefix.
+	for _, n := range []int{1, 2, 5} {
+		text := strings.Repeat(" ", n)
+		if got := len(tok.Encode(text, false)); got != n+1 {
+			t.Errorf("Encode(%d spaces) is %d tokens, want %d", n, got, n+1)
+		}
+		// And the round trip still returns exactly what was written, prefix included.
+		if back := tok.Decode(tok.Encode(text, false)); back != text {
+			t.Errorf("Decode(Encode(%q)) = %q", text, back)
+		}
+	}
+}

@@ -138,8 +138,11 @@ func TestPagedCacheFreesOnReset(t *testing.T) {
 	if got := pool.Free(); got != free-2 {
 		t.Errorf("free after 5 positions = %d, want %d", got, free-2)
 	}
-	if got := c.BlocksHeld(); got == 0 {
-		t.Error("cache holds no blocks after appending")
+	// Two, the same number the free list just lost. Asserting only "not zero" would pass for a
+	// cache that held one block or three, and the count is what the prefix index publishes
+	// from -- a cache holding the wrong number of blocks remembers the wrong span.
+	if got := c.BlocksHeld(); got != 2 {
+		t.Errorf("cache holds %d blocks after 5 positions with block size 4, want 2", got)
 	}
 	if err := c.Reset(); err != nil {
 		t.Fatalf("Reset: %v", err)

@@ -1107,3 +1107,88 @@ func TestLooksByteLevel(t *testing.T) {
 		t.Error("markers past the scan limit were seen, so the bound is not 4096")
 	}
 }
+
+// TestNewValidatesMergeEntries covers the one format rule the merge list has.
+//
+// Each entry is "left right", split on the FIRST space. That detail is what makes a real
+// byte-level vocabulary work: its first merges are pieces that are themselves spaces, so an
+// entry reads "Ġ Ġ" and both halves are the escaped space. Splitting on the last space, or
+// on every space, would reject or misread the entries that matter most.
+//
+// A malformed entry is reported rather than skipped, and the comment says why: a vocabulary
+// missing one rule tokenizes differently, so ignoring it produces subtly wrong text with no
+// error anywhere.
+func TestNewValidatesMergeEntries(t *testing.T) {
+	build := func(entries []string) *gguf.File {
+		arr := make([]gguf.Value, len(entries))
+		for i, e := range entries {
+			arr[i] = gguf.Value{Type: gguf.TypeString, Str: e}
+		}
+		return &gguf.File{Metadata: map[string]gguf.Value{
+			"tokenizer.ggml.tokens": {Type: gguf.TypeArray, Array: []gguf.Value{
+				{Type: gguf.TypeString, Str: "a"},
+				{Type: gguf.TypeString, Str: "b"},
+			}},
+			"tokenizer.ggml.merges": {Type: gguf.TypeArray, Array: arr},
+		}}
+	}
+
+	t.Run("a piece may itself be a space", func(t *testing.T) {
+		// The real first merge of a byte-level vocabulary. A loader that split on the last
+		// space or required exactly two non-empty halves would reject it.
+		tok, err := New(build([]string{"\u0120 \u0120"}))
+		if err != nil {
+			t.Fatalf("New rejected a merge between two space pieces: %v", err)
+		}
+		if _, ok := tok.merges["\u0120\x00\u0120"]; !ok {
+			t.Errorf("the entry was not stored under its two pieces: %v", tok.merges)
+		}
+	})
+
+	t.Run("the split is on the first space", func(t *testing.T) {
+		// "a b c" is read as left "a" and right "b c", not as a malformed entry.
+		tok, err := New(build([]string{"a b c"}))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, ok := tok.merges["a\x00b c"]; !ok {
+			t.Errorf("the right piece should be everything after the first space: %v", tok.merges)
+		}
+	})
+
+	for _, c := range []struct {
+		name  string
+		entry string
+	}{
+		{"no separator", "ab"},
+		{"empty left", " b"},
+		{"empty right", "a "},
+		{"only a separator", " "},
+		{"empty entry", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := New(build([]string{c.entry}))
+			if err == nil {
+				t.Fatalf("New accepted the merge entry %q", c.entry)
+			}
+			// The message must carry the entry and its position: a vocabulary can have
+			// hundreds of thousands of these, and "a merge is malformed" would leave the
+			// reader searching.
+			for _, want := range []string{"merge 0", c.entry} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not state %q", err, want)
+				}
+			}
+		})
+	}
+
+	t.Run("the position is the rank", func(t *testing.T) {
+		_, err := New(build([]string{"a b", "c d", "broken"}))
+		if err == nil {
+			t.Fatal("New accepted a malformed third entry")
+		}
+		if !strings.Contains(err.Error(), "merge 2") {
+			t.Errorf("error %q does not name the entry's position", err)
+		}
+	})
+}

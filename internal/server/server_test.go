@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -225,6 +226,16 @@ func TestMaxBodyBytesScalesWithContext(t *testing.T) {
 		{ctx: 64, want: 1 << 20, why: "a tiny context still gets the 1 MiB floor"},
 		{ctx: 1000, want: 1 << 20, why: "48 KB is below the floor"},
 		{ctx: 131072, want: 131072 * 48, why: "a 128k context allows 6 MiB of text"},
+		// The multiplication is int64 and ContextLen is a header field, so the product can
+		// overflow. Measured: MaxInt64/48+1 wraps negative and lands on the floor below, which
+		// is the right answer by accident rather than by construction -- the floor catches it,
+		// not the arithmetic. Recorded here so that removing or inverting the floor shows up
+		// as a change in this row rather than as a silently tiny limit.
+		//
+		// Unreachable from a file: LoadConfig refuses a non-positive context length, and the
+		// overflow needs 1.9e17 positions. This is the guard's behaviour, not a served path's.
+		{ctx: math.MaxInt64/48 + 1, want: 1 << 20, why: "an overflowing product falls to the floor"},
+		{ctx: math.MaxInt, want: 1 << 20, why: "the same at the extreme"},
 	}
 	for _, c := range cases {
 		srv := &Server{cfg: Config{ContextLen: c.ctx}}

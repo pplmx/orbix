@@ -890,3 +890,87 @@ func lineAt(s string, n int) string {
 	}
 	return lines[n-1]
 }
+
+// TestMetricsCountPoolRefusals covers the counter that had no test at all.
+//
+// refused_queue_full_total is exercised by TestMetricsCountRefusedRequests, which also asserts
+// the pool counter does not move for a backlog refusal. The reverse -- that a pool refusal is
+// counted, and is not also counted as a backlog refusal -- was never checked: the only
+// reference to the pool counter in the whole test tree was an assertion that it was zero.
+//
+// The two causes are separate and a client acts on them differently, but they are easy to
+// conflate: both are reported as 503 with Retry-After, and both come from the same handler.
+// A prompt that needs more blocks than the pool holds is refused before submission with a 400,
+// so reaching the 503 requires enough concurrent sequences that they run out while running --
+// four active requests against a five-block pool, where each needs a block as it generates.
+func TestMetricsCountPoolRefusals(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	// Four sequences may run at once and each takes a block per position-block as it
+	// generates, so a five-block pool cannot satisfy them all.
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 4, MaxQueued: 4, Blocks: 5, BlockSize: 4, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pumpCtx, stopPump := context.WithCancel(context.Background())
+	t.Cleanup(stopPump)
+	srv.StartPump(pumpCtx)
+
+	before := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_pool_total")
+
+	// Four blocking requests issued together: they are admitted (the pool is large enough for
+	// one at a time) and then compete for blocks while generating.
+	const concurrent = 4
+	statuses := make([]int, concurrent)
+	var wg sync.WaitGroup
+	for i := range concurrent {
+		wg.Go(func() {
+			// The budget is small on purpose: a request needing more blocks than the pool
+			// holds is refused before submission with a 400, and this test needs it to be
+			// admitted and then lose the race for blocks while running.
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Once upon a time", "max_tokens": 6}`)
+			statuses[i] = resp.StatusCode
+			_ = resp.Body.Close()
+		})
+	}
+	wg.Wait()
+
+	refused := 0
+	for _, code := range statuses {
+		if code == http.StatusServiceUnavailable {
+			refused++
+		}
+	}
+	if refused == 0 {
+		t.Fatalf("all %d requests returned %v: the pool never ran out, so this run says "+
+			"nothing about the counter", concurrent, statuses)
+	}
+
+	after := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_pool_total")
+	if got := after - before; got != float64(refused) {
+		t.Errorf("pool refusals rose by %v, want %d (one per 503)", got, refused)
+	}
+	// The other counter must not have absorbed any of them.
+	if got := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_queue_full_total"); got != 0 {
+		t.Errorf("queue-full refusals = %v after pool refusals, want 0: the two causes are "+
+			"separate and a client treats them differently", got)
+	}
+}

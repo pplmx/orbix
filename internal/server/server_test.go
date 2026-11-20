@@ -4005,3 +4005,41 @@ func TestStartPumpIsIdempotent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestStartPumpAfterShutdownDoesNothing pins what the once means for a stopped server.
+//
+// Making StartPump idempotent raised the question of what it does after Shutdown, and the
+// answer has to be "nothing". The pump exits on a closed stop channel, so a goroutine
+// started afterwards would return on its first iteration -- that is not a failure to
+// restart, it is the absence of a restart API. Without this test, a caller whose sequence
+// is Shutdown followed by StartPump gets no error either way, so nothing would distinguish
+// "the server is running again" from "the call did nothing".
+//
+// This test has no discriminating power against removing the once, and says so rather than
+// implying otherwise: with the guard gone the second start also returns immediately and also
+// does not panic, because the goroutine it spawns exits on the already-closed stop channel.
+// What catches that mutation is TestStartPumpIsIdempotent, whose concurrent requests give the
+// extra pump something to race on. This test is here for the reader -- it records that the
+// once makes a stopped server inert, which is the behaviour a caller could otherwise expect
+// to be a restart.
+func TestStartPumpAfterShutdownDoesNothing(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 128})
+	srv.Shutdown()
+
+	// Must return, not block waiting for a pump that will never run.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.StartPump(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartPump blocked after Shutdown")
+	}
+
+	// Callable again without panicking: the once absorbs it rather than closing a closed
+	// channel or spawning a goroutine that would exit immediately.
+	srv.StartPump(context.Background())
+	srv.Shutdown()
+}

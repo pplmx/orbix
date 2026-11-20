@@ -251,6 +251,11 @@ func (s *Server) run(ctx context.Context) {
 // StartPump starts the goroutine that advances the engine. Calling it twice is a no-op
 // rather than a second pump: the engine may have only one goroutine inside Pump, and two
 // would race on the sequence fields it writes there.
+//
+// The once also means StartPump after Shutdown does nothing. That is not a restart API and
+// cannot become one without recreating the stop channel: the pump exits when stop closes,
+// so a goroutine started afterwards would return on its first iteration. A server is
+// started once and shut down once; rebuilding one means a new Server.
 func (s *Server) StartPump(ctx context.Context) {
 	s.pumpOnce.Do(func() {
 		s.wg.Add(1)

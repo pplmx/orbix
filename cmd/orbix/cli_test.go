@@ -53,6 +53,13 @@ func TestRunNoArgsPrintsUsage(t *testing.T) {
 func TestCommandHelpIsNotAFailure(t *testing.T) {
 	// Every command that has its own flag set. `version` and `help` are absent because they
 	// handle -h themselves and never reach the flag package; they are covered below.
+	//
+	// What this does not need to cover is whether the help text lists the flags the command
+	// accepts: the text is flag.PrintDefaults', generated from the same FlagSet that does the
+	// parsing, so the two cannot disagree unless someone stops using the package. Checked by
+	// hand when this test was extended -- run 10 flags, chat 10, serve 12, bench 11, each
+	// matching its own registrations plus the shared ones in flags.go -- and the only way to
+	// break the property is to hand-write a usage line, which is why there is no test for it.
 	commands := [][]string{
 		{"run", "-h"},
 		{"chat", "-h"},

@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -104,4 +105,77 @@ func TestSpansOfZeroRowsIsEmptyNotAPanic(t *testing.T) {
 		t.Errorf("spans(1 row) returned %d keys and %d values, want one each",
 			len(keys), len(values))
 	}
+}
+
+// TestNewKVCacheRejectsAnUnaddressableOrUnavailableSize covers the two size guards.
+//
+// Both exist so a corrupt file produces a message instead of a crash or a swap storm, and
+// neither had a test: the only size test here covered nCtx <= 0, and the pool's equivalent
+// guards were tested while the contiguous cache's were not.
+//
+// The first guard bounds the byte count, not the element count, and its comment explains
+// why: make() refuses a length whose size overflows, and a float32 slice of 2^62 elements is
+// four times that in bytes, so checking elements alone lets a length through that the runtime
+// panics on. The multiplication is done in int64 from the parts for the same reason --
+// cfg.kvDim() multiplies two ints and can wrap before the guard sees it.
+//
+// The second compares against available memory. Its hook is the same one the pool's tests
+// use, because the real figure depends on the machine and a test that read it would either
+// assert nothing or fail on a different host.
+func TestNewKVCacheRejectsAnUnaddressableOrUnavailableSize(t *testing.T) {
+	t.Run("a byte count that would overflow", func(t *testing.T) {
+		// Narrow enough to be expressible, deep enough that the product overflows: with
+		// 2^31-1 values per position per layer, the bound MaxInt64/kvDim/4 is under 2^31,
+		// so a 2^31-position request crosses it. Measured, nCtx = 2^31 is refused here and
+		// nCtx = 1 is accepted, which is what makes this the byte guard rather than a
+		// mis-sized config.
+		cfg := Config{Layers: 1, KVHeads: 1, HeadDim: math.MaxInt32}
+		_, err := NewKVCache(cfg, 1<<31)
+		if err == nil {
+			t.Fatal("NewKVCache accepted a size whose byte count cannot be addressed")
+		}
+		if !strings.Contains(err.Error(), "too large to address") {
+			t.Errorf("error %q does not say the size cannot be addressed", err)
+		}
+		// The message names both factors rather than the byte count, which would be the value
+		// that overflowed. Asserting them keeps a future edit from "improving" it into a
+		// negative number.
+		if strings.Contains(err.Error(), "GiB") {
+			t.Errorf("error %q prints a byte count, which is the value that overflows", err)
+		}
+	})
+
+	t.Run("more than the machine reports available", func(t *testing.T) {
+		old := availableMemoryHook
+		t.Cleanup(func() { availableMemoryHook = old })
+		availableMemoryHook = func() int64 { return 1 << 30 } // 1 GiB
+
+		// Small enough to address, large enough to exceed the reported budget:
+		// 8192 positions x 8192 values x 4 bytes x 2 x 1 layer = 512 MiB... doubled by the
+		// layers below to cross 1 GiB.
+		cfg := Config{Layers: 4, KVHeads: 8, HeadDim: 1024}
+		_, err := NewKVCache(cfg, 8192)
+		if err == nil {
+			t.Fatal("NewKVCache allocated more than the reported available memory")
+		}
+		if !strings.Contains(err.Error(), "GiB is available") {
+			t.Errorf("error %q does not name the budget", err)
+		}
+		if !strings.Contains(err.Error(), "context length in the file") {
+			t.Errorf("error %q does not say the file asked for it", err)
+		}
+	})
+
+	t.Run("a budget of zero skips the check", func(t *testing.T) {
+		// The guard is skipped when the kernel cannot say: refusing a legitimate model because
+		// the estimate was unavailable would be the worse mistake.
+		old := availableMemoryHook
+		t.Cleanup(func() { availableMemoryHook = old })
+		availableMemoryHook = func() int64 { return 0 }
+
+		cfg := Config{Layers: 1, KVHeads: 1, HeadDim: 4}
+		if _, err := NewKVCache(cfg, 8); err != nil {
+			t.Errorf("NewKVCache refused a small cache when the budget was unknown: %v", err)
+		}
+	})
 }

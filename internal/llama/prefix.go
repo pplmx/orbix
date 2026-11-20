@@ -63,8 +63,15 @@ type prefixEntry struct {
 //
 // The index costs a hash map entry per remembered block, which is tiny next to the
 // block itself, but an unbounded map is still a leak in a server that runs for
-// weeks. The bound is generous: at the default 16 positions per block this
-// remembers a 16384-token prefix, longer than any context this engine supports.
+// weeks. At the default 16 positions per block the bound covers a 16384-token
+// prefix.
+//
+// That figure used to be described here as "longer than any context this engine
+// supports", which is not true: ContextLen comes from the file and LoadConfig puts
+// no ceiling on it, so a model trained at 128k is accepted and its second half of
+// the prefix simply stops being remembered. The cost is a hit rate rather than
+// correctness -- a miss re-runs the prefill -- so the bound is still the right
+// trade, and saying what it actually covers is what makes it checkable.
 const maxPrefixEntries = 1024
 
 // NewPrefixIndex returns an empty index over pool.

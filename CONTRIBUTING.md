@@ -51,11 +51,12 @@ Run `prek install` once to make the hooks fire on every commit; it writes shims 
 
 ## Fuzzing
 
-`just fuzz` searches rather than gates. Six targets cover the paths that read untrusted bytes:
-the GGUF container, the quantization decoders, the chat template parser, and the tokenizer's
-pre-split and decode. Each keeps a seed corpus that `go test` replays on every run, so a crash
-found once stays fixed; reading a file is the one thing here that runs on input someone else
-produced, and a panic during it takes the process down rather than returning an error.
+`just fuzz` searches rather than gates. Six targets cover the paths that take input this
+project did not produce: the GGUF container, the quantization decoders, the chat template
+parser, and the tokenizer's pre-split, decode, and encode/decode round trip. Each keeps a seed
+corpus that `go test` replays on every run, so a crash found once stays fixed; reading a file or
+a user's text is the part that runs on someone else's input, and a panic during it takes the
+process down rather than returning an error.
 
 ## Constraints CI enforces
 

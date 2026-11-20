@@ -685,13 +685,15 @@ curl -sSL -o /tmp/stories15M-q4_0.gguf \
   https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf
 ```
 
-The gates take the suite from seventeen skipped tests to none, so a machine holding the
+The gates take the suite from fifteen skipped tests to none, so a machine holding the
 checkpoints can check every claim the project makes. Both numbers are observable in the run
-itself -- `go test ./... -v | grep -c '^--- SKIP'` reads 17 with no checkpoint on disk and 0 with
+itself -- `go test ./... -v | grep -c '^--- SKIP'` reads 15 with no checkpoint on disk and 0 with
 all four set -- which is why they are named here instead of a test total: the count of tests
 changes with every commit and nothing can pin it, while the skip count is a property of the
-gating. That does not make it immutable: adding a gated test raises the first number, and this
-sentence has been wrong twice for exactly that reason. Re-measure it rather than trusting it.
+gating. That does not make it immutable: adding a gated test raises the first number, removing a
+gate that was never needed lowers it, and this sentence has now been wrong three times for
+exactly those reasons. Re-measure it rather than trusting it; the last correction was two gates
+that skipped without needing a checkpoint at all, because the tests drove the fixture.
 
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \

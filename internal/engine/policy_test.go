@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -571,12 +570,12 @@ func TestPriorityDoesNotChangeOutput(t *testing.T) {
 // carrying the fields an operator needs: the model, the token counts, the finish reason,
 // and the split between prefill and decode. Without this the tracing path could be wired
 // up but empty, which no compile error would catch.
+//
+// It used to skip without MODEL, although the engine it drives comes from loadEngine --
+// which is the fixture -- so the gate guarded nothing. The trace fields it asserts are
+// counts and names computed from the request, not values that depend on a trained
+// checkpoint, and every test beside it already ran on the fixture.
 func TestTracingRecordsRequestSpans(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
-
 	type captured struct {
 		count int
 		body  []byte

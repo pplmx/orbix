@@ -745,14 +745,16 @@ func TestRunSeedOnlyMattersWithTemperature(t *testing.T) {
 // whose prompt was too short to fill a block looked identical to one where the cache was broken.
 // --suite has always reported the number for its reuse pair; this is the single-run path.
 //
-// Gated on MODEL because the figures only exist once real weights have prefilled something.
+// It used to be gated on MODEL, on the reasoning that the figures only exist once real weights
+// have prefilled something. That is not what the gate did: the fixture's weights are as real as
+// any checkpoint's as far as block reuse is concerned, because reuse counts prompt positions
+// attached from the prefix index and never looks at a value. Measured on the fixture with the
+// prompt below: 784 positions reused. The gate therefore skipped, in CI, the only test of the
+// line this test exists for.
 func TestBenchReportsPrefixReuse(t *testing.T) {
-	path := os.Getenv("MODEL")
-	if path == "" {
-		t.Skip("set MODEL to a GGUF file")
-	}
 	// Long enough to span more than one default 16-position block, which is the condition for
-	// anything to be shareable at all.
+	// anything to be shareable at all. The context has to hold it with room to generate.
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	longPrompt := strings.Repeat("word ", 24)
 
 	cases := []struct {

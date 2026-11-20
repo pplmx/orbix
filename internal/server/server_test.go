@@ -4343,3 +4343,62 @@ func TestBlockingResponseCarriesTheGeneratesTimestamp(t *testing.T) {
 		})
 	}
 }
+
+// TestNoCORSAccessControlHeadersIsPartOfTheTextPlainDecision covers the half of the
+// Content-Type tolerance that keeps it from being a bypass.
+//
+// decodeJSON accepts a body whatever Content-Type says, which is what makes `curl -d` work:
+// curl sets application/x-www-form-urlencoded rather than omitting the header. The cost,
+// stated in that function's comment, is that a cross-origin page can make the server generate
+// -- POST with text/plain is a "simple request" under the Fetch standard and skips the
+// preflight, so the request runs.
+//
+// What keeps the exposure from being worse is stated in the same comment as two further
+// facts: no Access-Control-Allow-Origin is ever sent, so the page cannot read the reply, and
+// OPTIONS answers 405, so an application/json request from a page never gets past the
+// preflight. Both are asserted here because both are load-bearing: adding a permissive CORS
+// header, or answering OPTIONS with the usual allowed-methods response, would turn the
+// documented tolerance into the bypass the comment says it is not -- and nothing else in the
+// suite would notice.
+func TestNoCORSAccessControlHeadersIsPartOfTheTextPlainDecision(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// A simple request, the shape a page can send without a preflight.
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		strings.NewReader(`{"prompt":"hi","max_tokens":1}`))
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Origin", "https://example.invalid")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the text/plain tolerance is the documented behaviour",
+			w.Code)
+	}
+	for _, header := range []string{
+		"Access-Control-Allow-Origin",
+		"Access-Control-Allow-Credentials",
+		"Access-Control-Allow-Methods",
+		"Access-Control-Allow-Headers",
+		"Access-Control-Expose-Headers",
+	} {
+		if got := w.Header().Get(header); got != "" {
+			t.Errorf("%s = %q on a cross-origin request; sending it would let the page read "+
+				"the reply, which is the limit the Content-Type comment relies on", header, got)
+		}
+	}
+
+	// And the preflight is refused, so an application/json request from a page stops here.
+	preflight := httptest.NewRequest(http.MethodOptions, "/v1/completions", nil)
+	preflight.Header.Set("Origin", "https://example.invalid")
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	pw := httptest.NewRecorder()
+	h.ServeHTTP(pw, preflight)
+	if pw.Code != http.StatusMethodNotAllowed {
+		t.Errorf("OPTIONS = %d, want 405: a successful preflight would let a cross-origin "+
+			"application/json request through", pw.Code)
+	}
+	if got := pw.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("the preflight response carries Access-Control-Allow-Origin %q", got)
+	}
+}

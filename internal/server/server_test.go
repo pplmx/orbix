@@ -4652,3 +4652,76 @@ func TestDisconnectReturnsTheBlocksToo(t *testing.T) {
 			before.PoolFree-after.PoolFree, before.PoolBlocks, before.PoolFree)
 	}
 }
+
+// TestBlockingDisconnectReturnsTheBlocksToo is the non-streaming counterpart of
+// TestDisconnectReturnsTheBlocksToo.
+//
+// The two paths cancel through different code: the streaming one notices a write error, the
+// blocking one sees its request context expire while it waits for the engine. Both end up in
+// the same finish, but only the streaming version of this test existed, and a change confined
+// to the blocking path -- a reader that returns without draining, a cancel channel that is not
+// forwarded -- would leak blocks with every other test still green.
+//
+// Measured with 32 blocks of 16 positions: the pool is whole again once the handler returns.
+func TestBlockingDisconnectReturnsTheBlocksToo(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 2048}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 2, BlockSize: 16, Blocks: 32, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.StartPump(context.Background())
+	t.Cleanup(srv.Shutdown)
+
+	before := eng.Stats()
+	if before.PoolBlocks != 32 {
+		t.Fatalf("the pool has %d blocks, want 32", before.PoolBlocks)
+	}
+
+	// A budget that fits the pool -- 32 blocks of 16 is 512 positions, and the prompt plus the
+	// budget must stay under that or Submit refuses with a 400 instead of running -- while
+	// still outlasting the cancel. No EOS in the fixture, so it cannot finish on its own.
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		strings.NewReader(`{"prompt": "Once upon a time", "max_tokens": 400}`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.Handler().ServeHTTP(rec, req)
+	}()
+	waitFor(t, 5*time.Second, func() bool { return eng.Active() > 0 },
+		"the request never reached the engine")
+	if used := before.PoolFree - eng.Stats().PoolFree; used == 0 {
+		t.Fatalf("no blocks were allocated while the request ran, so this run proves nothing")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the handler did not return after the client cancelled")
+	}
+	waitFor(t, 5*time.Second, func() bool { return eng.Stats().PoolFree == before.PoolFree },
+		"the pool did not return every block the cancelled request held")
+
+	if after := eng.Stats(); after.PoolFree != before.PoolFree {
+		t.Errorf("%d of %d blocks are still out after the cancel (was %d free)",
+			before.PoolFree-after.PoolFree, before.PoolBlocks, before.PoolFree)
+	}
+}

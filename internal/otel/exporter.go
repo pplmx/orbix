@@ -303,6 +303,13 @@ func partialSuccessRejected(body []byte) int {
 
 // Flush sends everything queued now. It is what a test or a one-shot command wants
 // instead of waiting for the interval.
+//
+// It keeps working after Close. Close stops the background sender and performs its own flush;
+// it does not disarm this method, so a span recorded afterwards is still deliverable by an
+// explicit Flush. Measured: Close, then Record, then Flush returned nil and the collector
+// received the span. That is deliberate rather than incidental -- the alternative would need
+// Record to start failing once closed, and a caller that records after a shutdown it did not
+// initiate would then lose spans silently instead of being able to send them.
 func (e *Exporter) Flush(ctx context.Context) error { return e.flush(ctx) }
 
 // Close flushes and stops the sender. It is safe to call more than once.

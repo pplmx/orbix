@@ -1506,3 +1506,35 @@ func TestSecondCloseReportsNoError(t *testing.T) {
 		t.Errorf("the second Close returned %v, want nil: the flush belongs to the first call", second)
 	}
 }
+
+// TestFlushStillWorksAfterClose pins the lifetime claim in Flush's comment.
+//
+// Close stops the background sender and does its own flush; it does not disarm Flush, so a
+// span recorded after Close is still deliverable by an explicit call. Verified against a
+// collector counting requests: none before, one after.
+//
+// The alternative -- Record failing once closed -- would make a caller that records after a
+// shutdown it did not initiate lose spans silently, with no way to send them.
+func TestFlushStillWorksAfterClose(t *testing.T) {
+	var received atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+	}))
+	defer srv.Close()
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	if err := exp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	before := received.Load()
+	exp.Record(testSpan(t, "after-close"))
+	if err := exp.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush after Close: %v", err)
+	}
+	if after := received.Load(); after <= before {
+		t.Errorf("the collector received %d requests before and %d after; the span was not delivered",
+			before, after)
+	}
+}

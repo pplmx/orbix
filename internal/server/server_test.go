@@ -4134,13 +4134,15 @@ func TestUsageIsPerRequestUnderConcurrency(t *testing.T) {
 // times, while 8 never did -- so the id now carries an atomic sequence number as well. The
 // failure is silent when it happens: two responses with the same id, no error anywhere.
 //
-// This test does NOT catch a return to the bare timestamp, and saying so is the point. Six
-// requests through the mux are spaced by routing and JSON decoding, far more than a
-// nanosecond, so reverting the fix still passes here -- verified by doing it and running the
-// test twenty times. What it does catch is the sequence number being dropped or made
-// constant, which is the mistake an edit to the format string would introduce. The
-// uniqueness of the timestamp alone cannot be tested at this level; TestIDCounterIsTheReason
-// covers the property that actually changed.
+// This test catches neither of the two ways the id can regress, and saying so is the point.
+// Six requests through the mux are spaced by routing and JSON decoding, far more than a
+// nanosecond, so a bare timestamp still produces distinct ids here -- and for the same reason
+// a constant sequence number does too, which was measured by making it constant and watching
+// this test pass. Both were verified that way rather than assumed.
+//
+// TestResponseIDStaysUniqueWithAFrozenClock covers the property that actually changed: it
+// holds the clock fixed and calls responseID directly, so the counter is the only thing that
+// can distinguish the ids.
 //
 // Kept to the admission limit so every request succeeds. A refused request has no id at all,
 // and counting those as duplicates would make this test measure the queue rather than the

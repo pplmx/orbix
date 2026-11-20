@@ -850,3 +850,63 @@ func TestPrefixIndexAccessorReportsWhetherReuseIsOn(t *testing.T) {
 		})
 	}
 }
+
+// TestEvictedPrefixNoLongerMatches covers the failure that eviction exists to prevent, from
+// the direction the existing tests do not look.
+//
+// TestPrefixIndexEvictsWhenPoolRunsShort checks that the pool survives the pressure, and
+// TestPrefixEvictionTakesTheTail checks that the remaining chain still matches. Neither asks
+// what happens to the prefix that lost its blocks: if evictTail deleted the order entry but
+// not the map entry -- or kept both and only released the block -- Match would still return
+// that block, which has since been handed to a different sequence and overwritten. The
+// symptom is not an error but wrong logits, and it appears only after enough traffic to evict.
+//
+// Measured with a four-block pool: a two-block prefix matches 16 positions and holds two
+// blocks free; after twelve unrelated prefills it matches nothing and one block is free.
+func TestEvictedPrefixNoLongerMatches(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 4, BlockSize: 8})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	idx := pool.EnablePrefixCache()
+
+	// Exactly two blocks, so the prefix is published and evictable on its own.
+	primed := fixtureTokens(cfg, 16)
+	c := pool.New()
+	if _, err := m.PrefillWithPrefix(c, primed, 0); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	if err := c.Reset(); err != nil {
+		t.Fatalf("reset after priming: %v", err)
+	}
+	n, blocks := idx.Match(primed)
+	if n != 16 {
+		t.Fatalf("the primed prefix matched %d positions, want 16; the setup did not publish it", n)
+	}
+	primedBlocks := append([]int32(nil), blocks...)
+
+	// Enough unrelated prefixes to drive the two blocks out of a four-block pool.
+	for i := range 12 {
+		cc := pool.New()
+		p := append([]int32{int32(200 + i)}, fixtureTokens(cfg, 16)...)
+		if _, err := m.PrefillWithPrefix(cc, p, 0); err != nil {
+			t.Fatalf("churn %d: %v", i, err)
+		}
+		// A reset error here would mean the pool's bookkeeping is already broken, which is a
+		// different defect from the one this test is about. Continue rather than fail so the
+		// assertion below is what reports a stale entry.
+		_ = cc.Reset()
+	}
+
+	if n, blocks := idx.Match(primed); n != 0 || len(blocks) != 0 {
+		t.Errorf("the evicted prefix still matches %d positions in blocks %v (it was %v); "+
+			"those blocks have been reused, so adopting them feeds another sequence's keys "+
+			"and values into this one", n, blocks, primedBlocks)
+	}
+}

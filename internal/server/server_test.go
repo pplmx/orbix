@@ -4043,3 +4043,74 @@ func TestStartPumpAfterShutdownDoesNothing(t *testing.T) {
 	srv.StartPump(context.Background())
 	srv.Shutdown()
 }
+
+// TestUsageIsPerRequestUnderConcurrency covers what the other usage tests cannot: that
+// each response's counts describe its own request.
+//
+// The existing three cover the arithmetic within one request -- streaming against
+// non-streaming, include_usage, and every token counted. None ran two requests at once, so a
+// counter stored per server rather than per sequence would pass all of them. That is the
+// shape this checks: eight requests at once, each with a distinct max_tokens, and every
+// response must report its own budget as completion_tokens. A shared counter would show a
+// larger number on whoever finished later and a smaller one on whoever finished first.
+//
+// The work happens in parallel with the pump, so a mismatch would also be a race -- but the
+// assertion here is on the values, which fails deterministically rather than only when the
+// detector happens to be watching.
+func TestUsageIsPerRequestUnderConcurrency(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	const requests = 8
+	type result struct {
+		budget, completion, total, prompt int
+		err                               string
+	}
+	results := make([]result, requests)
+
+	var wg sync.WaitGroup
+	for i := range requests {
+		wg.Go(func() {
+			budget := 1 + i
+			body := fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d}`, budget)
+			req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			var got struct {
+				Usage struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+					TotalTokens      int `json:"total_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				results[i] = result{budget: budget, err: err.Error()}
+				return
+			}
+			results[i] = result{
+				budget:     budget,
+				completion: got.Usage.CompletionTokens,
+				total:      got.Usage.TotalTokens,
+				prompt:     got.Usage.PromptTokens,
+			}
+		})
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.err != "" {
+			t.Errorf("budget %d: %s", r.budget, r.err)
+			continue
+		}
+		if r.completion != r.budget {
+			t.Errorf("budget %d reported completion_tokens = %d; the count belongs to another request",
+				r.budget, r.completion)
+		}
+		if r.total != r.prompt+r.completion {
+			t.Errorf("budget %d: total %d != prompt %d + completion %d",
+				r.budget, r.total, r.prompt, r.completion)
+		}
+	}
+}

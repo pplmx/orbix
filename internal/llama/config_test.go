@@ -1464,3 +1464,99 @@ func TestLoadConfigReadsRopeBaseAndScale(t *testing.T) {
 		}
 	})
 }
+
+// TestTemperatureTopPBounds pins the two documented no-op values for the nucleus threshold.
+//
+// TopP's doc says a value of zero or below disables it, and so does one at or above 1,
+// "because keeping every candidate is what happens without the limit". Three branches meet
+// there -- the nucleus call, the sort that only the nucleus path needs, and the plain walk --
+// and nothing tested either end: TopK=1 and Temp=0 had cases, the threshold did not.
+//
+// The property that has to hold is that no candidate is pruned. It is asserted through the
+// draw rather than by inspecting the candidate list, which the sampler does not expose: with
+// every candidate still present, a draw near 1 reaches a low-probability token, and with the
+// tail pruned it cannot. The draws also cover the case where the limit is implemented by
+// falling through to the nucleus path -- nucleus(p=1) keeps all five candidates here, so that
+// implementation is correct too, which is why this test asserts the outcome rather than which
+// branch produced it.
+func TestTemperatureTopPBounds(t *testing.T) {
+	logits := []float32{1, 5, 3, 2, 4}
+	const argmax = 1
+
+	// The control, and the threshold is chosen for its discrimination rather than its roundness:
+	// measured, nucleus(p=0.5) keeps one candidate on these logits and nucleus(p=0.7) keeps two
+	// ([1 4], the argmax and the next). A threshold of 0.5 cannot tell a real nucleus from one
+	// that always returns a single candidate, which is exactly the regression worth catching.
+	real := Temperature{Temp: 1, TopP: 0.7, NextFloat: func() float64 { return 0.5 }}
+	if got := real.Next(logits); got != argmax {
+		t.Fatalf("TopP=0.7 with a draw of 0.5 returned %d, want the argmax %d", got, argmax)
+	}
+	// With two candidates kept and a draw past the argmax's share, the second one has to win.
+	// A nucleus that kept only the argmax would return it here too.
+	real2 := Temperature{Temp: 1, TopP: 0.7, NextFloat: func() float64 { return 0.99 }}
+	if got := real2.Next(logits); got == argmax {
+		t.Errorf("TopP=0.7 kept only the argmax: a draw of 0.99 still returned %d, so the second "+
+			"candidate was pruned", got)
+	}
+
+	for _, topP := range []float32{0, -1, 1, 1.5} {
+		// A draw of nearly 1 must land on a token the nucleus would have pruned. With the
+		// threshold disabled that is reachable; with it applied it is not.
+		s := Temperature{Temp: 1, TopP: topP, NextFloat: func() float64 { return 0.999 }}
+		got := s.Next(logits)
+		if got < 0 || int(got) >= len(logits) {
+			t.Errorf("TopP=%v returned %d, outside the candidate range", topP, got)
+		}
+		if got == argmax {
+			t.Errorf("TopP=%v with a draw of 0.999 returned the argmax %d: the tail was pruned, "+
+				"so the threshold did not disable itself", topP, got)
+		}
+	}
+
+	// The other end of the draw, which is a different fact and easy to get wrong: with the
+	// limit off the candidates are NOT sorted, so the walk follows index order and a draw near
+	// zero returns candidate 0 -- the smallest logit, not the largest. That is the documented
+	// behaviour of a disabled limit (the sort exists only for the nucleus path), so this
+	// asserts it rather than the argmax. It is also what distinguishes the two no-op values
+	// from a pruning threshold: under TopP=0.5 the sort puts the argmax first and a near-zero
+	// draw returns it.
+	for _, topP := range []float32{0, 1} {
+		s := Temperature{Temp: 1, TopP: topP, NextFloat: func() float64 { return 0.0001 }}
+		if got := s.Next(logits); got != 0 {
+			t.Errorf("TopP=%v with a draw of 0.0001 returned %d, want candidate 0: with the limit "+
+				"disabled nothing is sorted, so the walk follows index order", topP, got)
+		}
+	}
+	// The control: the same draw under a real threshold returns the argmax, because the nucleus
+	// path sorts first.
+	pruned := Temperature{Temp: 1, TopP: 0.7, NextFloat: func() float64 { return 0.0001 }}
+	if got := pruned.Next(logits); got != argmax {
+		t.Errorf("TopP=0.7 with a draw of 0.0001 returned %d, want the argmax %d", got, argmax)
+	}
+}
+
+// TestTemperatureTopKOutOfRange covers the two values outside the useful range, both of which
+// must fall back to "no limit" rather than reject the request.
+//
+// The guard is `s.TopK > 0 && s.TopK < len(logits)`, so a TopK at or above the vocabulary size
+// keeps every candidate and a non-positive one does too. A slice taken without the second half
+// of that comparison would panic on the first, and the CLI passes the flag straight through:
+// `--top-k 999999` on a 32k vocabulary is a value a user can type.
+func TestTemperatureTopKOutOfRange(t *testing.T) {
+	logits := []float32{1, 5, 3, 2, 4}
+	for _, topK := range []int{-1, 0, 5, 6, 999999} {
+		s := Temperature{Temp: 1, TopK: topK, NextFloat: func() float64 { return 0.5 }}
+		got := s.Next(logits)
+		if got < 0 || int(got) >= len(logits) {
+			t.Errorf("TopK=%d returned %d, outside the vocabulary", topK, got)
+		}
+	}
+	// TopK=1 is the one value that must constrain the result, so it is checked separately to
+	// prove the loop above is not passing by accident.
+	for _, r := range []float64{0, 0.9, 0.999} {
+		s := Temperature{Temp: 1, TopK: 1, NextFloat: func() float64 { return r }}
+		if got := s.Next(logits); got != 1 {
+			t.Errorf("TopK=1 r=%v returned %d, want the argmax 1", r, got)
+		}
+	}
+}

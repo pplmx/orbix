@@ -3617,3 +3617,90 @@ func TestCutAtStopChoosesTheLeftmostMatch(t *testing.T) {
 		})
 	}
 }
+
+// TestDisconnectFreesTheSlotForTheNextRequest checks the half TestClientDisconnectStopsGeneration
+// leaves out.
+//
+// That test asserts the engine's active count returns to zero, which says the sequence left the
+// engine. It does not say the slot the request occupied is available again: a slot leaked
+// anywhere above the engine -- in the handler's admission path, in a semaphore, in the queue
+// bookkeeping -- would leave Active()==0 while the next request is refused or made to wait
+// forever. With MaxQueued at zero there is nowhere for a leaked slot to hide, and a second
+// request is the only thing that can tell the two states apart.
+//
+// Measured against the real server before this test existed: twenty disconnecting streaming
+// requests left submitted==finished==11 with active 0 and eleven queue-full refusals, and every
+// count balanced. The disconnects here are cancellations of a blocking request, which reaches
+// the same finish path.
+func TestDisconnectFreesTheSlotForTheNextRequest(t *testing.T) {
+	// One slot and no queue, built directly rather than through newTestServerModel: the limits
+	// are fixed at construction, and this is the configuration that makes a leaked slot visible
+	// instead of absorbable.
+	path := gguftest.Model{NoEOS: true, ContextLen: 2048}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{MaxActive: 1, MaxQueued: 0})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	modelCfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: modelCfg.Name, ContextLen: modelCfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// The engine only advances inside Pump, and a handler blocks until its sequence produces
+	// a token, so without this the first request never reaches the point where cancelling it
+	// means anything.
+	pumpCtx, stopPump := context.WithCancel(context.Background())
+	t.Cleanup(stopPump)
+	srv.StartPump(pumpCtx)
+
+	// The first request is cancelled while the engine is working on it.
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		strings.NewReader(`{"prompt": "Once upon a time", "max_tokens": 1000}`)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.Handler().ServeHTTP(w, req)
+	}()
+	waitFor(t, 5*time.Second, func() bool { return srv.eng.Active() > 0 },
+		"request never reached the engine")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler did not return after the client cancelled")
+	}
+	waitFor(t, 5*time.Second, func() bool { return srv.eng.Active() == 0 },
+		"engine still has an active sequence after the client left")
+
+	// The slot has to be usable: a leaked one would refuse this outright with MaxQueued=0.
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "hi", "max_tokens": 2}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the request after a disconnect = %d, want 200: the cancelled request's slot "+
+			"was not released", resp.StatusCode)
+	}
+	body := decodeBody[completionResponse](t, resp)
+	if len(body.Choices) != 1 {
+		t.Errorf("got %d choices, want 1", len(body.Choices))
+	}
+
+	// The client leaving is accounted for as one of the two client-gone reasons rather than as
+	// a normal finish. Which of the two depends on timing -- an engine that notices the missing
+	// reader before it notices the cancelled context calls it abandoned -- so the assertion is
+	// on the pair, and it is why the leak mutation has to cover both to be caught.
+	waitFor(t, 5*time.Second, func() bool {
+		st := srv.eng.Stats()
+		return st.FinishedByReason[engine.FinishCancel]+st.FinishedByReason[engine.FinishAbandoned] == 1
+	}, "the client-gone request was not counted as cancelled or abandoned")
+}

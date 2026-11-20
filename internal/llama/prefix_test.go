@@ -676,6 +676,12 @@ func TestPrefixIndexRejectsACollidingHit(t *testing.T) {
 // still produces finite logits of the right length. Measured on the fixture: 8 tokens, two
 // whole blocks, reused 8, and the logits equal the cold run bit for bit. Swapping the position
 // or the embedded token makes both alternatives fail.
+// Measured on the fixture while checking the boundary rules, and worth recording because the
+// progression takes two requests: with two blocks already published and a 12-token prompt (the
+// same 8 plus a 4-token tail), Match returns 8 before that prompt has ever run, the run reuses
+// 8 and fills 4 and publishes the block its last token completed, and the *next* run of the
+// same prompt reuses all 12. A 3-token tail never completes a block, so it is never published
+// and the reuse for an 11-token prompt stays 8 however often it is sent.
 func TestWholePromptHitProducesIdenticalLogits(t *testing.T) {
 	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
 	m, err := New(path)

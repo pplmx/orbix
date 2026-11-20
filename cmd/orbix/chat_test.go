@@ -1081,3 +1081,45 @@ func (w *failOnceWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// TestChatStatsReportsThePool covers the line that answers "why did that turn fail".
+//
+// Running out of the pool is the one failure a REPL hits repeatedly: a conversation outgrows
+// the pool, every later turn fails the same way because a failed turn does not grow the
+// history, and the error names the pool's size without saying how close the session is to it.
+// /stats reported turns, tokens and reuse but not the pool, so the question was unanswerable
+// from inside the session.
+//
+// The total is asserted as well as the free count, because the free count alone misleads: a
+// session whose every turn is refused because one request is larger than the whole pool shows
+// every block free, and a reader concludes the pool is healthy. It is -- the request is simply
+// too big, which is the case explainChatError says /clear cannot fix.
+func TestChatStatsReportsThePool(t *testing.T) {
+	model := chatModel(t)
+
+	t.Run("a paged session reports its pool", func(t *testing.T) {
+		out := runChat(t, chatOptions{
+			model: model, maxTokens: 2, blocks: 4, blockSize: 16, prefixCache: true,
+		}, "/stats\n/exit\n")
+		// Both numbers and the position count, so the reader can compare their own prompt
+		// against the pool rather than only knowing that a pool exists.
+		for _, want := range []string{"kv pool:", "of 4 blocks free", "16 positions each", "64 total"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("/stats does not report the pool (%q missing):\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("the free count reflects use", func(t *testing.T) {
+		out := runChat(t, chatOptions{
+			model: model, maxTokens: 2, blocks: 8, blockSize: 16, prefixCache: true,
+		}, "alpha beta gamma\n/stats\n/exit\n")
+		// A turn holds at least one block, so the pool cannot read as untouched afterwards.
+		if strings.Contains(out, "8 of 8 blocks free") {
+			t.Errorf("/stats reports a full pool after a turn that used one:\n%s", out)
+		}
+		if !strings.Contains(out, "kv pool:") {
+			t.Errorf("/stats printed no pool line:\n%s", out)
+		}
+	})
+}

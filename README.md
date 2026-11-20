@@ -458,6 +458,15 @@ whole-block only, so a conversation shorter than one block (the REPL's default i
 positions) has nothing to attach: `/stats` reports the positions actually reused, which is
 0 until the history outgrows a block and 32 once it does on a 30-word message.
 
+`/stats` also reports the KV pool, `N of M blocks free (S positions each, T total)`, because
+running out of it is the one failure a session hits repeatedly: a conversation outgrows the
+pool, every later turn fails the same way since a failed turn does not grow the history, and
+the error names the pool's size without saying how close the session is to it. The total is
+there because the free count alone misleads -- a session refused on every turn may show all
+blocks free, which means the request is larger than the pool can ever hold rather than that
+anything is contended. That is the case `/clear` cannot fix, and seeing the size is what tells
+the two apart.
+
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
 | `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization, and whether this build reproduces the model's pre-tokenizer | v0.1   |

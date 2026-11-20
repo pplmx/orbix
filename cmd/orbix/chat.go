@@ -486,7 +486,7 @@ const chatHelp = `Commands:
   /exit, /quit, /q   end the session
   /clear             forget the conversation
   /history           show the conversation so far
-  /stats             tokens generated and prefix positions reused
+  /stats             tokens, prefix positions reused, and KV pool use
   /help              this message
 `
 
@@ -540,6 +540,28 @@ func chatCommand(out io.Writer, line string, history *[]chatTurn, stats func() e
 		}
 		if _, err := fmt.Fprintf(out, "  reused:     %d prompt positions from shared prefixes\n", st.PrefixReused); err != nil {
 			return false, err
+		}
+		// The pool, when the session has one, because running out of it is the one failure
+		// this REPL hits repeatedly: a conversation outgrows the pool, every later turn fails
+		// the same way because a failed turn does not grow the history, and the error message
+		// names the size but not how close to it the session is.
+		//
+		// The total is printed alongside the free count because the two answer different
+		// questions, and the free count alone was misleading: a session whose every turn is
+		// refused shows "4 of 4 blocks free", and a reader concludes the pool is fine. It is
+		// fine -- the request is simply larger than the pool can ever hold, which is the case
+		// explainChatError already says /clear cannot fix. Printing the size is what lets them
+		// tell that apart from contention.
+		//
+		// Only when a pool exists: a contiguous cache has no blocks, and printing
+		// "blocks:     0 / 0" on every session would be noise in exactly the configuration
+		// that cannot hit this failure.
+		if st.PoolBlocks > 0 {
+			if _, err := fmt.Fprintf(out, "  kv pool:    %d of %d blocks free (%d positions each, %d total)\n",
+				st.PoolFree, st.PoolBlocks, st.PoolBlockSize,
+				st.PoolBlocks*st.PoolBlockSize); err != nil {
+				return false, err
+			}
 		}
 		return false, nil
 	case "/help":

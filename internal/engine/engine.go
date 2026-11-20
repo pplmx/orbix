@@ -619,15 +619,22 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 		return 0, false
 	}
 	s.out = append(s.out, tok)
-	// Count the token as soon as it is queued for the caller, which is the moment its
-	// throughput is committed to; counting at the forward pass would over-count a
-	// batched round.
-	e.mu.Lock()
-	e.tokensGenerated++
-	e.mu.Unlock()
+	// Count the token only once the caller has it. Stats documents TokensGenerated as "the
+	// tokens a caller was told about", and emit refuses when the buffer is full and nobody
+	// reads -- so counting before the send reported tokens that never left the engine.
+	// Measured against a run pumped to exhaustion without a reader: 64 delivered and 65
+	// counted, and the gap grew with concurrency (4 sequences gave 256 and 260) because each
+	// abandoned sequence loses exactly the one token that filled its buffer.
+	//
+	// Counting at the forward pass instead would over-count a batched round, which is the
+	// other direction and equally wrong; counting after the send is the only point where the
+	// number means what the field says.
 	if !s.emit(Event{Token: tok, HasToken: true, Round: s.round}) {
 		return 0, false
 	}
+	e.mu.Lock()
+	e.tokensGenerated++
+	e.mu.Unlock()
 
 	if s.pos >= cfg.ContextLen {
 		e.finish(s, Event{Done: true, FinishReason: "length"})

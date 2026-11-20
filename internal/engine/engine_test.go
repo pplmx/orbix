@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -2283,5 +2284,61 @@ func TestCancelledSequenceStillPublishesItsWholeBlocks(t *testing.T) {
 	if got, want := e.Stats().PrefixReused-before, uint64(48); got != want {
 		t.Errorf("reused %d positions after a cancelled prefill, want %d (12 whole blocks of 4; "+
 			"the 3-token tail is not a whole block)", got, want)
+	}
+}
+
+// TestTokensGeneratedCountsOnlyDeliveredTokens pins what the field's doc claims: it counts
+// "the tokens a caller was told about".
+//
+// The counter was incremented before the send, so a token the engine produced but could not
+// deliver was still counted. The difference is one token per abandoned sequence, and it grows
+// with concurrency: measured against runs pumped to exhaustion with no reader, one sequence
+// delivered 64 and counted 65, and four delivered 256 and counted 260. A metric that
+// over-reports by one per abandoned stream overstates the throughput the operator reads.
+//
+// The assertion is delivered == counted rather than a fixed number, because the buffer size
+// and the abandon grace are both free to change; what has to hold is that the two agree.
+// Concurrency 4 is included because the per-sequence gap only becomes visible in the total
+// once more than one sequence can be abandoned.
+func TestTokensGeneratedCountsOnlyDeliveredTokens(t *testing.T) {
+	for _, conc := range []int{1, 4} {
+		t.Run(fmt.Sprintf("concurrency %d", conc), func(t *testing.T) {
+			e, tok, _ := loadModelPath(t, Options{
+				MaxActive: conc, Workers: 2, BlockSize: 16, Blocks: 64,
+			})
+			prompt := tok.Encode("hello", true)
+			// A budget far beyond the buffer, so every sequence fills it and is abandoned.
+			chans := make([]<-chan Event, conc)
+			for i := range conc {
+				ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 400})
+				if err != nil {
+					t.Fatalf("Submit: %v", err)
+				}
+				chans[i] = ch
+			}
+			// Pump without reading: this is what drives the sequences into emit's refusal.
+			for e.Pump() > 0 {
+			}
+			delivered := 0
+			for _, ch := range chans {
+				for ev := range ch {
+					if ev.HasToken {
+						delivered++
+					}
+				}
+			}
+			st := e.Stats()
+			if st.TokensGenerated != uint64(delivered) {
+				t.Errorf("counted %d tokens but delivered %d: %d were produced and refused by "+
+					"emit, and the counter is documented as what the caller was told about",
+					st.TokensGenerated, delivered, int64(st.TokensGenerated)-int64(delivered))
+			}
+			// The run has to have reached the abandon path, or the comparison above is vacuous:
+			// a sequence that completed normally delivers everything it counts either way.
+			if st.FinishedByReason[FinishAbandoned] != uint64(conc) {
+				t.Fatalf("%d sequences finished as abandoned, want %d -- this run did not "+
+					"exercise the path the test is about", st.FinishedByReason[FinishAbandoned], conc)
+			}
+		})
 	}
 }

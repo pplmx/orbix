@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,8 +17,11 @@ import (
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
+	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/server"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // TestContiguousMemoryNote pins the KV footprint arithmetic.
@@ -156,10 +160,26 @@ func TestPoolCapacityWarning(t *testing.T) {
 	}
 	// The same standard as the reservation warning: name what to change and state both
 	// numbers, since either one alone leaves the operator guessing which is wrong.
-	for _, want := range []string{"--blocks", "--block-size", "1", "128", "503"} {
+	for _, want := range []string{"--blocks", "--block-size", "1", "128"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("warning %q does not mention %q", got, want)
 		}
+	}
+	// The status it quotes has to be the one the server sends. This assertion used to read
+	// "503", which was the status at the time and became wrong when a request that can never
+	// fit the pool started answering 400: the test pinned the old behaviour rather than the
+	// contract, so it kept a stale advertisement green.
+	if !strings.Contains(got, "400") {
+		t.Errorf("warning %q does not name the 400 a request over the pool actually gets", got)
+	}
+	if strings.Contains(got, "503") {
+		t.Errorf("warning %q still advertises 503 for a request that can never fit; that "+
+			"status now means the pool is busy", got)
+	}
+	// And the advice is why it differs from the busy case: a permanent refusal is not
+	// something a client can wait out.
+	if !strings.Contains(got, "retrying") {
+		t.Errorf("warning %q does not say that retrying cannot help", got)
 	}
 }
 
@@ -775,4 +795,66 @@ func TestDefaultQueued(t *testing.T) {
 			t.Errorf("defaultQueued(-1, 4) = %d, want %d", got, want)
 		}
 	})
+}
+
+// TestPoolCapacityWarningNamesTheStatusTheServerSends closes the gap that let the warning go
+// stale.
+//
+// The warning quotes a status code to an operator, and the code that produces it lives in
+// internal/server -- a different package, with its own tests. When the refusal changed from
+// 503 to 400 for requests that can never fit the pool, both sides stayed green: the warning
+// still said 503 and its test asserted 503, because that assertion was written from the
+// implementation rather than from the contract.
+//
+// This drives the real handler with the pool the warning is about and compares: whatever
+// status that request gets is the one the warning has to name, so a future change to either
+// side fails here.
+func TestPoolCapacityWarningNamesTheStatusTheServerSends(t *testing.T) {
+	const contextLen = 64
+	path := gguftest.Model{NoEOS: true, ContextLen: contextLen}.Write(t, t.TempDir())
+
+	// One block of one position: smaller than any prompt, which is the configuration the
+	// warning is for.
+	warning := poolCapacityWarning(1, contextLen)
+	if warning == "" {
+		t.Fatal("no warning for a pool smaller than the context")
+	}
+
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 1, MaxQueued: 1, Blocks: 1, BlockSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	srv, err := server.New(eng, tok, server.Config{
+		ModelName: eng.Model().Config().Name, ContextLen: contextLen,
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"prompt": "hello there", "max_tokens": 2}`
+	resp, err := ts.Client().Post(ts.URL+"/v1/completions", "application/json",
+		strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	// Every "NNN" the warning names has to include the status actually returned.
+	got := strconv.Itoa(resp.StatusCode)
+	if !strings.Contains(warning, got) {
+		t.Errorf("the server answered %d but the warning says:\n%s", resp.StatusCode, warning)
+	}
 }

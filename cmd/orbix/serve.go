@@ -402,10 +402,16 @@ func poolReservationWarning(reserved int64) string {
 //
 // The pool report above already prints the block count and the positions per block, so the
 // shortage is derivable -- but it is not visible, and the failure arrives per request as a
-// 503 naming "block pool exhausted". Measured with --blocks 1 --block-size 1 against a
-// 128-position model: the server started, printed "paged, 1 blocks x 1 positions", accepted
-// the connection, and refused every prompt longer than one token. A config that cannot serve
-// anything should say so at startup, which is where the operator is still looking.
+// refusal. Measured with --blocks 1 --block-size 1 against a 128-position model: the server
+// started, printed "paged, 1 blocks x 1 positions", accepted the connection, and refused
+// every prompt longer than one token. A config that cannot serve anything should say so at
+// startup, which is where the operator is still looking.
+//
+// The status is 400, not 503. It used to say 503, and when that refusal became a 400 for
+// requests whose size can never be met, this line kept advertising the old one -- the
+// warning was the only place a reader saw a status, and TestPoolCapacityWarning asserted
+// "503" because that is what the code produced. Both moved together in that change; the
+// wording now names the status the server actually sends.
 //
 // This mirrors poolReservationWarning in the other direction: that one warns about a pool too
 // large to be free, this one about a pool too small to be useful.
@@ -414,7 +420,8 @@ func poolCapacityWarning(capacity, contextLen int) string {
 		return ""
 	}
 	return fmt.Sprintf("warning:    the pool holds %d positions but one request needs up to %d, "+
-		"so requests longer than %d will be refused with 503; raise --blocks or --block-size",
+		"so requests longer than %d are refused with 400 (they can never fit, so retrying "+
+		"does not help); raise --blocks or --block-size",
 		capacity, contextLen, capacity)
 }
 

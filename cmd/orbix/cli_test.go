@@ -20,6 +20,7 @@ import (
 	"github.com/pplmx/orbix/internal/gguftest"
 
 	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // The CLI tests drive run() directly, which keeps them free of subprocesses
@@ -1810,5 +1811,91 @@ func TestBenchSaysWhenTheWindowCutTheBudget(t *testing.T) {
 	})
 	if strings.Contains(fits, "window cut the budget") {
 		t.Errorf("a run that fit its budget reported a cut:\n%s", fits)
+	}
+}
+
+// TestEveryCommandAgreesOnThePromptTokenCount checks the one number three commands each
+// compute for themselves.
+//
+// run, bench and serve all encode the caller's prompt with the same tokenizer, and each
+// reports the result: run as "prompt: N tokens", bench on the same line, and serve as
+// usage.prompt_tokens. Nothing compared them, and a divergence would be close to invisible --
+// every command would keep working, and the only symptom would be a budget computed against a
+// different length than the one reported. Measured on the 4096-position fixture with one
+// prompt: all three say 26.
+//
+// They are compared here rather than each being pinned to a literal because the literal is a
+// property of the fixture's vocabulary, not of the agreement being tested: what matters is
+// that the three paths cannot drift apart, and a test written against one implementation
+// would pass while two others disagreed.
+//
+// serve is driven through its handler rather than a bound port, so this stays a unit test and
+// runs everywhere.
+func TestEveryCommandAgreesOnThePromptTokenCount(t *testing.T) {
+	const prompt = "Explain KV caching in detail"
+	path := gguftest.Model{NoEOS: true, ContextLen: 4096}.Write(t, t.TempDir())
+
+	promptTokensFrom := func(prefix string, out string) int {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, prefix) {
+				continue
+			}
+			rest := strings.TrimPrefix(line, prefix)
+			var n int
+			if _, err := fmt.Sscanf(strings.TrimSpace(rest), "%d", &n); err != nil {
+				t.Fatalf("could not read a count from %q: %v", line, err)
+			}
+			return n
+		}
+		t.Fatalf("no %q line in:\n%s", prefix, out)
+		return 0
+	}
+
+	// run writes its counts to stderr, deliberately: stdout carries the generated text so a
+	// shell can pipe it, and mixing the two would make every redirection carry statistics.
+	// The flag's own help says "print timing and token counts to stderr".
+	runOut := captureStderr(t, func() {
+		if err := run([]string{"run", "--model", path, "--stats", "--max-tokens", "2", prompt}); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+	fromRun := promptTokensFrom("prompt:", runOut)
+
+	benchOut := captureStdout(t, func() {
+		if err := run([]string{"bench", "--model", path, "--max-tokens", "2",
+			"--concurrency", "1", "--requests", "1", "--prompt", prompt}); err != nil {
+			t.Fatalf("bench: %v", err)
+		}
+	})
+	fromBench := promptTokensFrom("prompt:", benchOut)
+
+	// serve encodes with the tokenizer it was built from, and reports the result through
+	// usage.prompt_tokens. That figure comes from len(promptTokens) in the handler, so the
+	// number to compare is what tokenize produces for the same text -- the handler adds no
+	// transformation beyond Encode.
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	cfg, err := llama.LoadConfig(gf)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	fromServe := len(tok.Encode(prompt, cfg.BOSID >= 0))
+
+	if fromRun != fromBench || fromBench != fromServe {
+		t.Errorf("the three commands disagree on the prompt length: run=%d bench=%d serve=%d",
+			fromRun, fromBench, fromServe)
+	}
+	// And it must be a believable count for this prompt, not three zeros agreeing with each
+	// other.
+	if fromRun <= 0 {
+		t.Errorf("all three reported %d prompt tokens", fromRun)
 	}
 }

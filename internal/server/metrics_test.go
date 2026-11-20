@@ -1049,3 +1049,44 @@ func TestMetricsCountStreamingPoolRefusals(t *testing.T) {
 		t.Errorf("queue-full refusals = %v after streaming pool refusals, want 0", got)
 	}
 }
+
+// TestMetricsValuesMatchStats covers the binding between every sample and its field.
+//
+// The existing tests parse the exposition for format and check two or three values, but
+// nothing compared the whole set against engine.Stats(). A metric wired to the wrong field
+// -- Rounds bound to PrefixReused, say -- would still emit valid Prometheus text, still pass
+// the format checks, and still look plausible in a scrape.
+//
+// The map below is the same list twice, which is the cost of not reflecting over a struct:
+// the metric name on the left, the field it must equal on the right. It is worth paying here
+// because a transposition between two adjacent counters is invisible in every other kind of
+// test. RequestsSubmitted is deliberately not asserted: Submit increments it, so the figure
+// read after a request is a different instant than the one the scrape took unless nothing
+// else is running, and the other counters catch the same class of mistake.
+func TestMetricsValuesMatchStats(t *testing.T) {
+	srv, _ := newTestServer(t)
+	post(t, srv.Handler(), "/v1/completions", `{"prompt": "hi", "max_tokens": 2}`)
+
+	scraped := parseMetrics(t, scrape(t, srv.Handler()))
+	st := srv.eng.Stats()
+
+	want := map[string]string{
+		"orbix_requests_finished_total":       fmt.Sprint(st.RequestsFinished),
+		"orbix_tokens_generated_total":        fmt.Sprint(st.TokensGenerated),
+		"orbix_rounds_total":                  fmt.Sprint(st.Rounds),
+		"orbix_prefix_positions_reused_total": fmt.Sprint(st.PrefixReused),
+		"orbix_requests_active":               fmt.Sprint(st.Active),
+		"orbix_requests_queued":               fmt.Sprint(st.Queued),
+		"orbix_round_max_active":              fmt.Sprint(st.MaxActive),
+	}
+	for name, expected := range want {
+		got, ok := scraped[name]
+		if !ok {
+			t.Errorf("%s is missing from the exposition", name)
+			continue
+		}
+		if got != expected {
+			t.Errorf("%s = %s, want %s (the Stats field)", name, got, expected)
+		}
+	}
+}

@@ -1058,3 +1058,52 @@ func TestNewRejectsATokenTypeOutsideTheFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestLooksByteLevel pins the inference used when tokenizer.ggml.model is absent.
+//
+// The one indirect test covers the case that matters most -- a real byte-level vocabulary
+// with the key missing -- but nothing asserted the conditions themselves, and the function
+// decides between two decodings that produce different text from the same ids. The comment
+// on the caller records what that costs: a Qwen2 conversion without the key produced
+// "ĊA.ĠTĊB.ĠFĊ" where the correct file produced a sentence.
+//
+// Both markers are required and the SentencePiece marker vetoes them, so the rule cannot be
+// satisfied by a vocabulary that merely contains one of the three by accident.
+func TestLooksByteLevel(t *testing.T) {
+	cases := []struct {
+		name   string
+		tokens []string
+		want   bool
+		why    string
+	}{
+		{"both markers", []string{"a", "\u0120", "\u010a"}, true,
+			"a space and a newline marker together identify the byte-level spelling"},
+		{"space only", []string{"a", "\u0120"}, false,
+			"one marker is not enough; a piece spelling a space can appear in other schemes"},
+		{"newline only", []string{"a", "\u010a"}, false, "the same, for the other marker"},
+		{"both plus SentencePiece", []string{"\u0120", "\u010a", "\u2581"}, false,
+			"U+2581 vetoes: a vocabulary carrying it is SentencePiece whatever else it holds"},
+		{"SentencePiece only", []string{"\u2581"}, false, "the ordinary SentencePiece case"},
+		{"neither", []string{"a", "b"}, false,
+			"no evidence is not evidence for byte-level, so the SentencePiece default stands"},
+		{"empty", nil, false, "an empty vocabulary identifies nothing"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := looksByteLevel(c.tokens); got != c.want {
+				t.Errorf("looksByteLevel(%q) = %v, want %v: %s", c.tokens, got, c.want, c.why)
+			}
+		})
+	}
+
+	// The scan is bounded, and the bound is a real limit rather than a detail: markers past
+	// it are not seen, so such a vocabulary falls back to the SentencePiece default. Every
+	// real vocabulary puts them in the first few hundred entries -- measured, the fixture's
+	// are at 117 and 139 -- which is the claim the bound rests on. Asserted so the
+	// consequence is recorded rather than to suggest the bound is wrong.
+	late := make([]string, 5000)
+	late[4500], late[4501] = "\u0120", "\u010a"
+	if looksByteLevel(late) {
+		t.Error("markers past the scan limit were seen, so the bound is not 4096")
+	}
+}

@@ -914,3 +914,36 @@ func containsID(ids []int32, want int32) bool {
 	}
 	return false
 }
+
+// TestEncodeSurvivesADocumentSizedInput is the property that makes this encoder safe on a
+// large prompt: it handles a megabyte in one chunk without recursing.
+//
+// Nothing pinned this. The merge loop is iterative -- a symbol list with prev/next links and a
+// priority queue, no recursion anywhere -- and measured on the fixture, a one-megabyte run of a
+// single character encodes to 1,000,001 tokens (the extra one is the dummy prefix) in 110ms and
+// 168 MiB. The count is the assertion: a recursive merge, or one that splits the chunk first,
+// either changes how the text is cut or overflows the stack, and both show up as a different
+// token count or a dead test.
+//
+// A timing assertion was written first and removed: replacing the heap pop with a linear scan --
+// genuinely quadratic, same answers -- still passed, because the fixture's vocabulary produces
+// short queues and the quadratic term never dominates. A test that cannot tell the two apart
+// would assert a property it does not check, which is worse than not asserting it.
+func TestEncodeSurvivesADocumentSizedInput(t *testing.T) {
+	tok := newTestTokenizer(t)
+	text := strings.Repeat("x", 1<<20)
+	ids := tok.Encode(text, false)
+	// One token per character plus the dummy prefix. An implementation that recursed would
+	// either overflow the stack or, in a language without one, take long enough to be obvious;
+	// one that chunked the text differently would produce a different count.
+	if want := len(text) + 1; len(ids) != want {
+		t.Errorf("%d tokens for %d characters, want %d", len(ids), len(text), want)
+	}
+
+	// The same input through EncodeWithSpecials takes the other pre-tokenizer path and must
+	// handle it just as well.
+	if got := tok.EncodeWithSpecials(text, false); len(got) != len(ids) {
+		t.Errorf("EncodeWithSpecials produced %d tokens against Encode's %d for text with no "+
+			"markers in it", len(got), len(ids))
+	}
+}

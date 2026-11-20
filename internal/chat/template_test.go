@@ -2839,3 +2839,62 @@ func TestParseErrorsNameTheOffset(t *testing.T) {
 		}
 	})
 }
+
+// TestToJSONIndentIsBounded covers the two failures a huge indent caused.
+//
+// The indent is multiplied by the nesting depth and the product becomes a strings.Repeat length,
+// so it is not a formatting knob with a linear cost. Measured before the bound:
+// tojson(9223372036854775807) panicked with "makeslice: len out of range", and tojson(100000)
+// on four short messages produced 2.4 MB of output. A template is model-file content, so a
+// crash and a memory amplification are both reachable by opening a file.
+//
+// Python's json.dumps has no bound and a template in the wild writes one digit, so the limit
+// sits well above anything a formatting choice needs; the cases below assert both sides of it.
+func TestToJSONIndentIsBounded(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "a"}}
+
+	render := func(t *testing.T, arg string) (string, error) {
+		t.Helper()
+		tpl, err := Parse(`{{ messages | tojson` + arg + ` }}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		return tpl.Render(msgs, Inputs{})
+	}
+
+	// The values that must keep working, including the largest one allowed.
+	for _, c := range []struct{ name, arg string }{
+		{"no argument", ""},
+		{"zero", "(0)"},
+		{"a formatting choice", "(2)"},
+		{"negative", "(-1)"},
+		{"exactly the limit", "(1024)"},
+		{"keyword form", "(indent=2)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := render(t, c.arg); err != nil {
+				t.Errorf("tojson%s was refused: %v", c.arg, err)
+			}
+		})
+	}
+
+	// The values that must be refused rather than attempted.
+	for _, c := range []struct{ name, arg string }{
+		{"just past the limit", "(1025)"},
+		{"large", "(100000)"},
+		{"the value that used to panic", "(9223372036854775807)"},
+		{"keyword form past the limit", "(indent=1025)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := render(t, c.arg)
+			if err == nil {
+				t.Fatalf("tojson%s was accepted", c.arg)
+			}
+			// The message has to name the value and the limit, or the template author cannot
+			// tell which of their numbers was wrong.
+			if !strings.Contains(err.Error(), "1024") {
+				t.Errorf("error %q does not state the limit", err)
+			}
+		})
+	}
+}

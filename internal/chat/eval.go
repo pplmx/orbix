@@ -492,6 +492,9 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 				if convErr != nil {
 					return value{}, fmt.Errorf("chat: tojson indent %q is not a number", iv.print())
 				}
+				if n, err = checkIndent(n); err != nil {
+					return value{}, err
+				}
 				return strValue(toJSONIndent(v, n)), nil
 			}
 		}
@@ -504,6 +507,9 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 			n, convErr := strconv.Atoi(av.print())
 			if convErr != nil {
 				return value{}, fmt.Errorf("chat: tojson indent %q is not a number", av.print())
+			}
+			if n, err = checkIndent(n); err != nil {
+				return value{}, err
 			}
 			return strValue(toJSONIndent(v, n)), nil
 		}
@@ -597,4 +603,27 @@ func equalValues(a, b value) bool {
 		return false
 	}
 	return a.text == b.text
+}
+
+// maxJSONIndent bounds tojson's indent, because the value is multiplied by the nesting depth
+// and the product becomes the length of a string.Repeat.
+//
+// Measured before this check: tojson(9223372036854775807) panicked with "makeslice: len out of
+// range", and tojson(100000) on four short messages produced 2.4 MB of output. A template is
+// model-file content, so neither is a shape a caller asked for.
+//
+// Python's json.dumps has no such bound, and a template in the wild writes a single digit. A
+// limit well above anything a formatting choice needs keeps every real template working while
+// turning the two failures above into an error the template author can read.
+const maxJSONIndent = 1024
+
+// checkIndent rejects an indent that would make the output unreasonably large. A negative
+// indent is not an error: json.dumps treats 0 and negative alike as "no newlines", which the
+// style already handles.
+func checkIndent(n int) (int, error) {
+	if n > maxJSONIndent {
+		return 0, fmt.Errorf("chat: tojson indent %d is larger than the %d this renderer allows, "+
+			"because the indent is repeated at every nesting level", n, maxJSONIndent)
+	}
+	return n, nil
 }

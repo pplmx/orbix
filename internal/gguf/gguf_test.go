@@ -1650,3 +1650,96 @@ func TestTensorDataStreamsRatherThanReading(t *testing.T) {
 			"data was loaded rather than streamed", tensorBytes, alloc, float64(alloc)/(1<<20))
 	}
 }
+
+// TestKeysAndAllAgreeAcrossScripts covers three properties the sortedness check cannot.
+//
+// TestKeysSorted walks the fixture's keys and asserts each is not less than the one before,
+// which proves ordering but nothing else: a Keys() that returned only the ASCII keys would
+// pass, and it says nothing about All(), the streaming form the dump uses.
+//
+// The ordering that matters in practice is byte order, not alphabetical order in a locale.
+// slices.Sorted on strings compares bytes, so "A" precedes "a", "-" (0x2d) precedes "."
+// (0x2e) precedes "_" (0x5f), and every non-ASCII key lands after all ASCII ones (its lead
+// byte is 0xC2 or above). That is what a reader of a dump sees, and it is stable across runs
+// because a sort is deterministic while map iteration is not.
+//
+// All() is asserted to yield exactly Keys() order with the same values, and to stop when the
+// loop breaks: an implementation that collected everything first would ignore the break, and
+// the dump would keep formatting values after the caller asked it to stop.
+func TestKeysAndAllAgreeAcrossScripts(t *testing.T) {
+	kvs := []kv{
+		{"zebra", Value{Type: TypeUint32, Uint: 1}},
+		{"Apple", Value{Type: TypeUint32, Uint: 2}},
+		{"apple", Value{Type: TypeUint32, Uint: 3}},
+		{"a-b", Value{Type: TypeUint32, Uint: 4}},
+		{"a.b", Value{Type: TypeUint32, Uint: 5}},
+		{"a_b", Value{Type: TypeUint32, Uint: 6}},
+		{"中文", Value{Type: TypeBool, Bool: true}},
+		{"日本語", Value{Type: TypeBool, Bool: false}},
+		{"éclair", Value{Type: TypeString, Str: "accented"}},
+	}
+	data := buildFile(kvs, nil, 32, nil)
+	f, err := Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	keys := f.Keys()
+	if len(keys) != len(kvs) {
+		t.Fatalf("Keys() returned %d keys for %d entries", len(keys), len(kvs))
+	}
+
+	// Byte order, spelled out. The expectation is written as a literal sequence rather than
+	// re-derived with sort.Strings, so a change to the comparison shows up here.
+	want := []string{
+		"Apple", "a-b", "a.b", "a_b", "apple", "zebra", // ASCII, byte order
+		"éclair", "中文", "日本語", // non-ASCII, after every ASCII key
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Errorf("position %d: got %q, want %q\nfull order: %q", i, keys[i], want[i], keys)
+			break
+		}
+	}
+
+	// Stability: the contract says callers print these, so two calls must agree.
+	for range 5 {
+		again := f.Keys()
+		for i := range keys {
+			if again[i] != keys[i] {
+				t.Fatalf("Keys() reordered at position %d between calls: %q then %q",
+					i, keys[i], again[i])
+			}
+		}
+	}
+
+	// All() yields the same order with the same values.
+	var fromAll []string
+	for k, v := range f.All() {
+		fromAll = append(fromAll, k)
+		// Value holds a slice for arrays, so it is not comparable; the rendering is what a
+		// dump prints and is enough to catch a wrong value being yielded under the right key.
+		if wantVal := f.Metadata[k]; v.String() != wantVal.String() {
+			t.Errorf("All() yielded %q for %q, want %q", v.String(), k, wantVal.String())
+		}
+	}
+	if len(fromAll) != len(keys) {
+		t.Fatalf("All() yielded %d entries, Keys() has %d", len(fromAll), len(keys))
+	}
+	for i := range keys {
+		if fromAll[i] != keys[i] {
+			t.Errorf("All() order differs from Keys() at %d: %q vs %q", i, fromAll[i], keys[i])
+		}
+	}
+
+	// And it honours an early break rather than draining the map first.
+	visited := 0
+	for range f.All() {
+		visited++
+		if visited == 2 {
+			break
+		}
+	}
+	if visited != 2 {
+		t.Errorf("a break after 2 iterations ran %d", visited)
+	}
+}

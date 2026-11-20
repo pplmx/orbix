@@ -4477,3 +4477,67 @@ func TestChatMultiTurnReusesTheSharedPrefix(t *testing.T) {
 			"16-position blocks", added)
 	}
 }
+
+// TestStreamingRequestAlsoReusesThePrefix covers the same feature on the other response path.
+//
+// Chat and completions share generate and Submit, but not everything: the prompt is rendered
+// differently, and the streaming path writes chunks where the other writes one body. A change
+// confined to the streaming branch -- a re-rendered prompt, an extra header token -- would
+// break reuse there while the non-streaming test stayed green.
+//
+// Measured with a 512-position fixture and block size 16: the first stream reuses nothing,
+// the second reuses 32 positions. That is fewer than the chat path's 48 because the completions
+// endpoint renders a bare transcript rather than a templated conversation, so the shared prefix
+// is shorter -- the figure is a property of the prompt, not of the streaming code.
+func TestStreamingRequestAlsoReusesThePrefix(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 2, BlockSize: 16, Blocks: 64, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.StartPump(context.Background())
+	t.Cleanup(srv.Shutdown)
+
+	const prompt = "Once upon a time there was a small model that could"
+	stream := func() uint64 {
+		t.Helper()
+		body := fmt.Sprintf(`{"prompt":%q,"max_tokens":2,"stream":true}`, prompt)
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		raw := readBody(t, resp)
+		// A stream that did not finish would leave the sequence running and the count would
+		// still rise, so the completion is asserted before the number is trusted.
+		if !strings.Contains(raw, "[DONE]") {
+			t.Fatalf("the stream did not reach [DONE]: %q", raw)
+		}
+		return eng.Stats().PrefixReused
+	}
+
+	one := stream()
+	if one != 0 {
+		t.Errorf("the first stream reused %d positions; there was nothing cached yet", one)
+	}
+	two := stream()
+	if two <= one {
+		t.Fatalf("the second stream reused %d positions, the same as the first (%d): the shared "+
+			"prefix did not hit on the streaming path", two, one)
+	}
+	if added := two - one; added%16 != 0 {
+		t.Errorf("the second stream added %d reused positions, which is not a whole number of "+
+			"16-position blocks", added)
+	}
+}

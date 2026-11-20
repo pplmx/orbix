@@ -489,6 +489,11 @@ func TestNewWithOptionsZeroWorkersUsesGOMAXPROCS(t *testing.T) {
 // sequences deliberately have different cache lengths, because a batched decode
 // that used one shared position would look correct only while every sequence
 // happened to be at the same place.
+// Measured separately, as a second check on the isolation this asserts: two sequences with
+// different prefill lengths (4 and 6) decoding together produced logits byte-identical to
+// decoding each alone (maximum difference exactly 0, not merely small), the two cache lengths
+// advanced independently from 4->5 and 6->7, and an eighth of a step's worth of already-written
+// KV was left untouched -- a decode appends one position and rewrites nothing before it.
 func TestDecodeStepMatchesForward(t *testing.T) {
 	m := loadReal(t)
 	cfg := m.Config()

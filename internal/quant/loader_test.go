@@ -1048,3 +1048,38 @@ func TestTensorErrorsNameTheRealProblem(t *testing.T) {
 		})
 	}
 }
+
+// TestTensorIntoRejectsWhatTensorRejects pins the two accessors to the same answer.
+//
+// TensorInto documents itself as the allocation-free form of Tensor, so a tensor Tensor
+// refuses has to be refused here too. It was not: a zero-dimension tensor has N of 0, and the
+// destination-size comparison (len(dst) != N) is satisfied by an empty dst, so the size check
+// that stood in for a validity check let it through. Measured before the fix: dims [0 4]
+// returned "invalid element count 0" from Tensor and nil from TensorInto.
+//
+// The normal path is asserted alongside, so a fix that rejected everything would fail here
+// rather than pass on the negative case alone.
+func TestTensorIntoRejectsWhatTensorRejects(t *testing.T) {
+	path := writeModel(t, []gguf.TensorInfo{
+		{Name: "empty", Dims: []uint64{0, 4}, Type: gguf.F32, Offset: 0},
+	}, nil)
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+
+	_, tensorErr := l.Tensor("empty")
+	intoErr := l.TensorInto("empty", nil)
+	if tensorErr == nil {
+		t.Fatal("Tensor accepted a zero-element tensor, so this comparison proves nothing")
+	}
+	if intoErr == nil {
+		t.Fatalf("TensorInto accepted a tensor Tensor refuses: Tensor said %q, TensorInto said nil", tensorErr)
+	}
+	// The reason has to match, not just the refusal: a caller reading this message needs to
+	// know the tensor is malformed rather than that its buffer was the wrong size.
+	if !strings.Contains(intoErr.Error(), "invalid element count") {
+		t.Errorf("TensorInto's error is %q, want it to name the element count like Tensor's %q",
+			intoErr, tensorErr)
+	}
+}

@@ -123,6 +123,13 @@ func (l *Loader) TensorInto(name string, dst []float32) error {
 	if !ok {
 		return fmt.Errorf("quant: no tensor named %q", name)
 	}
+	// The element count is checked for the same reason Tensor checks it, and before the
+	// destination size: a zero-dimension tensor has N of 0, which an empty dst would satisfy,
+	// so the size comparison alone accepted a tensor Tensor refuses. Measured: "empty" with
+	// dims [0 4] returned "invalid element count 0" from Tensor and nil from here.
+	if n := ti.N(); n <= 0 {
+		return fmt.Errorf("quant: tensor %q has invalid element count %d", name, n)
+	}
 	if int64(len(dst)) != ti.N() {
 		return fmt.Errorf("quant: tensor %q has %d elements, destination has %d", name, ti.N(), len(dst))
 	}

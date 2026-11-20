@@ -76,6 +76,11 @@ func encodeValue(b *bytes.Buffer, v gguf.Value) {
 	switch v.Type {
 	case gguf.TypeUint32:
 		u32(uint32(v.Uint))
+	case gguf.TypeUint64:
+		// A real file may state a count this way, and the loader reads it through
+		// Get[int] -- so a test that needs a value beyond uint32's range has to be able to
+		// write one. Without this the builder panics rather than the loader refusing.
+		u64(v.Uint)
 	case gguf.TypeFloat32:
 		u32(math.Float32bits(float32(v.Float)))
 	case gguf.TypeString:
@@ -1627,4 +1632,104 @@ func TestTemperatureTopKOutOfRange(t *testing.T) {
 			t.Errorf("TopK=1 r=%v returned %d, want the argmax 1", r, got)
 		}
 	}
+}
+
+// TestHugeHeadCountCannotReachTheArithmetic records why kvDim needs no overflow guard.
+//
+// kvDim() is KVHeads * HeadDim, and an int overflow there would return a negative width --
+// measured, Config{KVHeads: MaxInt/2, HeadDim: 4}.kvDim() is -4. The question that matters
+// is whether a file can get such a config past LoadConfig, so this walks the checks that
+// stand in the way, one at a time, using uint64 metadata to state values beyond uint32.
+//
+// Four independent checks have to pass before the multiplication is reached, and each one
+// names the value it rejected: embedding_length must be divisible by head_count,
+// rope.dimension_count must be even and inside (0, head_dim], the tensors' row lengths must
+// agree with embedding_length, and head_count_kv must divide head_count. Reaching the
+// overflow means satisfying all four at once with values near 2^63, which no consistent
+// tensor directory can describe.
+//
+// The test asserts the refusals rather than the absence of a crash: a future edit that
+// removed one of the checks would surface here as a changed message, which is the point at
+// which kvDim would start needing its own guard.
+func TestHugeHeadCountCannotReachTheArithmetic(t *testing.T) {
+	c := defaultTiny()
+	dropKey := func(kvs []kv, key string) []kv {
+		out := make([]kv, 0, len(kvs))
+		for _, e := range kvs {
+			if e.key != key {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	read := func(t *testing.T, kvs []kv) Config {
+		t.Helper()
+		f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		cfg, err := LoadConfig(f)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		return cfg
+	}
+
+	const huge = uint64(1) << 50
+
+	t.Run("head_count must divide embedding_length", func(t *testing.T) {
+		kvs := replaceKey(c.kvs(), "llama.attention.head_count",
+			gguf.Value{Type: gguf.TypeUint64, Uint: huge})
+		f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if _, err := LoadConfig(f); err == nil {
+			t.Fatal("a head_count that does not divide embedding_length was accepted")
+		} else if !strings.Contains(err.Error(), "not divisible") {
+			t.Errorf("error %q does not name the divisibility problem", err)
+		}
+	})
+
+	t.Run("rope dimension must stay even", func(t *testing.T) {
+		kvs := dropKey(c.kvs(), "llama.rope.dimension_count")
+		kvs = replaceKey(kvs, "llama.embedding_length",
+			gguf.Value{Type: gguf.TypeUint64, Uint: huge})
+		kvs = replaceKey(kvs, "llama.attention.head_count",
+			gguf.Value{Type: gguf.TypeUint64, Uint: huge})
+		f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if _, err := LoadConfig(f); err == nil {
+			t.Fatal("head_dim 1 was accepted; rope.dimension_count must be even")
+		} else if !strings.Contains(err.Error(), "odd") && !strings.Contains(err.Error(), "divisible") {
+			t.Errorf("error %q names neither the odd rope dim nor the divisibility problem", err)
+		}
+	})
+
+	t.Run("tensor rows must match embedding_length", func(t *testing.T) {
+		heads := huge
+		kvs := dropKey(c.kvs(), "llama.rope.dimension_count")
+		kvs = replaceKey(kvs, "llama.embedding_length",
+			gguf.Value{Type: gguf.TypeUint64, Uint: heads * 2})
+		kvs = replaceKey(kvs, "llama.attention.head_count",
+			gguf.Value{Type: gguf.TypeUint64, Uint: heads})
+		f, err := gguf.Read(bytes.NewReader(buildFile(kvs, c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if _, err := LoadConfig(f); err == nil {
+			t.Fatal("a tensor whose row length disagrees with embedding_length was accepted")
+		} else if !strings.Contains(err.Error(), "row length") {
+			t.Errorf("error %q does not name the row length", err)
+		}
+	})
+
+	t.Run("a consistent small model still loads", func(t *testing.T) {
+		cfg := read(t, c.kvs())
+		if cfg.kvDim() <= 0 {
+			t.Errorf("kvDim() = %d on the baseline fixture", cfg.kvDim())
+		}
+	})
 }

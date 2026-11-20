@@ -2171,3 +2171,55 @@ func TestBenchRejectsBadCountsBeforeOpeningTheModel(t *testing.T) {
 		}
 	})
 }
+
+// TestBenchPrefixCacheNeedsAPagedPool is the bench counterpart to the serve check of the same
+// name, and it covers a flag whose absence is invisible rather than noisy.
+//
+// --prefix-cache without --blocks leaves the contiguous cache in place. Nothing fails: the run
+// completes, and the "reused: N prompt positions" line the flag exists to produce is simply
+// never printed, because contiguous caches have no blocks to share. A reader comparing that
+// absence against a run that did reuse cannot tell "reuse does not pay here" from "reuse was
+// never on", which is why this is refused before the model opens rather than reported after.
+//
+// The message is asserted for both halves a caller needs: the flag they passed and the flag it
+// requires. "cache flags are inconsistent" would leave them diffing their command line against
+// the help text.
+func TestBenchPrefixCacheNeedsAPagedPool(t *testing.T) {
+	t.Setenv("ORBIX_MODEL", filepath.Join(t.TempDir(), "missing.gguf"))
+
+	err := cmdBench([]string{"--prefix-cache"})
+	if err == nil {
+		t.Fatal("cmdBench accepted --prefix-cache without --blocks")
+	}
+	for _, want := range []string{"--prefix-cache", "--blocks"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	// Rejected by the check, not by the load: the same ordering assertion the count test makes.
+	if strings.Contains(err.Error(), "no such file") {
+		t.Errorf("error %q mentions the model file, so the flags reached the load before "+
+			"being validated", err)
+	}
+
+	// The combinations that must keep working. A block size is optional, and --blocks without
+	// --prefix-cache is an ordinary paged run with no reuse.
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"pool alone", []string{"--blocks", "8"}},
+		{"pool with a block size", []string{"--prefix-cache", "--blocks", "8", "--block-size", "16"}},
+		{"pool with reuse and no block size", []string{"--prefix-cache", "--blocks", "8"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := cmdBench(c.args)
+			if err == nil {
+				return // got past the flag checks, which is all this asserts
+			}
+			if strings.Contains(err.Error(), "prefix-cache needs") {
+				t.Errorf("cmdBench(%v) was refused by the flag check: %v", c.args, err)
+			}
+		})
+	}
+}

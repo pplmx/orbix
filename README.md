@@ -29,7 +29,6 @@ It is not competing with vLLM or llama.cpp. It is a **learning vehicle**: each l
 - [Roadmap](#roadmap)
 - [Design Principles](#design-principles)
 - [Configuration](#configuration)
-- [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -689,29 +688,32 @@ The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it t
 
 The roadmap is a learning path as much as a feature list. Each version adds one conceptual layer.
 
-- [x] `v0.1` — **GGUF and first kernels**: GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference matmul/RMSNorm/softmax/SiLU kernels, SentencePiece tokenizer, Llama forward pass, `orbix run`, `orbix model inspect`
-- [x] `v0.2` — **Scheduling and cache**: continuous batching, a paged KV cache, Q4_0/Q4_1, Qwen2 — batched prefill and decode with an admission policy, a reference-counted paged cache with prefix reuse, the 32-weight block formats a checkpoint carries (`Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `IQ4_NL`), Llama and Qwen2
-- [x] `v0.3` — **Serving**: `orbix serve` with OpenAI-compatible SSE, priority queues, Q5_0/Q5_1, Mistral — SSE streaming, client-disconnect cancellation, a per-request `priority` field, an admission policy, every 32-weight block format and five of the six K-quants, the `mistral` architecture with its sliding window, chat templates rendered from `tokenizer.chat_template`, and mixture-of-experts layers
-- [x] `v0.4` — **Performance paths**: K-quants, prefix-aware cache — the five K-quant decodes a checkpoint actually carries (`Q2_K` through `Q6_K`) plus IQ4_NL, and a paged cache whose prefix index records which block continues which, so eviction gives up a chain's end rather than its middle. `Q8_K` is the one K-quant not decoded; it is an intermediate in conversion tools, and a file using it fails with `cannot decode Q8_K` rather than producing garbage. Assembly is deliberately out of scope: see below
-- [x] `v0.5` — **Measurement and observability**: `orbix bench --suite` prints every scenario as one table with the conditions that produced it, `/metrics` exports Prometheus-format counters and gauges, `--otlp-endpoint` exports traces in OTLP/HTTP+JSON, and `serve --log-format` writes one structured access record per request. A remote HTTP backend was considered and dropped: see the note under Architecture
-- [x] `v1.0` — **Stable interface**: a cross-platform CI matrix that builds five targets and runs the suite on two, benchmarks published with the machine and flags that produced them, and a documented reading path through every layer. "Stable" means the interfaces are settled enough to read as a whole, not that they will not change: the project is still pre-alpha
+- [x] `v0.1` — GGUF loader, F32/F16/BF16/Q4_0/Q8_0 decode, reference kernels, SentencePiece
+  tokenizer, Llama forward pass, `orbix run` and `model inspect`.
+- [x] `v0.2` — Continuous batching and a paged KV cache with prefix reuse, the 32-weight block
+  formats, Qwen2.
+- [x] `v0.3` — `orbix serve` with SSE, client-disconnect cancellation, the `priority` field,
+  Mistral's sliding window, chat templates, mixture of experts.
+- [x] `v0.4` — The five K-quants a checkpoint carries (`Q2_K`-`Q6_K`) plus IQ4_NL, and a prefix
+  index that records which block continues which, so eviction gives up a chain's end.
+  `Q8_K` is the one K-quant not decoded, because it is a conversion-tool intermediate.
+- [x] `v0.5` — `bench --suite`, `/metrics`, `--otlp-endpoint`, `serve --log-format`.
+- [x] `v1.0` — A CI matrix building five targets and testing two, and the reading path this
+  file documents. "Stable" means the interfaces are settled enough to read as a whole.
 
-Every version on that list is complete, and that means less than a green checklist
-suggests. It means each layer has an implementation that is correct against its reference
-and small enough to read; it does not mean the project is production-ready. There is no
-GPU path, no request queuing beyond one process, no model architecture beyond the
-Llama-family, and no plan to add those. The roadmap was a reading order, and it is
-finished because the reading order is finished.
+Every version on that list is complete, which means less than a green checklist suggests: each
+layer has an implementation correct against its reference and small enough to read. It does not
+mean production-ready -- there is no GPU path, no queuing beyond one process, and no architecture
+beyond the Llama family. The roadmap was a reading order, and it is finished.
 
 ## Design Principles
 
-1. **No CGo, ever.** `CGO_ENABLED=0` is the default and the only supported configuration. If a feature needs C to be understood, it is out of scope.
-2. **Readability before performance.** Reference implementations are written to be read. Fast paths come later, behind the same interfaces, and never replace the readable version.
-3. **One layer, one concept.** Each package maps to a concept in LLM inference, with a `doc.go` explaining what it does and why.
-4. **Scheduling and caching are first-class.** The kernel is not the whole engine. Continuous batching and KV reuse are what separate a serving engine from a script.
-5. **GGUF is the model format.** No proprietary formats, no Python conversion step.
-6. **Honest benchmarks.** No cherry-picked numbers. `orbix bench` runs on the user's hardware, with the user's model.
-7. **Go conventions are load-bearing.** Explicit interfaces, directional dependencies, `context.Context` everywhere, no reflection-heavy magic.
+1. **No CGo, ever.** `CGO_ENABLED=0` is the only supported configuration.
+2. **Scheduling and caching are first-class.** The kernel is not the whole engine; continuous
+   batching and KV reuse are what separate a serving engine from a script.
+3. **GGUF is the model format.** No proprietary formats, no Python conversion step.
+4. **Go conventions are load-bearing.** Explicit interfaces, directional dependencies,
+   `context.Context` everywhere, no reflection-heavy magic.
 
 ## Configuration
 
@@ -802,74 +804,12 @@ For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that 
 (131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes), against 32 KiB for the synthetic fixtures.
 Any model with a long window should be run with `--blocks`.
 
-## Development
-
-The commands below are [just](https://just.systems) recipes. `just` is not usually preinstalled:
-`cargo install just`, `brew install just`, `winget install --id Casey.Just --exact`, or a
-release binary. Each recipe is a short shell command; the justfile is the readable list.
-
-```bash
-git clone https://github.com/pplmx/orbix
-cd orbix
-
-just test      # CGO_ENABLED=0 go test ./...
-just lint      # golangci-lint run
-just check     # the local gate: vet, test, lint, gofmt
-just docs      # rumdl check: Markdown is code here too
-just hooks     # prek: whitespace, final newlines, and YAML/TOML/JSON syntax
-just commits   # cz check: commit subjects across a range; override RANGE=base..HEAD first
-just release-preview # what the next release would be; changes nothing
-just fuzz      # run every fuzz target; FUZZTIME sets the per-target budget
-just build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix
-just bench     # run kernel and engine benchmarks
-just cross     # build all five supported platforms with CGo disabled
-just test-race # the suite under the race detector; needs cgo, so it is separate
-```
-
-`just check` is what a contributor runs before pushing; it needs the Go toolchain and
-golangci-lint **v2**, because `.golangci.yml` is a v2 configuration and a v1 binary refuses to
-read one. The recipe checks the version and says so, rather than letting the linter's own
-message about the config stand in for it.
-
-`just docs` runs `rumdl check .` and needs rumdl; `just hooks` runs the pre-commit hooks through
-prek. Both are separate targets rather than part of `check` because neither tool is in the Go
-toolchain, and `check` should stay runnable with Go and golangci-lint alone.
-
-They differ in what they do on a problem: `just docs` reports and leaves the file alone, while
-`just hooks` **rewrites** it (`rumdl` and `rumdl-fmt` pass `--fix`, and `end-of-file-fixer` and
-`mixed-line-ending` edit in place). A hook that changed something exits non-zero; re-stage the
-file and look at what it did rather than assuming the edit was cosmetic. `just check` sees Go
-files only, which is why a stray whitespace line under `.github/workflows/` leaves it green and
-`just hooks` catches it.
-
-Run `prek install` once to make the hooks fire on every commit; it writes shims under
-`.git/hooks/`, which git does not track.
-
-`just fuzz` searches rather than gates. Six targets cover the paths that read untrusted bytes:
-the GGUF container, the quantization decoders, the chat template parser, and the tokenizer's
-pre-split and decode. Each keeps a seed corpus that `go test` replays on every run, so a crash
-found once stays fixed; reading a file is the one thing here that runs on input someone else
-produced, and a panic during it takes the process down rather than returning an error.
-
-CI enforces `CGO_ENABLED=0` on every platform. A build that requires CGo is a build that fails.
-
-Renovate keeps the workflow's pinned actions current: `.github/renovate.json` extends
-`config:recommended`, so a new `actions/checkout`, `actions/setup-go`, or lint action release
-arrives as a pull request rather than as a stale pin nobody notices. Nothing in the build
-depends on it — the versions in `ci.yml` are the ones used.
-
-If you are contributing with an AI coding agent, read [`AGENTS.md`](AGENTS.md) first. It records the no-CGo constraint, layering rules, interface contracts, and naming conventions.
-
 ## Contributing
 
-This is primarily a personal learning project, but issues and design discussions are welcome — especially if you are learning LLM inference yourself and spot something unclear.
-
-- **No CGo.** PRs that introduce `import "C"` or require `CGO_ENABLED=1` will not be merged.
-- **Clarity is a feature.** If a kernel or scheduler change makes the code harder to read, it needs a strong justification.
-- Keep dependencies directional: kernels must not import the scheduler; the scheduler must not import the server.
-- Kernel changes must include a correctness test against the reference implementation and a benchmark.
-- New model architectures go through the architecture registry; do not add model-specific branches to the scheduler or server.
-- Naming: brand **Orbix**, binary **`orbix`**, module path **`github.com/pplmx/orbix`**. There is no importable root package -- the layers are under `internal/` -- so a package named `orbix` would be a new decision rather than a rename.
+This is primarily a personal learning project, but issues and design discussions are welcome.
+Build commands, the gates and how they differ, and the repository's constraints are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md). If you are contributing with an AI coding agent, read
+[`AGENTS.md`](AGENTS.md) first.
 
 ## License
 

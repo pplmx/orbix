@@ -58,6 +58,31 @@ func (l *Loader) File() *gguf.File {
 //
 // The slice has one float32 per tensor element, in ggml's storage order. The
 // caller is responsible for reshaping it.
+// tensorBytes returns the encoded size of a tensor, naming the reason when it has none.
+//
+// TensorInfo.Bytes reports one false for two different failures: a type this package does not
+// know, and an element count that is not a multiple of its block size. Reporting both as
+// "unsupported type" is actively misleading -- measured, a hand-built Q4_0 tensor declaring 33
+// elements produced `has unsupported type Q4_0`, which sends a reader to the type support table
+// for a problem that is in the shape. The two are separated here so each says what is wrong.
+func tensorBytes(ti gguf.TensorInfo) (int64, error) {
+	if nbytes, ok := ti.Bytes(); ok {
+		return nbytes, nil
+	}
+	block, known := ti.Type.BlockSize()
+	if !known {
+		return 0, fmt.Errorf("quant: tensor %q has unsupported type %s", ti.Name, ti.Type)
+	}
+	if n := ti.N(); n%int64(block) != 0 {
+		return 0, fmt.Errorf("quant: tensor %q is %d elements, which is not a multiple of %s's %d-element block",
+			ti.Name, n, ti.Type, block)
+	}
+	// Bytes can still fail for an element count whose byte length would overflow int64. That
+	// is a size problem rather than a type one, and saying so is the only useful description.
+	return 0, fmt.Errorf("quant: tensor %q is too large: %d elements of %s do not fit in a byte count",
+		ti.Name, ti.N(), ti.Type)
+}
+
 func (l *Loader) Tensor(name string) ([]float32, error) {
 	ti, ok := l.file.Tensor(name)
 	if !ok {
@@ -67,9 +92,9 @@ func (l *Loader) Tensor(name string) ([]float32, error) {
 	if n <= 0 {
 		return nil, fmt.Errorf("quant: tensor %q has invalid element count %d", name, n)
 	}
-	nbytes, ok := ti.Bytes()
-	if !ok {
-		return nil, fmt.Errorf("quant: tensor %q has unsupported type %s", name, ti.Type)
+	nbytes, err := tensorBytes(ti)
+	if err != nil {
+		return nil, err
 	}
 	start, rerr := l.dataStart(ti, nbytes)
 	if rerr != nil {
@@ -101,9 +126,9 @@ func (l *Loader) TensorInto(name string, dst []float32) error {
 	if int64(len(dst)) != ti.N() {
 		return fmt.Errorf("quant: tensor %q has %d elements, destination has %d", name, ti.N(), len(dst))
 	}
-	nbytes, ok := ti.Bytes()
-	if !ok {
-		return fmt.Errorf("quant: tensor %q has unsupported type %s", name, ti.Type)
+	nbytes, err := tensorBytes(ti)
+	if err != nil {
+		return err
 	}
 	start, rerr := l.dataStart(ti, nbytes)
 	if rerr != nil {
@@ -201,9 +226,9 @@ func (l *Loader) TensorReader(name string) (io.Reader, error) {
 	if !ok {
 		return nil, fmt.Errorf("quant: no tensor named %q", name)
 	}
-	nbytes, ok := ti.Bytes()
-	if !ok {
-		return nil, fmt.Errorf("quant: tensor %q has unsupported type %s", name, ti.Type)
+	nbytes, err := tensorBytes(ti)
+	if err != nil {
+		return nil, err
 	}
 	start, rerr := l.dataStart(ti, nbytes)
 	if rerr != nil {

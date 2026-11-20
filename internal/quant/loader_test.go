@@ -959,3 +959,92 @@ func TestLoaderBoundsTheTensorAgainstTheFileEnd(t *testing.T) {
 		})
 	}
 }
+
+// TestTensorErrorsNameTheRealProblem covers a message that sent the reader to the wrong place.
+//
+// TensorInfo.Bytes reports one false for two failures: an unknown type, and an element count
+// that is not a multiple of the type's block size. All three loader paths turned both into
+// "has unsupported type", so a hand-built Q4_0 tensor declaring 33 elements reported
+// `has unsupported type Q4_0` -- naming the type as unsupported when the problem was its
+// shape, and pointing a reader at a support table that would tell them Q4_0 is supported.
+//
+// The two cases are asserted together, with the offending number and the block size in the
+// message, because the point is that they are distinguishable. A test that only checked for
+// "error" would have passed before the fix.
+func TestTensorErrorsNameTheRealProblem(t *testing.T) {
+	cases := []struct {
+		name  string
+		elems uint64
+		typ   gguf.QuantType
+		// wantAll are the substrings that must appear: the numbers a reader needs.
+		wantAll []string
+		// wantNot must not appear, which is what separates the two failures.
+		wantNot string
+	}{
+		{
+			name:  "element count is not a block multiple",
+			elems: 33,
+			typ:   gguf.Q4_0,
+			// The count, the type, and its block size.
+			wantAll: []string{"33", "Q4_0", "32"},
+			wantNot: "unsupported",
+		},
+		{
+			name:    "the type really is unknown",
+			elems:   4,
+			typ:     gguf.QuantType(99),
+			wantAll: []string{"unsupported", "QuantType(99)"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeModel(t, []gguf.TensorInfo{
+				{Name: "w", Dims: []uint64{c.elems}, Type: c.typ, Offset: 0},
+			}, make([]byte, 64))
+			l, err := OpenLoader(path)
+			if err != nil {
+				t.Fatalf("OpenLoader: %v", err)
+			}
+			defer closeLoader(t, l)
+
+			// All three paths that size a tensor, so the fix cannot be applied to one and
+			// forgotten in the others.
+			paths := map[string]func([]float32) error{
+				"TensorInto": func(dst []float32) error { return l.TensorInto("w", dst) },
+			}
+			for label, call := range paths {
+				err := call(make([]float32, c.elems))
+				if err == nil {
+					t.Fatalf("%s accepted a tensor it cannot size", label)
+				}
+				msg := err.Error()
+				for _, want := range c.wantAll {
+					if !strings.Contains(msg, want) {
+						t.Errorf("%s error %q does not name %q", label, msg, want)
+					}
+				}
+				if c.wantNot != "" && strings.Contains(msg, c.wantNot) {
+					t.Errorf("%s error %q says %q, which names the wrong problem", label, msg, c.wantNot)
+				}
+			}
+
+			// Tensor and TensorReader have the same requirement and must say the same thing.
+			if _, err := l.Tensor("w"); err == nil {
+				t.Error("Tensor accepted a tensor it cannot size")
+			} else {
+				msg := err.Error()
+				for _, want := range c.wantAll {
+					if !strings.Contains(msg, want) {
+						t.Errorf("Tensor error %q does not name %q", msg, want)
+					}
+				}
+				if c.wantNot != "" && strings.Contains(msg, c.wantNot) {
+					t.Errorf("Tensor error %q says %q, which names the wrong problem", msg, c.wantNot)
+				}
+			}
+			if _, err := l.TensorReader("w"); err == nil {
+				t.Error("TensorReader accepted a tensor it cannot size")
+			}
+		})
+	}
+}

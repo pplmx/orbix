@@ -3908,3 +3908,59 @@ func TestUsageIsIdenticalOnBothPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestValidationOrderIsFixed pins which error a request with several problems reports.
+//
+// Each handler checks in a fixed order, and that order is the contract: a client that sent
+// two bad things is told about one of them, and which one determines what it fixes first.
+// The order is decode, model, shape fields, required fields, then value ranges -- documented
+// on handleCompletion -- and nothing enforced it. Reordering two checks compiles, passes every
+// existing test, and changes what every multi-problem request is told.
+//
+// The pairs below are chosen so each one separates two adjacent stages: a 404 must beat a 400
+// about the body, a shape refusal must beat a missing prompt, and a missing prompt must beat a
+// bad value, since a value cannot be judged against a request that has no prompt.
+func TestValidationOrderIsFixed(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	cases := []struct {
+		name   string
+		path   string
+		body   string
+		status int
+		param  string
+	}{
+		// 404 before any 400: the model check runs before the body is judged.
+		{"unknown model beats a missing prompt", "/v1/completions",
+			`{"model": "nope", "prompt": "  "}`, http.StatusNotFound, "model"},
+		{"unknown model beats a shape field", "/v1/completions",
+			`{"model": "nope", "prompt": "hi", "n": 3}`, http.StatusNotFound, "model"},
+		{"unknown model beats a bad value", "/v1/completions",
+			`{"model": "nope", "prompt": "hi", "top_p": 5}`, http.StatusNotFound, "model"},
+		// Shape fields before the required-field check: the response would be the wrong
+		// shape regardless of what the prompt holds.
+		{"shape field beats a missing prompt", "/v1/completions",
+			`{"prompt": "  ", "n": 3}`, http.StatusBadRequest, "n"},
+		{"shape field beats a chat with no messages", "/v1/chat/completions",
+			`{"n": 3}`, http.StatusBadRequest, "n"},
+		// Required fields before value ranges.
+		{"missing prompt beats a bad max_tokens", "/v1/completions",
+			`{"prompt": "", "max_tokens": -5}`, http.StatusBadRequest, "prompt"},
+		{"missing messages beats a bad top_p", "/v1/chat/completions",
+			`{"top_p": 5}`, http.StatusBadRequest, "messages"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != c.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, c.status)
+			}
+			body := decodeBody[errorBody](t, resp)
+			if body.Error.Param != c.param {
+				t.Errorf("param = %q, want %q: a client fixes the named field first",
+					body.Error.Param, c.param)
+			}
+		})
+	}
+}

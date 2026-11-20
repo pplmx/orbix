@@ -638,6 +638,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCompletion and handleChat check a request in the same order, and the order is the
+// contract: decode, model, response-shape fields, required fields, then the values inside
+// generate. A client that sends several problems at once sees the first one in that list, so
+// changing the order changes what a client is told to fix.
+//
+// The reasoning, cheapest-and-most-fundamental first: a body the decoder cannot parse has no
+// fields to look at; a model this server does not serve makes every later answer a reply from
+// the wrong model, so 404 precedes any 400 about the request; a shape field the server cannot
+// honour means the response would be the wrong shape whatever the prompt says; a missing
+// prompt means there is nothing to generate from. Value ranges come last because they can only
+// be judged against a request that is otherwise well-formed.
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	var req completionRequest
 	if err := decodeJSON(w, r, &req, s.maxBodyBytes()); err != nil {

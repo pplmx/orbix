@@ -4290,3 +4290,56 @@ func TestStreamChunksShareOneTimestamp(t *testing.T) {
 			chunks, len(created), created)
 	}
 }
+
+// TestBlockingResponseCarriesTheGeneratesTimestamp covers the same property as the streaming
+// one for the two non-streaming shapes.
+//
+// blockingResponse is called with the timestamp generate already took, rather than reading the
+// clock again. That matters because the response is written after generation finishes: a
+// request whose generation started at 12:00:00.9 and ended at 12:00:01.1 would report the
+// latter, and a client comparing created across requests would see a delay that did not
+// happen. The difference is one call rather than a whole stream, so it is worth stating why
+// it is still the same fix: one response, one creation time.
+//
+// This test does NOT catch a return to time.Now() in either branch, and saying so is the
+// point. Generation here takes milliseconds, so a second reading lands in the same second as
+// the first and the window assertion holds -- verified by restoring the clock in the chat
+// branch and running it three times. What it does catch is the timestamp being replaced by a
+// constant, dropped, or taken before the request arrived. The property that actually changed
+// -- that the value comes from generate rather than from the writer -- is only observable
+// across a second boundary, which the streaming test forces by holding its channel open and
+// this one cannot afford to do twice.
+//
+// Both endpoints are checked because they are separate branches of the same function, and a
+// future edit could adjust one without the other.
+func TestBlockingResponseCarriesTheGeneratesTimestamp(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	for _, c := range []struct{ name, path, body string }{
+		{"completions", "/v1/completions", `{"prompt": "hi", "max_tokens": 2}`},
+		{"chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before := time.Now().Unix()
+			req := httptest.NewRequest("POST", c.path, strings.NewReader(c.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			after := time.Now().Unix()
+
+			var got struct {
+				Created int64 `json:"created"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("status %d: %v", rec.Code, err)
+			}
+			// The value must be the one taken when the request arrived, which is inside this
+			// window -- not a second reading after generation finished.
+			if got.Created < before || got.Created > after {
+				t.Errorf("created = %d, outside the request's own window [%d, %d]",
+					got.Created, before, after)
+			}
+		})
+	}
+}

@@ -888,11 +888,11 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		s.streamResponse(w, r, ch, id, created, p.chat, p.stop, p.includeUsage, len(promptTokens))
 		return
 	}
-	s.blockingResponse(w, r, ch, id, p, promptTokens)
+	s.blockingResponse(w, r, ch, id, created, p, promptTokens)
 }
 
 // blockingResponse collects the whole output and writes one JSON body.
-func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, p generateParams, promptTokens []int32) {
+func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, created int64, p generateParams, promptTokens []int32) {
 	var out []int32
 	reason := "stop"
 	for ev := range ch {
@@ -940,7 +940,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 		writeJSON(w, http.StatusOK, map[string]any{
 			"id":      id,
 			"object":  "chat.completion",
-			"created": time.Now().Unix(),
+			"created": created,
 			"model":   s.cfg.ModelName,
 			"choices": []map[string]any{{
 				"index":         0,
@@ -954,7 +954,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      id,
 		"object":  "text_completion",
-		"created": time.Now().Unix(),
+		"created": created,
 		"model":   s.cfg.ModelName,
 		"choices": []map[string]any{{
 			"index":         0,

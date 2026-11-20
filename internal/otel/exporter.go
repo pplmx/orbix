@@ -307,6 +307,14 @@ func (e *Exporter) Flush(ctx context.Context) error { return e.flush(ctx) }
 
 // Close flushes and stops the sender. It is safe to call more than once.
 //
+// Only the first call can report an error. A later call returns nil because the flush already
+// happened and its result was that call's business: measured with a collector answering 500,
+// the first Close returned "otel: export: 500 Internal Server Error" and the second returned
+// nil. A caller that defers Close and also checks the error from an explicit call will see the
+// deferred one fail and the checked one succeed, so the error has to be read from the first
+// call -- the alternative, caching the result for every caller afterwards, would let a
+// shutdown path that closes twice report the same failure twice.
+//
 // The flush is bounded by CloseBudget rather than running on context.Background(). A
 // collector that accepts a connection and never answers otherwise holds the caller for one
 // client timeout per batch, and Close is deferred in a server's shutdown path: measured end

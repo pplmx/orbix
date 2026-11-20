@@ -1477,3 +1477,32 @@ func TestSpanFinishClearsAStaleMessage(t *testing.T) {
 		t.Errorf("the encoded body still carries the earlier error: %s", body)
 	}
 }
+
+// TestSecondCloseReportsNoError pins what the lifetime after the first Close looks like.
+//
+// The first call owns the flush and its error; a later call returns nil because there is
+// nothing left to do and no new failure to report. Measured with a collector answering 500:
+// first "otel: export: 500 Internal Server Error", second nil. A caller that defers Close and
+// also checks an explicit call sees exactly this, so the behaviour is worth stating rather
+// than leaving to the type's documentation alone.
+func TestSecondCloseReportsNoError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint: srv.URL, Interval: time.Hour, CloseBudget: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	exp.Record(testSpan(t, "op"))
+
+	first := exp.Close()
+	if first == nil {
+		t.Fatal("the first Close reported success despite a collector answering 500")
+	}
+	if second := exp.Close(); second != nil {
+		t.Errorf("the second Close returned %v, want nil: the flush belongs to the first call", second)
+	}
+}

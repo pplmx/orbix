@@ -1,6 +1,7 @@
 package gguf
 
 import (
+	"bytes"
 	"math"
 	"strconv"
 	"testing"
@@ -244,4 +245,78 @@ func TestFormatFloatPrecision(t *testing.T) {
 	if got, want := FormatFloat(TypeFloat64, 1.0/3), strconv.FormatFloat(1.0/3, 'g', -1, 64); got != want {
 		t.Errorf("FormatFloat(float64, 1/3) = %q, want %q", got, want)
 	}
+}
+
+// TestParsedValuesStringifyExactly covers the path from bytes to text, which the table in
+// TestValueString cannot: that test builds Value structs by hand, so it would pass even if the
+// parser filled the wrong field.
+//
+// The field that matters here is Num, a float64 convenience the Value doc describes as "holds
+// any numeric value as a float64 ... so callers that only care about magnitude do not need a
+// type switch". It is lossy above 2^53 and nothing reads it, so the risk is a future caller
+// reaching for it. Measured on values written and read back through the whole parser:
+//
+//	2^53+1        exact uint 9007199254740993   Num 9007199254740992
+//	MaxInt64      exact int  9223372036854775807 Num 9223372036854775808
+//	MaxUint64     exact uint 18446744073709551615 Num 18446744073709551616
+//
+// The last one is past uint64's own range, so a caller converting it back gets a wrapped value
+// rather than an error. String() is safe because it formats the exact field, and this test
+// pins that: whatever Num does, the text a reader sees is the value the file holds.
+func TestParsedValuesStringifyExactly(t *testing.T) {
+	write := func(v Value) Value {
+		t.Helper()
+		data := buildFile([]kv{{"k", v}}, nil, 32, nil)
+		f, err := Read(bytes.NewReader(data))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		out, ok := f.Metadata["k"]
+		if !ok {
+			t.Fatal("the key did not survive the round trip")
+		}
+		return out
+	}
+
+	for _, c := range []struct {
+		name string
+		in   Value
+		want string
+	}{
+		{"uint64 above 2^53", Value{Type: TypeUint64, Uint: (1 << 53) + 1}, "9007199254740993"},
+		{"uint64 max", Value{Type: TypeUint64, Uint: math.MaxUint64}, "18446744073709551615"},
+		{"int64 max", Value{Type: TypeInt64, Int: math.MaxInt64}, "9223372036854775807"},
+		{"int64 min", Value{Type: TypeInt64, Int: math.MinInt64}, "-9223372036854775808"},
+		{"uint32", Value{Type: TypeUint32, Uint: 4294967295}, "4294967295"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := write(c.in)
+			if text := got.String(); text != c.want {
+				t.Errorf("after a round trip String() = %q, want %q", text, c.want)
+			}
+			// And the exact field has to match too: String() agreeing while the field is
+			// wrong would mean the two are derived differently.
+			if got.Type != c.in.Type {
+				t.Errorf("type came back as %v, want %v", got.Type, c.in.Type)
+			}
+			switch c.in.Type {
+			case TypeUint64, TypeUint32:
+				if got.Uint != c.in.Uint {
+					t.Errorf("Uint came back as %d, want %d", got.Uint, c.in.Uint)
+				}
+			case TypeInt64:
+				if got.Int != c.in.Int {
+					t.Errorf("Int came back as %d, want %d", got.Int, c.in.Int)
+				}
+			}
+		})
+	}
+
+	// The float path through the parser, where Num is exact and is the field being printed.
+	t.Run("float32 keeps its own digits", func(t *testing.T) {
+		got := write(Value{Type: TypeFloat32, Float: float64(float32(1e-5))})
+		if text := got.String(); text != "1e-05" {
+			t.Errorf("String() = %q, want 1e-05: the float32's own digits", text)
+		}
+	})
 }

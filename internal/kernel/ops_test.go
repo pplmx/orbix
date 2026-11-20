@@ -1019,3 +1019,44 @@ func TestRMSNormAccumulatesInFloat64(t *testing.T) {
 	// by 1/sqrt(eps) either way. A test asserting the guess would have failed on correct code.
 
 }
+
+// TestRMSNormZeroEpsOnAZeroRow pins the precondition its doc states.
+//
+// The doc used to say "eps prevents a division by zero on an all-zero row" without saying
+// that it takes a positive eps to do it. The scale is 1/sqrt(mean+eps): with eps = 0 an
+// all-zero row gives 1/0 = +Inf, and every weight becomes 0 * Inf = NaN. Measured, the row
+// comes back as four NaNs where eps 1e-5 gives four zeros.
+//
+// RMSNorm does not refuse eps = 0 -- the caller owns that, and LoadConfig refuses a
+// non-positive epsilon for every model this repository loads -- so the behaviour is pinned
+// rather than guarded. Locking both halves means a future change that started clamping eps
+// internally would show up here as a deliberate decision rather than a silent divergence
+// from the doc.
+func TestRMSNormZeroEpsOnAZeroRow(t *testing.T) {
+	weight := []float32{1, 1, 1, 1}
+	zero := []float32{0, 0, 0, 0}
+
+	t.Run("a positive eps gives zeros", func(t *testing.T) {
+		dst := make([]float32, 4)
+		if err := RMSNorm(dst, zero, weight, 1e-5); err != nil {
+			t.Fatalf("RMSNorm: %v", err)
+		}
+		for i, v := range dst {
+			if v != 0 {
+				t.Errorf("dst[%d] = %v, want 0: a zero row normalized by a positive eps is zero", i, v)
+			}
+		}
+	})
+
+	t.Run("a zero eps gives NaN", func(t *testing.T) {
+		dst := make([]float32, 4)
+		if err := RMSNorm(dst, zero, weight, 0); err != nil {
+			t.Fatalf("RMSNorm: %v", err)
+		}
+		for i, v := range dst {
+			if !math.IsNaN(float64(v)) {
+				t.Errorf("dst[%d] = %v, want NaN: 0 * Inf is not zero", i, v)
+			}
+		}
+	})
+}

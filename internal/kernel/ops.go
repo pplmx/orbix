@@ -165,8 +165,13 @@ func AddBias(dst, bias []float32, rows, width int) error {
 //
 // dst and src may alias. Each element is divided by the RMS of the row and
 // then multiplied by the corresponding weight, which is the normalization
-// used by Llama-family models. eps prevents a division by zero on an
-// all-zero row.
+// used by Llama-family models.
+//
+// eps prevents the division by zero on an all-zero row, and it needs to be positive to do
+// that: the scale is 1/sqrt(mean+eps), so eps = 0 gives 1/0 = +Inf and every weight becomes
+// 0 * Inf = NaN. Measured on a zero row, eps 0 returns NaN and eps 1e-5 returns zeros. This
+// function does not refuse a zero eps -- every caller passes cfg.RMSNormEps, which LoadConfig
+// refuses at or below zero -- so the requirement is stated here rather than enforced twice.
 func RMSNorm(dst, src, weight []float32, eps float32) error {
 	n := len(src)
 	if len(dst) < n {

@@ -768,3 +768,98 @@ func TestTensorAndTensorReaderWrapTheOffsetError(t *testing.T) {
 		})
 	}
 }
+
+// TestLoaderReadsTensorsAtArbitraryOffsets covers a layout the other loader tests do not
+// build: tensors that are out of order in the directory, unaligned on disk, and not adjacent.
+//
+// Every existing test places tensors in directory order with flags that happen to align, so
+// each one reads from a location that is also the natural place to read from. GGUF makes no
+// such promise -- a writer may lay the data out in any order, and the alignment is whatever
+// the writer chose -- and the loader's whole job is to follow the offset rather than the
+// order. A loader that walked the data section sequentially would pass every test currently
+// in this file.
+//
+// The quantized case is included because its block is 18 bytes: at an offset that is not a
+// multiple of four, the block straddles the boundaries a word-at-a-time read would use, which
+// is the case a `ReadAt` on a non-aligned start has to get right.
+func TestLoaderReadsTensorsAtArbitraryOffsets(t *testing.T) {
+	t.Run("out of order, unaligned", func(t *testing.T) {
+		// Three F32 tensors of two elements. Directory order b, a, c; disk order is whatever
+		// the offsets say, and none of them is aligned to eight.
+		data := make([]byte, 30)
+		putF32 := func(off int, vals ...float32) {
+			for i, v := range vals {
+				binary.LittleEndian.PutUint32(data[off+i*4:], math.Float32bits(v))
+			}
+		}
+		putF32(0, 20, 21)  // b
+		putF32(10, 10, 11) // a, deliberately at 10 rather than 8
+		putF32(20, 30, 31) // c
+
+		path := writeModel(t, []gguf.TensorInfo{
+			{Name: "b", Offset: 0, Dims: []uint64{2}, Type: gguf.F32},
+			{Name: "a", Offset: 10, Dims: []uint64{2}, Type: gguf.F32},
+			{Name: "c", Offset: 20, Dims: []uint64{2}, Type: gguf.F32},
+		}, data)
+		l, err := OpenLoader(path)
+		if err != nil {
+			t.Fatalf("OpenLoader: %v", err)
+		}
+		defer closeLoader(t, l)
+
+		for _, c := range []struct {
+			name  string
+			want0 float32
+			want1 float32
+		}{
+			{"a", 10, 11},
+			{"b", 20, 21},
+			{"c", 30, 31},
+		} {
+			got, err := l.Tensor(c.name)
+			if err != nil {
+				t.Errorf("%s: %v", c.name, err)
+				continue
+			}
+			if len(got) != 2 || got[0] != c.want0 || got[1] != c.want1 {
+				t.Errorf("%s = %v, want [%v %v]", c.name, got, c.want0, c.want1)
+			}
+		}
+	})
+
+	t.Run("quantized block at an unaligned offset", func(t *testing.T) {
+		// IQ4_NL is 18 bytes for 32 weights. Placed at offset 3 so the 16-bit scale straddles
+		// a four-byte boundary, which a word-aligned reader would misread.
+		blk := make([]byte, 18)
+		binary.LittleEndian.PutUint16(blk[0:], 0x3c00) // d = 1.0 in binary16
+		for i := 2; i < 18; i++ {
+			blk[i] = 0x08 // low nibble 8, high nibble 0
+		}
+		data := append([]byte{0xAA, 0xBB, 0xCC}, blk...)
+		path := writeModel(t, []gguf.TensorInfo{
+			{Name: "q", Offset: 3, Dims: []uint64{32}, Type: gguf.IQ4_NL},
+		}, data)
+		l, err := OpenLoader(path)
+		if err != nil {
+			t.Fatalf("OpenLoader: %v", err)
+		}
+		defer closeLoader(t, l)
+
+		got, err := l.Tensor("q")
+		if err != nil {
+			t.Fatalf("Tensor: %v", err)
+		}
+		// The low nibbles fill the first sixteen weights and the high nibbles the second
+		// sixteen, so the two halves take different codebook entries: kValuesIQ4NL[8] is 1 and
+		// kValuesIQ4NL[0] is -127. Asserting both halves is what makes a half-swapped decode
+		// fail rather than produce a symmetric result that looks reasonable.
+		for i := range 16 {
+			if got[i] != 1 {
+				t.Errorf("low half [%d] = %v, want 1", i, got[i])
+			}
+			if got[i+16] != -127 {
+				t.Errorf("high half [%d] = %v, want -127", i, got[i+16])
+			}
+		}
+	})
+}

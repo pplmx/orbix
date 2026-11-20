@@ -1256,3 +1256,59 @@ func TestKQuantDecodersProduceOnlyFiniteValues(t *testing.T) {
 		})
 	}
 }
+
+// TestSizeAgreesWithTheCodecTable pins the two places block sizes are stated.
+//
+// A tensor's byte length comes from gguf.QuantType.Size; the decoder splits those bytes
+// using the block and size constants in the codecs map above. They are maintained
+// separately, and nothing compared them: a typo in either one makes the loader read the
+// next tensor from the wrong offset, which produces plausible-looking weights rather
+// than an error, because both halves are self-consistent on their own.
+//
+// Q8_1 and Q8_K are Size-able but not decodable -- they are conversion-tool
+// intermediates, refused at load with "cannot decode". They are skipped rather than
+// expected to match, and the loop asserts that they are the only such types, so a codec
+// added without a size (or removed without cleaning up) fails here.
+func TestSizeAgreesWithTheCodecTable(t *testing.T) {
+	// Every quantized type the format defines, so the check is over the whole table
+	// rather than whichever types a test happened to think of.
+	all := []gguf.QuantType{
+		gguf.F32, gguf.F16, gguf.BF16,
+		gguf.Q4_0, gguf.Q4_1, gguf.Q5_0, gguf.Q5_1, gguf.Q8_0,
+		gguf.IQ4_NL, gguf.Q2_K, gguf.Q3_K, gguf.Q4_K, gguf.Q5_K, gguf.Q6_K,
+	}
+	for _, typ := range all {
+		c, ok := codecs[typ]
+		if !ok {
+			t.Errorf("%s has no codec entry, so Decode would refuse a type the format defines", typ)
+			continue
+		}
+		// Two element counts per type, one block-aligned and one several blocks long, so a
+		// constant that happens to match at 256 does not hide a rounding difference.
+		for _, n := range []int64{256, 1024, 4096} {
+			if n%int64(c.block) != 0 {
+				continue
+			}
+			sized, ok := typ.Size(n)
+			if !ok {
+				t.Errorf("%s.Size(%d) reported no size", typ, n)
+				continue
+			}
+			want := n / int64(c.block) * int64(c.size)
+			if sized != want {
+				t.Errorf("%s.Size(%d) = %d bytes, but the codec reads %d per block x %d blocks = %d",
+					typ, n, sized, c.size, n/int64(c.block), want)
+			}
+		}
+	}
+
+	// The types with a size but no decoder are the documented pair, and only that pair.
+	for _, typ := range []gguf.QuantType{gguf.Q8_1, gguf.Q8_K} {
+		if _, ok := codecs[typ]; ok {
+			t.Errorf("%s is decoded, so the note that it is a conversion-tool intermediate is stale", typ)
+		}
+		if _, ok := typ.Size(256); !ok {
+			t.Errorf("%s has no size, so the loader cannot refuse it with a byte count", typ)
+		}
+	}
+}

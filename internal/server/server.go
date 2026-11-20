@@ -844,6 +844,12 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		prefix = "chatcmpl-"
 	}
 	id := s.responseID(prefix, time.Now().UnixNano())
+	// One timestamp for the whole response. Every chunk of a stream and the final usage chunk
+	// carry this same value, because a client reads it as when the response was created, not
+	// as when each chunk happened to be written. Computing it per chunk made a long stream
+	// report two different creation times -- measured, a fixture reply is short enough to fit
+	// in one second, so it took a deliberate slow stream to see, but nothing prevented it.
+	created := time.Now().Unix()
 
 	// The two endpoints differ only in how the prompt was rendered, so the operation name
 	// is what tells them apart in a trace.
@@ -879,7 +885,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 
 	if p.stream {
-		s.streamResponse(w, r, ch, id, p.chat, p.stop, p.includeUsage, len(promptTokens))
+		s.streamResponse(w, r, ch, id, created, p.chat, p.stop, p.includeUsage, len(promptTokens))
 		return
 	}
 	s.blockingResponse(w, r, ch, id, p, promptTokens)
@@ -967,7 +973,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 // in the same stream carries "usage": null. A client written against the documented shape
 // distinguishes the two by choices being empty, and one that reads usage off every chunk
 // without a null there would see the field missing rather than absent.
-func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, chat bool, stop []string, includeUsage bool, promptTokens int) {
+func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, created int64, chat bool, stop []string, includeUsage bool, promptTokens int) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this connection")
@@ -1002,7 +1008,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	send := func(payload map[string]any) bool {
 		payload["id"] = id
 		payload["object"] = object
-		payload["created"] = time.Now().Unix()
+		payload["created"] = created
 		payload["model"] = s.cfg.ModelName
 		if includeUsage {
 			// Set on every ordinary chunk, not only the usage one: OpenAI documents the
@@ -1168,7 +1174,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	// sentinel every OpenAI stream ends with. Clients that accumulate deltas see no
 	// text change from either.
 	final := map[string]any{
-		"id": id, "object": object, "created": time.Now().Unix(), "model": s.cfg.ModelName,
+		"id": id, "object": object, "created": created, "model": s.cfg.ModelName,
 		"choices": []map[string]any{{"index": 0, "delta": map[string]string{}, "finish_reason": stopReason}},
 	}
 	if !chat {
@@ -1195,7 +1201,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	// breaks the check a client uses to find it.
 	if includeUsage {
 		usage := map[string]any{
-			"id": id, "object": object, "created": time.Now().Unix(), "model": s.cfg.ModelName,
+			"id": id, "object": object, "created": created, "model": s.cfg.ModelName,
 			"choices": []map[string]any{},
 			"usage": map[string]int{
 				"prompt_tokens":     promptTokens,

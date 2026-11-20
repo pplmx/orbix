@@ -1979,7 +1979,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", false, nil, false, 0)
+		ch, "cmpl-test", 1700000000, false, nil, false, 0)
 
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
@@ -1997,7 +1997,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch2)
 	w2 := httptest.NewRecorder()
 	srv.streamResponse(w2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch2, "cmpl-test", false, []string{"this stop never appears"}, false, 0)
+		ch2, "cmpl-test", 1700000000, false, []string{"this stop never appears"}, false, 0)
 	if withStop := collectStream(t, io.NopCloser(strings.NewReader(w2.Body.String()))); withStop != want {
 		t.Errorf("with a stop configured, streamed %q, want %q", withStop, want)
 	}
@@ -2013,7 +2013,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch3)
 	w3 := httptest.NewRecorder()
 	srv.streamResponse(w3, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch3, "cmpl-test", false, nil, false, 0)
+		ch3, "cmpl-test", 1700000000, false, nil, false, 0)
 	if got := collectStream(t, io.NopCloser(strings.NewReader(w3.Body.String()))); got != wantSingle {
 		t.Errorf("one-byte stream gave %q, the same token decodes to %q", got, wantSingle)
 	}
@@ -2094,7 +2094,7 @@ func TestStreamReleasesHeldTextWhenNoStopMatches(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", false, []string{"中X"}, false, 0)
+		ch, "cmpl-test", 1700000000, false, []string{"中X"}, false, 0)
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
 		t.Errorf("streamed %q with an unmatched stop, want %q", got, want)
@@ -2746,7 +2746,7 @@ func TestStreamStopsWhenWritesFail(t *testing.T) {
 	go func() {
 		defer close(done)
 		srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-			ch, "cmpl-test", false, nil, false, 0)
+			ch, "cmpl-test", 1700000000, false, nil, false, 0)
 	}()
 	select {
 	case <-done:
@@ -2784,7 +2784,7 @@ func TestStreamRefusesAConnectionItCannotFlush(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.streamResponse(&noFlushWriter{ResponseWriter: rec},
 		httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", false, nil, false, 0)
+		ch, "cmpl-test", 1700000000, false, nil, false, 0)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -3143,7 +3143,7 @@ func TestStreamReportsAMidStreamError(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
-	srv.streamResponse(w, r, ch, "req-1", false, nil, false, 3)
+	srv.streamResponse(w, r, ch, "req-1", 1700000000, false, nil, false, 3)
 
 	body := w.Body.String()
 	// The error has to be visible to the client, not only in a log.
@@ -4217,5 +4217,76 @@ func TestResponseIDStaysUniqueWithAFrozenClock(t *testing.T) {
 	// look alike in a log.
 	if id := srv.responseID("chatcmpl-", frozen); !strings.HasPrefix(id, "chatcmpl-") {
 		t.Errorf("id %q lost its prefix", id)
+	}
+}
+
+// TestStreamChunksShareOneTimestamp covers the field a client reads as when the response was
+// created.
+//
+// Every chunk of a stream used to compute created with its own time.Now(). A reply that
+// crosses a second boundary then reports two creation times for one response, which no
+// client can interpret: the id is the same, the model is the same, and the timestamp is not.
+// The fixture replies here are short enough to fit inside one second, so measuring the bug
+// took a deliberately slow stream -- but nothing prevented it, and a real generation at eight
+// tokens a second crosses the boundary routinely.
+//
+// The timestamp is now taken once, in generate, and threaded through streamResponse.
+//
+// The stream is fed by hand and deliberately straddles a second boundary, because that is the
+// only way this property can fail: the fixture replies used elsewhere finish well inside one
+// second, so a test driven through the handler passes even with the per-chunk clock restored
+// -- verified by doing exactly that five times. Waiting for the real boundary costs up to a
+// second of suite time, which is why the event channel is driven directly rather than by a
+// longer generation.
+func TestStreamChunksShareOneTimestamp(t *testing.T) {
+	srv, tok := newTestServer(t)
+
+	// Drive streamResponse directly so the two events can be separated by more than the
+	// remaining time in the current second.
+	ch := make(chan engine.Event, 4)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/completions", nil)
+	go func() {
+		id := tok.Encode("hello", false)
+		if len(id) > 0 {
+			ch <- engine.Event{Token: id[0], HasToken: true}
+		}
+		// Sleep past the next second boundary, so a per-chunk clock would produce a second
+		// value for the chunks after it.
+		time.Sleep(time.Until(time.Unix(time.Now().Unix()+1, 0)) + 50*time.Millisecond)
+		if len(id) > 1 {
+			ch <- engine.Event{Token: id[1], HasToken: true}
+		}
+		ch <- engine.Event{Done: true, FinishReason: "length", Generated: 2}
+		close(ch)
+	}()
+	const createdArg = int64(1700000000)
+	srv.streamResponse(rec, req, ch, "cmpl-test", createdArg, false, nil, true, 3)
+
+	created := make(map[int64]int, 8)
+	chunks := 0
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") || strings.HasSuffix(line, "[DONE]") {
+			continue
+		}
+		var got struct {
+			ID      string `json:"id"`
+			Created int64  `json:"created"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &got); err != nil {
+			continue
+		}
+		if got.ID == "" {
+			continue
+		}
+		chunks++
+		created[got.Created]++
+	}
+	if chunks < 2 {
+		t.Fatalf("only %d chunks carried an id; the fixture is too small to test this", chunks)
+	}
+	if len(created) != 1 {
+		t.Errorf("%d chunks reported %d distinct created values: %v; one response has one creation time",
+			chunks, len(created), created)
 	}
 }

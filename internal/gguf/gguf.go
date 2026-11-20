@@ -164,6 +164,21 @@ func Read(r io.Reader) (*File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("gguf: read %q: %w", key, err)
 		}
+		if _, seen := file.Metadata[key]; seen {
+			// GGUF does not allow a key twice, and a silent last-wins is the wrong answer
+			// for the metadata this package then trusts. Measured: a file declaring
+			// llama.context_length as 4096 and then as 8 loaded with 8, so a generator could
+			// shrink the window a reader believes in without anything saying so. The map is
+			// what makes the first value disappear, and the count in the header is the only
+			// place the duplication is still visible -- so the check has to happen here,
+			// where both the map and the loop index are in hand.
+			//
+			// This differs from the reference implementation, which stores metadata in a map
+			// and lets the last write win. Departing is deliberate: a reader of a file
+			// should not be able to disagree with a reader of the same file about what it
+			// says, and reporting the key is cheap.
+			return nil, fmt.Errorf("gguf: duplicate metadata key %q at entry %d", key, i)
+		}
 		file.Metadata[key] = val
 	}
 

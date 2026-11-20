@@ -1899,3 +1899,73 @@ func TestReadBoundsTheTensorCountAgainstTheDirectory(t *testing.T) {
 		}
 	})
 }
+
+// TestReadRejectsDuplicateMetadataKeys covers a file that states one key twice.
+//
+// The loader stored into a map, so the later value replaced the earlier one with no record of
+// it. Measured: a file declaring llama.context_length as 4096 and then as 8 loaded reporting 8,
+// so a generator could shrink the window a reader believes in and nothing in the loaded file
+// would say the two numbers had ever disagreed. Every other asymmetry in this package is
+// refused rather than resolved -- GetArray says in as many words that element types are "not
+// silently mixed" -- and this one had no comment explaining why it was different.
+//
+// This departs from the reference implementation, which keeps metadata in a map and lets the
+// last write win. A reader of a file should not be able to disagree with another reader of the
+// same file about what it says, and reporting the key costs one line.
+func TestReadRejectsDuplicateMetadataKeys(t *testing.T) {
+	// build writes kvs as metadata entries, in order, with no tensors.
+	build := func(kvs ...kvp) []byte {
+		var b bytes.Buffer
+		u32 := func(v uint32) { var x [4]byte; binary.LittleEndian.PutUint32(x[:], v); b.Write(x[:]) }
+		u64 := func(v uint64) { var x [8]byte; binary.LittleEndian.PutUint64(x[:], v); b.Write(x[:]) }
+		str := func(s string) { u64(uint64(len(s))); b.WriteString(s) }
+		b.WriteString("GGUF")
+		u32(3)
+		u64(0) // no tensors
+		u64(uint64(len(kvs)))
+		for _, e := range kvs {
+			str(e.key)
+			u32(4) // uint32
+			u32(e.val)
+		}
+		return b.Bytes()
+	}
+
+	// The damaged case: the same key twice. The message has to name the key and where the
+	// second copy is, or a reader with a large file has nothing to search for.
+	_, err := Read(bytes.NewReader(build(
+		kvp{"llama.context_length", 4096},
+		kvp{"llama.context_length", 8},
+		kvp{"general.architecture", 0},
+	)))
+	if err == nil {
+		t.Fatal("Read accepted the same metadata key twice; the second value silently replaced " +
+			"the first")
+	}
+	for _, want := range []string{"duplicate", "llama.context_length", "1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	// Distinct keys must still load, so the check cannot be satisfied by refusing everything.
+	f, err := Read(bytes.NewReader(build(
+		kvp{"llama.context_length", 4096},
+		kvp{"general.architecture", 0},
+	)))
+	if err != nil {
+		t.Fatalf("Read rejected distinct keys: %v", err)
+	}
+	if got := f.MetadataCount(); got != 2 {
+		t.Errorf("MetadataCount = %d, want 2", got)
+	}
+	if v, ok := f.Get[uint32]("llama.context_length"); !ok || v != 4096 {
+		t.Errorf("context_length = %d, %v; want 4096", v, ok)
+	}
+}
+
+// kvp is one metadata entry for TestReadRejectsDuplicateMetadataKeys.
+type kvp struct {
+	key string
+	val uint32
+}

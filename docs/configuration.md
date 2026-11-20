@@ -22,6 +22,22 @@ orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --pr
 the context can never fill is never published and `--prefix-cache` would reuse nothing. `serve`,
 `chat`, and `bench` refuse that combination rather than start it.
 
+`--prefix-cache` holds blocks, not just references to them. Every block the index remembers is
+retained until an entry is evicted, and eviction happens when the index reaches its own bound of
+1024 entries -- not when the pool runs short. A pool smaller than that bound therefore fills with
+remembered prefixes long before the index starts evicting.
+
+Measured on a 48-block pool with distinct prompts: 46 blocks free at the start, 26 after 100
+requests, and **1 after 200, where it stays**. Adding the pool's whole size back as `--blocks`
+moves that floor up but not away, and a prompt too short to fill a block contributes nothing to
+it -- shares are only remembered once a block is full.
+
+The practical reading: `--blocks` for a `--prefix-cache` deployment is the working set for
+in-flight requests *plus* whatever the index retains, so sizing it for concurrency alone leaves
+the floor near a handful of blocks. Requests still complete at that floor because each needs only
+a few, which is why the failure it produces is a 400 on an unusually long prompt rather than a
+crash.
+
 `--max-tokens` accepts 0 only on `run`, where "prefill and print nothing" is a result. The
 server cannot express a zero-token request (`max_tokens` is an integer, so 0 is indistinguishable
 from absent), a REPL turn generating nothing answers with an empty line, and a benchmark of zero

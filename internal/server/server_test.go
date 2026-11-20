@@ -4629,18 +4629,21 @@ func TestDisconnectReturnsTheBlocksToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("starting the stream: %v", err)
 	}
-	// Wait for the prefill to have taken blocks before hanging up. Reading one chunk is not
-	// enough: the first chunk can be an empty delta or the SSE preamble, either of which may
-	// arrive before the prompt has been through the model. Sampling the pool once after one read
-	// made this test fail intermittently -- "no blocks were allocated while the stream ran" --
-	// which is the guard reporting a race in the test rather than a leak in the server.
+	// This test cannot prove the blocks were held while the stream ran, and trying to made it
+	// flaky twice. Measured under -cpu 1: the whole response can be produced before the first
+	// Read returns, and a goroutine polling PoolFree as fast as it can still never sees it drop
+	// -- minFree stayed at 32 across a run that completed 31 rounds. The allocation window is
+	// real but too short to sample reliably, so the assertion below is the one this test can
+	// make: after a client hangs up, the pool is whole again.
+	//
+	// What that leaves untested is a leak that the release path would produce only for a
+	// cancelled sequence; the streaming-cancel accounting is covered by
+	// TestStreamingClientGoneReleasesTheSequence, which waits on Active rather than a pool
+	// figure and so does not depend on the window.
 	buf := make([]byte, 32)
 	if _, err := resp.Body.Read(buf); err != nil {
 		t.Fatalf("reading the first chunk: %v", err)
 	}
-	waitFor(t, 5*time.Second, func() bool {
-		return eng.Stats().PoolFree < before.PoolFree
-	}, "no blocks were allocated while the stream ran, so this run proves nothing")
 	_ = resp.Body.Close()
 
 	waitFor(t, 10*time.Second, func() bool { return eng.Active() == 0 },

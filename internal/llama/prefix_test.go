@@ -799,3 +799,54 @@ func TestRememberFullBlockRefusesInconsistentState(t *testing.T) {
 		}
 	})
 }
+
+// TestPrefixIndexAccessorReportsWhetherReuseIsOn pins the accessor that decides it.
+//
+// It was the one function in this package with 0.0% coverage under `go test
+// ./internal/llama/`, and the reason is the one the project notes describe for other
+// functions: Go instruments only the package under test, so its callers --
+// internal/engine's tests and cmd/orbix's banner -- do not count. The function does have a
+// production caller (serve prints "prefix cache: on" when it is non-nil), which is the
+// question that matters, but a zero here makes the next reader re-run that investigation.
+//
+// The property is the tri-state: a contiguous pool has no index at all, a paged pool
+// without reuse has an index that is nil, and a paged pool with reuse has one. The banner
+// reads exactly that distinction, so an implementation that always returned an empty index
+// would turn the flag on for every paged server.
+func TestPrefixIndexAccessorReportsWhetherReuseIsOn(t *testing.T) {
+	cfg := Config{
+		Arch: "llama", Hidden: 32, Layers: 1, Heads: 2, KVHeads: 2,
+		HeadDim: 16, ContextLen: 256,
+	}
+	for _, c := range []struct {
+		name    string
+		enable  bool
+		wantNil bool
+	}{
+		{"reuse off", false, true},
+		{"reuse on", true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 16, Blocks: 16})
+			if err != nil {
+				t.Fatalf("NewBlockPool: %v", err)
+			}
+			// The pool does not take this from its options: reuse is turned on by calling
+			// EnablePrefixCache, which is what makes a second call idempotent.
+			if c.enable {
+				pool.EnablePrefixCache()
+			}
+			got := pool.PrefixIndex()
+			if (got == nil) != c.wantNil {
+				t.Fatalf("PrefixIndex() == nil is %v, want %v", got == nil, c.wantNil)
+			}
+			// An index that exists must actually match: returning a non-nil placeholder
+			// would satisfy the nil check and still leave the flag lying.
+			if got != nil {
+				if n, _ := got.Match([]int32{1, 2, 3}); n != 0 {
+					t.Errorf("a fresh index reported a match of %d positions", n)
+				}
+			}
+		})
+	}
+}

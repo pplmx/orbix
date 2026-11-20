@@ -1,21 +1,6 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ],
-  "// note": "This repository has no Go dependencies, so almost everything here updates the GitHub Actions pinned in .github/workflows/ci.yml. Renovate rather than Dependabot because the two would both open pull requests for the same bumps; one manager avoids that.",
-  "labels": ["dependencies"],
-  "packageRules": [
-    {
-      "// why": "A pinned action that moves under us turns a green branch red without a commit here. Group them so one review covers all of them rather than five identical pull requests.",
-      "matchManagers": ["github-actions"],
-      "groupName": "github actions",
-      "automerge": false
-    },
-    {
-      "// why": "prek-action stopped publishing moving major tags at v3, so it is pinned to an exact version and must be bumped by hand-reviewed commits.",
-      "matchPackageNames": ["j178/prek-action"],
-      "automerge": false
-    }
-  ]
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:recommended"
+    ]
 }

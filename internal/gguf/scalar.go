@@ -82,10 +82,14 @@ func scalarAs[T Scalar](v Value) (T, bool) {
 			return intAs[T](int64(v.Float))
 		}
 		if v.Type.isUnsigned() {
-			if v.Uint > math.MaxInt64 {
-				return zero, false
-			}
-			return intAs[T](int64(v.Uint))
+			// An unsigned source goes through uintAs, not through int64 first. Routing it
+			// through int64 lost every value above MaxInt64 even when the destination was
+			// uint64 and could hold it: measured, Get[uint64] rejected
+			// 9223372036854775808 and 18446744073709551615 with ok=false, so reading a
+			// uint64 metadata value at its own type failed for the top half of its range.
+			// The file format allows those values and the destination can represent them,
+			// which makes the rejection a defect rather than a bounds check.
+			return uintAs[T](v.Uint)
 		}
 		return intAs[T](v.Int)
 	}
@@ -150,6 +154,53 @@ func intAs[T Scalar](n int64) (T, bool) {
 		return floatAs[T](float64(n))
 	default:
 		return zero, false
+	}
+}
+
+// uintAs converts an unsigned value to the integer type T, reporting false when T cannot
+// hold it.
+//
+// Separate from intAs because the two have different domains at the top: a uint64 source can
+// exceed MaxInt64, and forcing it through int64 first rejected those values before the
+// destination was ever consulted. Narrowing to an unsigned type is a plain range check; the
+// signed destinations are reached through intAs only when the value fits an int64, which is
+// exactly the condition that makes the narrowing well-defined.
+func uintAs[T Scalar](n uint64) (T, bool) {
+	var zero T
+	switch any(zero).(type) {
+	case uint8:
+		if n > math.MaxUint8 {
+			return zero, false
+		}
+		return convert[T](uint8(n))
+	case uint16:
+		if n > math.MaxUint16 {
+			return zero, false
+		}
+		return convert[T](uint16(n))
+	case uint32:
+		if n > math.MaxUint32 {
+			return zero, false
+		}
+		return convert[T](uint32(n))
+	case uint64:
+		return convert[T](n)
+	case uint:
+		if n > uint64(^uint(0)) {
+			return zero, false
+		}
+		return convert[T](uint(n))
+	case float32:
+		return floatAs[T](float64(n))
+	case float64:
+		return floatAs[T](float64(n))
+	default:
+		// A signed destination. The value has to fit an int64 before intAs can reason about
+		// it, and reporting false here is the honest answer for the rest.
+		if n > math.MaxInt64 {
+			return zero, false
+		}
+		return intAs[T](int64(n))
 	}
 }
 

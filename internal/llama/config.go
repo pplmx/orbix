@@ -304,6 +304,19 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// The vocabulary size comes from the embedding tensor, not from a
 	// hyperparameter: GGUF does not store one, and the tokenizer length can
 	// legitimately differ from the padded embedding rows.
+	//
+	// The two directions are not equally safe, and the difference is why every entry point
+	// checks token < VocabSize rather than trusting the tokenizer. Embedding rows beyond the
+	// token count are ordinary padding -- a checkpoint rounded 32001 pieces up to 32064 so a
+	// matmul dimension is a round number -- and nothing can reach them. Embedding rows short
+	// of the token count is the dangerous direction: the tokenizer can return an id the model
+	// has no row for, and the failure would be a slice index panic deep in the forward pass.
+	// Measured: one past the last valid id is refused at the boundary with
+	// "llama: token 363 outside the vocabulary (363)", at every entry point.
+	//
+	// Refusing the file when the tokenizer overruns is not an option this function has: it
+	// reads the config, and the tokenizer is loaded separately. That is why the check lives
+	// at the entry points instead of at load time.
 	emb, ok := f.Tensor("token_embd.weight")
 	if !ok {
 		return Config{}, fmt.Errorf("llama: missing token_embd.weight")

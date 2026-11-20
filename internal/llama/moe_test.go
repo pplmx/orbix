@@ -647,3 +647,44 @@ func TestParamsMatchesTheTensorElements(t *testing.T) {
 		t.Fatal("the bias terms are not a positive part of the total")
 	}
 }
+
+// TestSelectExpertsLeadingNaNAreNotSkipped pins the same comparison-rule cost Greedy has.
+//
+// The search seeds best = -1 and takes the first candidate unconditionally, so expert 0
+// wins even when its logit is NaN: every later comparison is `v > logits[0]`, which is
+// false against a NaN. Measured on {NaN, 3, 2} with k=2, the selection is [0 1] and both
+// weights are NaN. A NaN anywhere else is skipped normally ({1, NaN, 2} selects [2 0]),
+// because there the NaN is the one being compared and the comparison is false.
+//
+// This is the rule Greedy documents and TestGreedyNeverSelectsNaN pins -- the same shape,
+// reached by a different search. It is not a second bug, and it is unreachable in a served
+// model: the load-time finite check refuses a NaN weight, which is what makes the router
+// logits finite. The behaviour is pinned here so a future change to the seed value has to
+// think about both searches rather than only the sampler.
+func TestSelectExpertsLeadingNaNAreNotSkipped(t *testing.T) {
+	nan := float32(math.NaN())
+
+	t.Run("leading NaN wins its slot", func(t *testing.T) {
+		sel, w := selectExperts([]float32{nan, 3, 2}, 2)
+		if len(sel) != 2 || sel[0] != 0 {
+			t.Fatalf("selectExperts({NaN,3,2}, 2) = %v, want 0 selected first", sel)
+		}
+		for i, v := range w {
+			if !math.IsNaN(float64(v)) {
+				t.Errorf("weight %d = %v, want NaN: the selected set holds a NaN logit", i, v)
+			}
+		}
+	})
+
+	t.Run("a NaN elsewhere is skipped", func(t *testing.T) {
+		sel, w := selectExperts([]float32{1, nan, 2}, 2)
+		if len(sel) != 2 || sel[0] != 2 || sel[1] != 0 {
+			t.Fatalf("selectExperts({1,NaN,2}, 2) = %v, want [2 0]", sel)
+		}
+		for i, v := range w {
+			if math.IsNaN(float64(v)) {
+				t.Errorf("weight %d is NaN, but no selected logit was NaN", i)
+			}
+		}
+	})
+}

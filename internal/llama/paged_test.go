@@ -405,11 +405,21 @@ func TestNewBlockPoolRejectsUntenableSizes(t *testing.T) {
 		}
 	}
 
-	// A pool that fits is still built, and an unknown budget disables the check rather than
-	// rejecting a legitimate pool.
+	// A pool that fits is still built.
 	availableMemoryHook = availableMemory
 	if _, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 8, BlockSize: 4}); err != nil {
 		t.Fatalf("an ordinary pool was refused: %v", err)
+	}
+
+	// A budget of zero means the kernel did not say, and the check is skipped rather than
+	// treating "unknown" as "nothing available". The case above does not reach that branch:
+	// availableMemory returns a real figure on any machine with a working kernel, so
+	// budget > 0 holds and the guard runs. Injecting 0 is the only way to see the skip, and
+	// it is asserted with a pool that the 1 GiB budget above would have refused -- otherwise
+	// a guard that had become a no-op would still pass.
+	availableMemoryHook = func() int64 { return 0 }
+	if _, err := NewBlockPool(small, BlockPoolOptions{Blocks: 1 << 26, BlockSize: 1}); err != nil {
+		t.Errorf("an unknown budget rejected a pool it should not have judged: %v", err)
 	}
 }
 

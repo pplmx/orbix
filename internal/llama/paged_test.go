@@ -790,3 +790,65 @@ func TestSpansRefusesOutOfRangeArguments(t *testing.T) {
 		})
 	}
 }
+
+// TestPoolAccountingSurvivesALongRun extends the balance check from twenty cycles to two
+// thousand, which is the scale a server actually runs at.
+//
+// TestPoolAccountingStaysBalanced proves the invariant holds over a handful of prefills, and
+// TestPrefixIndexEvictsAtCapacity proves the index stops at its cap. Neither runs long enough
+// for the two to interact: eviction chooses a tail through the chain structure, and a chain
+// that loses its head while a sequence still holds the middle would be a leak that twenty
+// cycles cannot reach.
+//
+// The prompts vary across a range of lengths so the index keeps inserting distinct keys and
+// has to evict repeatedly, rather than hitting the same entry each cycle. The assertion is
+// the invariant itself rather than a final count: free plus held must equal the pool's size
+// after every prefill and every reset, so a leak fails at the cycle that causes it instead of
+// at a threshold someone picked.
+func TestPoolAccountingSurvivesALongRun(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 12, BlockSize: 4})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	idx := pool.EnablePrefixCache()
+
+	held := func() int {
+		n := 0
+		for id := range pool.Blocks() {
+			if pool.RefCount(int32(id)) > 0 {
+				n++
+			}
+		}
+		return n
+	}
+	for i := range 2000 {
+		cache := pool.New()
+		// Varying lengths keep producing distinct prefix keys, so the index evicts rather
+		// than replacing one entry.
+		prompt := append([]int32{1}, fixtureTokens(cfg, 8+(i%40))...)
+		if _, err := m.PrefillWithPrefix(cache, prompt, 0); err != nil {
+			t.Fatalf("cycle %d: %v", i, err)
+		}
+		if got, want := pool.Free()+held(), pool.Blocks(); got != want {
+			t.Fatalf("cycle %d: %d free + %d held != %d blocks", i, pool.Free(), held(), pool.Blocks())
+		}
+		if err := cache.Reset(); err != nil {
+			t.Fatalf("cycle %d Reset: %v", i, err)
+		}
+		if got, want := pool.Free()+held(), pool.Blocks(); got != want {
+			t.Fatalf("cycle %d after Reset: %d free + %d held != %d blocks",
+				i, pool.Free(), held(), pool.Blocks())
+		}
+		// The index may never exceed its cap, whatever the pool did.
+		if got := idx.Len(); got > maxPrefixEntries {
+			t.Fatalf("cycle %d: the index holds %d entries, past its cap of %d",
+				i, got, maxPrefixEntries)
+		}
+	}
+}

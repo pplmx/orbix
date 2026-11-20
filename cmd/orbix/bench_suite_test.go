@@ -1025,3 +1025,46 @@ func TestRunSeedSelectsTheStream(t *testing.T) {
 		}
 	}
 }
+
+// TestRowLineKeepsAFailureOnOneLine covers what a multi-line error would do to the table.
+//
+// tabwriter ends a row at a newline, so an error carrying one splits the failure across two
+// rows: the measurement cells of the second row are whatever the message happened to contain,
+// and every row below shifts out of alignment. One message makes the whole table unreadable,
+// which is worse than a truncated one because a reader trusts a table that lines up.
+//
+// The errors bench receives today are single-line -- ErrQueueFull and ErrPoolExhausted and the
+// wrappers around them -- so this was invisible rather than wrong. It is pinned because the
+// table's readability depends on a property of code owned by another package.
+func TestRowLineKeepsAFailureOnOneLine(t *testing.T) {
+	sc := scenario{name: "single"}
+	for _, c := range []struct {
+		name string
+		err  error
+		want []string
+	}{
+		{"a newline", errors.New("first line\nsecond line"), []string{"first line", "second line"}},
+		{"a carriage return", errors.New("first\rsecond"), []string{"first", "second"}},
+		{"a tab", errors.New("first\tsecond"), []string{"first", "second"}},
+		{"all three", errors.New("alpha\nbeta\ngamma\tdelta"), []string{"alpha", "beta", "gamma", "delta"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := rowLine(sc, result{}, c.err)
+			if strings.ContainsAny(got, "\n\r") {
+				t.Errorf("rowLine = %q, which ends the row early or rewinds the line", got)
+			}
+			// Six cells exactly. A tab inside the message would have made seven, which
+			// tabwriter renders as a column that nothing else has.
+			if n := len(strings.Split(got, "\t")); n != 6 {
+				t.Errorf("rowLine produced %d cells, want 6: %q", n, got)
+			}
+			// Every word of the message survives, so the failure is still diagnosable after
+			// the separator was replaced.
+			for _, want := range c.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("rowLine = %q does not contain %q", got, want)
+				}
+			}
+		})
+	}
+}

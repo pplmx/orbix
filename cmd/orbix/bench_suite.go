@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"text/tabwriter"
 	"time"
@@ -285,7 +286,14 @@ func runScenarios(o suiteOptions, scenarios []scenario) error {
 // rather than "0s". Both were reachable only by reading the code.
 func rowLine(sc scenario, res result, runErr error) string {
 	if runErr != nil {
-		return fmt.Sprintf("%s\t-\t-\t-\t-\tfailed: %v", sc.name, runErr)
+		// One line, whatever the error says. tabwriter treats a newline as the end of the row,
+		// so an error carrying one would split the failure across two rows and leave the
+		// remaining cells unaligned -- the whole table unreadable because of one message. The
+		// errors bench actually receives are single-line today (ErrQueueFull, ErrPoolExhausted
+		// and their wrappers), which is why this was invisible; the cost of not depending on
+		// that is one call.
+		return fmt.Sprintf("%s\t-\t-\t-\t-\tfailed: %s",
+			sc.name, oneLine(runErr.Error()))
 	}
 	first := "-"
 	if res.firstToken > 0 {
@@ -569,4 +577,14 @@ func runSequential(o suiteOptions, n int, opts engine.Options) (result, error) {
 		r.extra = fmt.Sprintf("paged %dx%d", pool.Blocks(), pool.BlockSize())
 	}
 	return r, nil
+}
+
+// oneLine replaces the control characters that would break a table row with visible
+// alternatives, so a multi-line error still occupies exactly one row.
+//
+// A tab would start a new column and a carriage return would rewind the line; a newline would
+// end the row. All three are common in error text that passed through a shell or a wrapped
+// fmt.Errorf, so none of them is hypothetical enough to leave to the caller.
+func oneLine(s string) string {
+	return strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(s)
 }

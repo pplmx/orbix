@@ -320,3 +320,53 @@ func TestParsedValuesStringifyExactly(t *testing.T) {
 		}
 	})
 }
+
+// TestQuantSizeRefusesOverflow covers the guard that keeps a huge element count from becoming a
+// negative byte count.
+//
+// The comment in Size says why this matters more than it looks: n is a product of dimensions
+// read out of the file, so it is attacker-controlled, and a wrapped negative length passes a
+// bounds check of the form "start + nbytes > fileSize" -- the check the loader relies on. An
+// unavailable size is handled; a negative one is trusted.
+//
+// The guard is reachable, which is not obvious. For a type whose block size times the byte size
+// is itself large the product wraps before the guard can see it, so only some types can reach
+// it: F16, I16, I32, Q8_0 and Q8_1 on the table as it stands. F16 is the clearest -- its block
+// size is 1 and its element is 2 bytes, so n = MaxInt64 is block-aligned and doubling it
+// overflows. Measured: F16.Size(MaxInt64) and Size(MaxInt64-1) are both refused, Size(MaxInt64/2)
+// is accepted at 9223372036854775806, and Size(MaxInt64/2+1) is refused, so the boundary is
+// exact to one element.
+func TestQuantSizeRefusesOverflow(t *testing.T) {
+	// The boundary, to the element.
+	cases := []struct {
+		n    int64
+		want int64
+		ok   bool
+	}{
+		// MaxInt64/2 blocks of two bytes each: block-aligned (F16's block is one element)
+		// and exactly representable, which is the largest accepted value.
+		{math.MaxInt64 / 2, (math.MaxInt64 / 2) * 2, true},
+		{math.MaxInt64/2 + 1, 0, false},
+		{math.MaxInt64 - 1, 0, false},
+		{math.MaxInt64, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := F16.Size(c.n)
+		if ok != c.ok || got != c.want {
+			t.Errorf("F16.Size(%d) = (%d, %v), want (%d, %v)", c.n, got, ok, c.want, c.ok)
+		}
+	}
+
+	// No type in the table may report a negative size as a success. This is the property the
+	// guard exists for, asserted across every type rather than the one that happened to be
+	// convenient: the types that cannot reach the guard must still not reach it, and a table
+	// edit that adds a type with a large block/byte ratio is exactly what would change that.
+	for q := range quantSizes {
+		for _, n := range []int64{math.MaxInt64, math.MaxInt64 - 1, math.MaxInt64 / 2} {
+			if got, ok := q.Size(n); ok && got < 0 {
+				t.Errorf("%s.Size(%d) = %d with ok=true: a negative byte count is worse than an "+
+					"unavailable one, because a bounds check trusts it", q, n, got)
+			}
+		}
+	}
+}

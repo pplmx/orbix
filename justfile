@@ -152,11 +152,13 @@ check: vet test lint
 # lint Markdown with rumdl
 docs:
     @# CI runs this as its own job, and the repository's convention is that Markdown is code:
-    @# the README is the project's front page and each package's doc.go is its authoritative
-    @# description, so a malformed table or a broken link is a defect like any other. It is a
-    @# separate recipe rather than part of `check` because rumdl is a Python-era tool that a
-    @# Go-only contributor may not have, and `check` should stay runnable with the Go toolchain
-    @# and golangci-lint alone.
+    @# the README is the entry page, everything under docs/ is the body, and each package's
+    @# doc.go is its authoritative description, so a malformed table or a broken link is a
+    @# defect like any other. It walks the tree, so a page under docs/ is linted whether or
+    @# not the README links it; what it does not see is the package doc.go files, which are Go.
+    @# It is a separate recipe rather than part of `check` because rumdl is a Python-era tool
+    @# that a Go-only contributor may not have, and `check` should stay runnable with the Go
+    @# toolchain and golangci-lint alone.
     @command -v rumdl >/dev/null 2>&1 || { \
         echo "rumdl not found: install it (https://rumdl.dev) or run CI's docs job"; \
         exit 1; \

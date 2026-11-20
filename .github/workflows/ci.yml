@@ -231,9 +231,9 @@ jobs:
             just RANGE="HEAD~1..HEAD" commits
           fi
 
-  # Documentation is code here: the README is the project's front page and the
-  # pull-request template shapes every contribution, so a broken link or a malformed table
-  # is a defect like any other. This job runs the same `just docs` a contributor runs.
+  # Documentation is code here: the README is the entry page, docs/ carries the body and
+  # the pull-request template shapes every contribution, so a broken link or a malformed
+  # table is a defect like any other. This job runs the same `just docs` a contributor runs.
   #
   # It does not lint the package doc.go files -- those are Go, and rumdl refuses them.
   # Their prose is checked by review, which is why it lives in the diff.

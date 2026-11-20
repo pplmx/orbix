@@ -289,6 +289,14 @@ response but a different one -- the failure would surface as an `IndexError` or 
 the caller, far from the request that caused it. Several at once are all named, so one round
 trip fixes the request.
 
+`max_completion_tokens` is refused for a third reason, and it is the only field here whose
+silent omission a client cannot notice at all. OpenAI's newer name for `max_tokens` has to be
+sent *instead of* it, so a client that has migrated sends only the new one; the server read
+`max_tokens`, found zero, and generated its default 256 tokens for a request that asked for 3.
+The reply parsed, the shape was right, and nothing said the length was wrong -- measured on
+both completions and chat. Ignoring a limit is worse than ignoring a sampling knob, so it gets
+the same 400 the response-shape fields do.
+
 `stream_options.include_usage` is honoured rather than ignored, because it is the only way a
 streaming caller learns what it spent: without it a streamed response reports no usage at all.
 With it, one extra chunk arrives before `[DONE]` whose `choices` is an empty array and whose

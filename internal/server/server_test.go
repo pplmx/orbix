@@ -2426,6 +2426,15 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		{"logprobs on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": true}`,
 			"logprobs", nil},
+		// max_completion_tokens is a limit rather than a response shape, and it is the one
+		// field here whose silent omission the client cannot detect: it generated the
+		// server's default 256 tokens for a request asking for 3, and the reply still
+		// parsed. Refusing it says so at the call site.
+		{"max_completion_tokens on completions", "/v1/completions",
+			`{"prompt": "hi", "max_completion_tokens": 3}`, "max_completion_tokens", nil},
+		{"max_completion_tokens on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_completion_tokens": 3}`,
+			"max_completion_tokens", nil},
 		{"three at once", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "n": 2, "logprobs": 1, "echo": true}`,
 			"n", []string{"n", "logprobs", "echo"}},

@@ -292,6 +292,14 @@ type chatRequest struct {
 	Messages  []chatMessage `json:"messages"`
 	MaxTokens int           `json:"max_tokens"`
 
+	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens. It is a pointer so an
+	// omitted field is distinguishable from a zero, and it is refused rather than ignored:
+	// measured, a request carrying only this field generated the server's default 256 tokens
+	// where the client asked for 3, and nothing in the response said so. Ignoring a limit is
+	// worse than ignoring a sampling knob -- the reply is 85 times longer than requested and
+	// still parses, so the caller never learns.
+	MaxCompletionTokens *int `json:"max_completion_tokens"`
+
 	// N, Logprobs, TopLogprobs and Echo change the response body, so they are refused
 	// rather than ignored; see the type comment. Their types are loose on purpose: the
 	// only thing read is whether the client asked for something, and a value this struct
@@ -345,6 +353,10 @@ type completionRequest struct {
 	Model     string `json:"model"`
 	Prompt    string `json:"prompt"`
 	MaxTokens int    `json:"max_tokens"`
+
+	// MaxCompletionTokens is refused for the same reason as on the chat endpoint; see
+	// chatRequest.MaxCompletionTokens.
+	MaxCompletionTokens *int `json:"max_completion_tokens"`
 
 	// The response-shape fields, refused rather than ignored; see chatRequest.
 	N        int     `json:"n"`
@@ -539,6 +551,9 @@ var chatShapeFields = []shapeField{
 		"alternative-token log-probabilities are not computed or returned"},
 	{"echo", func(v any) bool { return v.(*chatRequest).Echo != nil },
 		"the response never includes the prompt, and a silent omission is worse than a refusal"},
+	{"max_completion_tokens", func(v any) bool { return v.(*chatRequest).MaxCompletionTokens != nil },
+		"this server reads max_tokens; sending only the newer name would silently generate " +
+			"the default length instead of the one asked for"},
 }
 
 // completionShapeFields are the response-shape fields the completions endpoint refuses.
@@ -553,6 +568,9 @@ var completionShapeFields = []shapeField{
 		"suffix generation is not implemented, so the reply would silently lack it"},
 	{"best_of", func(v any) bool { return v.(*completionRequest).BestOf != 0 },
 		"best_of needs several candidates per request, and this server samples one"},
+	{"max_completion_tokens", func(v any) bool { return v.(*completionRequest).MaxCompletionTokens != nil },
+		"this server reads max_tokens; sending only the newer name would silently generate " +
+			"the default length instead of the one asked for"},
 }
 
 // rejectShapeFields writes a 400 naming every response-shape field the request asked for,

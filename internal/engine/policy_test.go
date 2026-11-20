@@ -1227,3 +1227,102 @@ func TestShortestServesTheShortestFirstWhateverTheSubmissionOrder(t *testing.T) 
 	}
 	t.Logf("FIFO first-token rounds %v; shortest %v", fifo, shortest)
 }
+
+// TestFairBoundsTheGapBetweenTurns checks the property PriorityFair is named for.
+//
+// The policy's own comment says "no sequence can be passed over more than about
+// len(active)/MaxActive rounds in a row. That is the property fair claims". The existing tests
+// check which sequence one admit call picks; none run the policy over enough rounds to say
+// anything about the wait a sequence sees, which is what a caller choosing this policy over
+// FIFO is buying.
+//
+// Measured with the engine rather than admit alone, because the gap a request experiences also
+// depends on how the engine advances the sequences it admits: ceil(total/active) is the bound,
+// and four shapes confirmed it exactly -- 8 sequences on 2 slots gave a worst gap of 4, 4 on 1
+// gave 4, 9 on 3 gave 3, and 3 on 2 gave 2 (the ceiling of 1.5).
+func TestFairBoundsTheGapBetweenTurns(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	prompt := tok.Encode("hi", true)
+
+	for _, shape := range []struct{ active, total int }{
+		{2, 8}, {1, 4}, {3, 9}, {2, 3},
+	} {
+		name := fmt.Sprintf("%d slots %d sequences", shape.active, shape.total)
+		t.Run(name, func(t *testing.T) {
+			e, err := New(path, Options{
+				MaxActive: shape.active, MaxQueued: shape.total, Policy: PriorityFair,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			// Mixed budgets, so the shapes are not all identical sequences. This does not
+			// make the test discriminate Fair from FIFO, and it should not be read as doing
+			// so: measured with 8 sequences on 2 slots, FIFO's worst gap is 1 and Fair's is
+			// the bound of 4, so FIFO satisfies "at most 4" comfortably. What separates the
+			// two policies is the lastServed ordering itself, which
+			// TestAdmitFairPicksLeastRecentlyServed covers at the admit level.
+			budget := func(i int) int {
+				if i%3 == 0 {
+					return 2
+				}
+				return 9
+			}
+			rounds := make([][]int, shape.total)
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			for i := range shape.total {
+				ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: budget(i)})
+				if err != nil {
+					t.Fatalf("Submit %d: %v", i, err)
+				}
+				wg.Go(func() {
+					for ev := range ch {
+						if ev.HasToken {
+							mu.Lock()
+							rounds[i] = append(rounds[i], int(ev.Round))
+							mu.Unlock()
+						}
+					}
+				})
+			}
+			for e.Pump() > 0 {
+			}
+			wg.Wait()
+
+			// Every sequence must have run its full budget, or the gap measurement is
+			// over a sequence that was starved rather than merely spaced out.
+			for i := range shape.total {
+				if want := budget(i); len(rounds[i]) != want {
+					t.Fatalf("sequence %d produced %d tokens, want %d: it was starved, which is "+
+						"the failure this policy exists to prevent", i, len(rounds[i]), want)
+				}
+			}
+
+			// The bound is ceil(total/active): integer arithmetic, since the ratio is not
+			// always exact.
+			want := (shape.total + shape.active - 1) / shape.active
+			worst, worstSeq := 0, -1
+			for i := range shape.total {
+				for j := 1; j < len(rounds[i]); j++ {
+					if gap := rounds[i][j] - rounds[i][j-1]; gap > worst {
+						worst, worstSeq = gap, i
+					}
+				}
+			}
+			if worst > want {
+				t.Errorf("sequence %d waited %d rounds between turns; the policy promises at "+
+					"most %d (%d sequences on %d slots)", worstSeq, worst, want, shape.total,
+					shape.active)
+			}
+		})
+	}
+}

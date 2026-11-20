@@ -352,6 +352,42 @@ func TestGreedyNeverSelectsNaN(t *testing.T) {
 	}
 }
 
+// TestTemperatureTreatsNonFiniteAsGreedy pins what a NaN or infinite Temp does.
+//
+// The comparison in Next is "s.Temp <= 0", and NaN fails it: the value sailed through to the
+// softmax, where exp(NaN) made sum NaN, every `r < acc` evaluated false, and the loop fell
+// through to its last-candidate fallback. The measured result on logits {1,5,3,0} was token 3
+// -- the least likely of the four -- while Temp 0 and Temp 1 both returned the argmax. A
+// caller that reached this through a flag or a request field would see plausible-looking
+// wrong text rather than an error, which is the failure mode worth pinning.
+//
+// +Inf is the same shape of bug for a different reason: (logit-max)/+Inf is 0 for every
+// candidate, so exp is 1 for all of them and the draw becomes uniform. It is not a crash, it
+// just silently discards the distribution, so it is greedy here too.
+func TestTemperatureTreatsNonFiniteAsGreedy(t *testing.T) {
+	logits := []float32{1, 5, 3, 0} // argmax is index 1
+	for _, c := range []struct {
+		name string
+		temp float32
+	}{
+		{"zero", 0},
+		{"negative", -1},
+		{"NaN", float32(math.NaN())},
+		{"+Inf", float32(math.Inf(1))},
+		{"-Inf", float32(math.Inf(-1))},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// NextFloat returns 0.5, which picks the argmax only when the draw is meaningful;
+			// with a NaN sum it picks nothing and the fallback runs.
+			got := Temperature{Temp: c.temp, NextFloat: func() float64 { return 0.5 }}.Next(logits)
+			if got != 1 {
+				t.Errorf("Temperature{Temp: %v}.Next(%v) = %d, want the greedy choice 1",
+					c.temp, logits, got)
+			}
+		})
+	}
+}
+
 // TestNucleusEdges covers the two branches nucleus reaches with a degenerate candidate set.
 //
 // Both are asserted directly rather than through Temperature.Next, because neither is observable from

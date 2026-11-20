@@ -75,7 +75,21 @@ type Temperature struct {
 // A model cannot reach here with an empty row: LoadConfig refuses a zero-width vocabulary
 // because this is what an empty row would panic in.
 func (s Temperature) Next(logits []float32) int32 {
-	if s.Temp <= 0 || s.NextFloat == nil {
+	// A temperature that is not a finite positive number cannot mean anything here, and each
+	// way of being wrong produces silently wrong text rather than an error.
+	//
+	// NaN fails "s.Temp <= 0", so it reached the softmax: exp(NaN) made sum NaN, every
+	// `r < acc` evaluated false, and the loop fell through to its last-candidate fallback.
+	// Measured on logits {1,5,3,0}, Temp NaN returned 3 -- the least likely of the four --
+	// while Temp 0 and Temp 1 both returned the argmax.
+	//
+	// +Inf divides every logit difference to 0, so exp is 1 for every candidate and the draw
+	// becomes uniform over the vocabulary. Measured on the same logits it returned 2. That
+	// discards the distribution without saying so.
+	//
+	// Both are treated as greedy, which is the answer the <=0 branch already gives and the
+	// only sensible reading of "no usable temperature".
+	if !(s.Temp > 0) || math.IsInf(float64(s.Temp), 1) || s.NextFloat == nil {
 		return Greedy{}.Next(logits)
 	}
 

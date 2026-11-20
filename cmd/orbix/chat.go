@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	"strings"
@@ -47,13 +48,16 @@ func cmdChat(args []string) error {
 	}
 	// Sampling is switched on by "temp > 0" and top-k applies at "topK > 0", so a negative
 	// value is the same as zero: the session goes greedy without saying so.
-	if *temp < 0 {
-		return fmt.Errorf("chat: --temp must not be negative (0 means greedy)")
+	// NaN and Inf pass every comparison below, so each is named rather than left to a range
+	// check: a NaN temperature reached the sampler, made sum NaN, failed every `r < acc`
+	// and returned the last candidate -- the least likely token in the set.
+	if math.IsNaN(*temp) || math.IsInf(*temp, 0) || *temp < 0 {
+		return fmt.Errorf("chat: --temp must be a finite, non-negative number (0 means greedy)")
 	}
 	if *topK < 0 {
 		return fmt.Errorf("chat: --top-k must not be negative (0 disables it)")
 	}
-	if *topP < 0 || *topP > 1 {
+	if math.IsNaN(*topP) || *topP < 0 || *topP > 1 {
 		return fmt.Errorf("chat: --top-p must be between 0 and 1 (0 disables it)")
 	}
 	// The engine refuses a negative budget too, but only when a turn is submitted -- so the

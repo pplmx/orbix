@@ -1959,3 +1959,45 @@ func TestVersionAcceptsTheWholeWordFlag(t *testing.T) {
 		t.Error("--version accepted an unknown argument")
 	}
 }
+
+// TestNonFiniteSamplingFlagsAreRefused pins the flags that pass every range comparison.
+//
+// The checks for --temp and --top-p were written as "x < 0" and "x < 0 || x > 1", and NaN
+// makes every one of those false: `orbix run --temp NaN` was accepted, reached the sampler,
+// turned the softmax sum into NaN, and produced garbage tokens. +Inf passed too -- it divides
+// every logit difference to zero, so the draw became uniform over the vocabulary. Neither
+// printed an error, which is what makes the silently-wrong output the thing worth pinning.
+//
+// The library is guarded as well, but a flag that reads as accepted is a separate failure: the
+// user typed a number and got no complaint, and the run cost a model load to produce nothing.
+func TestNonFiniteSamplingFlagsAreRefused(t *testing.T) {
+	path := chatModel(t)
+
+	for _, c := range []struct {
+		name string
+		flag string
+		args []string
+	}{
+		{"run temp NaN", "--temp", []string{"run", "--model", path, "--temp", "NaN", "hi"}},
+		{"run temp +Inf", "--temp", []string{"run", "--model", path, "--temp", "+Inf", "hi"}},
+		{"run temp -Inf", "--temp", []string{"run", "--model", path, "--temp", "-Inf", "hi"}},
+		{"run top-p NaN", "--top-p", []string{"run", "--model", path, "--top-p", "NaN", "--temp", "1", "hi"}},
+		{"chat temp NaN", "--temp", []string{"chat", "--model", path, "--temp", "NaN"}},
+		{"chat top-p NaN", "--top-p", []string{"chat", "--model", path, "--top-p", "NaN", "--temp", "1"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := run(c.args)
+			if err == nil {
+				t.Fatalf("%v was accepted, want a refusal", c.args)
+			}
+			if !strings.Contains(err.Error(), c.flag) {
+				t.Errorf("error %q does not name %s", err, c.flag)
+			}
+			// It must be refused before the model is loaded: a run that reports the flag only
+			// after paying for a load is still spending the user's time on it.
+			if strings.Contains(err.Error(), "gguf") {
+				t.Errorf("error %q came from the loader, not the flag check", err)
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"strings"
@@ -41,8 +42,11 @@ func cmdRun(args []string) error {
 	// negative value silently means the same as zero: greedy decoding, and a top-k that is
 	// never applied. A flag that reads as "turn sampling down" and turns it off is worth
 	// refusing rather than interpreting.
-	if *temp < 0 {
-		return fmt.Errorf("run: --temp must not be negative (0 means greedy)")
+	// NaN and Inf pass every comparison below, so each is named rather than left to a range
+	// check: a NaN temperature reached the sampler, made sum NaN, failed every `r < acc`
+	// and returned the last candidate -- the least likely token in the set.
+	if math.IsNaN(*temp) || math.IsInf(*temp, 0) || *temp < 0 {
+		return fmt.Errorf("run: --temp must be a finite, non-negative number (0 means greedy)")
 	}
 	if *workers < 0 {
 		return fmt.Errorf("run: --workers must not be negative")
@@ -53,7 +57,7 @@ func cmdRun(args []string) error {
 	// A probability outside (0, 1] is refused rather than clamped, for the same reason as
 	// --top-k: 0 and 1 both read as "no limit" to some callers and "only the best token" to
 	// others, so interpreting either would change the output without saying so.
-	if *topP < 0 || *topP > 1 {
+	if math.IsNaN(*topP) || *topP < 0 || *topP > 1 {
 		return fmt.Errorf("run: --top-p must be between 0 and 1 (0 disables it)")
 	}
 	// The library rejects this too, but only once the model is loaded and Generate is

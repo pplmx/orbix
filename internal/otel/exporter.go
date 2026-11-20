@@ -32,6 +32,14 @@ type Exporter struct {
 	maxBatch int
 	maxQueue int
 
+	// closeBudget bounds how long Close may spend flushing. Without it the flush ran on
+	// context.Background() and a stalled collector held the caller for one client timeout per
+	// batch: measured with a collector that accepts and never answers, Close took 603ms for
+	// three batches at a 200ms timeout, and the default 5s timeout would multiply the same way.
+	// For a server that is shutdown latency -- measured end to end with SIGTERM, a serving
+	// process went from 30ms to 5044ms -- and a trace is worth less than an orderly exit.
+	closeBudget time.Duration
+
 	stop    chan struct{}
 	stopped chan struct{}
 	once    sync.Once
@@ -53,6 +61,9 @@ type ExporterOptions struct {
 	Client *http.Client
 	// Resource is attached to every exported span, typically service.name.
 	Resource []Attribute
+	// CloseBudget is how long Close may spend delivering what is queued. Zero means two
+	// seconds. Spans still queued when it expires are counted as dropped.
+	CloseBudget time.Duration
 }
 
 // tracesPath is the OTLP/HTTP path for trace data.
@@ -79,6 +90,10 @@ func NewExporter(opts ExporterOptions) (*Exporter, error) {
 	if maxQueue <= 0 {
 		maxQueue = 2048
 	}
+	closeBudget := opts.CloseBudget
+	if closeBudget <= 0 {
+		closeBudget = 2 * time.Second
+	}
 	client := opts.Client
 	if client == nil {
 		// A collector that hangs must not pin a goroutine and hold spans forever.
@@ -86,13 +101,14 @@ func NewExporter(opts ExporterOptions) (*Exporter, error) {
 	}
 
 	e := &Exporter{
-		endpoint: normalizeEndpoint(opts.Endpoint),
-		client:   client,
-		tracer:   NewTracer(opts.Resource...),
-		maxBatch: maxBatch,
-		maxQueue: maxQueue,
-		stop:     make(chan struct{}),
-		stopped:  make(chan struct{}),
+		endpoint:    normalizeEndpoint(opts.Endpoint),
+		client:      client,
+		tracer:      NewTracer(opts.Resource...),
+		maxBatch:    maxBatch,
+		maxQueue:    maxQueue,
+		closeBudget: closeBudget,
+		stop:        make(chan struct{}),
+		stopped:     make(chan struct{}),
 	}
 	go e.run(interval)
 	return e, nil
@@ -159,7 +175,14 @@ func (e *Exporter) run(interval time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
-			_ = e.flush(context.Background())
+			// Bounded for the same reason Close is: this goroutine's flush is what
+			// Close waits for through <-e.stopped, so an unbounded send here would hold
+			// the shutdown even though Close's own flush has a budget. Measured before
+			// this: with a hung collector the ticker was mid-flush when SIGTERM arrived,
+			// and the process took 4522ms even though Close's budget was 2s.
+			ctx, cancel := context.WithTimeout(context.Background(), e.closeBudget)
+			_ = e.flush(ctx)
+			cancel()
 		case <-e.stop:
 			return
 		}
@@ -283,12 +306,22 @@ func partialSuccessRejected(body []byte) int {
 func (e *Exporter) Flush(ctx context.Context) error { return e.flush(ctx) }
 
 // Close flushes and stops the sender. It is safe to call more than once.
+//
+// The flush is bounded by CloseBudget rather than running on context.Background(). A
+// collector that accepts a connection and never answers otherwise holds the caller for one
+// client timeout per batch, and Close is deferred in a server's shutdown path: measured end
+// to end, SIGTERM to process exit went from 30ms to 5044ms with a hung collector, which is
+// longer than the shutdown grace the server promises for in-flight responses. A trace is
+// worth less than an orderly exit, so spans still queued when the budget expires are
+// counted as dropped and the call returns.
 func (e *Exporter) Close() error {
 	var err error
 	e.once.Do(func() {
 		close(e.stop)
 		<-e.stopped
-		err = e.flush(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), e.closeBudget)
+		defer cancel()
+		err = e.flush(ctx)
 	})
 	return err
 }

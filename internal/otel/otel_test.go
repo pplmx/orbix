@@ -1310,3 +1310,98 @@ func TestExporterIgnoresCleanAcknowledgement(t *testing.T) {
 		t.Errorf("Dropped = %d after a clean export, want 0", got)
 	}
 }
+
+// TestCloseIsBoundedAgainstAHungCollector covers the shutdown path a collector that accepts a
+// connection and never answers drives the server into.
+//
+// Close used to flush on context.Background(), so a hung collector held it for one client
+// timeout per batch. Measured end to end, SIGTERM to process exit went from 30ms with tracing
+// off to 5044ms with a hung collector -- longer than the five-second grace the server promises
+// for in-flight responses, and paid on every restart or rolling update. A trace is worth less
+// than an orderly exit.
+//
+// Bounding Close alone was not enough: Close waits for the sender goroutine through
+// <-e.stopped, and that goroutine's own ticker flush was equally unbounded, so the process
+// still took 4522ms when SIGTERM arrived mid-flush. Both are bounded now, and the budget is
+// honoured in a run with several batches queued rather than only in the trivial one.
+//
+// The client timeout is deliberately far longer than the budget: if the budget were not what
+// stopped the flush, this would take ten seconds and fail.
+func TestCloseIsBoundedAgainstAHungCollector(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // accept, then never answer
+	}))
+	defer func() { close(block); srv.Close() }()
+
+	const budget = 250 * time.Millisecond
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint:    srv.URL,
+		Interval:    time.Hour, // the ticker must not fire during this test
+		MaxBatch:    2,         // six spans therefore need three sequential sends
+		MaxQueue:    100,
+		Client:      &http.Client{Timeout: 10 * time.Second},
+		CloseBudget: budget,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	for range 6 {
+		exp.Record(testSpan(t, "chat"))
+	}
+
+	start := time.Now()
+	err = exp.Close()
+	elapsed := time.Since(start)
+
+	// Generous against scheduler noise, tight against the 10s client timeout and the 5s
+	// default that the unbounded version would reach.
+	if elapsed > 4*budget {
+		t.Errorf("Close took %v with a %v budget, so the budget did not bound it", elapsed, budget)
+	}
+	if err == nil {
+		t.Error("Close reported success although the collector never answered")
+	}
+	// The spans still have to be visible as lost: a bounded Close that returned quietly would
+	// trade a hang for an invisible gap.
+	if got := exp.Dropped(); got != 6 {
+		t.Errorf("Dropped = %d after a Close that gave up on 6 spans, want 6", got)
+	}
+}
+
+// TestCloseWaitsForAnInFlightTickerFlush covers the second of the two blocking points.
+//
+// The sender goroutine flushes on the ticker, and Close waits for it to exit through
+// <-e.stopped. Bounding Close's own flush leaves that wait unbounded, which is the version
+// that still took 4522ms of a 5044ms shutdown. A short interval puts a ticker flush in flight
+// when Close is called, so the measurement covers the interaction rather than one function.
+func TestCloseWaitsForAnInFlightTickerFlush(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	defer func() { close(block); srv.Close() }()
+
+	const budget = 200 * time.Millisecond
+	exp, err := NewExporter(ExporterOptions{
+		Endpoint:    srv.URL,
+		Interval:    10 * time.Millisecond, // fires long before Close
+		MaxBatch:    512,
+		MaxQueue:    100,
+		Client:      &http.Client{Timeout: 10 * time.Second},
+		CloseBudget: budget,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	exp.Record(testSpan(t, "chat"))
+	// Let the ticker pick the span up and block inside the send.
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	_ = exp.Close()
+	elapsed := time.Since(start)
+	if elapsed > 8*budget {
+		t.Errorf("Close took %v waiting for an in-flight ticker flush with a %v budget", elapsed, budget)
+	}
+}

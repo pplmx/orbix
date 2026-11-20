@@ -26,4 +26,15 @@
 // Export is best-effort by design. Tracing is observability, not correctness: a
 // collector that is down must not fail a generation request, so an export error is
 // returned for the caller to log and never propagates into the serving path.
+//
+// That best-effort rule extends to shutdown, where it is easy to lose. Close flushes what is
+// queued, and its flush is bounded by CloseBudget rather than running on
+// context.Background(). A collector that accepts a connection and never answers otherwise
+// costs one client timeout per batch, and Close is deferred in a server's shutdown path:
+// measured end to end, SIGTERM to process exit went from 30ms with tracing off to 5044ms
+// with a hung collector, longer than the grace the server promises for in-flight responses.
+// Bounding Close alone was not enough -- it waits for the sender goroutine through
+// <-e.stopped, and that goroutine's own ticker flush was equally unbounded, which still took
+// 4522ms. Both are bounded now, so the shutdown pays at most CloseBudget and whatever is
+// still queued at that point is counted as dropped instead of silently lost.
 package otel

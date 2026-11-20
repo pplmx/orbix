@@ -2342,3 +2342,81 @@ func TestTokensGeneratedCountsOnlyDeliveredTokens(t *testing.T) {
 		})
 	}
 }
+
+// TestPrefixReuseWithinOneRound covers reuse between sequences admitted in the same round.
+//
+// The existing reuse test submits one request, waits for it, then submits the next -- so the
+// only reuse it can observe comes from a block published in an earlier round. Two sequences
+// admitted together take a different path: the prefill phase runs them one at a time, each
+// independently ("nothing to share between sequences" says the comment there), and whether the
+// second sees the first's newly published blocks depends on that ordering and on the index
+// being consulted per sequence rather than per round.
+//
+// Measured on the 512-position fixture with block size 4 and a 44-token prompt: one request
+// reuses 0, two admitted together reuse 44 (the second takes all eleven whole blocks), and
+// three reuse 88. The count is therefore per subsequent sequence, not per round.
+//
+// The tail is asserted too, because whole-block-only is the property that makes the figure
+// match floor(len/block)*block rather than the prompt length. A prompt of 18 tokens reuses 16.
+//
+// What this test does NOT pin is which sequence benefits. Reversing the prefill loop leaves the
+// total unchanged -- one sequence publishes and the other attaches, so the figure is the same
+// 44 whichever order they run in -- and that is arithmetic rather than an oversight: the round
+// admits a set and the net reuse is (size-1) * whole blocks however the members are ordered.
+// Only the per-sequence figure would distinguish the orders, and the engine reports the sum.
+// The property worth asserting is the total, and the mutation this catches is publication
+// being disabled, not the loop being reversed.
+func TestPrefixReuseWithinOneRound(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		text   string
+		seqs   int
+		perSeq uint64 // reused positions per sequence after the first
+	}{
+		{"two together, exact blocks", "the quick brown fox jumps over the lazy dog many times", 2, 44},
+		{"three together", "the quick brown fox jumps over the lazy dog many times", 3, 44},
+		// 18 tokens at a block size of 4 leaves a two-token tail that can never be published.
+		{"a tail costs nothing", "the quick brown fox", 2, 16},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, tok, _ := loadModelPath(t, Options{
+				MaxActive: 4, Workers: 2, BlockSize: 4, Blocks: 64, PrefixCache: true,
+			})
+			prompt := tok.Encode(c.text, true)
+			whole := uint64(len(prompt)/4) * 4
+			if whole != c.perSeq {
+				t.Fatalf("prompt is %d tokens, so %d whole-block positions; the case expects %d",
+					len(prompt), whole, c.perSeq)
+			}
+
+			chans := make([]<-chan Event, c.seqs)
+			for i := range c.seqs {
+				ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2})
+				if err != nil {
+					t.Fatalf("Submit %d: %v", i, err)
+				}
+				chans[i] = ch
+			}
+			// Drain as the rounds run: pumping to exhaustion first would fill the buffer and
+			// turn this into an abandonment test.
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for _, ch := range chans {
+					for range ch {
+					}
+				}
+			}()
+			for e.Pump() > 0 {
+			}
+			<-done
+
+			// The first sequence has nothing to reuse; each later one takes all whole blocks.
+			want := uint64(c.seqs-1) * c.perSeq
+			if got := e.Stats().PrefixReused; got != want {
+				t.Errorf("PrefixReused = %d for %d sequences admitted together, want %d (%d per "+
+					"sequence after the first)", got, c.seqs, want, c.perSeq)
+			}
+		})
+	}
+}

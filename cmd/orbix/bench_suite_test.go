@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"runtime"
@@ -1066,5 +1067,51 @@ func TestRowLineKeepsAFailureOnOneLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestScenarioFailureDoesNotStopTheSuite covers the property runScenarios exists for.
+//
+// A scenario that fails has to print its reason in the NOTE column and let the rest run: the
+// table is the deliverable, and a row missing because an earlier row failed reads as a scenario
+// that was never asked for. The exit status still has to be non-zero, or a failed row would
+// read as a successful run.
+//
+// Nothing pinned the continuation before this: the existing suite test asserts that no scenario
+// fails on a good model and that a failed one prints "failed:", both of which hold whether or
+// not the loop breaks early.
+func TestScenarioFailureDoesNotStopTheSuite(t *testing.T) {
+	var ran []string
+	ok := func(name string) scenario {
+		return scenario{name: name, run: func(suiteOptions) (result, error) {
+			ran = append(ran, name)
+			return result{}, nil
+		}}
+	}
+	broken := scenario{name: "broken", run: func(suiteOptions) (result, error) {
+		ran = append(ran, "broken")
+		return result{}, errors.New("deliberate")
+	}}
+
+	// runScenarios writes the table to os.Stdout, so the output is captured rather than
+	// asserted on: what this test is about is which scenarios ran and what was returned.
+	out := captureStdout(t, func() {
+		err := runScenarios(suiteOptions{model: "m", maxTok: 1},
+			[]scenario{ok("first"), broken, ok("last")})
+		if err == nil {
+			t.Error("runScenarios reported success despite a failed scenario")
+		} else if !strings.Contains(err.Error(), "broken") {
+			t.Errorf("error %q does not name the failed scenario", err)
+		}
+	})
+
+	if want := []string{"first", "broken", "last"}; fmt.Sprint(ran) != fmt.Sprint(want) {
+		t.Errorf("scenarios that ran = %v, want %v: a failure stopped later scenarios", ran, want)
+	}
+	// Both the failure and the scenario after it have to reach the table.
+	for _, want := range []string{"failed: deliberate", "last"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the table does not contain %q:\n%s", want, out)
+		}
 	}
 }

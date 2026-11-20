@@ -273,6 +273,13 @@ func jsonValue(v gguf.Value) any {
 	case gguf.TypeBool:
 		return v.Bool
 	case gguf.TypeUint8, gguf.TypeUint16, gguf.TypeUint32, gguf.TypeUint64:
+		// Emitted as a JSON number, which encoding/json writes in full for a uint64 -- a
+		// value above 2^53 keeps every digit here but loses them in a consumer whose parser
+		// uses float64, JavaScript being the case that matters. That is a property of the
+		// reader rather than of this output, and no field in a real checkpoint comes near the
+		// boundary (file sizes, dimensions and counts are all far smaller), so the number is
+		// written as the number it is rather than quoted into a string that every consumer
+		// would have to special-case.
 		return v.Uint
 	case gguf.TypeInt8, gguf.TypeInt16, gguf.TypeInt32, gguf.TypeInt64:
 		return v.Int

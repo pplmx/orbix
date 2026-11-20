@@ -2657,3 +2657,33 @@ func TestRenderIsSafeForConcurrentUse(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestPlusConcatenatesRatherThanAdds pins what the + operator means here.
+//
+// It concatenates, so "1 + 2" renders "12". That is the documented behaviour -- doc.go lists
+// "+ concatenation" among the supported constructs -- and it differs from Jinja2, where the
+// same expression renders "3". Nothing tested either reading: the only arithmetic tests
+// covered subtraction, so an evaluator that started adding numbers would have changed what
+// every prompt says without failing anything.
+//
+// The mixed-operand cases are the ones real templates write: a literal marker plus a message
+// field, which is why no type check happens before joining.
+func TestPlusConcatenatesRatherThanAdds(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	cases := []struct{ name, src, want string }{
+		{"two numbers", `{{ 1 + 2 }}`, "12"},
+		{"three numbers", `{{ 1 + 2 + 3 }}`, "123"},
+		{"two strings", `{{ "a" + "b" }}`, "ab"},
+		{"literal and field", `{% for m in messages %}{{ "role: " + m.role }}{% endfor %}`, "role: user"},
+		{"number and field", `{% for m in messages %}{{ loop.index + m.content }}{% endfor %}`, "1hi"},
+		{"a set variable", `{% set x = 1 %}{{ x + 2 }}`, "12"},
+		{"subtraction still subtracts", `{{ 1 - 2 }}`, "-1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := render(t, c.src, msgs, Inputs{}); got != c.want {
+				t.Errorf("%s rendered %q, want %q", c.src, got, c.want)
+			}
+		})
+	}
+}

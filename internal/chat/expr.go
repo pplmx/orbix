@@ -411,12 +411,18 @@ func (p *exprParser) parseCompare() (expr, error) {
 	}
 }
 
-// parseConcat handles + between operands, folding an integer addition into arithmetic
-// and everything else into string concatenation.
+// parseConcat handles + between operands, which this package defines as concatenation.
 //
-// The template language does not distinguish the two at parse time: "a" + "b" concatenates
-// and 1 + 2 adds, and which one applies is decided from the operands at render time. The
-// parser therefore builds a single add node and the evaluator picks the meaning.
+// The operator does not add. "1 + 2" renders "12", not "3", and that is the documented
+// behaviour (see doc.go: "+ concatenation") rather than an accident of the evaluator: every
+// operand is converted to text and joined. Subtraction is the only arithmetic operator here,
+// which is what makes the two spellings look inconsistent -- they are, and this comment used
+// to claim the opposite, saying "1 + 2 adds" while the evaluator had always concatenated.
+//
+// A real template writes {{ "user: " + m.content }} far more often than it adds numbers, and
+// a template that does need a count has loop.index rather than arithmetic. A construct this
+// parser does not support is reported at parse time, so a template that added numbers would
+// not quietly render the wrong text -- but + is supported, as concatenation.
 func (p *exprParser) parseConcat() (expr, error) {
 	first, err := p.parseArith()
 	if err != nil {

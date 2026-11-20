@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -1810,4 +1811,91 @@ func TestGetFloatDestinationRoundsInsteadOfFailing(t *testing.T) {
 		t.Error("a value that narrows to +Inf was accepted; that is the failure the float " +
 			"check exists for")
 	}
+}
+
+// TestReadBoundsTheTensorCountAgainstTheDirectory covers the header's tensor count when it
+// disagrees with what the file actually holds.
+//
+// TestReadRejectsBadInput truncates the file at every byte boundary, which varies how much data
+// there is while leaving the declared count alone. The other direction -- a count that does not
+// match the entries present -- was never exercised, and it is the one an attacker controls
+// directly: the count is a single field, and the parser trusts it to decide how many entries to
+// read.
+//
+// Three properties, measured on a file built for each: a count larger than the entries is
+// refused with the index it ran out at, a count smaller than the entries is accepted and the
+// extra bytes are left alone, and a count far beyond any real file is refused without
+// pre-allocating for it.
+func TestReadBoundsTheTensorCountAgainstTheDirectory(t *testing.T) {
+	// build writes a GGUF declaring tensorCount entries and writing entries of them, with no
+	// trailing padding, so the only bytes after the directory are the ones it wrote.
+	build := func(tensorCount, entries uint64) []byte {
+		var b bytes.Buffer
+		u32 := func(v uint32) { var x [4]byte; binary.LittleEndian.PutUint32(x[:], v); b.Write(x[:]) }
+		u64 := func(v uint64) { var x [8]byte; binary.LittleEndian.PutUint64(x[:], v); b.Write(x[:]) }
+		str := func(s string) { u64(uint64(len(s))); b.WriteString(s) }
+		b.WriteString("GGUF")
+		u32(3)
+		u64(tensorCount)
+		u64(1) // one metadata entry, which LoadConfig-style readers need
+		str("general.architecture")
+		u32(8) // string
+		str("llama")
+		for i := uint64(0); i < entries; i++ {
+			str("t")
+			u32(1) // one dimension
+			u64(4)
+			u32(0) // F32
+			u64(i * 16)
+		}
+		return b.Bytes()
+	}
+
+	t.Run("a count larger than the entries is refused", func(t *testing.T) {
+		for _, c := range []struct{ tensorCount, entries, failsAt uint64 }{
+			{1, 0, 0},
+			{2, 1, 1},
+			{5, 2, 2},
+		} {
+			_, err := Read(bytes.NewReader(build(c.tensorCount, c.entries)))
+			if err == nil {
+				t.Errorf("Read accepted a header declaring %d tensors over %d entries",
+					c.tensorCount, c.entries)
+				continue
+			}
+			// The index is what makes the message useful: it says where the directory
+			// ended, which is where a damaged file can be inspected.
+			if want := fmt.Sprintf("read tensor info %d", c.failsAt); !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("a count smaller than the entries is accepted", func(t *testing.T) {
+		// The extra entries are indistinguishable from tensor data, which follows the
+		// directory, so reading only what was declared is the only safe answer.
+		f, err := Read(bytes.NewReader(build(2, 5)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if got := f.TensorCount(); got != 2 {
+			t.Errorf("read %d tensors, want the 2 the header declared", got)
+		}
+	})
+
+	t.Run("an enormous count allocates nothing for it", func(t *testing.T) {
+		// The capacity is min(count, maxPreallocEntries), so a header claiming 2^64-1 must
+		// not turn into an allocation before the first read fails.
+		for _, declared := range []uint64{1 << 20, 1 << 40, 1 << 62, ^uint64(0)} {
+			delta := allocDelta(t, func() {
+				if _, err := Read(bytes.NewReader(build(declared, 0))); err == nil {
+					t.Errorf("Read accepted a header declaring %d tensors over 0 entries", declared)
+				}
+			})
+			if delta > 16<<20 {
+				t.Errorf("a count of %d allocated %.1f MiB before being refused",
+					declared, float64(delta)/(1<<20))
+			}
+		}
+	})
 }

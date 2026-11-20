@@ -544,4 +544,21 @@ func TestPartsPinsTheThresholds(t *testing.T) {
 	if got := NewRunner(1).parts(1 << 30); got != 1 {
 		t.Errorf("one-worker parts = %d, want 1", got)
 	}
+	// Zero is the value callers pass to mean "decide for me", and this type does not decide:
+	// it takes the number it was given. A Runner built with 0 therefore runs serial here,
+	// while Workers() reports 0 -- so a caller expanding "0 means GOMAXPROCS" has to do it
+	// before construction. llama.workers does exactly that, which is what keeps the two from
+	// disagreeing in a served model.
+	//
+	// These two assertions record that contract rather than guarding it: changing the
+	// condition above from "<= 1" to "< 1" lets 0 through to min(0, work/workPerWorker) = 0,
+	// and split's own "parts <= 1" then runs the same serial branch. The behaviour is
+	// unchanged, so removing the guard here is an equivalent mutant and no test can fail on
+	// it. The value of these lines is that the next reader sees the decision was deliberate.
+	if got := NewRunner(0).parts(1 << 30); got != 1 {
+		t.Errorf("zero-worker parts = %d, want 1", got)
+	}
+	if got := NewRunner(0).Workers(); got != 0 {
+		t.Errorf("NewRunner(0).Workers() = %d, want 0: the type reports what it was given", got)
+	}
 }

@@ -654,3 +654,117 @@ func TestNewRopeTrustsTheConfigForDimensionBounds(t *testing.T) {
 	// dimension it exceeds. Repeating it here would be a second place to keep in step; what
 	// this test adds is the other half of the division.
 }
+
+// TestKVCacheSpansAddressEveryLayerAndHead covers the read path the existing offsets test
+// does not touch.
+//
+// TestKVCacheOffsets writes to layer 0 only and reads back the view appendKV returns, which is
+// a prefix of one layer's arena. Attention does not use that view: it calls spans, whose end
+// offset is computed as off + (n-1)*dim + head -- a different expression, covering a strided
+// range rather than a prefix, and addressing a layer and a kv head chosen by the caller. An
+// error in the layer indexing, in the head offset, or in the stride shows up there and nowhere
+// else.
+//
+// Every element is written with a value derived from its own (layer, position, index), so a
+// wrong offset reads a neighbouring value rather than a plausible zero. All 24 combinations on
+// this config are checked: 2 layers x 2 kv heads x 6 positions, for both keys and values.
+func TestKVCacheSpansAddressEveryLayerAndHead(t *testing.T) {
+	cfg := testConfig()
+	const positions = 6
+	c, err := NewKVCache(cfg, positions)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	dim := cfg.kvDim()
+
+	// value is the number expected at (layer, position, index). It is asymmetric in every
+	// argument so swapping any two of them changes the answer.
+	value := func(layer, pos, i int) float32 {
+		return float32(layer*1000 + pos*100 + i)
+	}
+
+	for layer := range cfg.Layers {
+		for pos := range positions {
+			k := make([]float32, dim)
+			v := make([]float32, dim)
+			for i := range dim {
+				k[i] = value(layer, pos, i)
+				v[i] = -value(layer, pos, i)
+			}
+			if _, _, err := c.appendKV(layer, k, v, pos); err != nil {
+				t.Fatalf("appendKV(layer=%d, pos=%d): %v", layer, pos, err)
+			}
+		}
+	}
+
+	for layer := range cfg.Layers {
+		for kv := range cfg.KVHeads {
+			for n := 1; n <= positions; n++ {
+				keys, values, err := c.spans(layer, kv, n)
+				if err != nil {
+					t.Fatalf("spans(layer=%d, kv=%d, n=%d): %v", layer, kv, n, err)
+				}
+				if len(keys) != 1 || len(values) != 1 {
+					t.Fatalf("spans returned %d key and %d value spans, want 1 each",
+						len(keys), len(values))
+				}
+				sp := keys[0]
+				if sp.rows != n {
+					t.Errorf("layer %d kv %d: rows = %d, want %d", layer, kv, sp.rows, n)
+				}
+				if sp.width != cfg.HeadDim {
+					t.Errorf("layer %d kv %d: width = %d, want %d", layer, kv, sp.width, cfg.HeadDim)
+				}
+				// The span must cover positions 0..n-1 for this head, and not one element more.
+				if got, want := len(sp.data), (n-1)*dim+cfg.HeadDim; got != want {
+					t.Errorf("layer %d kv %d n %d: data length %d, want %d",
+						layer, kv, n, got, want)
+				}
+				// Every row, not just the first: the stride is what a wrong end offset or a
+				// missing head offset would corrupt.
+				for pos := range n {
+					for i := range cfg.HeadDim {
+						got := sp.data[pos*sp.stride+i]
+						want := value(layer, pos, kv*cfg.HeadDim+i)
+						if got != want {
+							t.Errorf("layer %d kv %d n %d: key[%d][%d] = %v, want %v",
+								layer, kv, n, pos, i, got, want)
+							return
+						}
+						if gv := values[0].data[pos*values[0].stride+i]; gv != -want {
+							t.Errorf("layer %d kv %d n %d: value[%d][%d] = %v, want %v",
+								layer, kv, n, pos, i, gv, -want)
+							return
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Two layers must not share storage: writing one must leave the other alone.
+	k0 := make([]float32, dim)
+	k1 := make([]float32, dim)
+	for i := range dim {
+		k0[i] = 11
+		k1[i] = 22
+	}
+	if _, _, err := c.appendKV(0, k0, k0, 0); err != nil {
+		t.Fatalf("appendKV layer 0: %v", err)
+	}
+	if _, _, err := c.appendKV(1, k1, k1, 0); err != nil {
+		t.Fatalf("appendKV layer 1: %v", err)
+	}
+	l0, _, err := c.spans(0, 0, 1)
+	if err != nil {
+		t.Fatalf("spans layer 0: %v", err)
+	}
+	l1, _, err := c.spans(1, 0, 1)
+	if err != nil {
+		t.Fatalf("spans layer 1: %v", err)
+	}
+	if l0[0].data[0] != 11 || l1[0].data[0] != 22 {
+		t.Errorf("layers share storage: layer 0 reads %v, layer 1 reads %v, want 11 and 22",
+			l0[0].data[0], l1[0].data[0])
+	}
+}

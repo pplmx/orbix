@@ -65,3 +65,43 @@ func TestNewKVCacheRejectsANonPositiveSize(t *testing.T) {
 		}
 	}
 }
+
+// TestSpansOfZeroRowsIsEmptyNotAPanic pins the guard whose comment says why it exists.
+//
+// spans computes end as off + (n-1)*dim + head. With n = 0 that is off - dim + head, which
+// is negative, and the slice expression c.k[layer][off:end] panics. The comment calls it a
+// contract rather than a forward-pass path -- every caller in this package asks for at
+// least one row -- but a public method that panics on a legal zero is still a crash, so the
+// guard returns no spans instead.
+//
+// Verified by deleting the guard: the call panics with "slice bounds out of range [:-16]"
+// for a 16-wide head. It had no test, so nothing would have caught a "simplification" that
+// folded the zero case into the general path.
+func TestSpansOfZeroRowsIsEmptyNotAPanic(t *testing.T) {
+	// A constructed config rather than a fixture: spans only reads the geometry, and this
+	// package's other cache tests build one the same way.
+	cfg := Config{Layers: 1, KVHeads: 1, HeadDim: 16}
+	cache, err := NewKVCache(cfg, 8)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+
+	keys, values, err := cache.spans(0, 0, 0)
+	if err != nil {
+		t.Fatalf("spans(0 rows): %v", err)
+	}
+	if len(keys) != 0 || len(values) != 0 {
+		t.Errorf("spans(0 rows) returned %d keys and %d values, want none",
+			len(keys), len(values))
+	}
+
+	// One row is still one span, so the zero case is not simply "always empty".
+	keys, values, err = cache.spans(0, 0, 1)
+	if err != nil {
+		t.Fatalf("spans(1 row): %v", err)
+	}
+	if len(keys) != 1 || len(values) != 1 {
+		t.Errorf("spans(1 row) returned %d keys and %d values, want one each",
+			len(keys), len(values))
+	}
+}

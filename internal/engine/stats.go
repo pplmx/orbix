@@ -160,10 +160,18 @@ func (s Stats) FractionFull() float64 {
 
 // Stats returns a snapshot of the engine's counters and gauges.
 //
-// The whole snapshot is taken under one lock, so the numbers describe a single instant.
-// Reading them piecemeal would let Active and RequestsFinished disagree about a request
-// that finished in between, which is the kind of inconsistency that makes a dashboard
-// show a queue that never existed.
+// The engine's own numbers are taken under one lock, so Active and RequestsFinished agree
+// about every request: reading them piecemeal would let the two disagree about one that
+// finished in between, which is the kind of inconsistency that makes a dashboard show a
+// queue that never existed.
+//
+// The pool fields are not in that snapshot. They come from BlockPool.Free, which takes the
+// pool's own mutex, and the pump changes the pool after releasing e.mu -- so PoolFree can
+// describe a slightly later instant than Active does. Both are consistent within themselves
+// and neither can tear, and the pair is not read as a single fact: a deployment watching
+// PoolFree is watching it trend, not comparing it to the active count. Making the two
+// atomic would mean teaching the engine to hold the pool's lock, which is the coupling the
+// two types exist to avoid.
 func (e *Engine) Stats() Stats {
 	e.mu.Lock()
 	defer e.mu.Unlock()

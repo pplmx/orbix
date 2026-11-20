@@ -2762,3 +2762,75 @@ func (s *nthSampler) Next([]float32) int32 {
 	}
 	return s.filler
 }
+
+// TestStatsPoolFieldsComeFromThePoolLock records the one part of Stats that is not in its
+// snapshot, and asserts the parts that are.
+//
+// The engine's counters are read under e.mu, so Active and RequestsFinished always agree.
+// The pool fields are not: BlockPool.Free takes the pool's own mutex, and the pump changes
+// the pool after releasing e.mu, so PoolFree can describe a slightly later instant than
+// Active. That is a documented trade rather than a defect -- making it atomic would mean the
+// engine holding the pool's lock, which is the coupling the two types exist to avoid.
+//
+// The property that does hold, and that this pins, is that the pool fields are internally
+// consistent and never tear: PoolFree stays inside [0, PoolBlocks] however many samples are
+// taken while blocks move. A reader that saw Free > Blocks would compute a negative used
+// count and a fraction outside [0,1], which is the failure this rules out.
+func TestStatsPoolFieldsComeFromThePoolLock(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+	e, err := New(path, Options{MaxActive: 4, BlockSize: 16, Blocks: 64})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for range 8 {
+		ch, err := e.Submit(Request{Prompt: []int32{1, 2, 3}, MaxTokens: 4})
+		if err != nil {
+			continue
+		}
+		go func() {
+			for range ch {
+			}
+		}()
+	}
+
+	stop := make(chan struct{})
+	bad := make(chan string, 1)
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				st := e.Stats()
+				if st.PoolFree < 0 || st.PoolFree > st.PoolBlocks {
+					select {
+					case bad <- fmt.Sprintf("PoolFree = %d outside [0, %d]",
+						st.PoolFree, st.PoolBlocks):
+					default:
+					}
+					return
+				}
+				if f := st.FractionFull(); f < 0 || f > 1 {
+					select {
+					case bad <- fmt.Sprintf("FractionFull = %v outside [0,1]", f):
+					default:
+					}
+					return
+				}
+			}
+		})
+	}
+	for e.Pump() > 0 {
+	}
+	close(stop)
+	wg.Wait()
+	select {
+	case msg := <-bad:
+		t.Error(msg)
+	default:
+	}
+}

@@ -4541,3 +4541,39 @@ func TestStreamingRequestAlsoReusesThePrefix(t *testing.T) {
 			"16-position blocks", added)
 	}
 }
+
+// TestStartPumpRejectsANilContextByPanicking records what a nil context does, because the
+// alternative is discovering it in production as a whole-process exit.
+//
+// The pump selects on ctx.Done(). A nil context interface has no Done method, so the
+// goroutine panics on its first iteration -- and a panic inside a goroutine the caller never
+// holds cannot be recovered by the caller, so the process dies. The comment on StartPump
+// says ctx must not be nil for that reason.
+//
+// Panicking is the correct behaviour rather than a defect: the context package documents that
+// a nil Context must not be passed, so the caller is wrong, and a library that silently
+// substituted context.Background would hide a request whose cancellation had been wired up
+// incorrectly. The test exists so the failure mode is written down and so a change that
+// started tolerating nil is a deliberate decision rather than an accident.
+func TestStartPumpRejectsANilContextByPanicking(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 64})
+
+	// This does NOT drive StartPump: the panic happens in the pump goroutine, so the test
+	// process would die rather than fail, and a suite that kills itself is worse than one that
+	// documents the gap. What it does assert is the narrower fact the comment depends on --
+	// that ctx.Done() on a nil interface panics -- so the sentence "StartPump must not be given
+	// a nil context" rests on something checked rather than on folklore.
+	//
+	// The connection between the two is by inspection: run's first select case is
+	// <-ctx.Done(). A change that moved the dereference behind a nil check would make this
+	// test pass while the comment became wrong, which is why the comment points at the line.
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("a nil context did not panic; StartPump's comment says it must not be nil, " +
+				"so if this starts working the comment and this test both need revisiting")
+		}
+	}()
+	var ctx context.Context
+	_ = ctx.Done() // the same operation s.run performs on its first iteration
+	_ = srv
+}

@@ -262,6 +262,13 @@ func (s *Server) run(ctx context.Context) {
 // cannot become one without recreating the stop channel: the pump exits when stop closes,
 // so a goroutine started afterwards would return on its first iteration. A server is
 // started once and shut down once; rebuilding one means a new Server.
+//
+// ctx must not be nil. The pump selects on ctx.Done(), and a nil interface has no such
+// method, so the goroutine panics on its first iteration -- which is worse than it sounds,
+// because a panic in a goroutine the caller never sees cannot be recovered: the process
+// exits. The context package says not to pass nil, so this is a contract note rather than a
+// check; rejecting nil here would imply the function could otherwise do something sensible
+// with it, and there is nothing to do. The one production caller passes the signal context.
 func (s *Server) StartPump(ctx context.Context) {
 	s.pumpOnce.Do(func() {
 		s.wg.Add(1)

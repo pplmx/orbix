@@ -68,6 +68,12 @@ func RenderChatPrompt(turns []Turn) string {
 // rather than per request. It records why it fell back, because "the model's format was
 // not used" is something an operator needs to see: the server prints it at startup and
 // the REPL shows it on the first turn.
+//
+// It is safe for concurrent use, which the server relies on: one renderer serves every
+// request goroutine. Render reads the configuration fields that are set once at
+// construction and takes no lock for them; the mutex below covers renderReason alone,
+// which is the one field a request writes. Anything added to this type has to join one
+// group or the other, and the accessors that read renderReason already lock.
 type ChatRenderer struct {
 	tmpl *chat.Template
 	// fallbackReason is empty when the model's template is in use.

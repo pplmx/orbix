@@ -18,9 +18,15 @@ orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --pr
 | `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context  |
 | `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix             |
 
-`--block-size` cannot exceed the model's context: prefix reuse matches whole blocks, so a block
-the context can never fill is never published and `--prefix-cache` would reuse nothing. `serve`,
-`chat`, and `bench` refuse that combination rather than start it.
+`--block-size` above the model's context is refused when reuse is on: prefix reuse matches whole
+blocks, so a block the context can never fill is never published and `--prefix-cache` would reuse
+nothing. `serve` and `bench` refuse it when `--prefix-cache` is given, and `chat` refuses it
+always, because chat enables reuse by default rather than on request.
+
+With reuse off the combination is accepted, and deliberately so: a block larger than the context
+is then just a pool with one block in practice, which serves text correctly. Measured on a
+64-position fixture with `--blocks 8 --block-size 128`: `serve` and `bench` start, while the same
+invocation with `--prefix-cache` answers "use --block-size 64 or less".
 
 `--prefix-cache` holds blocks, not just references to them. Every block the index remembers is
 retained until an entry is evicted, and eviction happens when the index reaches its own bound of

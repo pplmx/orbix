@@ -985,3 +985,43 @@ func TestRunEchoPrintsThePromptFirst(t *testing.T) {
 		t.Errorf("--echo printed the prompt %d times, want 1: %q", n, withEcho)
 	}
 }
+
+// TestRunSeedSelectsTheStream adds the half TestRunSeedZeroIsNotSeedZero cannot check.
+//
+// That test compares two runs at the same seed, which stays green if the seed is ignored
+// entirely -- an ignored seed also produces two identical runs. The property a seed actually
+// promises is that it selects the stream, so two different seeds must produce different text.
+//
+// The greedy half is the doc comment on --seed made checkable: it says seed "has no effect
+// without --temp, because greedy decoding is already deterministic". Three different seeds at a
+// fixed budget are compared for equality, and only the absence of --temp makes that the right
+// answer.
+func TestRunSeedSelectsTheStream(t *testing.T) {
+	model := suiteModel(t)
+	run := func(args ...string) string {
+		return captureStdout(t, func() {
+			_ = cmdRun(append([]string{"--model", model}, args...))
+		})
+	}
+
+	// Two different seeds must not agree. Temperature 1.5 and a 48-token budget put enough
+	// samples on the stream that agreement would mean the seed is not reaching the sampler.
+	const budget = "48"
+	a := run("--max-tokens", budget, "--temp", "1.5", "--seed", "7", "Once")
+	b := run("--max-tokens", budget, "--temp", "1.5", "--seed", "8", "Once")
+	if a == b {
+		t.Errorf("--seed 7 and --seed 8 produced identical text, so the seed does not select the "+
+			"stream: %q", a)
+	}
+
+	// And with no temperature the flag must do nothing: greedy is already deterministic, so
+	// every seed is the same run.
+	first := run("--max-tokens", "24", "--seed", "1", "Once")
+	for _, seed := range []string{"2", "99", "12345"} {
+		got := run("--max-tokens", "24", "--seed", seed, "Once")
+		if got != first {
+			t.Errorf("--seed %s changed greedy output, so the flag is not ignored without --temp "+
+				"as its help says:\nseed 1: %q\nseed %s: %q", seed, first, seed, got)
+		}
+	}
+}

@@ -67,10 +67,28 @@ fmt:
 
 # run golangci-lint
 lint:
-    @command -v golangci-lint >/dev/null 2>&1 || { \
-        echo "golangci-lint not found: install it (https://golangci-lint.run/docs/welcome/install/) or run CI's check job"; \
-        exit 1; \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v golangci-lint >/dev/null 2>&1 || {
+        echo "golangci-lint not found: install it (https://golangci-lint.run/docs/welcome/install/) or run CI's check job"
+        exit 1
     }
+    # .golangci.yml is a v2 configuration and golangci-lint v1 refuses to read one. Its own
+    # message is about the config file rather than the toolchain, so a reader has no way to
+    # learn that the fix is a different binary, and `just check` goes red on a clean tree --
+    # the failure mode this gate exists to prevent. Measured with mise resolving v1.64.8
+    # while CI pins v2.15.0: check failed with "you are using a configuration file for
+    # golangci-lint v2 with golangci-lint v1".
+    #
+    # A shebang recipe rather than a plain one: the body is handed to bash verbatim, so `$`
+    # needs no escaping. The first attempt wrote `$$` in a plain recipe and just turned it
+    # into the PID, which made the version probe a file name.
+    v="$(golangci-lint --version 2>/dev/null | sed -n 's/.*version v\{0,1\}\([0-9][0-9]*\).*/\1/p' | head -1)"
+    if [ "${v:-}" != "2" ]; then
+        echo "golangci-lint is not v2 (found ${v:-unknown}): .golangci.yml is a v2 config and v1 refuses to read it"
+        echo "install golangci-lint v2 (CI pins v2.15.0): https://golangci-lint.run/docs/welcome/install/"
+        exit 1
+    fi
     golangci-lint run
 
 # run kernel and engine benchmarks

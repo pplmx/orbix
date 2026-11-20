@@ -32,10 +32,15 @@ shaped 503 look like a proxy error.
 
 Unsupported fields split by what a client does with the answer. Sampling knobs -- `logit_bias`,
 `presence_penalty`, `response_format` -- are ignored, because the SDKs send them regardless.
-Fields describing the *response* -- `n`, `logprobs`, `top_logprobs`, `echo`, `suffix`, `best_of`
--- are refused with a 400 naming every one, since a client that sent `n: 3` indexes `choices[2]`.
-`max_completion_tokens` is refused for a sharper reason: it replaces `max_tokens` rather than
-accompanying it, so a migrated client would silently get the default length.
+Fields describing the *response* are refused with a 400 naming every one, since a client that
+sent `n: 3` indexes `choices[2]`.
+
+The refused set is not the same on the two endpoints, because their schemas differ. Chat refuses
+`n`, `logprobs`, `top_logprobs` and `echo`; completions refuses `n`, `logprobs`, `echo`, `suffix`
+and `best_of`. A field belonging to the other endpoint is not refused there -- it is an unknown
+member and is ignored, so `suffix` sent to chat is silently dropped rather than named.
+`max_completion_tokens` is refused on both, for a sharper reason: it replaces `max_tokens` rather
+than accompanying it, so a migrated client would silently get the default length.
 
 `stream_options.include_usage` is honoured: it is the only way a streaming caller learns what it
 spent. The extra chunk carries the counts before `[DONE]` and matches the non-streaming body.

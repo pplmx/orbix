@@ -273,6 +273,13 @@ func TestStreamDecoderMatchesDecodeOnSplitBytes(t *testing.T) {
 	// do not depend on what Encode happens to produce for a string. id 2858 ends in a lead
 	// byte and 94/95 are bare continuation bytes, which together form one character; the
 	// stream used to drop the space the first piece carried and render the rest as U+FFFD.
+	//
+	// Every truncation of a multi-byte character is covered by the two-entry sequence and
+	// its prefixes. Measured on a byte-level fixture: encoding "中文" gives seven tokens, and
+	// streaming the first n of them with a final Flush matches DecodeCompletion at all seven
+	// n -- "�" at n=2 and 3, "中" at 4, "中�" at 5 and 6, "中文" at 7. Omitting the
+	// Flush reproduces the divergence the prefixes exist to catch, which is worth knowing
+	// because a probe that forgets it looks like a decoding bug rather than a probe bug.
 	for _, seq := range [][]int32{
 		{2858, 94, 95},
 		{2858, 94},

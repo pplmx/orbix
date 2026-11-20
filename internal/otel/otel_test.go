@@ -133,6 +133,100 @@ func TestEncodeFieldNames(t *testing.T) {
 	}
 }
 
+// TestEncodeParentChildRelationship checks that a child span's link to its parent survives
+// encoding.
+//
+// TestTracerProducesValidSpans asserts the Span struct's fields, and TestEncodeFieldNames
+// asserts the names of the fields a root span carries. Neither looks at what a child looks
+// like on the wire, so the one field that makes a child a child -- parentSpanId -- was
+// unchecked. A tag naming some other field would compile, encode and be silently ignored,
+// and a backend would show a request's spans as unrelated entries rather than as a tree.
+//
+// What it does not catch, measured rather than assumed: a tag misspelled only in case
+// ("parentSpanID"). Go's decoder matches field names case-insensitively, so this test reads
+// the value back and passes. That is a real limit of the check, not a defect to chase --
+// the tag is written once and reviewed in the same diff as this test, and a case-only slip
+// still carries the right value for every decoder that compares names the way Go does. What
+// the test does catch is a tag pointing somewhere else entirely: replacing the name with
+// PARENTPROBE fails it with "child span has no parentSpanId on the wire".
+//
+// The trace id is asserted too, because a child that inherited a fresh trace id would look
+// correct in isolation and be unjoinable to its parent.
+func TestEncodeParentChildRelationship(t *testing.T) {
+	type wireSpan struct {
+		TraceID      string `json:"traceId"`
+		SpanID       string `json:"spanId"`
+		ParentSpanID string `json:"parentSpanId"`
+		Name         string `json:"name"`
+	}
+	type wireBody struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []wireSpan `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+
+	tr := NewTracer(StringAttr("service.name", "orbix"))
+	root, ok := tr.StartTrace("request", 2)
+	if !ok {
+		t.Fatal("StartTrace failed")
+	}
+	child, ok := tr.StartChild(root, "prefill", 1)
+	if !ok {
+		t.Fatal("StartChild failed")
+	}
+	body, err := Encode(tr.Resource(), []Span{root.Finish(nil), child.Finish(nil)})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	// Decode rather than substring-match: the point is what a collector reads, and a
+	// substring would pass on a value attached to the wrong span.
+	var got wireBody
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var spans []wireSpan
+	for _, rs := range got.ResourceSpans {
+		for _, ss := range rs.ScopeSpans {
+			spans = append(spans, ss.Spans...)
+		}
+	}
+	if len(spans) != 2 {
+		t.Fatalf("encoded %d spans, want 2: %s", len(spans), body)
+	}
+	byName := map[string]wireSpan{}
+	for _, sp := range spans {
+		byName[sp.Name] = sp
+	}
+	rootSpan, okRoot := byName["request"]
+	childSpan, okChild := byName["prefill"]
+	if !okRoot || !okChild {
+		t.Fatalf("missing a span: %v", body)
+	}
+
+	// The whole point: a child with no parentSpanId, or with the wrong one, is a separate
+	// entry to a backend rather than part of this request's trace.
+	if childSpan.ParentSpanID == "" {
+		t.Fatalf("child span has no parentSpanId on the wire: %s", body)
+	}
+	if childSpan.ParentSpanID != rootSpan.SpanID {
+		t.Errorf("child parentSpanId = %q, want the root's spanId %q",
+			childSpan.ParentSpanID, rootSpan.SpanID)
+	}
+	if rootSpan.ParentSpanID != "" {
+		t.Errorf("root span carries parentSpanId %q; a root has no parent",
+			rootSpan.ParentSpanID)
+	}
+	if childSpan.TraceID != rootSpan.TraceID {
+		t.Errorf("child traceId = %q, want the root's %q", childSpan.TraceID, rootSpan.TraceID)
+	}
+	if childSpan.SpanID == rootSpan.SpanID {
+		t.Error("child reused the parent's spanId")
+	}
+}
+
 // TestEncodeAttributes checks the typed value union: an integer must use intValue, not a
 // quoted string, or a backend cannot sum it.
 func TestEncodeAttributes(t *testing.T) {
@@ -1129,5 +1223,90 @@ func TestRecordDropsInvalidSpans(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no export arrived")
+	}
+}
+
+// TestPartialSuccessRejectedCountsSpans covers the acknowledgement that says "200 OK, but I
+// kept none of it".
+//
+// OTLP reports that in partialSuccess, and the exporter did not read the response body on a
+// 2xx at all, so those spans vanished with Dropped() at zero -- the counter that exists to
+// make trace loss visible reported a healthy export. Measured against a collector answering
+// {"partialSuccess":{"rejectedSpans":"3"}}: six requests left the count at 0 while nothing
+// reached a backend.
+//
+// The proto field is an int64, which proto3's JSON mapping writes as a string, so both forms
+// have to be accepted; a number is what a hand-written collector sends.
+func TestPartialSuccessRejectedCountsSpans(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+		why  string
+	}{
+		{`{"partialSuccess":{"rejectedSpans":"3"}}`, 3, "the proto3 JSON string form"},
+		{`{"partialSuccess":{"rejectedSpans":3}}`, 3, "a plain number, which a hand-written collector may send"},
+		{`{"partialSuccess":{"errorMessage":"quota exceeded"}}`, 0, "a message with no count drops nothing"},
+		{`{"partialSuccess":{}}`, 0, "the clean-export shape a real collector returns"},
+		{`{}`, 0, "an empty acknowledgement"},
+		{``, 0, "no body at all"},
+		{`not json`, 0, "an unparseable acknowledgement is not a drop"},
+		{`{"partialSuccess":{"rejectedSpans":"0"}}`, 0, "an explicit zero"},
+	}
+	for _, c := range cases {
+		if got := partialSuccessRejected([]byte(c.body)); got != c.want {
+			t.Errorf("partialSuccessRejected(%q) = %d, want %d (%s)", c.body, got, c.want, c.why)
+		}
+	}
+}
+
+// TestExporterCountsRejectedSpans is the same fact through the exporter, so the counter a
+// deployment actually scrapes is what the test watches.
+func TestExporterCountsRejectedSpans(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"partialSuccess":{"rejectedSpans":"5","errorMessage":"quota exceeded"}}`))
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	exp.Record(testSpan(t, "chat"))
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := exp.Dropped(); got != 5 {
+		t.Errorf("Dropped = %d after the collector rejected 5, want 5", got)
+	}
+}
+
+// TestExporterIgnoresCleanAcknowledgement is the other side: a normal export must not be
+// counted as a loss, or the metric becomes noise and stops being looked at.
+func TestExporterIgnoresCleanAcknowledgement(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"partialSuccess":{}}`))
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	exp.Record(testSpan(t, "chat"))
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := exp.Dropped(); got != 0 {
+		t.Errorf("Dropped = %d after a clean export, want 0", got)
 	}
 }

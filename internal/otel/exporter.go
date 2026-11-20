@@ -3,10 +3,12 @@ package otel
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -139,8 +141,10 @@ func (e *Exporter) Record(s Span) {
 	e.queue = append(e.queue, s)
 }
 
-// Dropped reports how many spans were discarded, whether for a full queue or a failed
-// send. A non-zero value means the collector is not keeping up.
+// Dropped reports how many spans were discarded: for a full queue, for a failed send, or
+// because the collector acknowledged the request while rejecting spans inside it. A non-zero
+// value means a trace is incomplete, whether or not the export itself succeeded -- a collector
+// over quota answers 200 and keeps nothing.
 func (e *Exporter) Dropped() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -216,7 +220,62 @@ func (e *Exporter) send(ctx context.Context, spans []Span) error {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("otel: export: %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}
+	// A 2xx does not mean every span was kept. OTLP's response carries partialSuccess for
+	// exactly this: a collector that accepted the request and dropped some or all of the
+	// spans inside it, usually for quota or for an attribute it rejects. Without reading it
+	// those spans vanish with Dropped() at zero, which is the opposite of what the counter
+	// is for -- measured against a collector answering
+	// {"partialSuccess":{"rejectedSpans":"3","errorMessage":"quota exceeded"}}, six requests
+	// left orbix_trace_spans_dropped_total at 0 while no span reached a backend.
+	//
+	// Read bounded, and failure to parse is not an export failure: the spans were sent, and
+	// an unreadable acknowledgement is the collector's problem rather than a reason to
+	// report the send as failed.
+	ack, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if rejected := partialSuccessRejected(ack); rejected > 0 {
+		e.mu.Lock()
+		e.dropped += rejected
+		e.mu.Unlock()
+	}
 	return nil
+}
+
+// partialSuccessRejected reads the rejected span count from an OTLP/HTTP response.
+//
+// proto3 omits zero-valued fields, so a clean export has no partialSuccess at all and a
+// present one with no rejectedSpans is indistinguishable from an absent one -- both mean
+// nothing was dropped. rejectedSpans is an int64 in the proto, which proto3's JSON mapping
+// writes as a string, so the string form is what a collector sends; a number is accepted too
+// because the mapping permits it and a collector in the wild may use it.
+func partialSuccessRejected(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	var resp struct {
+		PartialSuccess struct {
+			RejectedSpans json.RawMessage `json:"rejectedSpans"`
+		} `json:"partialSuccess"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return 0
+	}
+	raw := bytes.TrimSpace(resp.PartialSuccess.RejectedSpans)
+	if len(raw) == 0 {
+		return 0
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return int(n)
+	}
+	// The string form proto3 uses for 64-bit integers.
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return 0
+	}
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return int(v)
+	}
+	return 0
 }
 
 // Flush sends everything queued now. It is what a test or a one-shot command wants

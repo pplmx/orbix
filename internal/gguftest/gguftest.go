@@ -124,6 +124,12 @@ type Model struct {
 	// RopeDim/2, since that is the shape the loader requires.
 	RopeFreqs []float32
 
+	// AddSpacePrefix is tokenizer.ggml.add_space_prefix. Nil omits the key, which leaves the
+	// loader to infer it from the vocabulary family -- true for SentencePiece, false for
+	// byte-level BPE. A non-nil value states it explicitly, which is the only way to test
+	// a file that contradicts its family.
+	AddSpacePrefix *bool
+
 	// ExtraFloat, when set, writes one float32 metadata value under the given key, after
 	// the fixture's own keys. It exists so a test can put a value in the file that no
 	// accessor would construct -- a NaN in rope.freq_base, say -- and check what the loader
@@ -485,7 +491,9 @@ func (m Model) kvs() []kv {
 	// A SentencePiece vocabulary prepends a space during training, so the key is written
 	// for it. A byte-level BPE vocabulary does not -- the space is part of the text --
 	// and writing it there makes the encoder add a leading space the model never saw.
-	if model == "llama" {
+	if m.AddSpacePrefix != nil {
+		out = append(out, boolKV("tokenizer.ggml.add_space_prefix", *m.AddSpacePrefix))
+	} else if model == "llama" {
 		out = append(out, boolKV("tokenizer.ggml.add_space_prefix", true))
 	}
 	if m.AddBOS != nil {

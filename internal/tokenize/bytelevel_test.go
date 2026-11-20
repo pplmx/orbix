@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // Byte-level BPE and SentencePiece differ in how a space is represented before the
@@ -524,5 +525,55 @@ func TestBpeKeepMatchesGPT2sThreeRanges(t *testing.T) {
 		if got := bpeBytes[rune(b)]; got != b {
 			t.Errorf("bpeBytes[%q] = 0x%02X, want 0x%02X (byte kept as itself)", rune(b), got, b)
 		}
+	}
+}
+
+// TestAddSpacePrefixFromTheFileOverridesTheFamily pins the explicit key against the default.
+//
+// The loader infers this flag when the key is absent -- true for SentencePiece, false for
+// byte-level BPE -- and only the inferred case was tested. A file that states the opposite
+// of its family is the case the code exists for, and it is what a converted checkpoint
+// looks like when the conversion kept the convention but changed the vocabulary model.
+//
+// Measured, all six combinations behave as the loader's comment describes: absent infers
+// from the family, and present wins either way. Without the override being tested, an
+// implementation that ignored the key and always inferred would pass everything here.
+func TestAddSpacePrefixFromTheFileOverridesTheFamily(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name     string
+		model    string
+		key      *bool
+		want     bool
+		wantByte bool
+	}{
+		{"gpt2 without the key", "gpt2", nil, false, true},
+		{"gpt2 asking for one", "gpt2", &yes, true, true},
+		{"gpt2 refusing one", "gpt2", &no, false, true},
+		{"llama without the key", "llama", nil, true, false},
+		{"llama refusing one", "llama", &no, false, false},
+		{"llama asking for one", "llama", &yes, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := gguftest.Model{
+				TokenizerModel: c.model, NoBytes: true, AddSpacePrefix: c.key,
+			}.Write(t, t.TempDir())
+			f, err := gguf.Open(path)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			tok, err := New(f)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if tok.addSpacePrefix != c.want {
+				t.Errorf("addSpacePrefix = %v, want %v", tok.addSpacePrefix, c.want)
+			}
+			if tok.byteLevel != c.wantByte {
+				t.Errorf("byteLevel = %v, want %v: the key must not change the family",
+					tok.byteLevel, c.wantByte)
+			}
+		})
 	}
 }

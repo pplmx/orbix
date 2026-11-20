@@ -29,14 +29,20 @@
 // control the prompt exactly sends it to the completions endpoint, which passes text
 // through verbatim.
 //
-// Every error body carries a "code", including the ones a client hits before any field is
-// parsed: invalid_json, unsupported_encoding and body_too_large for a body the decoder
-// rejected, and invalid_value, missing_required_parameter, unsupported_parameter,
-// context_length_exceeded and model_not_found for a request it understood and refused.
-// OpenAI's guidance is to branch on "code" rather than on message text. "param" is present
-// when one field is at fault and absent when the failure is about the body as a whole, and
-// "type" separates invalid_request_error from server_error and from
-// service_unavailable_error, which is the one the SDKs retry.
+// A request-validation error carries a "code": invalid_json, unsupported_encoding and
+// body_too_large for a body the decoder rejected, and invalid_value,
+// missing_required_parameter, unsupported_parameter, context_length_exceeded and
+// model_not_found for a request it understood and refused. OpenAI's guidance is to branch on
+// "code" rather than on message text, and paramError exists to keep the code paired with the
+// field that produced it. "param" is present when one field is at fault and absent when the
+// failure is about the body as a whole.
+//
+// Capacity and internal failures have no code. A full queue answers 503 with
+// service_unavailable_error and a message, and a broken stream likewise: there is no field
+// for a caller to fix, and the retryable signal the SDKs read is "type", not "code". A client
+// must therefore treat a missing code as "nothing to correct in the request" rather than as a
+// malformed response -- which is what the earlier wording here claimed, saying every error
+// body carried one.
 //
 // Unsupported request fields are handled by what a client does with the answer. A field
 // that only tunes sampling -- logit_bias, presence_penalty, response_format -- is ignored,

@@ -1174,3 +1174,49 @@ func TestEmptyPromptThroughThePagedPathIsRefused(t *testing.T) {
 		t.Errorf("a four-token prompt through the same cache: %v", err)
 	}
 }
+
+// TestEmbedBatchGuardsTheTokenNotTheOffset covers the reason its check is written that way.
+//
+// The comment there explains why the guard is on the token rather than on off+Hidden: a
+// negative token makes off negative while off+Hidden can still be inside the embedding, so
+// a check against the sum alone lets it through and the slice expression panics. Measured
+// with Hidden 8 and token -1: off is -8 and off+Hidden is 0, which is in range.
+//
+// Prefill checks every token before calling this, so the function is unreachable with a bad
+// token through the public API -- TestPrefillRejectsTokensOutsideTheVocabulary covers that
+// path. This test asserts the second line of defence on its own, because the comment's
+// reasoning is what stops a future edit from "simplifying" the check into the broken form,
+// and nothing was holding the reasoning in place.
+func TestEmbedBatchGuardsTheTokenNotTheOffset(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.W.Config
+	b := newBatch(cfg, 2)
+
+	for _, tok := range []int32{-1, -1000, int32(cfg.VocabSize), int32(cfg.VocabSize) + 5} {
+		err := m.embedBatch(b, []int32{tok})
+		if err == nil {
+			t.Errorf("embedBatch accepted token %d, vocabulary is %d", tok, cfg.VocabSize)
+			continue
+		}
+		if !strings.Contains(err.Error(), "outside vocabulary") {
+			t.Errorf("token %d: error %q does not name the problem", tok, err)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprint(tok)) {
+			t.Errorf("token %d: error %q does not name the token", tok, err)
+		}
+	}
+
+	// The arithmetic the comment describes, so the reasoning is checked and not just stated.
+	const hidden = 8
+	off := -1 * hidden
+	if off >= 0 {
+		t.Fatalf("off = %d, expected negative for the premise to hold", off)
+	}
+	if off+hidden < 0 {
+		t.Fatal("off+Hidden is negative here, so this fixture does not demonstrate the trap")
+	}
+}

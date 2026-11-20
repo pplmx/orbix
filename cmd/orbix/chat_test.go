@@ -1123,3 +1123,48 @@ func TestChatStatsReportsThePool(t *testing.T) {
 		}
 	})
 }
+
+// TestExplainChatErrorCoversTheWindowToo extends the test above to the second failure that
+// repeats.
+//
+// The doc on explainChatError called pool exhaustion "the one failure here that repeats",
+// and that was wrong: the conversation outgrowing the model's window repeats for exactly the
+// same reason -- history advances only on a successful turn -- but arrives as an encoding
+// check in chatTurnOnce rather than as an engine error, so nothing recognised it. Measured on
+// a 256-position fixture, three turns filled the window and each of the next nine attempts
+// printed "conversation is 318 tokens, context is 256" with nothing to say the number could
+// not change by itself.
+//
+// Both halves are asserted: the explanation appears, and the sentinel survives in the chain so
+// a caller checking errors.Is still sees what failed.
+func TestExplainChatErrorCoversTheWindowToo(t *testing.T) {
+	full := fmt.Errorf("%w: conversation is 318 tokens, context is 256", errContextFull)
+	got := explainChatError(full)
+	if got == full {
+		t.Fatal("a full context window was not explained")
+	}
+	if !errors.Is(got, errContextFull) {
+		t.Error("the explanation dropped errContextFull from the chain")
+	}
+	// The fact the bare message omits: retrying is pointless.
+	if !strings.Contains(got.Error(), "will fail the same way") {
+		t.Errorf("error %q does not say the next turn fails identically", got)
+	}
+	// And the way out. /clear is named because it is the only thing that helps here: unlike
+	// the pool case, the window is fixed by the model, so no flag raises it.
+	if !strings.Contains(got.Error(), "/clear") {
+		t.Errorf("error %q does not name a way out", got)
+	}
+	// The numbers the engine produced have to survive, since they are what tells the user how
+	// far over they are.
+	for _, want := range []string{"318", "256"} {
+		if !strings.Contains(got.Error(), want) {
+			t.Errorf("error %q lost the figure %s", got, want)
+		}
+	}
+	// The two explanations must not be each other's: a window error mentioning --blocks would
+	// send the user to a flag that cannot help.
+	if strings.Contains(got.Error(), "--blocks") {
+		t.Errorf("the window explanation suggests --blocks, which cannot widen the window: %q", got)
+	}
+}

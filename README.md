@@ -459,9 +459,13 @@ positions) has nothing to attach: `/stats` reports the positions actually reused
 0 until the history outgrows a block and 32 once it does on a 30-word message.
 
 `/stats` also reports the KV pool, `N of M blocks free (S positions each, T total)`, because
-running out of it is the one failure a session hits repeatedly: a conversation outgrows the
-pool, every later turn fails the same way since a failed turn does not grow the history, and
-the error names the pool's size without saying how close the session is to it. The total is
+running out of it is one of two failures a session hits repeatedly: a conversation outgrows
+the pool, every later turn fails the same way since a failed turn does not grow the history,
+and the error names the pool's size without saying how close the session is to it. The other
+is the conversation outgrowing the model's window, which is fixed by the model rather than by
+a flag -- measured on a 256-position fixture, three turns filled it and each of the next nine
+attempts printed the same `conversation is 318 tokens, context is 256`. Both errors now say
+that retrying changes nothing and which command or flag is the way out. The total is
 there because the free count alone misleads -- a session refused on every turn may show all
 blocks free, which means the request is larger than the pool can ever hold rather than that
 anything is contended. That is the case `/clear` cannot fix, and seeing the size is what tells

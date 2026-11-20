@@ -303,11 +303,23 @@ type chatTurn struct {
 // expects and what makes prefix reuse pay: every turn's prompt starts with the
 // previous turn's prompt, so the engine can attach those blocks instead of
 // recomputing them.
+// errContextFull marks a turn whose rendered conversation is longer than the model's window.
+//
+// It is a sentinel so explainChatError can recognise the case: it is the second failure that
+// repeats, and the doc there used to call the pool "the one failure here that repeats". The
+// window has the same trap for the same reason -- history only grows on a successful turn --
+// but arrives as a plain encoding check rather than an engine error, so it needed a marker.
+var errContextFull = errors.New("context window full")
+
 // explainChatError adds what the caller can do about an error the engine reports bare.
 //
-// Exhausting the pool is the one failure here that repeats: the history is not advanced on a failed
-// turn, so the next turn submits the same conversation against the same full pool and fails
-// identically, for as long as the session lasts. The engine's message names the pool's size, which
+// Two failures repeat, for the same reason: the history is not advanced on a failed turn, so
+// the next turn submits the same conversation against the same limit and fails identically for
+// as long as the session lasts. Exhausting the pool is one. The other is the conversation
+// outgrowing the model's window, which was missed here because it is an encoding check rather
+// than an engine error: measured on a 256-position fixture, three turns filled the window and
+// each of the next nine attempts printed the same "conversation is 318 tokens, context is 256"
+// with nothing to say that the situation could not change on its own. The engine's message names the pool's size, which
 // is the wrong end of the problem -- the session already knows what it asked for -- and suggests
 // nothing.
 //
@@ -321,6 +333,18 @@ type chatTurn struct {
 // that case: measured on a 60-word message against --blocks 4, the error repeated verbatim after
 // /clear. Saying when it helps costs one clause and stops the advice from being a dead end.
 func explainChatError(err error) error {
+	// The window can be outgrown by the conversation itself, which is a different failure
+	// from the pool running out but has the same trap: a failed turn does not grow the
+	// history, so the next one fails identically. Without saying so the REPL answers every
+	// later message with the same line -- measured on a 256-position fixture, three turns
+	// filled the window and the next nine attempts each printed "conversation is 318 tokens,
+	// context is 256" with no hint that nothing had changed.
+	if errors.Is(err, errContextFull) {
+		return fmt.Errorf("%w -- this conversation no longer fits the model's window, and the"+
+			" next turn will fail the same way because a failed turn does not grow the history;"+
+			" /clear starts over, and the model's window is fixed, so a longer --system or a"+
+			" smaller --max-tokens only helps by leaving room for fewer turns", err)
+	}
 	if !errors.Is(err, llama.ErrPoolExhausted) {
 		return err
 	}
@@ -343,7 +367,8 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 		return "", fmt.Errorf("prompt encoded to no tokens")
 	}
 	if len(ids) >= cfg.ContextLen {
-		return "", fmt.Errorf("conversation is %d tokens, context is %d; use /clear", len(ids), cfg.ContextLen)
+		return "", fmt.Errorf("%w: conversation is %d tokens, context is %d",
+			errContextFull, len(ids), cfg.ContextLen)
 	}
 
 	sampler := llama.Sampler(llama.Greedy{})

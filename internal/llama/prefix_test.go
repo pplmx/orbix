@@ -389,6 +389,12 @@ func TestPrefixEvictionTakesTheTail(t *testing.T) {
 	tokens := []int32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 	pool, idx := buildChain(t, tokens)
 
+	_, primed := idx.Match(tokens)
+	if len(primed) != 3 {
+		t.Fatalf("the chain holds %d blocks, want 3; the setup did not publish it", len(primed))
+	}
+	evicted := primed[len(primed)-1]
+
 	// One eviction must leave a matchable prefix of two blocks rather than none.
 	if !idx.evictOne() {
 		t.Fatal("evictOne reported nothing to evict")
@@ -400,9 +406,17 @@ func TestPrefixEvictionTakesTheTail(t *testing.T) {
 	if n != 8 {
 		t.Errorf("match after one eviction = %d positions, want 8 (two blocks still reachable)", n)
 	}
-	// And the evicted block must have gone back to the pool.
-	if free := pool.Free(); free != 1 {
-		t.Errorf("pool has %d free blocks after evicting one of four, want 1", free)
+	// And the evicted block must have lost the index's reference.
+	//
+	// Asserted on the refcount rather than on Free, because Free cannot see this: buildChain
+	// leaves its cache holding every block, so each one starts at 2 -- the index and the
+	// sequence. Evicting drops it to 1 and the block does not join the free list, which is
+	// correct but means "free == 1" is true before the eviction as well. Measured, and
+	// verified by deleting the release in evictTail: the Free assertion passed, and the
+	// refcount assertion below is what fails.
+	if got := pool.RefCount(evicted); got != 1 {
+		t.Errorf("the evicted block %d has refcount %d, want 1 (the index's reference gone, "+
+			"the sequence's still held)", evicted, got)
 	}
 }
 

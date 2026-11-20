@@ -203,7 +203,10 @@ func printTensors(tw *tabwriter.Writer, ew *errWriter, f *gguf.File) error {
 		if n, ok := ti.Bytes(); ok {
 			size = formatBytes(n)
 		}
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", ti.Name, ti.Type, shape, size)
+		// The name is truncated only here: writeJSON emits it whole, because a script reading
+		// the machine-readable form wants to look the tensor up by its real name.
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
+			truncateForDisplay(ti.Name, maxValueWidth), ti.Type, shape, size)
 	}
 	tw.Flush()
 	return ew.err
@@ -364,14 +367,35 @@ func formatValue(v gguf.Value) string {
 	if v.Type == gguf.TypeArray {
 		return fmt.Sprintf("%d values", len(v.Array))
 	}
-	const max = 60
-	s := v.String()
+	return truncateForDisplay(v.String(), maxValueWidth)
+}
+
+// maxValueWidth is how wide a metadata value or a tensor name may be before the human-readable
+// output truncates it.
+//
+// The two shared one budget because they share the failure: a table whose first column is 300
+// characters wide pushes every other column off the screen, and a reader scrolling sideways to
+// find a tensor's type learns nothing from the name that is more useful than its prefix. The
+// --json output is not affected, because a script that wants the whole name is the reason that
+// flag exists.
+const maxValueWidth = 60
+
+// truncateForDisplay shortens s to max bytes, ending in an ellipsis.
+//
+// The cut is measured in bytes but must land on a rune boundary: a tensor name or metadata
+// string is arbitrary UTF-8 -- a checkpoint name in Chinese, a template with an emoji -- and
+// slicing at a fixed byte offset splits a multi-byte character, which writes invalid UTF-8 to
+// the terminal and makes the --json output fail to parse downstream. Measured before this: a
+// 61-byte name whose first character is ASCII produced a 60-byte result that utf8.ValidString
+// rejected. The budget includes the ellipsis, so the result stays inside the width callers
+// space their columns for.
+func truncateForDisplay(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	// Keep max-3 bytes plus the ellipsis, retreating to the start of the last rune that
-	// would otherwise be split. utf8.RuneStart walks back over continuation bytes, whose
-	// top two bits are 10.
+	// Keep max-3 bytes plus the ellipsis, retreating to the start of the last rune that would
+	// otherwise be split. utf8.RuneStart walks back over continuation bytes, whose top two
+	// bits are 10.
 	keep := max - 3
 	for keep > 0 && !utf8.RuneStart(s[keep]) {
 		keep--

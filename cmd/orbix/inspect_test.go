@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -486,5 +487,147 @@ func TestInspectJSONSurvivesNonFiniteFloats(t *testing.T) {
 	// cost the reader every other key.
 	if got := doc.Metadata["general.architecture"]; got != "llama" {
 		t.Errorf("general.architecture = %#v, want llama", got)
+	}
+}
+
+// TestTruncateForDisplayKeepsUTF8Valid covers the helper the two tables share.
+//
+// A tensor name or a metadata string is arbitrary UTF-8, so a byte-counted cut can land in the
+// middle of a multi-byte character. The earlier version of this logic was written for metadata
+// values alone and left tensor names untruncated entirely, which meant a 300-character name
+// pushed every other column of the tensors table off screen -- measured on a hand-built file,
+// the type and size columns were no longer visible at a normal terminal width.
+//
+// The property is utf8.ValidString on the result, not a particular length: any boundary that
+// keeps the output valid is acceptable, and asserting the exact cut would make a cosmetic
+// change look like a regression.
+func TestTruncateForDisplayKeepsUTF8Valid(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+	}{
+		{"short ASCII", "blk.0.attn_q.weight", 60},
+		{"exactly at the limit", strings.Repeat("a", 60), 60},
+		{"one over", strings.Repeat("a", 61), 60},
+		{"long ASCII", strings.Repeat("very_long_name_", 20), 60},
+		// A cut landing inside a multi-byte rune: every 3-byte character means the 57-byte
+		// boundary is a continuation byte.
+		{"CJK at the boundary", strings.Repeat("中", 30), 60},
+		{"emoji at the boundary", strings.Repeat("🙂", 30), 60},
+		{"mixed", "abc" + strings.Repeat("中", 25), 60},
+		{"wide max", strings.Repeat("x", 10), 100},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateForDisplay(c.in, c.max)
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateForDisplay(%q, %d) = %q, which is not valid UTF-8", c.in, c.max, got)
+			}
+			if len(got) > c.max {
+				t.Errorf("result is %d bytes, over the %d budget: %q", len(got), c.max, got)
+			}
+			if len(c.in) <= c.max {
+				if got != c.in {
+					t.Errorf("a string inside the budget was changed: %q -> %q", c.in, got)
+				}
+				return
+			}
+			if !strings.HasSuffix(got, "...") {
+				t.Errorf("a truncated string %q does not end in an ellipsis", got)
+			}
+			// The kept prefix has to be a prefix: truncation must not rewrite the text.
+			if !strings.HasPrefix(c.in, strings.TrimSuffix(got, "...")) {
+				t.Errorf("%q is not a prefix of the input", got)
+			}
+		})
+	}
+}
+
+// TestInspectTruncatesLongTensorNamesOnce covers the table the helper was extended for.
+//
+// The assertion is about the rendered row, not about the helper: the point of the change is
+// that the columns after the name stay on screen, and only a test that looks at the printed
+// line can tell whether the call was wired in. A tensor named with 300 characters must have
+// its type and size visible after it, and --json must still carry the whole name, because a
+// script looking the tensor up needs the real one.
+func TestInspectTruncatesLongTensorNamesOnce(t *testing.T) {
+	long := strings.Repeat("very_long_name_", 20)
+	// A minimal file built here rather than through gguftest, which fixes the tensor names it
+	// writes: the whole point is a name longer than the display budget.
+	var b []byte
+	u32 := func(v uint32) { var t [4]byte; binary.LittleEndian.PutUint32(t[:], v); b = append(b, t[:]...) }
+	u64 := func(v uint64) { var t [8]byte; binary.LittleEndian.PutUint64(t[:], v); b = append(b, t[:]...) }
+	str := func(s string) { u64(uint64(len(s))); b = append(b, s...) }
+	b = append(b, []byte("GGUF")...)
+	u32(3)
+	u64(1) // one tensor
+	u64(1) // one metadata entry
+	str("general.architecture")
+	u32(8) // string
+	str("llama")
+	str(long)
+	u32(1) // one dimension
+	u64(4)
+	u32(0) // F32
+	u64(0) // offset
+	for len(b)%32 != 0 {
+		b = append(b, 0)
+	}
+	b = append(b, make([]byte, 16)...)
+	data := b
+	path := filepath.Join(t.TempDir(), "long.gguf")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = run([]string{"model", "inspect", path}) })
+	if runErr != nil {
+		t.Fatalf("inspect: %v", runErr)
+	}
+
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "very_long_name_") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("the tensor row is missing from:\n%s", out)
+	}
+	if strings.Contains(row, long) {
+		t.Errorf("the row carries the whole %d-character name, so the table is unreadable:\n%s",
+			len(long), row)
+	}
+	if !strings.Contains(row, "...") {
+		t.Errorf("the truncated name has no ellipsis:\n%s", row)
+	}
+	// The columns that follow have to still be there.
+	for _, want := range []string{"F32", "4", "16 B"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("the row lost %q after the name:\n%s", want, row)
+		}
+	}
+
+	// And the machine-readable form keeps it whole.
+	jsonOut := captureStdout(t, func() { runErr = run([]string{"model", "inspect", "--json", path}) })
+	if runErr != nil {
+		t.Fatalf("inspect --json: %v", runErr)
+	}
+	var doc struct {
+		Tensors []struct {
+			Name string `json:"name"`
+		} `json:"tensors"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &doc); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if len(doc.Tensors) != 1 {
+		t.Fatalf("JSON has %d tensors, want 1", len(doc.Tensors))
+	}
+	if doc.Tensors[0].Name != long {
+		t.Errorf("JSON name is %d characters, want the full %d",
+			len(doc.Tensors[0].Name), len(long))
 	}
 }

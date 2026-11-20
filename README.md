@@ -512,6 +512,12 @@ orbix model inspect --json ./model.gguf   # machine-readable; values keep their 
 `orbix model inspect` is also a learning tool: it prints the GGUF layout in a
 readable form, which is useful when studying how a model file is structured.
 
+The human-readable tables cut a metadata value or a tensor name at 60 bytes and end it with
+`...`, on a rune boundary so a multi-byte name is never split. One long name is otherwise
+enough to push a table's later columns off screen -- a 300-character tensor name was measured
+doing exactly that to the type and size columns. `--json` is not affected: it carries the whole
+name, because a script looking a tensor up needs the one the file records.
+
 `--json` keeps each value the type the file declares, with one exception that the format
 forces: a float that is NaN or infinite cannot be a JSON number, because JSON's grammar has no
 token for either, so it is emitted as the string `"NaN"`, `"+Inf"` or `"-Inf"`. Such a value is

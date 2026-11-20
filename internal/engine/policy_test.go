@@ -129,6 +129,14 @@ func TestAdmitEdgeCases(t *testing.T) {
 // decision the pump makes without a model: round 1 admits the low-priority sequence, round
 // 2 sees the same sequence as ready alongside a higher-priority one and must pick the
 // higher-priority one.
+// The rounds below are synthetic, which is what lets the test assert exact round numbers. What
+// they do not show is the shape on a real engine, so that was measured separately on the
+// 512-position fixture with MaxActive 1 and FIFO, one 40-token request already three rounds in:
+// a second request at the default priority began generating 42 rounds after submitting, once
+// the long one had finished, while the same request at priority 10 began on the fourth round
+// after submitting. The long request produced its whole 40-token budget in both runs, which is
+// the half this test asserts as "round 3 admits the long sequence again" -- a preempted
+// sequence is yielded, not cancelled.
 func TestPriorityPreemptsARunningSequence(t *testing.T) {
 	long := fakeSeq(0, 100, 0, -1)
 	long.req.Priority = 0

@@ -84,47 +84,23 @@ Every layer on the roadmap exists. The package's `doc.go` says how it was verifi
 
 ## What You Can Learn From This Codebase
 
-Each layer maps to a concept in LLM inference. The code is organized to make that mapping explicit.
+Each package has a `doc.go` explaining what the layer is responsible for; read in this order and
+the concepts arrive in the order a request travels through them.
 
-| Layer               | Concept                                       | What the code shows                                                                      |
-| ------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| **GGUF loader**     | Model formats, quantization types, tokenizers | How a model file is structured, how tensors are laid out, how tokens become IDs          |
-| **Compute kernels** | Matmul, attention, normalization, activations | What a transformer forward pass actually computes, and why quantization changes the math |
-| **KV cache**        | KV cache, paged allocation, prefix reuse      | Why inference is memory-bound, how attention state is stored and reused                  |
-| **Scheduler**       | Continuous batching, prefill/decode, priority | Why serving is a scheduling problem, not just a compute problem                          |
-| **Server**          | OpenAI-compatible API, SSE, request lifecycle | How a serving layer maps HTTP requests onto an inference engine                          |
+| #   | Package                                                                          | Concept                                          |
+| --- | -------------------------------------------------------------------------------- | ------------------------------------------------ |
+| 1   | [`internal/gguf`](internal/gguf/doc.go)                                          | Model file layout; tensors by offset, not loaded |
+| 2   | [`internal/f16`](internal/f16/doc.go), [`internal/quant`](internal/quant/doc.go) | Half precision and block quantization            |
+| 3   | [`internal/kernel`](internal/kernel/doc.go)                                      | Matmul, RMSNorm, softmax, SiLU                   |
+| 4   | [`internal/tokenize`](internal/tokenize/doc.go)                                  | Text to ids: byte-level and SentencePiece        |
+| 5   | [`internal/llama`](internal/llama/doc.go)                                        | Attention, RoPE, KV cache, paged blocks, MoE     |
+| 6   | [`internal/engine`](internal/engine/doc.go)                                      | Continuous batching, admission, a round          |
+| 7   | [`internal/chat`](internal/chat/doc.go)                                          | The Jinja2 subset a template needs               |
+| 8   | [`internal/server`](internal/server/doc.go)                                      | OpenAI API, SSE, `/metrics`, access log          |
 
-If you are learning LLM inference, read in this order. Each entry links to that layer's
-`doc.go`, which explains what the layer is responsible for and why it is built the way it
-is; the code below it is written to be read in the same order.
-
-1. **[`internal/gguf`](internal/gguf/doc.go)** — the container: how a model file is laid
-   out, and why this package describes tensors by offset instead of loading them.
-2. **[`internal/f16`](internal/f16/doc.go)** and
-   **[`internal/quant`](internal/quant/doc.go)** — half precision and block quantization:
-   how a weight becomes a float32, and why the K-quant layouts are checked against exact
-   values rather than a round trip.
-3. **[`internal/kernel`](internal/kernel/doc.go)** — the numerics: matmul, RMSNorm,
-   softmax, SiLU, and the one rule everything else depends on, that parallelism is over
-   independent outputs -- never over a reduction -- so a parallel result equals the serial
-   one exactly.
-4. **[`internal/llama`](internal/llama/doc.go)** — attention, RoPE, and the KV cache. The
-   cache is in this package rather than its own because it is a data structure the
-   architecture owns: the contiguous and paged implementations are here, along with the
-   prefix index and the mixture-of-experts feed-forward.
-5. **[`internal/tokenize`](internal/tokenize/doc.go)** — text to token ids, including the
-   byte-level and SentencePiece conventions GGUF records.
-6. **[`internal/engine`](internal/engine/doc.go)** — scheduling: continuous batching,
-   admission policy, and why a round is the unit of progress.
-7. **[`internal/chat`](internal/chat/doc.go)** — the chat template subset, and what a
-   template outside it falls back to.
-8. **[`internal/server`](internal/server/doc.go)** — the OpenAI-compatible API, SSE
-   streaming, `/metrics`, and the access log.
-
-Two layers are not on that path because nothing in the forward pass goes through them:
-**[`internal/otel`](internal/otel/doc.go)** exports traces, and
-**[`internal/gguftest`](internal/gguftest/doc.go)** builds the model fixtures the tests run
-on.
+Two layers are off that path because nothing in the forward pass goes through them:
+[`internal/otel`](internal/otel/doc.go) exports traces, and
+[`internal/gguftest`](internal/gguftest/doc.go) builds the test fixtures.
 
 ## Architecture
 
@@ -194,18 +170,16 @@ type Event struct {
 }
 ```
 
-Progress against those interfaces, stated plainly so the block above reads as a target
-rather than as a description:
+The block above is a target, not a description:
 
-| Interface        | State                                                                                                             |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `Engine`         | Exists as `engine.Engine`, but takes a model path rather than a `LoadOptions` struct                              |
-| `Scheduler`      | Exists as `Engine.Submit` + `Engine.Pump` + `Engine.Stats`; a round is driven by the caller, not a loop           |
-| `KVCacheManager` | Not a separate interface: `llama.BlockPool` owns allocation and `llama.PrefixIndex` owns prefix matching          |
-| `Backend`        | Not implemented, by decision. One compute path exists, and a remote one could not support what the scheduler does |
+| Interface        | State                                                                                        |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| `Engine`         | `engine.Engine`, taking a model path rather than a `LoadOptions` struct                      |
+| `Scheduler`      | `Engine.Submit` + `Pump` + `Stats`; the caller drives the round, not a loop                  |
+| `KVCacheManager` | Not separate: `llama.BlockPool` allocates, `llama.PrefixIndex` matches prefixes              |
+| `Backend`        | Not implemented by decision: one compute path exists, and a remote one could not do this job |
 
-The compute kernels are real, exported, and callable from this repository's own packages. The
-signatures are the ones in `internal/kernel` today:
+The kernels are real and exported. Their signatures today:
 
 ```go
 package kernel
@@ -221,10 +195,10 @@ func (r *Runner) MatVec(dst, a, v []float32, n, k int) error
 func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error
 ```
 
-Decoding a quantized tensor is not a kernel: it lives in `internal/quant`, so a Q4_0 matrix
-arrives here already widened to float32. Attention is not a kernel either -- it is assembled in
-`internal/llama` from `Softmax`, `RMSNorm`, `AddBias` and `AddInPlace`, because the mask and the
-cache layout are model concerns rather than arithmetic ones.
+Decoding a quantized tensor is not a kernel -- it lives in `internal/quant`, so a Q4_0 matrix
+arrives already widened. Attention is not one either: it is assembled in `internal/llama` from
+`Softmax`, `RMSNorm`, `AddBias` and `AddInPlace`, because the mask and cache layout are model
+concerns rather than arithmetic ones.
 
 ## Quick Start
 
@@ -424,23 +398,20 @@ an older toolchain fails to build rather than degrading quietly.
 
 ## CLI
 
-Every command below marked with a version works today. `orbix chat` runs on the
-engine with a paged cache and prefix reuse, so a turn's prompt starts with the previous
-turn's and the blocks already computed are re-attached instead of prefilled again. Reuse is
-whole-block only, so a conversation shorter than one block (the REPL's default is 16
-positions) has nothing to attach: `/stats` reports the positions actually reused, which is
-0 until the history outgrows a block and 32 once it does on a 30-word message.
+`orbix chat` runs on a paged cache with prefix reuse, so each turn re-attaches the blocks the
+previous one computed instead of prefilling them. Reuse is whole-block only, so a conversation
+shorter than one block has nothing to attach -- `/stats` reports the positions actually reused,
+which is 0 until the history outgrows a block.
 
 `/stats` also reports the KV pool, `N of M blocks free (S positions each, T total)`, because
-running out of it is one of two failures a session hits repeatedly -- the other being the
-conversation outgrowing the model's window. Both errors say that retrying changes nothing and
-which flag is the way out. The total is there because the free count alone misleads: a session
-refused on every turn may show all blocks free, which means the request is larger than the pool
-can ever hold rather than that anything is contended.
+running out is one of two failures a session hits repeatedly, the other being the conversation
+outgrowing the window. Both errors say retrying changes nothing and which flag is the way out.
+The total is there because the free count alone misleads: a session refused every turn may show
+all blocks free, meaning the request is larger than the pool can ever hold.
 
-`/clear` forgets the conversation and nothing else. The blocks previous turns published stay in
-the prefix index, so the next prompts still attach what they share with the old history -- which
-is what makes it a way out of a full window rather than a way to start from scratch.
+`/clear` forgets the conversation and nothing else. Published blocks stay in the prefix index,
+so the next prompts still attach what they share with the old history -- which is what makes it a
+way out of a full window rather than a fresh start.
 
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
@@ -619,38 +590,31 @@ Orbix targets the GGUF ecosystem. Initial support:
 
 GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally. Two ggml types are defined and sized but not decoded -- `Q8_1` and `Q8_K` -- and both are conversion-tool intermediates rather than formats a released checkpoint uses. A file carrying either is refused with `cannot decode <type>` at load, the same way an unrecognised type is.
 
-Two of the three architectures are checked against real checkpoints, not only against
-synthetic fixtures: `llama` by comparison with llama.cpp's own log-probabilities, and
-`qwen2` by a converted official checkpoint whose continuation is on-topic. The
-mixture-of-experts path has its own real file. `mistral` does not: its configuration and
-its sliding window are covered against constructed files, and adding a real checkpoint
-test would need a Mistral GGUF that this project has not had.
+Two of the three architectures are checked against real checkpoints: `llama` against
+llama.cpp's log-probabilities, `qwen2` against a converted official checkpoint. The MoE path has
+its own real file. `mistral` does not -- its configuration and sliding window are covered against
+constructed files.
 
-The quantization is checked at the block level rather than by comparing whole
-generations across formats: each 32-weight format has exact-value tests on constructed
-blocks, the 256-weight K-quants add a round-trip error bound, and a test reads a real
-K-quant tensor from a checkpoint when one is available -- set `MODEL_KQUANT` to a
-K-quantized file to run it. Comparing a single prompt's
-continuation across quantizations would test the model more than the decoder -- a
-4-bit rounding difference is expected to change a greedy continuation eventually.
+Quantization is checked at the block level rather than by comparing generations across formats:
+exact-value tests on constructed blocks for the 32-weight formats, a round-trip error bound for
+the K-quants, and a real K-quant tensor when `MODEL_KQUANT` is set. Comparing one prompt's
+continuation across formats would test the model more than the decoder.
 
-A checkpoint that exercises that path, and more of the engine than the small stories model
-does: TinyLlama 1.1B's Q2_K build is 483 MB, has 22 layers, and uses grouped-query attention
-(32 heads over 4 KV heads), so it covers GQA and the K-quant decoders together. It also
-carries a chat template, which the stories model does not:
+TinyLlama 1.1B Q2_K exercises more of the engine: 22 layers, grouped-query attention (32 heads
+over 4 KV heads), and a chat template the stories model lacks:
 
 ```bash
 curl -sSL -o /tmp/tinyllama-q2k.gguf \
   https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q2_K.gguf
 ```
 
-With it set, the Q6_K tensor in that file decodes to a mean of -0.0004 and a standard
-deviation of 0.0247 over 65.5M values, which is the shape a weight matrix has; the count is
-what would go wrong first if a sub-block layout were misread.
+Its Q6_K tensor decodes to a mean of -0.0004 and a standard deviation of 0.0247 over 65.5M
+values -- the shape a weight matrix has. The count is what would go wrong first if a sub-block
+layout were misread.
 
-`scripts/hf_to_gguf.py` converts a Qwen2.5 safetensors checkpoint to GGUF for the
-weight-level cross-check; it is deliberately independent of the Go code, because a
-converter that shared the loader's assumptions could not catch a wrong one. With
+`scripts/hf_to_gguf.py` converts a Qwen2.5 checkpoint to GGUF for the weight-level cross-check,
+deliberately independent of the Go code: a converter sharing the loader's assumptions could not
+catch a wrong one. With
 `QWEN2_MODEL` set it runs those tests:
 
 ```bash
@@ -658,26 +622,22 @@ uv run --with numpy python3 scripts/hf_to_gguf.py ./Qwen2.5-0.5B-Instruct /tmp/q
 QWEN2_MODEL=/tmp/qwen2-f32.gguf CGO_ENABLED=0 go test ./internal/llama/ -run Qwen2
 ```
 
-`scripts/jinja_diff.py` checks the chat-template subset the same way: it renders a corpus of
-checkpoint templates and one-construct cases through both this package and real Jinja2, and
-reports where they differ. Jinja2 is the reference implementation a template was written
-against, so a disagreement is either a bug here or a construct the package documents as
-unsupported -- the tool separates the two, and exits non-zero if any template renders
+`scripts/jinja_diff.py` renders checkpoint templates through both this package and real Jinja2
+and reports differences. A disagreement is either a bug here or a construct the package
+documents as unsupported; the tool separates the two and exits non-zero on any that render
 differently rather than being refused.
 
 ```bash
 uv run --with jinja2 python3 scripts/jinja_diff.py
 ```
 
-The mixture-of-experts path has the same treatment, on a small public MoE checkpoint.
-Set `MIXTRAL_MODEL` to run it:
+The MoE path gets the same treatment on a small public checkpoint; set `MIXTRAL_MODEL`:
 
 ```bash
 MIXTRAL_MODEL=/tmp/tinymixtral.gguf CGO_ENABLED=0 go test ./internal/llama/ -run TestMoEReachesTheExperts
 ```
 
-The stories model is a 19 MB public download, and it is the one of the four that takes no
-conversion step:
+The stories model is a 19 MB download and the only one of the four needing no conversion:
 
 ```bash
 curl -sSL -o /tmp/stories15M-q4_0.gguf \

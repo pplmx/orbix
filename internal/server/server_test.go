@@ -3376,3 +3376,187 @@ func TestBlocksNeededMatchesTheCache(t *testing.T) {
 		}
 	}
 }
+
+// TestABadFieldIsReportedBeforeAPoolRefusal pins the order of two refusals that can both
+// apply to the same request.
+//
+// The request below is wrong twice over: temperature is negative, and with no max_tokens it
+// takes the 256-token default and needs more blocks than a small pool holds. Only one report
+// reaches the caller, and it has to be the field they got wrong. When the pool check ran
+// first, this request was answered context_length_exceeded against param "prompt" -- telling
+// the caller to shorten a prompt whose real problem was the temperature, and naming a code
+// that has nothing to do with the value sent.
+//
+// Both directions are asserted, because the fix is not "always report the sampler": a
+// correctly-shaped request that genuinely outgrows the pool must still be refused for that.
+func TestABadFieldIsReportedBeforeAPoolRefusal(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	// Eight blocks of sixteen positions: 128 positions, comfortably less than the 256-token
+	// default budget, so an ordinary request with no max_tokens really does not fit.
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 1, MaxQueued: 1, Blocks: 8, BlockSize: 16,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	t.Run("a bad sampler field wins", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "temperature": -2}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := readBody(t, resp)
+		for _, want := range []string{`"code":"invalid_value"`, `"param":"temperature"`,
+			"temperature must not be negative, got -2"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("body does not contain %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, "context_length_exceeded") {
+			t.Errorf("a negative temperature was reported as a context problem:\n%s", body)
+		}
+	})
+
+	t.Run("an oversized request still names the pool", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "word word word word word", "max_tokens": 200}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := readBody(t, resp)
+		if !strings.Contains(body, "context_length_exceeded") {
+			t.Errorf("an oversized request was not reported as such:\n%s", body)
+		}
+		if !strings.Contains(body, "KV cache blocks") {
+			t.Errorf("body does not explain the pool shortage:\n%s", body)
+		}
+	})
+}
+
+// TestEveryErrorCarriesACode is the contract the paramError type was introduced for, checked
+// across every failure the server can produce.
+//
+// The comment on paramError says a client that branches on `code` rather than message text
+// "could not tell 'your prompt is too long' from 'your temperature is negative', or either
+// from a malformed body". That last clause was not true: the decode path wrote through
+// writeError, which sets no code, so a malformed body, an unsupported encoding and an
+// oversized body all arrived uncoded next to the coded validation failures.
+//
+// Each case here is also checked for the envelope itself -- JSON content type, a parseable
+// body, and a `type` -- because a client that reads any of those first would fail before it
+// ever reached the code.
+func TestEveryErrorCarriesACode(t *testing.T) {
+	srv, _ := newTestServer(t)
+	limit := srv.maxBodyBytes()
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		header map[string]string
+		body   string
+		status int
+		code   string
+	}{
+		{
+			name: "malformed JSON", method: http.MethodPost, path: "/v1/completions",
+			body: "not json", status: http.StatusBadRequest, code: "invalid_json",
+		},
+		{
+			name: "unsupported encoding", method: http.MethodPost, path: "/v1/completions",
+			header: map[string]string{"Content-Encoding": "br"},
+			body:   "x", status: http.StatusUnsupportedMediaType, code: "unsupported_encoding",
+		},
+		{
+			name: "oversized body", method: http.MethodPost, path: "/v1/completions",
+			body:   `{"prompt":"` + strings.Repeat("x", int(limit)) + `","max_tokens":1}`,
+			status: http.StatusRequestEntityTooLarge, code: "body_too_large",
+		},
+		{
+			name: "negative budget", method: http.MethodPost, path: "/v1/completions",
+			body:   `{"prompt":"hi","max_tokens":-1}`,
+			status: http.StatusBadRequest, code: "invalid_value",
+		},
+		{
+			name: "response-shape field", method: http.MethodPost, path: "/v1/completions",
+			body:   `{"prompt":"hi","n":3}`,
+			status: http.StatusBadRequest, code: "unsupported_parameter",
+		},
+		{
+			name: "missing prompt", method: http.MethodPost, path: "/v1/completions",
+			body: `{"prompt":""}`, status: http.StatusBadRequest,
+			code: "missing_required_parameter",
+		},
+		{
+			// 404, not 400: the model is a resource this server does not have, which is the
+			// same answer /v1/models/{id} gives for an unknown id. OpenAI answers this with
+			// model_not_found and its SDKs map it to a not-found error.
+			name: "unknown model", method: http.MethodPost, path: "/v1/completions",
+			body: `{"model":"nope","prompt":"hi"}`, status: http.StatusNotFound,
+			code: "model_not_found",
+		},
+		{
+			name: "unknown endpoint", method: http.MethodGet, path: "/v1/nope",
+			status: http.StatusNotFound, code: "unknown_endpoint",
+		},
+		{
+			name: "wrong method", method: http.MethodPut, path: "/v1/completions",
+			status: http.StatusMethodNotAllowed, code: "method_not_allowed",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var rdr io.Reader
+			if c.body != "" {
+				rdr = strings.NewReader(c.body)
+			}
+			req := httptest.NewRequest(c.method, c.path, rdr)
+			for k, v := range c.header {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			resp := rec.Result()
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != c.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, c.status)
+			}
+			if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want application/json: an SDK decodes the body "+
+					"before it raises", ct)
+			}
+			var env errorBody
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				t.Fatalf("body is not JSON: %v", err)
+			}
+			if env.Error.Type == "" {
+				t.Errorf("no type in %+v", env.Error)
+			}
+			if env.Error.Code != c.code {
+				t.Errorf("code = %q, want %q (message %q)", env.Error.Code, c.code,
+					env.Error.Message)
+			}
+			// A code without a message is not actionable; the two travel together.
+			if env.Error.Message == "" {
+				t.Error("empty message")
+			}
+		})
+	}
+}

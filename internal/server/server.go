@@ -722,6 +722,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	if room := s.cfg.ContextLen - len(promptTokens); maxTokens > room {
 		maxTokens = room
 	}
+	sampler, err := s.sampler(p.temperature, p.topK, p.topP, p.seed)
+	if err != nil {
+		// The sampler's errors are all about one request field, so they carry it rather
+		// than making the client infer which of temperature and top_p was wrong.
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+
 	// A request that cannot fit the block pool is refused now, as a 400, rather than being
 	// submitted and failed later as a 503 with Retry-After.
 	//
@@ -739,6 +747,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	// Refusing costs one multiplication and saves the client a retry loop that cannot end.
 	// The wording names the two numbers a caller can act on, the pool's positions and what
 	// their request needs, because "block pool exhausted" reads as transient.
+	//
+	// The order against the checks above and below is deliberate: this one runs after the
+	// prompt-length and sampler checks, so a request with a bad field is reported for the
+	// field it got wrong. When it was placed before sampler, a request carrying
+	// temperature -2 and no max_tokens against a small pool was refused as
+	// context_length_exceeded -- the default 256-token budget made it look oversized, and
+	// the caller was told to shorten a prompt whose real problem was the temperature. A
+	// refusal that names the wrong field costs more than the retry loop it was added to stop.
 	if st := s.eng.Stats(); st.PoolBlocks > 0 {
 		if need, have := blocksNeeded(len(promptTokens)+maxTokens, st.PoolBlockSize),
 			st.PoolBlocks; need > have {
@@ -752,14 +768,6 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 				have*st.PoolBlockSize))
 			return
 		}
-	}
-
-	sampler, err := s.sampler(p.temperature, p.topK, p.topP, p.seed)
-	if err != nil {
-		// The sampler's errors are all about one request field, so they carry it rather
-		// than making the client infer which of temperature and top_p was wrong.
-		writeRequestError(w, http.StatusBadRequest, err)
-		return
 	}
 
 	stopIDs := s.stopTokenIDs(p.stop)
@@ -1373,15 +1381,26 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) er
 // encoding is unsupported and the client should change that, 413 says the body was too
 // large and the request must be made smaller. Reporting all three as 400 would send a
 // client with a compressed or oversized body looking for a syntax error.
+//
+// Each also carries a `code`. This is the writer the paramError comment calls out by name --
+// a client that branches on code rather than message text had nothing to match here, so a
+// malformed body, an unsupported encoding and an oversized one all arrived as an uncoded
+// error alongside the coded ones the handlers write. The three codes are the ones OpenAI's
+// own API uses for the same conditions where it has them.
 func writeDecodeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
+	code := "invalid_json"
 	switch {
 	case errors.Is(err, errUnsupportedEncoding):
 		status = http.StatusUnsupportedMediaType
+		code = "unsupported_encoding"
 	case errors.Is(err, errBodyTooLarge):
 		status = http.StatusRequestEntityTooLarge
+		code = "body_too_large"
 	}
-	writeError(w, status, err.Error())
+	// No `param`: these failures are about the body as a whole, and there is no field to name
+	// -- the decoder never reached one.
+	writeRequestError(w, status, newParamError("", code, "%s", err.Error()))
 }
 
 // errBodyTooLarge marks a request body past the server's size limit, so the handler can

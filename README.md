@@ -64,21 +64,20 @@ The constraints follow from the goal:
 
 ## Implementation Status
 
-Every layer on the roadmap exists. Each row says what was verified rather than what was
-intended:
+Every layer on the roadmap exists. The package's `doc.go` says how it was verified.
 
-| Layer          | Package             | State                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| -------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GGUF container | `internal/gguf`     | Parses header, metadata, tensor directory, and streams tensor data. Every field and byte offset cross-checked against an independent parser.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| Half precision | `internal/f16`      | binary16 to/from float32 with correct subnormals, infinities, NaNs, and round-to-nearest-even. All 65,536 bit patterns verified against a reference.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Dequantization | `internal/quant`    | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K. The 32-weight formats are pinned by exact-value tests on constructed blocks; the 256-weight K-quants add a round-trip error bound and a check against a real checkpoint tensor, because a wrong sub-block scale still decodes to plausible magnitudes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU, and elementwise helpers. A `Runner` splits the products across goroutines with a measured size threshold -- rows for `MatVec`, output columns for `MatMulTransposed`, since a decode step has one row and thousands of columns. Either way each output element is one serial dot product in the same order the reference kernel uses, so the parallel result is bit-identical to the serial one.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Tokenizer      | `internal/tokenize` | SentencePiece and byte-level BPE segmentation, with the four merge, space, and pre-tokenizer conventions read from the file rather than assumed. Thirty-four pre-tokenizer families are implemented (`qwen2`, `llama-bpe`, `gpt-2`, `starcoder`, `deepseek-v3`, `tekken`, `gpt4o`, `whitespace`, `bloom`, `deepseek-coder`, `falcon`, `deepseek-llm`, `mmbert`, `viking`, `superbpe`, `soprano`), covering all 100 names llama.cpp maps to a family (`dbrx`, `smaug-bpe`, `chatglm-bpe`, `glm4` and `glm5` share `llama-bpe`'s expression verbatim, and `gemma4`, `granite-embed-multi-311m`, `domyn-small` and `sarvam-moe` share `mmbert`'s, and `grok-2`, `bailingmoe`, `bailingmoe2` and `llada-moe` share the new one, and `cohere2moe` and `tiny_aya` share another); a file naming another one tokenizes as a single chunk, and `orbix model inspect` says so rather than leaving it to be discovered as poor output. There are no unimplemented names left -- checked against llama.cpp's pre-type assignments, every name resolves to a rule that agrees with the reference on the chunk boundaries. Each family's chunk boundaries are pinned by tests built from its llama.cpp expression, and the rules were diffed against those expressions as sequential passes over 80,128 strings -- every disagreement found that way is fixed, and the 126 strings that exposed them are kept in the package as a regression corpus. The corpus is the reproducible part: it is a Go file the tests walk, and its length can be counted. The 80,128 is the size of a one-off sweep whose generator was not kept, so it records what that run covered rather than offering a number a reader can recompute. `MODEL`-gated tests round-trip every Unicode code point and a set of convention-heavy strings through a real checkpoint. |
-| Chat templates | `internal/chat`     | Evaluates the subset of Jinja2 a checkpoint's `tokenizer.chat_template` needs -- conditionals, loops, set, concatenation, and the trim/tojson filters -- so a conversation is rendered in the format the model was trained on. Syntax outside the subset is reported at parse time; a call to a function this package does not implement is reported when the template is rendered, since the parser accepts any call. Either way the caller falls back to a neutral transcript rather than emitting a half-rendered prompt.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| Engine         | `internal/engine`   | Batches a scheduling round: every pending prompt prefills in one pass, then every active sequence decodes together in one pass, so concurrency raises total throughput. `MaxActive` bounds a round and an admission policy (`fifo`, `shortest`, `fair`) picks which sequences fill it. Each sequence keeps its own logits copy and KV cache; the cache is a contiguous arena or paged blocks from a shared pool, with optional prefix reuse. `RenderChatPrompt` is the one chat template the REPL and the HTTP server share.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| Transformer    | `internal/llama`    | Llama and Qwen2 forward passes: adjacent-pair (Llama) and NEOX (Qwen2) RoPE, optional attention bias, grouped-query attention, and two KV cache layouts -- a contiguous arena per sequence and a reference-counted paged cache over a shared block pool. `PrefillWithPrefix` reuses blocks whose token prefix has been seen before. `Prefill` and `DecodeStep` are bit-identical to the per-token path on either layout. Greedy decoding on a real checkpoint agrees with llama.cpp's log-probabilities to within 0.12 nats, which is close enough that the continuation matches on the prompts tried -- and not a guarantee that it matches on every one, since a greedy choice is only as stable as the gap between the top two candidates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Tracing        | `internal/otel`     | Exports spans in OpenTelemetry's OTLP/HTTP+JSON format without the SDK: the message it replaces is a handful of structs, which is cheaper to read here than to take as a dependency. Ids are lowercase hex, which is the one place OTLP/JSON overrides proto3's mapping for a bytes field, and timestamps are nanosecond strings, and export is best-effort: a collector that is down drops spans and counts them rather than slowing a request, and a collector that answers `200` while rejecting spans in `partialSuccess` has that rejection counted too, because a 2xx is not by itself evidence that anything was kept.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Server         | `internal/server`   | `orbix serve`: OpenAI-compatible `/v1/chat/completions` and `/v1/completions` with SSE streaming, `/v1/models`, `/healthz`, and Prometheus-format `/metrics`. Streaming text is decoded incrementally so multi-byte characters split across tokens still render; concatenated stream deltas equal the non-streaming body exactly. A disconnected client cancels its sequence through the engine. Both endpoints accept an Orbix extension, `priority`, which ranks a request against others waiting for a slot: higher advances first and the admission policy orders requests of equal priority. Priority preempts rather than only queue-jumping -- the ready set is re-ranked every round, so a running request yields its slot when higher-priority ones are waiting and resumes afterwards. On one slot a 120-token request takes about 0.55 s alone and 0.76 s when twelve short high-priority requests arrive during it, 37-39% longer over three runs on stories15M q4_0. It is omitted from OpenAI's schema, so a client that never sends it is unaffected.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Layer          | Package             | State                                                                     |
+| -------------- | ------------------- | ------------------------------------------------------------------------- |
+| GGUF container | `internal/gguf`     | Header, metadata, tensor directory, streamed tensor data.                 |
+| Half precision | `internal/f16`      | binary16, including subnormals, infinities, NaNs. All 65,536 patterns.    |
+| Dequantization | `internal/quant`    | F32/F16/BF16, Q4/Q5/Q8, IQ4_NL, Q2_K-Q6_K.                                |
+| Kernels        | `internal/kernel`   | MatMul, MatMulTransposed, MatVec, RMSNorm, Softmax, SiLU.                 |
+| Tokenizer      | `internal/tokenize` | SentencePiece and byte-level BPE; every pre-tokenizer name llama.cpp maps.|
+| Chat templates | `internal/chat`     | The Jinja2 subset a checkpoint's `tokenizer.chat_template` needs.         |
+| Engine         | `internal/engine`   | Continuous batching, admission policy, paged or contiguous KV cache.      |
+| Transformer    | `internal/llama`    | Llama and Qwen2 forward passes, RoPE, GQA, prefix reuse, MoE.             |
+| Tracing        | `internal/otel`     | OTLP/HTTP+JSON spans, hand-written, no SDK.                               |
+| Server         | `internal/server`   | OpenAI-compatible API, SSE, `/metrics`, access log.                       |
 
 ## What You Can Learn From This Codebase
 
@@ -145,38 +144,24 @@ on.
 └─────────────────────────────────┘   └───────────────────────────┘
 ```
 
-Solid boxes above are what the code does today. Two components that a project like
-this usually has are deliberately *not* drawn, because drawing them would imply they
-exist:
+Solid boxes are what the code does today. Two components a project like this usually has are
+deliberately *not* drawn:
 
-- There is no `Backend` abstraction, and there will not be one. A remote backend was
-  considered and rejected: everything the scheduler is worth -- continuous batching,
-  prefix reuse, a paged cache -- works by driving one batched forward pass over local
-  KV blocks, and a backend reachable over HTTP can only be asked for a prompt and
-  answer with tokens. Adding the seam would not extend those mechanisms to a remote
-  backend; it would mean the local path carries them and the remote path silently
-  does not. Two implementations with different capabilities behind one interface is
-  worse than one implementation, because the difference is invisible from the call
+- **No `Backend` abstraction.** Continuous batching, prefix reuse, and the paged cache all work
+  by driving one batched forward pass over local KV blocks. A remote backend can only be asked
+  for a prompt and answer with tokens, so the seam would leave the local path with the
+  mechanisms and the remote path silently without them -- a difference invisible at the call
   site.
-- There is no `KVCacheManager` interface, and no radix tree. The paged cache and its
-  hashed prefix index cover the same job: a shared pool of reference-counted blocks,
-  and an index that hands back the blocks a repeated prompt prefix already produced.
-  The index matches whole blocks by hash and compares the tokens, so a collision
-  costs a rejected hit rather than a wrong result. A radix tree would let a prefix be
-  matched at sub-block granularity, which buys nothing here because the cache stores
-  whole blocks; what it would also give is subtree eviction, and the index does that
-  explicitly instead: each entry records the block it continues, so eviction takes
-  the end of a chain and leaves the head reachable.
-- **Scheduler** owns admission, batching, and the prefill/decode lifecycle.
-- **Mixture of experts** is a property of the feed-forward layer, not a separate
-  architecture: a model with `expert_count` set replaces its single gated FFN with one
-  per expert plus a small router, and runs `expert_used_count` of them per token. The
-  routing is top-k over the router logits with a softmax over the selected experts only,
-  which renormalising a full softmax would give the same answer for. Both the prefill and
-  the decode path group rows by chosen expert so one matmul serves every row that picked
-  the same one.
-- **Compute kernels** are where the pure-Go work happens, with reference
-  implementations written to be read. There are no SIMD fast paths: see the note below.
+- **No `KVCacheManager` interface and no radix tree.** The paged cache and its hashed prefix
+  index cover the job: a shared pool of refcounted blocks plus an index that hands back what a
+  repeated prefix already produced. Matching is whole-block, so a radix tree's sub-block
+  granularity buys nothing, and eviction is explicit instead: each entry records the block it
+  continues, so eviction takes the end of a chain and leaves the head reachable.
+
+**Mixture of experts** is a property of the feed-forward layer rather than a separate
+architecture: `expert_count` replaces the single gated FFN with one per expert plus a router,
+and `expert_used_count` run per token. **Compute kernels** are the pure-Go work, written to be
+read, with no SIMD fast paths.
 
 Dependencies point downward only. Kernels never import the scheduler; the scheduler never imports the server.
 
@@ -265,29 +250,21 @@ and not), `/v1/models` (and `/v1/models/{id}`, which the SDKs' `models.retrieve`
 the API's JSON error envelope rather than Go's plain-text one, because the SDKs decode the body
 before they raise: a text 404 reaches the caller as a parse failure, not as a not-found.
 
-Every error body carries a `code`, including the ones a client hits before any field is
-parsed: `invalid_json`, `unsupported_encoding` and `body_too_large` for a body the decoder
-rejected, and `invalid_value`, `missing_required_parameter`, `unsupported_parameter`,
-`context_length_exceeded` and `model_not_found` for a request it understood and refused.
-OpenAI's guidance is to branch on `code` rather than on message text, and a client following
-it could previously tell its prompt was too long from its temperature being negative, but not
-either of those from a malformed body -- those three arrived with no code at all. `param` is
-present when one field is at fault and absent when the failure is about the body as a whole,
-and `type` separates a request error (`invalid_request_error`) from the server's own failure
-(`server_error`) and from capacity (`service_unavailable_error`, which is the one the OpenAI
-SDKs retry).
+Every error body carries a `code`, including the ones a client hits before any field is parsed:
+`invalid_json`, `unsupported_encoding`, `body_too_large`, `invalid_value`,
+`missing_required_parameter`, `unsupported_parameter`, `context_length_exceeded`,
+`model_not_found`. OpenAI's guidance is to branch on `code` rather than message text. `param` is
+present when one field is at fault and absent when the failure is about the body as a whole, and
+`type` separates `invalid_request_error` from `server_error` and from
+`service_unavailable_error` -- the one the SDKs retry.
 
-Unsupported request fields are handled by what a client does with the answer. A field that
-only tunes sampling -- `logit_bias`, `presence_penalty`, `response_format` -- is ignored,
-because the SDKs send such fields whether or not the engine can use them and refusing them
-would make the server unusable from that SDK; the text is not what was asked for, but it is
-the shape the client reads. A field that describes the *response* is refused with a 400 that
-names it and `code: unsupported_parameter`: `n`, `logprobs`, `top_logprobs`, `echo`, `suffix`,
-and `best_of`. A client that sent `n: 3` indexes `choices[2]`, and one that sent `logprobs`
-reads `choice.logprobs`, so answering with one choice and no logprobs is not a smaller
-response but a different one -- the failure would surface as an `IndexError` or `KeyError` in
-the caller, far from the request that caused it. Several at once are all named, so one round
-trip fixes the request.
+Unsupported fields are handled by what a client does with the answer. One that only tunes
+sampling -- `logit_bias`, `presence_penalty`, `response_format` -- is ignored, because the SDKs
+send such fields whether or not the engine can use them. One that describes the *response* is
+refused with a `400` naming it and `code: unsupported_parameter`: `n`, `logprobs`, `top_logprobs`,
+`echo`, `suffix`, `best_of`. A client that sent `n: 3` indexes `choices[2]`, so one choice is not
+a smaller response but a different one. Several at once are all named, so one round trip fixes
+the request.
 
 `max_completion_tokens` is refused for a third reason, and it is the only field here whose
 silent omission a client cannot notice at all. OpenAI's newer name for `max_tokens` has to be
@@ -351,36 +328,21 @@ default is actually for. Proxies that do not understand the header ignore it.
 
 Two things remain the deployment's job, because no application header can express them:
 
-- **Keep the connection open.** nginx's `proxy_read_timeout` defaults to 60 seconds and bounds
-  the gap between reads, not the whole response, so a long model load or a stalled generation
-  can exceed it. Raise it for the inference location.
+- **Raise `proxy_read_timeout`.** nginx defaults to 60 seconds bounding the gap between reads,
+  which a long model load or a stalled generation can exceed.
 - **Keep reading.** A stream nobody reads is abandoned, not paused, once the backpressure
-  reaches the engine. The engine buffers 64 events per sequence and, when that fills, waits 2
-  seconds for it to drain before retiring the sequence; its output is then discarded and its
-  slot goes to someone else. A client that opens the stream, does something slow, and comes
-  back finds a closed connection rather than the tokens it was owed.
-  How soon this bites depends on a size the server does not control: kernel socket buffers
-  absorb a surprising amount, so a short response finishes into them even with nobody reading
-  (measured: 120 tokens, about 20 KB, completed into the buffer with the reader stopped for
-  five seconds). The bound is on the *engine's* queue, not on the network, so a long generation
-  or a small receive window reaches it and a short one may not. The guarantee is therefore
-  "drain as you go", which every SSE client does by default and a hand-rolled one may not --
-  not "you have 2 seconds".
-- **The upstream connection has to be HTTP/1.1 for chunked transfer.** nginx proxies HTTP/1.1
-  by default from 1.29.7; before that the default was 1.0, where ending a stream means closing
-  the connection. Set `proxy_http_version 1.1` with an empty `Connection` header on older
-  versions, or where a higher-level block set something else.
+  reaches the engine: 64 events buffer per sequence, then two seconds of grace, then the slot
+  goes to someone else. The bound is on the engine's queue rather than on the network, and
+  kernel socket buffers absorb a surprising amount, so the guarantee is "drain as you go" --
+  which every SSE client does by default -- not "you have two seconds".
+- **Use HTTP/1.1 upstream.** nginx defaults to 1.1 from 1.29.7; before that it is 1.0, where
+  ending a stream means closing the connection.
 
-`X-Accel-Buffering` is nginx-specific, and nginx consumes it rather than forwarding it: it is
-in nginx's default hidden-header set, so it never reaches the client. A two-tier nginx chain
-therefore needs `proxy_pass_header X-Accel-Buffering` on the inner tier, or the outer tier
-never sees it.
-
-The other proxies do not need it, for different reasons. HAProxy and Envoy forward response
-bytes as they arrive and have no whole-message buffering to turn off. Caddy buffers partially
-by default, but its documentation lists `Content-Type: text/event-stream` among the cases where
-it flushes immediately regardless. All three still need timeouts sized for a response that can
-outlive the default -- which is the part no application header can fix.
+`X-Accel-Buffering` is nginx-specific and consumed rather than forwarded (it is in the default
+hidden-header set), so a two-tier nginx chain needs `proxy_pass_header X-Accel-Buffering` on the
+inner tier. HAProxy and Envoy forward bytes as they arrive and need nothing; Caddy flushes
+`text/event-stream` regardless. All of them still need timeouts sized for a response that can
+outlive the default.
 
 ### No CORS and no authentication
 
@@ -467,23 +429,15 @@ positions) has nothing to attach: `/stats` reports the positions actually reused
 0 until the history outgrows a block and 32 once it does on a 30-word message.
 
 `/stats` also reports the KV pool, `N of M blocks free (S positions each, T total)`, because
-running out of it is one of two failures a session hits repeatedly: a conversation outgrows
-the pool, every later turn fails the same way since a failed turn does not grow the history,
-and the error names the pool's size without saying how close the session is to it. The other
-is the conversation outgrowing the model's window, which is fixed by the model rather than by
-a flag -- measured on a 256-position fixture, three turns filled it and each of the next nine
-attempts printed the same `conversation is 318 tokens, context is 256`. Both errors now say
-that retrying changes nothing and which command or flag is the way out. The total is
-there because the free count alone misleads -- a session refused on every turn may show all
-blocks free, which means the request is larger than the pool can ever hold rather than that
-anything is contended. That is the case `/clear` cannot fix, and seeing the size is what tells
-the two apart.
+running out of it is one of two failures a session hits repeatedly -- the other being the
+conversation outgrowing the model's window. Both errors say that retrying changes nothing and
+which flag is the way out. The total is there because the free count alone misleads: a session
+refused on every turn may show all blocks free, which means the request is larger than the pool
+can ever hold rather than that anything is contended.
 
-`/clear` forgets the conversation and nothing else. The blocks the previous turns published
-stay in the prefix index, so the next prompts still attach what they share with the old
-history -- measured on the 512-position fixture, `/stats` reported reuse of 0, 160 and 480 over
-three turns, held at 480 across `/clear`, and reached 640 one turn later. That is what makes it
-a usable way out of a full window rather than a way to start from scratch.
+`/clear` forgets the conversation and nothing else. The blocks previous turns published stay in
+the prefix index, so the next prompts still attach what they share with the old history -- which
+is what makes it a way out of a full window rather than a way to start from scratch.
 
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
@@ -532,14 +486,11 @@ which mechanisms pay for themselves. It pairs each mechanism with a control row 
 against contiguous caches, prefix reuse against none, shortest against FIFO -- so a
 difference is attributable to that mechanism rather than to the scenario changing.
 
-How much prefix reuse is worth depends on the mix, and the two rows above are read under the
-conditions stated with the table: 41 prompt tokens against 8 generated per request, where the
-prompt is most of the work and the pair differs by 38%. Raise `--max-tokens` and the shared
-saving is diluted by generation, which reuse does not touch: at `--max-tokens 32` the same pair
-measures 205.4 against 218.2 tok/s, about 6% instead of 38%, and the difference between those two
-readings is the token budget rather than the mechanism. A long prompt with a short answer
-(retrieval, classification, question answering) is where this pays; a short prompt with a long
-generation is where it does not.
+How much prefix reuse is worth depends on the mix: the pair above shares 41 prompt tokens
+against 8 generated per request, where the prompt is most of the work. Raising `--max-tokens`
+dilutes the saving, since reuse does not touch generation. A long prompt with a short answer
+(retrieval, classification) is where it pays; a short prompt with a long generation is where it
+does not.
 
 The suite fixes the settings its rows compare -- concurrency, request count, admission
 policy, and cache shape -- so those flags are refused rather than ignored when `--suite` is
@@ -569,55 +520,30 @@ cannot separate them. The `NOTE` column in a live run is longer than the text ab
 it also reports the block pool's shape and the positions the prefix cache reused, which
 are trimmed here to fit.
 
-The `FIRST` column is a latency, but of a different request depending on the row, and reading it
-without knowing which is the faster way to be wrong about this table. On a throughput row it is
-how long until *any* request produced a token, which is essentially the prefill time. On the two
-policy rows it is the **short** request's own first token -- not "any", because under MaxActive 1
-the long request runs first and would supply that number under every policy, leaving the column
-with nothing to say. The policies reorder a fixed amount of work, so where the short request lands
-is the only thing they change: 41 ms under `shortest` against 401 ms under `fifo` is the whole
-result, and the two rows' `TOK/S` figures are not.
+`FIRST` is a latency of a different request depending on the row: on a throughput row it is
+how long until *any* request produced a token, and on the two policy rows it is the **short**
+request's own first token. Three rows need a word because their numbers look flat or backwards:
 
-Three of those rows need a sentence of explanation, because their numbers look flat or
-backwards for a reason:
-
-- **Paged vs contiguous** is a memory trade, not a throughput one. The paged cache serves
-  the same batch at the same speed while letting 16 sequences share one pool instead of
-  each reserving a whole context. The suite prints the pool shape so the trade is visible
-  rather than implied.
-- **The policy rows do the same amount of work, and they generate more than `--max-tokens`
-  asks for.** A policy reorders a fixed quantity of work; it cannot reduce it, which is why
-  the two rows' `ELAPSED` figures are close here. The 63 tokens in both rows are a 60-token
-  long request plus a 3-token short one: the rows raise anything below 60, because two
-  requests that both finish in three tokens measure the scheduler's startup rather than its
-  ordering, and the note in a live run says so when it happens.
-  Treat that as the design and not as a measurement of the scheduler, though: over six
-  interleaved runs of this pair the `TOK/S` ratio ranged from 0.92 to 2.78, and `FIRST`
-  ranged from 18 to 66 ms under shortest against 314 to 961 ms under FIFO -- all of it
-  machine load, none of it the policy. The number that is a property of the scheduler is
-  the round in the `NOTE` column, and it was 2 under shortest and 63 under FIFO in every
-  one of those runs. That is why the engine counts rounds and the suite reports them.
-- **The prefix rows run their four requests one after another, not concurrently.** A
-  concurrent burst with `MaxActive` as large as the request count prefills all four
-  together, so none arrives after another has cached its prefix and the reuse path is
-  never taken. Sequence is what makes the pair a comparison at all; the row reports the
-  positions reused so a reader can see it happened rather than infer it from throughput.
-  Both rows also repeat the prompt until it spans two cache blocks, because a block is
-  published to the prefix index only once its last position is written -- with the
-  command's default five-token prompt there is never a whole block to reuse, and the two
-  rows differ by nothing.
+- **Paged vs contiguous** is a memory trade, not a throughput one: the same batch at the same
+  speed, with 16 sequences sharing one pool instead of each reserving a whole context.
+- **The policy rows do the same work and can exceed `--max-tokens`.** A policy reorders a fixed
+  quantity of work, so `TOK/S` and `ELAPSED` there are machine load rather than a property of
+  the scheduler; the round in `NOTE` is the property (2 under `shortest`, 63 under `fifo`).
+  The rows raise any budget below 60 tokens so there is a queue to order.
+- **The prefix rows run their four requests one after another.** A concurrent burst prefills
+  them together, so no request arrives after another cached its prefix. Both rows repeat the
+  prompt until it spans two blocks, because a block is published only once its last position
+  is written.
 
 A row can also show fewer tokens than its budget. That is not a measurement failure: the
 model emitted its end-of-sequence token, and the suite says so in the `NOTE` column
 ("N request(s) stopped early on EOS") rather than leaving you to work out why two rows
 that should match do not.
 
-A single measurement (without `--suite`) reports the same kind of shortfall as a `note:`
-line, for the case the suite cannot hit: a prompt long enough that the model's window leaves
-less room than `--max-tokens` asks for. The header states the budget and the total is smaller,
-so the note names both — `the 4096-position window cut the budget: 6 of 100 requested tokens`.
-Without it the report was ambiguous in the worst way for a measurement: `finish: length` reads
-as "the budget was reached" whether the budget or the window ended the run.
+A single measurement (without `--suite`) reports the same kind of shortfall as a `note:` line,
+for the case the suite cannot hit: a prompt long enough that the window leaves less room than
+`--max-tokens` asks for. The note names both -- `the 4096-position window cut the budget: 6 of
+100 requested tokens` -- because `finish: length` reads as "the budget was reached" either way.
 
 `orbix serve` also exports the same numbers over `/metrics` in Prometheus text format,
 so the suite's baseline and a live deployment's behaviour are the same measurements
@@ -632,46 +558,28 @@ orbix_requests_queued 0
 orbix_kv_pool_used_fraction 0
 ```
 
-The exposition format is written by hand rather than through a client library, for the
-same reason the GGUF parser is: a family is three lines -- `# HELP`, `# TYPE`, and one
-sample -- and the hand-written encoder is read by the code review rather than trusted as
-a dependency. Sixteen families come to 52 lines on a paged server, because a labelled
-series costs one line per value. The tests parse the output back the way
-a scraper would, so a HELP line in the wrong place fails a test instead of a dashboard.
+The exposition is written by hand rather than through a client library, for the same reason
+the GGUF parser is: a family is three lines, and the encoder is read by code review rather than
+trusted as a dependency. Sixteen families come to 52 lines on a paged server, because a
+labelled series costs one line per value.
 
-The count depends on the configuration, which is worth knowing before comparing two
-scrapes: a contiguous server exports twelve families (the four `kv_pool_*` gauges are
-omitted without a pool, since a zero would read as "the pool is empty" rather than "there is
-no pool"), and `--otlp-endpoint` adds one more. The families are only omitted, never
-exported as zero, for that reason.
+The count depends on the configuration: a contiguous server exports twelve families (the four
+`kv_pool_*` gauges are omitted without a pool, since a zero would read as "the pool is empty"),
+and `--otlp-endpoint` adds one more. Families are omitted, never exported as zero.
 
-Three of the metrics exist because their failure mode is invisible in latency until it is
-already failing. `orbix_requests_queued` growing against a steady round rate is a
-capacity problem rather than a slow model, and `orbix_kv_pool_free` reaching zero is a
-paged deployment about to start refusing requests. Neither is recoverable from timing
-alone.
-
-The third is `orbix_requests_finished_by_reason_total`, which splits the finished count by
-why each request ended. A client that disconnects mid-generation produces a request that
-looks entirely healthy in every other number: it counts as finished, it contributes an
-ordinary latency, and it consumes exactly the tokens it was given. Measured against a live
-server, an aborted stream and a completed one produced access-log lines differing only in
-byte count. With the split, a server whose clients keep leaving shows it as
-`reason="cancel"` or `reason="abandoned"` growing against `reason="stop"`, which is a
-network or timeout problem rather than a model problem. The parts always sum to
-`orbix_requests_finished_total`; the tests assert that, so a reason missed in the engine
-breaks a test instead of quietly unbalancing a dashboard.
+Three exist because their failure mode is invisible in latency until it is already failing.
+`orbix_requests_queued` growing against a steady round rate is capacity, not a slow model;
+`orbix_kv_pool_free` reaching zero is a paged deployment about to refuse requests. The third,
+`orbix_requests_finished_by_reason_total`, is what catches clients leaving: a disconnect looks
+entirely healthy in every other number, and shows up here as `reason="cancel"` or
+`reason="abandoned"` growing against `reason="stop"`. The parts always sum to
+`orbix_requests_finished_total`, and the tests assert it.
 
 `orbix_requests_refused_queue_full_total` and `orbix_requests_refused_pool_total` count the
-requests answered `503`. They are the server's own counters rather than the engine's, because
-a refused request never enters the engine -- counting it as submitted would make the admission
-rate look better than it is, and that is deliberate. The consequence was that refusals
-appeared nowhere at all: measured with `--max-active 1 --max-queued 1` and 24 requests in
-bursts of eight, 16 were refused with `503` while `orbix_requests_submitted_total` read 8 and
-the queue gauge sat at 0, so a server shedding two thirds of its load reported nothing wrong.
-Two families rather than one, because the fixes differ: a full backlog wants a deeper
-`--max-queued` or more replicas, while an exhausted pool wants more `--blocks` or shorter
-prompts.
+requests answered `503`. They are the server's own counters rather than the engine's, since a
+refused request never enters the engine and counting it as submitted would flatter the admission
+rate. Two families rather than one, because the fixes differ: a full backlog wants a deeper
+`--max-queued` or more replicas, an exhausted pool wants more `--blocks` or shorter prompts.
 
 ### The access log
 
@@ -789,15 +697,10 @@ curl -sSL -o /tmp/stories15M-q4_0.gguf \
   https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf
 ```
 
-The gates take the suite from fifteen skipped tests to none, so a machine holding the
-checkpoints can check every claim the project makes. Both numbers are observable in the run
-itself -- `go test ./... -v | grep -c '^--- SKIP'` reads 15 with no checkpoint on disk and 0 with
-all four set -- which is why they are named here instead of a test total: the count of tests
-changes with every commit and nothing can pin it, while the skip count is a property of the
-gating. That does not make it immutable: adding a gated test raises the first number, removing a
-gate that was never needed lowers it, and this sentence has now been wrong three times for
-exactly those reasons. Re-measure it rather than trusting it; the last correction was two gates
-that skipped without needing a checkpoint at all, because the tests drove the fixture.
+The four gates take the suite from fifteen skipped tests to none, so a machine holding the
+checkpoints can check every claim the project makes: `go test ./... -v | grep -c '^--- SKIP'`
+reads 15 without a checkpoint and 0 with all four set. Re-measure rather than trusting the
+number -- adding a gated test raises it.
 
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \
@@ -807,18 +710,13 @@ MODEL_KQUANT=/tmp/tinymixtral.gguf \
 CGO_ENABLED=0 go test ./...
 ```
 
-`just test` does not set these variables. It runs `go test -count=1 ./...` with the justfile's
-`CGO_ENABLED=0` export and nothing more, so the checkpoint-gated tests skip under it exactly as
-they do without it. The block is written out here because a copyable command is what a reader
-holding the checkpoints needs; putting the paths in the recipe would mean every contributor's
-`just test` ran a different suite.
+`just test` does not set these variables, so the gated tests skip under it exactly as they do
+without them. Writing the block out here is what a reader holding the checkpoints needs; putting
+the paths in the recipe would mean every contributor's `just test` ran a different suite.
 
-Worth knowing before judging that run: a file whose weights were never trained produces
-a flat next-token distribution -- one measured at p(argmax) = 0.0003 against 0.26 for a
-trained checkpoint -- so its output is gibberish whatever the implementation does. The
-test therefore asserts that zeroing the experts changes the logits, which is a statement
-about the code, rather than that the text reads well, which would be a statement about
-the file.
+An untrained file produces a flat next-token distribution, so its output is gibberish whatever
+the implementation does. The MoE test therefore asserts that zeroing the experts changes the
+logits -- a statement about the code, not about the file.
 
 ## Performance Expectations
 
@@ -827,37 +725,15 @@ Orbix is a learning project, and it is honest about where it stands:
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
 
 - **Prefill throughput improves with prompt length, within the window.** On Llama 3.2
-  1B Q2_K with 32 workers, medians of five interleaved runs gave 3.96x the tokens for
-  3.04x the time (155 tokens in 8.1 s, 614 in 24.5 s), so the per-token cost fell from
-  52 ms to 40 ms as the prompt lengthened. With 128 workers the same interleave gave
-  2.76x, so the effect is larger when there are fewer workers to go round. That is the
-  direction the arithmetic predicts:
-  attention is O(n^2) in total but parallelises over positions, one goroutine per
-  position scoring against the cache, while the projections are O(n) and are spread
-  over output columns that do not grow with the prompt. So the growing term is the
-  one that gets more workers as it grows. [INFERENCE] the rest of the explanation --
-  that a longer prompt also amortises a round's fixed cost -- is arithmetic rather
-  than measurement; what was measured is the per-token cost falling. A prompt long
-  enough to make attention dominate per-position work would stop the trend, and this
-  engine has no measurement of where that turn is.
+  1B Q2_K with 32 workers, the per-token cost fell from 52 ms at a 155-token prompt to
+  40 ms at 614 tokens (medians of five interleaved runs). Attention is O(n^2) but
+  parallelises over positions, while the projections are O(n) over columns that do not
+  grow, so the growing term is the one that gains workers as it grows.
 
-  Interleaving the two sizes matters more than the sizes themselves: taken in separate
-  runs, load drift put a 2.5x spread on the smaller one, wider than the effect being
-  measured.
-
-  This bullet used to say prefill was *superlinear* and give "4x the tokens for 2.78x
-  the time" as evidence, which says the opposite. That figure was also measured before
-  attention was parallelised, when 2001 tokens took 177 s and attention was 135 s of
-  it. Both halves are replaced rather than deleted, because the shape of the mistake
-  -- an adjective that outlived the measurement under it -- is the reusable part.
-
-- **Treat the numbers above as indicative, not as a benchmark.** They were taken on
-  a shared machine whose load drifted between 40 and 90 over the course of a few
-  minutes, and repeat runs of the same workload varied by more than the improvements
-  being measured -- a 3721-token prompt once timed faster than a 3641-token one.
-  The direction of each change is sound and the bit-identity tests are unaffected,
-  but a timing claim from this machine needs a quiet one to confirm. `orbix bench`
-  prints its own conditions so a reader can judge a table taken elsewhere.
+- **Treat the numbers above as indicative, not as a benchmark.** They were taken on a
+  shared machine whose load drifted enough that repeat runs varied by more than the
+  effects being measured. `orbix bench` prints its own conditions so a table taken
+  elsewhere can be judged.
 
 - **Reference kernels are not optimized per instruction.** They are written to be
   readable, with no SIMD and no assembly. What they do use is more than one core: the
@@ -948,23 +824,16 @@ orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --pr
 | `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context  |
 | `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix             |
 
-`--block-size` has one hard limit worth stating next to the flag: it cannot exceed the model's
-context. Prefix reuse stores and matches whole blocks, so a block the context can never fill is
-never published to the index, and `--prefix-cache` would reuse nothing while still reporting
-itself on. `serve`, `chat`, and `bench` all refuse that combination rather than start; the
-default of 16 is safe for any model with a context of 16 or more.
+`--block-size` cannot exceed the model's context: prefix reuse matches whole blocks, so a block
+the context can never fill is never published and `--prefix-cache` would reuse nothing. `serve`,
+`chat`, and `bench` refuse that combination rather than start it.
 
-`--max-tokens` is the one flag whose accepted range differs by command, and the difference is
-not arbitrary. `run` accepts 0, which prefills and prints nothing -- one command, and the
-absence of output is the result. `serve`, `chat`, and `bench` refuse 0: the server cannot
-express a request for zero tokens at all (a request's `max_tokens` is an integer, so 0 is
-indistinguishable from the field being absent and takes the server's default), a REPL turn that
-generates nothing answers with an empty line, and a benchmark of zero generated tokens is not a
-measurement. None of them accepts a negative value, which every other numeric flag on these
-commands refuses too.
+`--max-tokens` accepts 0 only on `run`, where "prefill and print nothing" is a result. The
+server cannot express a zero-token request (`max_tokens` is an integer, so 0 is indistinguishable
+from absent), a REPL turn generating nothing answers with an empty line, and a benchmark of zero
+tokens is not a measurement. Negative values are refused everywhere.
 
-A config file is on the roadmap, not in the code: the interface block at the top of
-this file describes the target, and this table describes what exists.
+A config file is on the roadmap, not in the code.
 
 `--policy` is the flag most likely to need a reason rather than a definition, so: `fifo` is the
 default because submission order is the easiest thing to reason about and every other policy is a
@@ -986,12 +855,9 @@ first token:
 | `shortest` | 19, 10, 5, 2       | exactly inverted: the 2-token request moved from round 33 to round 2 |
 | `fair`     | 5, 6, 7, 8         | one turn apiece first, then round-robin from there                   |
 
-`shortest` is the one that changes the order most, and the inversion is the point: it looks
-purely at remaining work, so a request submitted last is served first when it is the smallest.
-`fair` does not reorder past the first turn -- it hands everyone a turn before repeating, which
-is why its first-token rounds are consecutive where `fifo`'s span the whole queue. Under `fair`
-each sequence then returns every `len(active)/MaxActive` rounds: with four sequences on one slot
-the measured round gap was exactly 4.
+The inversion is the point of `shortest`: it looks only at remaining work, so the last request
+submitted is served first when it is smallest. `fair` hands everyone a turn before repeating,
+which is why its rounds are consecutive where `fifo`'s span the queue.
 
 The two cache layouts differ in what they reserve, and the difference is large enough to
 decide the flag. A contiguous cache reserves the whole context for every accepted request
@@ -1077,49 +943,30 @@ just cross     # build all five supported platforms with CGo disabled
 just test-race # the suite under the race detector; needs cgo, so it is separate
 ```
 
-`just check` is what a contributor runs before pushing; it needs only the Go toolchain and
+`just check` is what a contributor runs before pushing; it needs the Go toolchain and
 golangci-lint **v2**, because `.golangci.yml` is a v2 configuration and a v1 binary refuses to
-read one. The recipe checks the version and says so rather than letting the linter's own
-message about the config stand in for it -- that message names neither the toolchain nor the
-fix, and a mismatch turns the gate red on an otherwise clean tree.
+read one. The recipe checks the version and says so, rather than letting the linter's own
+message about the config stand in for it.
 
-`just docs` runs `rumdl check .` over the repository's Markdown -- which here is
-the README and the pull-request template, since `.rumdl.toml` excludes `AGENTS.md` -- and needs
-rumdl. `just hooks` runs the pre-commit hooks through prek. Both are separate targets rather
-than part of `check` for the same reason: neither tool is in the Go toolchain, and `check`
-should stay runnable with Go and golangci-lint alone. The three are the gates CI runs, and
-running them makes a green branch predictable rather than hoped for.
+`just docs` runs `rumdl check .` and needs rumdl; `just hooks` runs the pre-commit hooks through
+prek. Both are separate targets rather than part of `check` because neither tool is in the Go
+toolchain, and `check` should stay runnable with Go and golangci-lint alone.
 
-The two differ in what they do when they find a problem, which is worth knowing before running
-either: `just docs` reports and leaves the file alone, while `just hooks` **rewrites** it --
-its `rumdl` and `rumdl-fmt` hooks pass `--fix`, and `end-of-file-fixer` and
-`mixed-line-ending` edit in place too. A hook that changed something exits non-zero and says
-`files were modified by this hook`; re-stage the file and look at what it did rather than
-assuming the edit was cosmetic, since the Markdown fixer also reflows list spacing and table
-alignment.
+They differ in what they do on a problem: `just docs` reports and leaves the file alone, while
+`just hooks` **rewrites** it (`rumdl` and `rumdl-fmt` pass `--fix`, and `end-of-file-fixer` and
+`mixed-line-ending` edit in place). A hook that changed something exits non-zero; re-stage the
+file and look at what it did rather than assuming the edit was cosmetic. `just check` sees Go
+files only, which is why a stray whitespace line under `.github/workflows/` leaves it green and
+`just hooks` catches it.
 
-The `doc.go` files are Go, so rumdl does not see them; their prose is checked only by reading
-it. That is why every package's design notes live in a `doc.go` that a reviewer sees in the
-diff rather than behind a linter -- a broken Markdown table in the README fails `just docs`,
-and a contradictory sentence in a package doc does not fail anything.
+Run `prek install` once to make the hooks fire on every commit; it writes shims under
+`.git/hooks/`, which git does not track.
 
-The split is not cosmetic. `just check` sees Go files only: a whitespace-only line appended to a
-file under `.github/workflows/` leaves it green, exit 0, which is what `just hooks` catches.
-
-Run `prek install` once to make the hooks fire on every commit. `just hooks` is the same checks on
-demand and is what CI runs; installing is what makes them run without being asked. The hooks are
-in `.pre-commit-config.yaml`, and nothing about them is copied into the repository when installed --
-`prek install` writes shims under `.git/hooks/`, which git does not track.
-
-`just fuzz` searches rather than gates, which is why it is separate too. Six targets cover the
-paths that read untrusted bytes: the GGUF container, the quantization decoders, the chat template
-parser, and the tokenizer's pre-split and decode. Each keeps a seed corpus that `go test` replays
-on every run, so a crash that was found once stays fixed without anyone remembering to fuzz; the
-target itself is what finds the next one, and costs a few minutes.
-
-Reading a file is the one thing here that runs on an arbitrary input — a model someone else
-produced — and a panic or an allocator kill during it takes the process down rather than
-returning an error. That is what the targets exist to rule out.
+`just fuzz` searches rather than gates. Six targets cover the paths that read untrusted bytes:
+the GGUF container, the quantization decoders, the chat template parser, and the tokenizer's
+pre-split and decode. Each keeps a seed corpus that `go test` replays on every run, so a crash
+found once stays fixed; reading a file is the one thing here that runs on input someone else
+produced, and a panic during it takes the process down rather than returning an error.
 
 CI enforces `CGO_ENABLED=0` on every platform. A build that requires CGo is a build that fails.
 

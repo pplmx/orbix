@@ -389,6 +389,23 @@ func TestLoadConfigRejects(t *testing.T) {
 			wantAll: []string{"8", "3"},
 		},
 		{
+			// The same hazard one line above: embedding_length % head_count with a zero
+			// divisor. It is caught by the shared positivity check in get rather than by a
+			// guard written for it, which is why it is worth a case of its own -- the
+			// protection is a property of a helper two hundred lines away, and a later edit
+			// that reads this key directly would remove it without touching anything here.
+			// Measured: with head_count 0, LoadConfig returns
+			// "llama.attention.head_count = 0, must be positive" and does not panic.
+			name: "zero heads",
+			mutate: func(c *tinyConfig) []kv {
+				return replaceKey(c.kvs(), "llama.attention.head_count", u32Val(0))
+			},
+			want: "must be positive",
+			// The key and the value, so a reader can tell which of several positivity
+			// messages fired.
+			wantAll: []string{"head_count", "0"},
+		},
+		{
 			// Zero is not merely invalid, it is the value the divisibility check two lines
 			// below would divide by: without this guard, head_count % 0 panics rather than
 			// returning an error. A file that writes the key with zero is the shape this

@@ -860,6 +860,12 @@ func TestRefusesOversizedArrayCount(t *testing.T) {
 		}
 	})
 	// 4096 elements that arrive plus growth headroom; the point is that it is not 1M Values.
+	//
+	// Measured: 17.5 MiB, against 96 MiB if the capacity came from the claim (a Value is 96
+	// bytes) -- so the 64 MiB ceiling sits between the two answers and a change to either side
+	// fails here. The same file with string elements instead of uint8 allocates 17.7 MiB, so
+	// the element type does not change what a truncated claim costs: the per-element Value is
+	// what dominates, and an empty string's contents are not allocated.
 	if delta > 64<<20 {
 		t.Errorf("a 1M claim with 4096 elements of data allocated %.1f MiB", float64(delta)/(1<<20))
 	}

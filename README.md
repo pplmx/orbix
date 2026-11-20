@@ -471,6 +471,12 @@ blocks free, which means the request is larger than the pool can ever hold rathe
 anything is contended. That is the case `/clear` cannot fix, and seeing the size is what tells
 the two apart.
 
+`/clear` forgets the conversation and nothing else. The blocks the previous turns published
+stay in the prefix index, so the next prompts still attach what they share with the old
+history -- measured on the 512-position fixture, `/stats` reported reuse of 0, 160 and 480 over
+three turns, held at 480 across `/clear`, and reached 640 one turn later. That is what makes it
+a usable way out of a full window rather than a way to start from scratch.
+
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
 | `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization, and whether this build reproduces the model's pre-tokenizer | v0.1   |

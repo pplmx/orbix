@@ -19,10 +19,16 @@ The server implements `/v1/chat/completions`, `/v1/completions` (streaming and n
 unimplemented path under `/v1` answers 404 in the API's JSON envelope rather than Go's
 plain-text one, because the SDKs decode the body before raising.
 
-Every error body carries a `code`, and `param` names the field at fault when there is one.
-Branch on `code`, not on message text -- OpenAI's guidance, and the reason is that the codes
+A request-validation error carries a `code`, and `param` names the field at fault when there is
+one. Branch on `code`, not on message text -- OpenAI's guidance, and the reason is that the codes
 cover the bodies a client hits before any field parses (`invalid_json`, `body_too_large`) as well
 as the ones it understands and refuses (`context_length_exceeded`, `unsupported_parameter`).
+
+Not every error has one. A refused request answers 503 with `type: service_unavailable_error`
+and no `code`, because there is nothing in the request to correct -- retry, or back off. Read a
+missing `code` as "this answer is about capacity, not about your fields", and branch on `type`
+for the retryable case. Treating the absence as a malformed response would make a correctly
+shaped 503 look like a proxy error.
 
 Unsupported fields split by what a client does with the answer. Sampling knobs -- `logit_bias`,
 `presence_penalty`, `response_format` -- are ignored, because the SDKs send them regardless.

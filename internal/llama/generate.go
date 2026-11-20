@@ -23,12 +23,20 @@ type Sampler interface {
 type Greedy struct{}
 
 // Next returns the argmax of logits.
+//
+// A NaN anywhere but index 0 cannot win: the comparison v > logits[best] is false against
+// NaN, so the scan never moves onto one. Index 0 is the exception, and it is the seed
+// rather than a comparison: best starts at 0 and only ever moves on a strict greater-than,
+// so a NaN at 0 stays chosen when every other value fails to beat it. Measured: {NaN, 5, 3}
+// returns 0, {5, NaN, 3} and {5, 3, NaN} both return 0 too, and {NaN, NaN} returns 0.
+//
+// A logit row like that cannot come from a loaded model -- the load-time finite check
+// refuses a NaN weight, and the comment there explains what a single one would do -- so
+// this is the cost of the comparison rule rather than a case to defend against. It is
+// pinned by TestGreedyAndNaN, whose subtest names say which positions are covered.
 func (Greedy) Next(logits []float32) int32 {
 	best := 0
 	for i, v := range logits {
-		// NaN never compares greater, so a NaN logit cannot win; that is the
-		// behaviour we want, since a NaN elsewhere in the row would otherwise
-		// silently become the chosen token at index 0 on ties.
 		if v > logits[best] {
 			best = i
 		}

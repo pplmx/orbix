@@ -319,13 +319,18 @@ func TestGreedyPicksTheLowestIndexOnATie(t *testing.T) {
 	}
 }
 
-// TestGreedyNeverSelectsNaN covers the second half of Next's contract.
+// TestGreedyAndNaN covers how the argmax scan treats NaN.
+//
+// The name says "and NaN" rather than "never selects" because it does select one: index 0
+// keeps its slot when it holds a NaN, and an all-NaN row returns 0. The two cases below that
+// expect 0 are that behaviour, not a failure to skip. What the scan does guarantee is that
+// it never MOVES onto a NaN from another position.
 //
 // NaN never compares greater, so a NaN entry cannot win even when it is the only
 // non-negative value in the row. Without this a NaN produced by a broken kernel could
 // become the chosen token rather than being skipped, which turns a numerical fault into
 // plausible-looking output.
-func TestGreedyNeverSelectsNaN(t *testing.T) {
+func TestGreedyAndNaN(t *testing.T) {
 	nan := float32(math.NaN())
 	cases := []struct {
 		name   string

@@ -656,7 +656,7 @@ func TestParamsMatchesTheTensorElements(t *testing.T) {
 // weights are NaN. A NaN anywhere else is skipped normally ({1, NaN, 2} selects [2 0]),
 // because there the NaN is the one being compared and the comparison is false.
 //
-// This is the rule Greedy documents and TestGreedyNeverSelectsNaN pins -- the same shape,
+// This is the rule Greedy documents and TestGreedyAndNaN pins -- the same shape,
 // reached by a different search. It is not a second bug, and it is unreachable in a served
 // model: the load-time finite check refuses a NaN weight, which is what makes the router
 // logits finite. The behaviour is pinned here so a future change to the seed value has to

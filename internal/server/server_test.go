@@ -4710,9 +4710,11 @@ func TestBlockingDisconnectReturnsTheBlocksToo(t *testing.T) {
 	}()
 	waitFor(t, 5*time.Second, func() bool { return eng.Active() > 0 },
 		"the request never reached the engine")
-	if used := before.PoolFree - eng.Stats().PoolFree; used == 0 {
-		t.Fatalf("no blocks were allocated while the request ran, so this run proves nothing")
-	}
+	// Active counts the sequence, not the blocks it holds: a sequence is active from admission
+	// and takes blocks once it prefills, so this waits for the second rather than sampling it.
+	// The streaming counterpart of this test learned the same lesson by failing intermittently.
+	waitFor(t, 5*time.Second, func() bool { return eng.Stats().PoolFree < before.PoolFree },
+		"no blocks were allocated while the request ran, so this run proves nothing")
 	cancel()
 
 	select {

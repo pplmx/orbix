@@ -798,6 +798,18 @@ func (q *bigramQueue) pop() (bigram, bool) {
 // saw. Without one, the vocabulary's own score decides and the larger score wins, which
 // is what a unigram vocabulary means by it. Ties go to the leftmost pair, which is what
 // makes the result deterministic rather than heap-order dependent.
+//
+// A NaN score makes ">" answer false in both directions, so less(a,b) and less(b,a) are both
+// false and the ordering is not strict-weak. Measured through push, the effect is bounded
+// and deterministic rather than random: the NaN entry pops last in every arrangement tried
+// ({NaN,5,9} -> lefts [0 2 1], {5,9,NaN} -> [1 2 0], {9,5,NaN} -> [0 2 1], {5,NaN,9} ->
+// [2 0 1]), because it can never satisfy the "score greater than" half of the comparison and
+// falls through to the leftmost-first tie-break from below everything.
+//
+// Not defended against: the values come from tokenizer.ggml.scores, which every real
+// vocabulary fills with log probabilities, and a file carrying a NaN there is corrupt in a
+// way this package cannot diagnose better than the merge order it produces. A test would
+// record the behaviour of a corrupt file rather than of the encoder.
 func (q bigramQueue) less(i, j int) bool {
 	if q[i].byRank != q[j].byRank {
 		// Two orderings in one heap would be meaningless; it cannot happen because

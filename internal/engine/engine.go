@@ -463,6 +463,15 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 // inference through while the pump is running -- the server and the REPL both keep Pump
 // on a single goroutine and call Submit from wherever.
 //
+// Breaking the constraint panics rather than returning wrong numbers. Measured: two
+// goroutines pumping one sequence give "panic: send on closed channel", because each round
+// advances the sequence and the second closes the channel the first is still emitting into.
+// That is the intended trade and the reason there is no test for it -- a lock would hide a
+// caller bug behind slower rounds, while the panic names it, and a test whose whole content
+// is a process-killing panic would take the package's other tests down with it. The cost is a
+// crashed process rather than a per-request error, so every caller keeps Pump on one
+// goroutine: see Server.run and the CLI's sequential loops.
+//
 // Panics inside the model propagate: a corrupt forward pass should not be turned
 // into a per-request error that hides a bug in the engine.
 func (e *Engine) Pump() int {

@@ -2112,3 +2112,62 @@ func TestCacheFlagsAreValidatedBeforeTheModelLoads(t *testing.T) {
 		}
 	})
 }
+
+// TestBenchRejectsBadCountsBeforeOpeningTheModel covers the three numeric flags bench validates
+// up front.
+//
+// They run before the model is opened, which is what makes this test cheap and what makes the
+// validation worth having: bench is the command most likely to be pointed at a large
+// checkpoint, so a mistyped count should be answered in microseconds rather than after a
+// multi-gigabyte load.
+//
+// --requests is the one with a subtlety. Zero has a documented meaning -- one request per
+// concurrency slot -- and the loop reaches that behaviour with "total <= 0", so a negative
+// value used to behave exactly like zero. The comment says why that is wrong here rather than
+// harmless: the request count is the sample size, and a mistyped one is not a smaller
+// measurement but a different one.
+func TestBenchRejectsBadCountsBeforeOpeningTheModel(t *testing.T) {
+	// A path that cannot exist, so nothing but the count checks can succeed. If one of them
+	// ever moved after the load, this would report a file error instead of the flag error and
+	// the mismatch would be visible.
+	t.Setenv("ORBIX_MODEL", filepath.Join(t.TempDir(), "missing.gguf"))
+
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"concurrency zero", []string{"--concurrency", "0"}, "--concurrency must be at least 1"},
+		{"concurrency negative", []string{"--concurrency", "-1"}, "--concurrency must be at least 1"},
+		{"max-tokens zero", []string{"--max-tokens", "0"}, "--max-tokens must be at least 1"},
+		{"max-tokens negative", []string{"--max-tokens", "-5"}, "--max-tokens must be at least 1"},
+		{"requests negative", []string{"--requests", "-1"}, "--requests must not be negative"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := cmdBench(c.args)
+			if err == nil {
+				t.Fatalf("cmdBench(%v) returned nil", c.args)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not contain %q; a model error here would mean the "+
+					"check had moved after the load", err, c.want)
+			}
+			if strings.Contains(err.Error(), "no such file") {
+				t.Errorf("error %q mentions the model file, so this flag was rejected by the "+
+					"load failing rather than by the check", err)
+			}
+		})
+	}
+
+	// The negative-requests message has to say what zero means, or a caller cannot tell
+	// whether the fix is 0 or 1.
+	t.Run("the requests message explains zero", func(t *testing.T) {
+		err := cmdBench([]string{"--requests", "-1"})
+		if err == nil {
+			t.Fatal("cmdBench accepted --requests -1")
+		}
+		if !strings.Contains(err.Error(), "one per concurrency slot") {
+			t.Errorf("error %q does not say what 0 means", err)
+		}
+	})
+}

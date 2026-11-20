@@ -1347,14 +1347,21 @@ func TestFairInterleavesNewArrivalsWithALongRunningSequence(t *testing.T) {
 		e, tok, _ := loadModelPath(t, Options{MaxActive: 1, MaxQueued: 16, Policy: policy})
 		prompt := tok.Encode("hi", false)
 
+		// Every sequence gets its own reader goroutine, so the map needs a lock: without one
+		// this is "fatal error: concurrent map writes", which took down the whole test binary
+		// rather than failing one test. Found by running the suite with its output kept, after
+		// two earlier sessions lost the message to a discarded log.
 		rounds := map[int32][]int{}
+		var roundsMu sync.Mutex
 		collect := func(ch <-chan Event, id int32) chan struct{} {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
 				for ev := range ch {
 					if ev.HasToken {
+						roundsMu.Lock()
 						rounds[id] = append(rounds[id], ev.Round)
+						roundsMu.Unlock()
 					}
 				}
 			}()

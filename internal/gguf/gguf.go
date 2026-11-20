@@ -449,6 +449,18 @@ func (f *File) Lookup(key string) (Value, bool) {
 // may be uint32 in one checkpoint and float32 in another. Narrowing to T is
 // checked, so a uint64 that does not fit in a uint32 reports false instead of
 // wrapping.
+//
+// What "checked" means differs between the two families, and the difference is
+// deliberate. An integer destination is refused when the value does not fit, so
+// nothing is ever rounded away. A float destination is refused only when the value
+// becomes infinite, which leaves precision: measured, Get[float32] on the uint64
+// 16777217 (= 2^24+1) reports ok and returns 16777216, and on 9007199254740993
+// (= 2^53+1) reports ok and returns 9007199254740992. The asymmetry is right for
+// the two questions -- an integer that wrapped would be a different number, while a
+// float that rounds is the same number at the nearest representable value, which is
+// what asking for a float means -- but a caller comparing metadata for equality has
+// to know which one it is getting. GGUF hyperparameters are small integers or
+// ratios; a token count above 2^24 is the case where this matters.
 func (f *File) Get[T Scalar](key string) (T, bool) {
 	var zero T
 	v, ok := f.Metadata[key]

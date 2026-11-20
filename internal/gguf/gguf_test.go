@@ -1749,3 +1749,65 @@ func TestKeysAndAllAgreeAcrossScripts(t *testing.T) {
 		t.Errorf("a break after 2 iterations ran %d", visited)
 	}
 }
+
+// TestGetFloatDestinationRoundsInsteadOfFailing pins the asymmetry the Get doc now states.
+//
+// An integer destination is refused when the value does not fit; a float destination is
+// refused only when the value becomes infinite. Between those two rules sits a band where a
+// float conversion succeeds and quietly rounds: 2^24+1 is an integer an int32 holds exactly,
+// and a float32 cannot. Nothing asserted which behaviour a caller gets, and the two are easy to
+// confuse because both are "narrowing".
+//
+// The rounding is correct for what was asked -- the nearest representable float is the same
+// number at that precision -- but a caller comparing metadata for equality has to know. The
+// numbers here are the ones the doc comment cites, so the two cannot drift apart.
+func TestGetFloatDestinationRoundsInsteadOfFailing(t *testing.T) {
+	cases := []struct {
+		name      string
+		value     uint64
+		wantF32   float32
+		fitsInt32 bool
+	}{
+		// 2^24+1: exactly representable as an int32, not as a float32.
+		{"2^24+1", 1<<24 + 1, 1 << 24, true},
+		// 2^53+1: exactly representable as an int64, not even as a float64.
+		{"2^53+1", 1<<53 + 1, 1 << 53, false},
+		// A value float32 holds exactly, for contrast.
+		{"2^24", 1 << 24, 1 << 24, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := Value{Type: TypeUint64, Uint: c.value}
+
+			got, ok := scalarAs[float32](v)
+			if !ok {
+				t.Fatalf("scalarAs[float32](%d) reported not ok: the value fits float32's range, "+
+					"so only its precision is lost", c.value)
+			}
+			if got != c.wantF32 {
+				t.Errorf("scalarAs[float32](%d) = %v, want %v (the nearest representable value)",
+					c.value, got, c.wantF32)
+			}
+			// The rounding is real rather than a coincidence of this value: converting back
+			// does not recover the original.
+			if c.value%(1<<24) != 0 && uint64(got) == c.value {
+				t.Errorf("%d survived a float32 round trip exactly, so this case does not "+
+					"demonstrate rounding", c.value)
+			}
+
+			// The integer destination answers the other question: whether the value fits.
+			_, intOK := scalarAs[int32](Value{Type: TypeInt64, Int: int64(c.value)})
+			if intOK != c.fitsInt32 {
+				t.Errorf("scalarAs[int32](%d) ok = %v, want %v: an integer destination is "+
+					"refused for range, and %d %s in int32", c.value, intOK, c.fitsInt32,
+					c.value, map[bool]string{true: "fits", false: "does not fit"}[c.fitsInt32])
+			}
+		})
+	}
+
+	// The one thing a float destination does refuse: a value that becomes infinite.
+	if _, ok := scalarAs[float32](Value{Type: TypeFloat64, Float: 2 * math.MaxFloat32}); ok {
+		t.Error("a value that narrows to +Inf was accepted; that is the failure the float " +
+			"check exists for")
+	}
+}

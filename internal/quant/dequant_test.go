@@ -1168,3 +1168,91 @@ func TestIQ4NLCodebookMatchesGGML(t *testing.T) {
 		}
 	}
 }
+
+// TestKQuantDecodersProduceOnlyFiniteValues covers the inputs a real checkpoint does not
+// contain but a corrupted one can, plus the degenerate block every format has to survive.
+//
+// The existing K-quant tests build one representative block per format and check it against
+// the same formula the decoder uses. That catches a wrong index or a dropped term; it does not
+// exercise the extremes, where a sign error or an unguarded shift shows up as NaN or an
+// infinity rather than as a wrong number. A NaN in a weight matrix does not fail a decode --
+// it propagates through a matmul and produces a model that emits nothing, with no error to
+// point at the tensor.
+//
+// An all-zero block is the case with a real answer: every format must produce 256 zeros,
+// because a zero super-scale scales everything to zero. The extreme-scale cases assert only
+// finiteness, since the value itself is a fact about the formula rather than about the
+// implementation.
+func TestKQuantDecodersProduceOnlyFiniteValues(t *testing.T) {
+	type layout struct {
+		name string
+		typ  gguf.QuantType
+		size int
+		// dOff are the byte offsets of the F16 super-scale fields, in the order the format
+		// stores them (scale then min, where a format has both).
+		dOff []int
+	}
+	formats := []layout{
+		{"Q2_K", gguf.Q2_K, 84, []int{80, 82}},
+		{"Q3_K", gguf.Q3_K, 110, []int{108}},
+		{"Q4_K", gguf.Q4_K, 144, []int{0, 2}},
+		{"Q5_K", gguf.Q5_K, 176, []int{0, 2}},
+		{"Q6_K", gguf.Q6_K, 210, []int{208}},
+	}
+
+	// F16 patterns: zero, the largest finite value, the smallest positive subnormal, and a
+	// negative. Anything a corrupt file can hold.
+	scales := []struct {
+		name string
+		bits uint16
+	}{
+		{"zero", 0x0000},
+		{"max", 0x7BFF},
+		{"subnormal", 0x0001},
+		{"negative", 0xB400},
+	}
+
+	for _, f := range formats {
+		t.Run(f.name, func(t *testing.T) {
+			t.Run("all-zero block decodes to zeros", func(t *testing.T) {
+				src := make([]byte, f.size)
+				dst := make([]float32, 256)
+				if err := Decode(f.typ, src, dst); err != nil {
+					t.Fatalf("Decode: %v", err)
+				}
+				for i, v := range dst {
+					if v != 0 {
+						t.Fatalf("element %d = %v with a zero scale, want 0", i, v)
+					}
+				}
+			})
+
+			// Every byte set, every scale field varied: the combination that would overflow a
+			// shift or lose a sign.
+			for _, fill := range []byte{0x00, 0xFF, 0xAA, 0x55} {
+				for _, sc := range scales {
+					src := make([]byte, f.size)
+					for i := range src {
+						src[i] = fill
+					}
+					for _, off := range f.dOff {
+						binary.LittleEndian.PutUint16(src[off:], sc.bits)
+					}
+					dst := make([]float32, 256)
+					if err := Decode(f.typ, src, dst); err != nil {
+						t.Fatalf("Decode(fill %#02x, scale %s): %v", fill, sc.name, err)
+					}
+					for i, v := range dst {
+						fv := float64(v)
+						if math.IsNaN(fv) {
+							t.Fatalf("fill %#02x scale %s: element %d is NaN", fill, sc.name, i)
+						}
+						if math.IsInf(fv, 0) {
+							t.Fatalf("fill %#02x scale %s: element %d is infinite", fill, sc.name, i)
+						}
+					}
+				}
+			}
+		})
+	}
+}

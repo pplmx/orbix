@@ -863,3 +863,99 @@ func TestLoaderReadsTensorsAtArbitraryOffsets(t *testing.T) {
 		}
 	})
 }
+
+// TestLoaderBoundsTheTensorAgainstTheFileEnd pins where the boundary between "fits" and
+// "does not fit" is, to the byte.
+//
+// TestLoaderRejectsTruncatedTensor reads a tensor whose declared size is far larger than the
+// file, so it cannot tell an off-by-one from an off-by-a-megabyte. The check is a single
+// expression -- nbytes > l.size-start -- and an off-by-one there is both easy to write and
+// invisible to a test whose gap is 1 MiB: it would reject a tensor that ends exactly at EOF,
+// or accept one whose last byte is past it.
+//
+// The data slice is 16 bytes and every case is an F32 tensor of four elements, so 16 bytes is
+// exactly what fits. The three cases are the boundary and its two neighbours on the side that
+// matters: exactly fitting, one byte short of fitting, and a tensor whose offset is already
+// past the end.
+func TestLoaderBoundsTheTensorAgainstTheFileEnd(t *testing.T) {
+	// 16 bytes of data, so a four-element F32 tensor at offset 0 uses the whole file.
+	data := make([]byte, 16)
+	for i := range data {
+		data[i] = byte(i + 1)
+	}
+
+	cases := []struct {
+		name    string
+		offset  uint64
+		elems   uint64
+		wantErr bool
+		// wantBytes is how many bytes the tensor claims when it fits, which is what the
+		// loader needs to see inside the file.
+	}{
+		// Exactly the file: the last byte is at EOF-1, so this must be accepted.
+		{"exactly fits", 0, 4, false},
+		// Offset 1 with four elements needs bytes [1,17) but the file ends at 16.
+		{"one byte past the end", 1, 4, true},
+		// A tensor that starts exactly at EOF needs no room for its own offset, but its data
+		// does not exist.
+		{"starts at EOF", 16, 1, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeModel(t, []gguf.TensorInfo{
+				{Name: "t", Dims: []uint64{c.elems}, Type: gguf.F32, Offset: c.offset},
+			}, data)
+			l, err := OpenLoader(path)
+			if err != nil {
+				t.Fatalf("OpenLoader: %v", err)
+			}
+			defer closeLoader(t, l)
+
+			got, err := l.Tensor("t")
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("Tensor() = %d values, want an error: the tensor extends past the "+
+						"16-byte file", len(got))
+				}
+				// The message has to name the tensor and say what is wrong with it, which a
+				// bare "error" assertion cannot distinguish from a wrong-width or
+				// wrong-name failure.
+				if !strings.Contains(err.Error(), "extends past end of file") {
+					t.Errorf("error = %v, want it to say the data extends past the file", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Tensor() failed on a tensor that ends exactly at EOF: %v", err)
+			}
+			if uint64(len(got)) != c.elems {
+				t.Fatalf("got %d values, want %d", len(got), c.elems)
+			}
+			// The values have to be the file's bytes decoded as F32, not zeros left behind by a
+			// short read. Compared as bit patterns rather than as round numbers: the data is
+			// deliberately the raw bytes 1,2,3,...,16, and only the bytes 00,00,00,00 decode to
+			// 0.0, so a short read shows up as zeros on every element but the first.
+			for i, v := range got {
+				var want float32
+				bits := binary.LittleEndian.Uint32(data[i*4 : i*4+4])
+				want = math.Float32frombits(bits)
+				if v != want {
+					t.Errorf("value[%d] = %v, want %v (bits %08x): a short read would leave a "+
+						"zero here", i, v, want, bits)
+				}
+			}
+			// At least one element must be non-zero, or the comparison above is satisfied by
+			// an all-zero buffer.
+			nonZero := false
+			for _, v := range got {
+				if v != 0 {
+					nonZero = true
+					break
+				}
+			}
+			if !nonZero {
+				t.Error("every value is zero, which is what a short read would produce")
+			}
+		})
+	}
+}

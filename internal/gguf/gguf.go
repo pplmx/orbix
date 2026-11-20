@@ -191,15 +191,37 @@ func Read(r io.Reader) (*File, error) {
 		file.TensorInfos = append(file.TensorInfos, ti)
 	}
 
-	file.Alignment = int64(file.floatOr("general.alignment", 32))
-	if file.Alignment <= 0 {
-		return nil, fmt.Errorf("gguf: invalid general.alignment %d", file.Alignment)
+	// The format declares this key as uint32, and the value is used as a divisor and as
+	// the offset every tensor is read from, so it has to be a positive integer.
+	//
+	// Reading it through float64 and converting hides two cases. A float value of 1.9
+	// truncates to 1, and align(n, 1) is the identity -- the file loads with no alignment
+	// anywhere and every tensor offset computed from an unaligned directory. A value too
+	// large for an offset, such as uint32 max, is accepted and sets TensorDataLoc past the
+	// end of the file, so the first tensor read fails against a position the header made up.
+	//
+	// NaN and infinity were already refused, but by accident: converting either to int64
+	// yields MinInt64, which the "<= 0" test then rejected. That is now stated rather than
+	// inherited, since the conversion result is undefined by the language.
+	raw := file.floatOr("general.alignment", 32)
+	if raw != math.Trunc(raw) || raw <= 0 || raw > maxAlignment {
+		return nil, fmt.Errorf("gguf: invalid general.alignment %v;"+
+			" it must be a whole number in (0, %d]", raw, maxAlignment)
 	}
+	file.Alignment = int64(raw)
 	// Tensor data is aligned relative to the start of the file, so round the
 	// current directory offset up to the next alignment boundary.
 	file.TensorDataLoc = align(rr.off, file.Alignment)
 	return file, nil
 }
+
+// maxAlignment bounds general.alignment.
+//
+// It is far above any value a real file uses -- llama.cpp writes 32 and the format's own
+// tooling pads to the architecture's page size at most -- and far below the point where an
+// offset computed from it could overflow. Its job is to make "this number is not an
+// alignment" an error at parse time rather than a failed read later.
+const maxAlignment = 1 << 20
 
 // readTensorInfo reads one tensor directory entry.
 func readTensorInfo(r *reader) (TensorInfo, error) {

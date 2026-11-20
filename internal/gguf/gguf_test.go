@@ -1969,3 +1969,69 @@ type kvp struct {
 	key string
 	val uint32
 }
+
+// TestAlignmentMustBeAWholeNumberInRange covers a value the format declares as uint32 and
+// the loader read through float64.
+//
+// Two inputs were accepted that should not have been. A float32 1.9 truncated to 1, and
+// align(n, 1) is the identity, so a file could load with no alignment at all and every
+// tensor offset computed from an unaligned directory; measured DataLoc was 102 for a file
+// whose own header said 32. uint32 max was accepted and set TensorDataLoc to 4294967295 for
+// a 176-byte file, so the first read failed against a position the header invented.
+//
+// NaN and 0.9 were already refused, but only because converting either to int64 gives
+// MinInt64 or zero and the old "<= 0" test caught them -- an accident of the conversion
+// rather than a check. They are asserted here so the behaviour is pinned either way.
+func TestAlignmentMustBeAWholeNumberInRange(t *testing.T) {
+	base := []kv{{"general.architecture", strVal("llama")}}
+	read := func(t *testing.T, v Value) (*File, error) {
+		t.Helper()
+		kvs := append(append([]kv{}, base...), kv{"general.alignment", v})
+		return Read(bytes.NewReader(buildFile(kvs, nil, 32, nil)))
+	}
+
+	t.Run("a whole number in range loads", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			v    Value
+			want int64
+		}{
+			{"uint32 32", Value{Type: TypeUint32, Uint: 32}, 32},
+			{"float32 32.0", Value{Type: TypeFloat32, Float: 32}, 32},
+			{"uint32 at the limit", Value{Type: TypeUint32, Uint: maxAlignment}, maxAlignment},
+		} {
+			f, err := read(t, c.v)
+			if err != nil {
+				t.Errorf("%s: %v", c.name, err)
+				continue
+			}
+			if f.Alignment != c.want {
+				t.Errorf("%s: Alignment = %d, want %d", c.name, f.Alignment, c.want)
+			}
+		}
+	})
+
+	for _, c := range []struct {
+		name string
+		v    Value
+		why  string
+	}{
+		{"a fraction", Value{Type: TypeFloat32, Float: 1.9},
+			"truncating to 1 turns alignment off"},
+		{"above the limit", Value{Type: TypeUint32, Uint: maxAlignment + 1},
+			"an offset computed from it cannot be real"},
+		{"uint32 max", Value{Type: TypeUint32, Uint: 4294967295},
+			"the same, at the format's own maximum"},
+		{"NaN", Value{Type: TypeFloat32, Float: math.NaN()},
+			"a NaN alignment is not a number at all"},
+		{"zero", Value{Type: TypeUint32, Uint: 0}, "zero is not an alignment"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := read(t, c.v); err == nil {
+				t.Fatalf("alignment %v was accepted; %s", c.v, c.why)
+			} else if !strings.Contains(err.Error(), "general.alignment") {
+				t.Errorf("error %q does not name the key", err)
+			}
+		})
+	}
+}

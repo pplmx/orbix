@@ -2216,6 +2216,12 @@ func TestSamplerErrorsNameTheField(t *testing.T) {
 			"temperature"},
 		{"top_p above one", `{"prompt": "Once upon a time", "max_tokens": 1, "top_p": 2}`,
 			"top_p"},
+		// The lower bound was the untested half: the check is "p < 0 || p > 1" and only the
+		// upper arm had a case, so a mutation flipping "<" to ">" on the lower bound would
+		// have left this test green. -0.5 rather than -1 so a check written as "p == -1"
+		// would not pass either.
+		{"top_p below zero", `{"prompt": "Once upon a time", "max_tokens": 1, "top_p": -0.5}`,
+			"top_p"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

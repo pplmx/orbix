@@ -423,6 +423,12 @@ func TestMergeRankBeatsScoreOrder(t *testing.T) {
 
 	// The same tokenizer with the list dropped must reach a different answer, which is
 	// what makes the assertion above about the list rather than about the pieces.
+	//
+	// Dropping the table by hand is a faithful stand-in for a vocabulary that has no merges
+	// key: measured on this fixture, the patched tokenizer and one built from a file with no
+	// merges key both encode "abcd" as [15], against [10 12] with the list. The alternative --
+	// two fixtures differing only in that key -- would compare two files rather than one, and
+	// the point of the contrast is that everything except the table is identical.
 	scored, err := New(f)
 	if err != nil {
 		t.Fatalf("New: %v", err)

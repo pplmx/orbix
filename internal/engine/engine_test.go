@@ -2888,3 +2888,67 @@ func TestStatsConserveRequestsUnderRandomInterleaving(t *testing.T) {
 		}
 	}
 }
+
+// TestFinishedByReasonSumsToRequestsFinished covers the second accounting identity, the one
+// that says every finished request was finished for exactly one reason.
+//
+// TestFinishReasonsMatchTheEventStream asserts the vocabulary -- that the enum and the events
+// agree on which reasons exist. It does not assert the counts, so a finish path that recorded
+// its reason twice, or one that never recorded it, would leave the two numbers disagreeing
+// with nothing to notice. That matters because /metrics exports the split: a request counted
+// as finished twice makes a dashboard show more completions than the server accepts.
+//
+// Cancellation is included because it makes the split non-trivial. Without it every request
+// ends with "length" and a bug that recorded only that reason would still sum correctly.
+func TestFinishedByReasonSumsToRequestsFinished(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		cancel bool
+	}{
+		{"all requests run to their budget", false},
+		{"half are cancelled before generation", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, tok := loadModel(t)
+			prompt := tok.Encode("Once upon a time", false)
+
+			var chans []<-chan Event
+			for i := range 4 {
+				req := Request{Prompt: prompt, MaxTokens: 3}
+				if c.cancel && i%2 == 0 {
+					cancelled := make(chan struct{})
+					close(cancelled)
+					req.Cancel = cancelled
+				}
+				ch, err := e.Submit(req)
+				if err != nil {
+					t.Fatalf("Submit: %v", err)
+				}
+				chans = append(chans, ch)
+			}
+			for e.Pump() > 0 {
+			}
+			for _, ch := range chans {
+				for range ch {
+				}
+			}
+
+			st := e.Stats()
+			var sum uint64
+			for _, n := range st.FinishedByReason {
+				sum += n
+			}
+			if sum != st.RequestsFinished {
+				t.Errorf("reasons sum to %d but %d requests finished: every request ends for "+
+					"exactly one reason, so the two must agree (split: %v)",
+					sum, st.RequestsFinished, st.FinishedByReason)
+			}
+			// Without a cancellation the split is one-sided, so the run above has to have
+			// produced one or the identity is being checked against a single bucket.
+			if c.cancel && st.FinishedByReason[FinishCancel] == 0 {
+				t.Fatalf("no request finished as cancelled; this run did not exercise the "+
+					"split it is about (reasons: %v)", st.FinishedByReason)
+			}
+		})
+	}
+}

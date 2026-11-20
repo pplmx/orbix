@@ -9,11 +9,11 @@ GGUF loading, quantized kernels, KV cache, continuous batching, and OpenAI-compa
 [![Status](https://img.shields.io/badge/status-learning--in--public-orange)](https://github.com/pplmx/orbix)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-> **Status: learning project, pre-alpha.** Orbix is a personal project for learning LLM inference by building one in pure Go. The API will change. The code prioritizes readability and correctness over performance.
+> **Status: learning project, pre-alpha.** The API will change. The code prioritizes readability and correctness over performance.
 
-Orbix is a **pure-Go LLM inference engine** written to understand, layer by layer, what happens between "load a GGUF file" and "stream tokens over HTTP". It has no CGo, no shared libraries, and no external runtime. It reads GGUF models, runs quantized transformer inference on CPU, schedules requests with continuous batching, and serves an OpenAI-compatible API — all from a single static binary produced by `go build`.
+Orbix reads GGUF models, runs quantized transformer inference on CPU, schedules requests with continuous batching, and serves an OpenAI-compatible API — from a single static binary with no CGo, no shared libraries, and no external runtime.
 
-This is not a production inference framework competing with vLLM or llama.cpp. It is a **learning vehicle**: a codebase where each layer of LLM inference is implemented explicitly in Go, small enough to read end to end, and structured so that every concept — quantization, attention, KV cache, batching — has a concrete, inspectable implementation.
+It is not competing with vLLM or llama.cpp. It is a **learning vehicle**: each layer of inference implemented explicitly in Go, small enough to read end to end, so that quantization, attention, KV cache and batching each have a concrete, inspectable implementation.
 
 ## Contents
 
@@ -49,18 +49,21 @@ An orbit is a stable, predictable path around a center. In Orbix, inference requ
 
 ## Why This Project Exists
 
-Most LLM inference code lives in Python + CUDA, wrapped in C++ kernels, and hidden behind framework abstractions. That is the right choice for production. It is a hard place to *learn*.
+Most LLM inference code lives in Python + CUDA, wrapped in C++ kernels, and hidden behind
+framework abstractions. That is the right choice for production and a hard place to *learn*.
+Orbix asks whether inference can be understood by building it in Go, from the file format up. The
+constraints follow from that:
 
-Orbix exists to answer a simple question: **can I understand LLM inference by building it in Go, from the file format up?** Go is a good language for this. It has explicit control flow, readable concurrency, a strong standard library, and no hidden magic. A GGUF parser, a quantized matmul, and a KV cache are all just code — and Go makes that code visible.
+- **Pure Go, no CGo.** `CGO_ENABLED=0` is a learning constraint here, not a deployment trick: if
+  a C library does it, it has to be written out to be understood.
+- **Readability over performance.** Kernels are written to be read. Assembly fast paths come
+  later, behind the same interface.
+- **One layer at a time**, so each can be studied independently.
+- **Honest benchmarks.** No cherry-picked numbers; where Orbix is slower than llama.cpp, this
+  file says so.
 
-The constraints follow from the goal:
-
-- **Pure Go, no CGo.** If a C library does it, I have to write it myself to understand it. `CGO_ENABLED=0` is not a deployment trick here; it is a learning constraint.
-- **Readability over performance.** Kernels are written to be read, not to be the fastest. Assembly fast paths come later, behind the same interface, after the reference implementation is correct and understandable.
-- **One layer at a time.** The project is organized so that each layer — GGUF, kernels, KV cache, scheduler, server — can be studied independently.
-- **Honest benchmarks.** No cherry-picked numbers. If Orbix is slower than llama.cpp, the README says so.
-
-**What this costs, stated plainly:** pure-Go CPU inference is slower than C++ with hand-tuned SIMD. Orbix does not pretend otherwise, and it is not trying to win a throughput benchmark. It is trying to make inference legible.
+The cost, plainly: pure-Go CPU inference is slower than C++ with hand-tuned SIMD. That is not the
+comparison this project is trying to win.
 
 ## Implementation Status
 
@@ -463,34 +466,24 @@ orbix model inspect ./model.gguf
 orbix model inspect --json ./model.gguf   # machine-readable; values keep their GGUF type
 ```
 
-`orbix model inspect` is also a learning tool: it prints the GGUF layout in a
-readable form, which is useful when studying how a model file is structured.
+`orbix model inspect` is also a learning tool: it prints the GGUF layout in a readable form.
 
-The human-readable tables cut a metadata value or a tensor name at 60 bytes and end it with
-`...`, on a rune boundary so a multi-byte name is never split. One long name is otherwise
-enough to push a table's later columns off screen -- a 300-character tensor name was measured
-doing exactly that to the type and size columns. `--json` is not affected: it carries the whole
-name, because a script looking a tensor up needs the one the file records.
+The human-readable tables cut a metadata value or a tensor name at 60 bytes with a rune-safe
+`...`, because one long name otherwise pushes a table's later columns off screen. `--json`
+carries the whole name, since a script looking a tensor up needs the one the file records.
 
-`--json` keeps each value the type the file declares, with one exception that the format
-forces: a float that is NaN or infinite cannot be a JSON number, because JSON's grammar has no
-token for either, so it is emitted as the string `"NaN"`, `"+Inf"` or `"-Inf"`. Such a value is
-legal in GGUF -- a float is any 64-bit pattern -- and a checkpoint can carry one as a sentinel
-or from a broken conversion. The alternative was letting one such key fail the whole document:
-before this, `model inspect --json` on a file with a NaN printed `json: unsupported value: NaN`
-and nothing else, so none of the file's other keys could be read.
+`--json` keeps each value the type the file declares, with one exception the format forces: a
+NaN or infinite float is emitted as the string `"NaN"`, `"+Inf"` or `"-Inf"`, because JSON has
+no token for either. Such a value is legal in GGUF, and the alternative was one such key
+failing the whole document.
 
-`orbix bench --suite` runs a fixed set of scenarios and prints them as one table. A
-single throughput number answers one question about one machine; the suite is what shows
-which mechanisms pay for themselves. It pairs each mechanism with a control row -- paged
-against contiguous caches, prefix reuse against none, shortest against FIFO -- so a
-difference is attributable to that mechanism rather than to the scenario changing.
+`orbix bench --suite` runs a fixed set of scenarios and prints them as one table. It pairs each
+mechanism with a control row -- paged against contiguous, prefix reuse against none, shortest
+against FIFO -- so a difference is attributable to that mechanism.
 
-How much prefix reuse is worth depends on the mix: the pair above shares 41 prompt tokens
-against 8 generated per request, where the prompt is most of the work. Raising `--max-tokens`
-dilutes the saving, since reuse does not touch generation. A long prompt with a short answer
-(retrieval, classification) is where it pays; a short prompt with a long generation is where it
-does not.
+How much prefix reuse is worth depends on the mix: the pair in the table shares 41 prompt tokens
+against 8 generated per request. Raising `--max-tokens` dilutes the saving, since reuse does not
+touch generation. A long prompt with a short answer is where it pays.
 
 The suite fixes the settings its rows compare -- concurrency, request count, admission
 policy, and cache shape -- so those flags are refused rather than ignored when `--suite` is
@@ -514,11 +507,9 @@ policy shortest  63      401ms    156.9  41ms   MaxActive 1, a short request que
 policy fifo      63      415ms    151.7  401ms  the same queue without reordering
 ```
 
-Those are medians of nine interleaved runs, not one run: on this machine a single run
-moves by more than the difference between neighbouring rows, so one table taken once
-cannot separate them. The `NOTE` column in a live run is longer than the text above --
-it also reports the block pool's shape and the positions the prefix cache reused, which
-are trimmed here to fit.
+Those are medians of nine interleaved runs: a single run moves by more than the difference
+between neighbouring rows. The `NOTE` column in a live run is longer -- it also reports the
+block pool's shape and the positions reused, trimmed here to fit.
 
 `FIRST` is a latency of a different request depending on the row: on a throughput row it is
 how long until *any* request produced a token, and on the two policy rows it is the **short**
@@ -535,15 +526,11 @@ request's own first token. Three rows need a word because their numbers look fla
   prompt until it spans two blocks, because a block is published only once its last position
   is written.
 
-A row can also show fewer tokens than its budget. That is not a measurement failure: the
-model emitted its end-of-sequence token, and the suite says so in the `NOTE` column
-("N request(s) stopped early on EOS") rather than leaving you to work out why two rows
-that should match do not.
-
-A single measurement (without `--suite`) reports the same kind of shortfall as a `note:` line,
-for the case the suite cannot hit: a prompt long enough that the window leaves less room than
-`--max-tokens` asks for. The note names both -- `the 4096-position window cut the budget: 6 of
-100 requested tokens` -- because `finish: length` reads as "the budget was reached" either way.
+A row can show fewer tokens than its budget without being a measurement failure: the model
+emitted its end-of-sequence token, and the `NOTE` column says so. A single measurement reports
+the same kind of shortfall as a `note:` line for the case the suite cannot hit -- a window that
+leaves less room than `--max-tokens` asks for -- naming both counts, because `finish: length`
+reads as "the budget was reached" either way.
 
 `orbix serve` also exports the same numbers over `/metrics` in Prometheus text format,
 so the suite's baseline and a live deployment's behaviour are the same measurements
@@ -735,31 +722,21 @@ Orbix is a learning project, and it is honest about where it stands:
   effects being measured. `orbix bench` prints its own conditions so a table taken
   elsewhere can be judged.
 
-- **Reference kernels are not optimized per instruction.** They are written to be
-  readable, with no SIMD and no assembly. What they do use is more than one core: the
-  partitionable products run on a bounded worker set, which took decoding on
-  stories15M from 65 to 235 tokens per second on a 128-core EPYC.
+- **Reference kernels are not optimized per instruction.** No SIMD and no assembly, because a
+  kernel that cannot be read in the repository's own language defeats the point. The speed
+  comes from parallelism over independent outputs instead, which took decoding on stories15M
+  from 65 to 235 tok/s on a 128-core EPYC.
 
-- **SIMD and assembly are deliberately out of scope.** This project exists to make
-  inference legible in one language, and a kernel that cannot be read in the
-  repository's own language defeats that. Parallelism over independent outputs is where
-  the speed comes from instead, and it is what the numbers above measure.
+- **Parallelism is over independent outputs, never over a reduction.** The split picks which
+  goroutine computes which output element -- rows for a matvec, columns for a transposed product
+  -- and never splits the dot product, so float32 addition is never reassociated and the
+  parallel result is bit-identical to the serial one. A split reduction would be faster on paper
+  and would silently change every number compared against llama.cpp.
 
-- **A model runs in its trained context, and no larger.** The rope table is built for
-  that window, so `--ctx` accepts a smaller value and refuses a larger one with a
-  message naming both numbers. Going past it needs rope scaling -- the frequency
-  adjustment a long-context fine-tune applies -- which this engine does not implement.
-  A generation budget larger than the window is cut to fit, and `--stats` says when
-  that happened, because a run that asked for 128 tokens and printed 123 otherwise
-  looks like the model stopped early.
-
-- **Parallelism is over independent outputs, never over a reduction.** The split decides
-  which goroutine computes which output element -- rows for a matvec, columns for a
-  transposed product -- and never splits the dot product itself, so every element is summed
-  in the same order the serial kernel uses. float32 addition is therefore never reassociated
-  and the parallel result is bit-identical. That is a deliberate constraint: a split reduction
-  would be faster on paper and would silently change every number the project compares against
-  llama.cpp.
+- **A model runs in its trained context, and no larger.** The rope table is built for that
+  window, so `--ctx` accepts a smaller value and refuses a larger one. Going past it needs rope
+  scaling, which this engine does not implement. A budget larger than the window is cut to fit,
+  and `--stats` says when that happened.
 
 - **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 with 32 generated tokens per request it goes 239 tok/s at one stream to 655 tok/s at sixteen, medians of seven interleaved runs. Per-stream speed still drops as streams are added, because the model is one shared resource.
 
@@ -835,19 +812,16 @@ tokens is not a measurement. Negative values are refused everywhere.
 
 A config file is on the roadmap, not in the code.
 
-`--policy` is the flag most likely to need a reason rather than a definition, so: `fifo` is the
-default because submission order is the easiest thing to reason about and every other policy is a
-visible departure from it. `shortest` serves the sequences with the least remaining work first,
-which is what keeps a queue of mixed-size requests from being dominated by its longest member --
-it reorders without bounding anything. `fair` serves whichever sequence has gone longest without a
-turn, and that is the one with a bound to quote: no sequence waits more than about
-`len(active)/MaxActive` rounds in a row, which makes it the choice for a long-running server where
-starving a request is the failure to avoid. `fair` is not the default for the same reason `fifo`
-is: a policy that bounds wait time is only useful if the operator asked for it.
+`--policy` needs a reason rather than a definition. `fifo`, the default, is submission order.
+`shortest` takes the least remaining work first, which keeps a queue of mixed-size requests from
+being dominated by its longest member, and reorders without bounding anything. `fair` takes
+whichever sequence has gone longest without a turn, and is the one with a bound to quote: no
+sequence waits more than about `len(active)/MaxActive` rounds in a row. That makes it the choice
+for a long-running server, and the reason it is not the default -- a bound is only useful if the
+operator asked for it.
 
-What those three do to the same queue, measured on the fixture with `MaxActive 1` and four
-requests whose budgets are 16, 8, 4 and 2 in submission order, as the round each got its
-first token:
+What the three do to one queue -- `MaxActive 1`, four requests budgeted 16, 8, 4, 2 in submission
+order, as the round each got its first token:
 
 | Policy     | First-token rounds | What it did                                                          |
 | ---------- | ------------------ | -------------------------------------------------------------------- |
@@ -855,16 +829,10 @@ first token:
 | `shortest` | 19, 10, 5, 2       | exactly inverted: the 2-token request moved from round 33 to round 2 |
 | `fair`     | 5, 6, 7, 8         | one turn apiece first, then round-robin from there                   |
 
-The inversion is the point of `shortest`: it looks only at remaining work, so the last request
-submitted is served first when it is smallest. `fair` hands everyone a turn before repeating,
-which is why its rounds are consecutive where `fifo`'s span the queue.
-
-The two cache layouts differ in what they reserve, and the difference is large enough to
-decide the flag. A contiguous cache reserves the whole context for every accepted request
-when it arrives, so the cost is `context x KV width x layers`, multiplied by the active
-and queued slots. A paged cache takes blocks as a sequence generates, so memory follows
-what is actually in flight. The server prints the figure it computed at startup, and warns
-when a contiguous reservation passes a gibibyte.
+The two cache layouts differ in what they reserve. A contiguous cache reserves the whole context
+for every accepted request on arrival: `context x KV width x layers`, times the active and queued
+slots. A paged cache takes blocks as a sequence generates, so memory follows what is in flight.
+The server prints the figure it computed at startup and warns past a gibibyte.
 
 A paged server answers `503` with `Retry-After` when the pool cannot hold a request *yet*,
 which is a capacity signal a client or proxy should back off on. It does not answer that for
@@ -887,29 +855,16 @@ counters still move on that path: `orbix_requests_refused_pool_total` is the onl
 survives, and leaving it out made a streaming deployment report no capacity problem at all
 while refusing every request.
 
-`--workers` divides one batched pass across goroutines. What bounds its usefulness is the
-number of independent outputs in a pass, not the number of sequences: a matvec splits by
-output row, so a batch has one row per sequence, but the transposed product behind the output
-projection and the attention value/output projections splits by output *column*, and a decode
-step has thousands of those whatever the batch size. Measured on a 128-core host with eight
-concurrent requests, medians of seven interleaved runs gave 349.6 tokens per second at 8
-workers, 536.6 at 32, and 543.9 at 128. The count is therefore a real knob below 32 and flat
-above it -- 32 and 128 differ by about 1%, which is inside the run-to-run spread, while 8 is
-half again slower. The default of one per CPU sits at the flat end, which is the safe place
-for it.
+`--workers` divides one batched pass across goroutines. What bounds its usefulness is the number
+of independent outputs in a pass, not the number of sequences: a matvec splits by output row, so
+a batch has one row per sequence, while the transposed products split by output *column*, and a
+decode step has thousands of those whatever the batch size. On a 128-core host with eight
+concurrent requests, 349.6 tok/s at 8 workers, 536.6 at 32, 543.9 at 128 -- a real knob below 32
+and flat above it, so the default of one per CPU sits at the safe end.
 
-This measurement was 324.9 and 327.6 (8 against 128, "the same within noise") before the
-transposed matmul moved to a column split. The old figure was right for the old split: a
-row-partitioned product could not use more workers than the batch had rows. The paragraph is
-here rather than deleted because the way it went stale is worth knowing -- the split axis
-decides which bound applies, and changing one silently invalidated the measurement of the
-other.
-
-The same knob on one stream instead of eight: stories15M q4_0 (19 MB, 6 layers, 288 hidden),
-128 tokens from one prompt, five interleaved runs. One worker gave 64.2-65.1 tok/s and 32 gave
-228.7-236.2, a ratio of 3.52x to 3.67x. The `run` example in the CLI section used to say 3.9x,
-which is what the synthetic fixture produces -- its projection is large next to the per-round
-overhead -- and a 19 MB model does not reach that.
+On one stream instead of eight: stories15M q4_0, 128 tokens from one prompt, 64.2-65.1 tok/s at
+one worker against 228.7-236.2 at 32 (3.52x-3.67x). The synthetic fixture reaches 3.9x because
+its projection is large next to the per-round overhead; a 19 MB model does not.
 
 For scale: the 128k-window Llama 3.2 checkpoint in this repository's test set reserves
 8 GiB per request that way (`context_length x kv_heads x head_dim x 2 x 4 x layers`;

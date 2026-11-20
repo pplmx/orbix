@@ -2426,6 +2426,12 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		{"logprobs on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": true}`,
 			"logprobs", nil},
+		// The chat endpoint refuses echo too, and that case was missing while the
+		// completion one was present -- the two lists are separate, so covering one
+		// says nothing about the other.
+		{"echo on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": true}`,
+			"echo", nil},
 		// max_completion_tokens is a limit rather than a response shape, and it is the one
 		// field here whose silent omission the client cannot detect: it generated the
 		// server's default 256 tokens for a request asking for 3, and the reply still

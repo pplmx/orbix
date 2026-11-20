@@ -29,6 +29,40 @@
 // control the prompt exactly sends it to the completions endpoint, which passes text
 // through verbatim.
 //
+// Every error body carries a "code", including the ones a client hits before any field is
+// parsed: invalid_json, unsupported_encoding and body_too_large for a body the decoder
+// rejected, and invalid_value, missing_required_parameter, unsupported_parameter,
+// context_length_exceeded and model_not_found for a request it understood and refused.
+// OpenAI's guidance is to branch on "code" rather than on message text. "param" is present
+// when one field is at fault and absent when the failure is about the body as a whole, and
+// "type" separates invalid_request_error from server_error and from
+// service_unavailable_error, which is the one the SDKs retry.
+//
+// Unsupported request fields are handled by what a client does with the answer. A field
+// that only tunes sampling -- logit_bias, presence_penalty, response_format -- is ignored,
+// because the SDKs send such fields whether or not the engine can use them; the text is not
+// what was asked for, but it is the shape the client reads. A field that describes the
+// response is refused with a 400 naming it: a client that sent n: 3 indexes choices[2], so
+// answering with one choice is not a smaller response but a different one, and the failure
+// would surface as an IndexError far from the request that caused it.
+//
+// The refused set differs per endpoint, because the two schemas do: chat refuses n, logprobs,
+// top_logprobs and echo, while completions refuses n, logprobs, echo, suffix and best_of.
+// max_completion_tokens is refused on both, for a sharper reason than the rest -- it replaces
+// max_tokens rather than accompanying it, so a migrated client sends only the newer name and
+// would otherwise get the default length with nothing saying so.
+//
+// stream_options.include_usage is honoured rather than ignored, because it is the only way a
+// streaming caller learns what it spent: without it a streamed response reports no usage at
+// all. With it, one extra chunk arrives before [DONE] whose choices is an empty array and
+// whose usage holds the whole request's counts, and every ordinary chunk in the same stream
+// carries "usage": null. The counts equal what the non-streaming body reports.
+//
+// A stop string is matched on decoded text, so a multi-token string truncates correctly; what
+// it does not do is stop generation sooner. The sequence runs to its budget unread while the
+// response is already cut. A stop that encodes to one token ("\n", "###") is handed to the
+// engine as an id, so that one halts the sequence itself.
+//
 // The one thing this layer adds beyond transport is /metrics, because exporting the
 // engine's counters is a job that belongs to whoever owns the process lifetime. The
 // numbers themselves are collected in internal/engine: a server that inferred queue

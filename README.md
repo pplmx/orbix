@@ -224,38 +224,24 @@ The server implements `/v1/chat/completions`, `/v1/completions` (streaming and n
 unimplemented path under `/v1` answers 404 in the API's JSON envelope rather than Go's
 plain-text one, because the SDKs decode the body before raising.
 
-Every error body carries a `code`, including the ones a client hits before any field is parsed:
-`invalid_json`, `unsupported_encoding`, `body_too_large`, `invalid_value`,
-`missing_required_parameter`, `unsupported_parameter`, `context_length_exceeded`,
-`model_not_found`. OpenAI's guidance is to branch on `code` rather than message text. `param` is
-present when one field is at fault and absent when the failure is about the body as a whole, and
-`type` separates `invalid_request_error` from `server_error` and from
-`service_unavailable_error` -- the one the SDKs retry.
+Every error body carries a `code`, and `param` names the field at fault when there is one.
+Branch on `code`, not on message text -- OpenAI's guidance, and the reason is that the codes
+cover the bodies a client hits before any field parses (`invalid_json`, `body_too_large`) as well
+as the ones it understands and refuses (`context_length_exceeded`, `unsupported_parameter`).
 
-Unsupported fields are handled by what a client does with the answer. One that only tunes
-sampling -- `logit_bias`, `presence_penalty`, `response_format` -- is ignored, because the SDKs
-send such fields whether or not the engine can use them. One that describes the *response* is
-refused with a `400` naming it and `code: unsupported_parameter`: `n`, `logprobs`, `top_logprobs`,
-`echo`, `suffix`, `best_of`. A client that sent `n: 3` indexes `choices[2]`, so one choice is not
-a smaller response but a different one. Several at once are all named, so one round trip fixes
-the request.
+Unsupported fields split by what a client does with the answer. Sampling knobs -- `logit_bias`,
+`presence_penalty`, `response_format` -- are ignored, because the SDKs send them regardless.
+Fields describing the *response* -- `n`, `logprobs`, `top_logprobs`, `echo`, `suffix`, `best_of`
+-- are refused with a 400 naming every one, since a client that sent `n: 3` indexes `choices[2]`.
+`max_completion_tokens` is refused for a sharper reason: it replaces `max_tokens` rather than
+accompanying it, so a migrated client would silently get the default length.
 
-`max_completion_tokens` is refused for a third reason, and it is the only field whose silent
-omission a client cannot notice. OpenAI's newer name for `max_tokens` has to be sent *instead of*
-it, so a migrated client sends only the new one; the server read `max_tokens`, found zero, and
-generated its default 256 tokens for a request that asked for 3 -- with a well-formed reply and
-nothing saying the length was wrong. Ignoring a limit is worse than ignoring a sampling knob, so
-it gets the same 400.
+`stream_options.include_usage` is honoured: it is the only way a streaming caller learns what it
+spent. The extra chunk carries the counts before `[DONE]` and matches the non-streaming body.
 
-`stream_options.include_usage` is honoured rather than ignored, because it is the only way a
-streaming caller learns what it spent: without it a streamed response reports no usage at all.
-With it, one extra chunk arrives before `[DONE]` whose `choices` is an empty array and whose
-`usage` holds the whole request's counts, and every ordinary chunk in the same stream carries
-`"usage": null`. Both halves are the documented contract, and the counts equal what the
-non-streaming body reports for the same request.
-
-Two things about the chat
-endpoint are worth knowing before pointing a client at it:
+[`internal/server/doc.go`](internal/server/doc.go) is the reference for the full contract -- the
+complete code list, the field-by-field rules, and the stop-string semantics. Two things about the
+chat endpoint are worth knowing before pointing a client at it:
 
 - **The chat template is the model's own, when it can be evaluated.** GGUF stores a
   checkpoint's format as a Jinja2 string under `tokenizer.chat_template`, and
@@ -272,13 +258,9 @@ endpoint are worth knowing before pointing a client at it:
   neutral transcript is merely less good than the model's own format.
   If you would rather control the prompt, send it to `/v1/completions`, which passes
   text through verbatim.
-- **`stop` is matched on text, and stops generation early only for single-token
-  strings.** An earlier version of this note said a stop spanning several tokens
-  was not matched, which understated it: the decoded text is checked against every
-  stop string, so `"中国的首都"` -- four tokens -- truncates correctly. What a
-  multi-token string does not do is stop generation sooner; the sequence runs to
-  its token budget unread while the response is already cut. For `"\n"` and other
-  markers, which encode to one token, the engine halts the sequence itself.
+- **`stop` is matched on decoded text, but only a single-token string stops generation
+  early.** A four-token string like `"中国的首都"` truncates correctly and still runs to its
+  budget unread; `"\n"` encodes to one token and halts the sequence itself.
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \

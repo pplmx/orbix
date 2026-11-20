@@ -1527,3 +1527,126 @@ func TestGetArrayDistinguishesEmptyFromAbsent(t *testing.T) {
 		t.Errorf("GetArray(strings) = %v, %v", got, ok)
 	}
 }
+
+// TestTensorDataRejectsOffsetOverflow pins the specific values the range check's comment
+// says it was written for.
+//
+// The check is ordered -- offset against MaxInt64 first, then start and length against the
+// file -- because a single `start < 0 || start+n > size` test passes when either the cast or
+// the sum has wrapped. The comment records the measurement that found it ("an offset of
+// 2^64-1 produced a tensor that 'read' 16 bytes successfully from before the data section"),
+// but nothing asserted any of those values: the existing test uses a plain out-of-range
+// tensor, which the same check rejects for a much simpler reason.
+//
+// Each case is a boundary of the conversion rather than a random large number: 2^64-1 is the
+// value that becomes -1 as an int64, 2^63 becomes the most negative int64, and MaxInt64 is
+// the largest offset that survives the cast at all -- so it has to be rejected by the file
+// bound instead, which is a different branch.
+func TestTensorDataRejectsOffsetOverflow(t *testing.T) {
+	cases := []struct {
+		name   string
+		offset uint64
+		want   string
+	}{
+		// Cast to int64 gives -1, and -1 + TensorDataLoc is still negative.
+		{"2^64-1", ^uint64(0), "too large"},
+		// The minimum int64: any size becomes positive again in the sum.
+		{"2^63", uint64(1) << 63, "too large"},
+		{"2^63+1", (uint64(1) << 63) + 1, "too large"},
+		// The largest offset that converts cleanly. It reaches the file bound rather than the
+		// cast guard, which is what proves the two branches are separate.
+		{"MaxInt64", uint64(1<<63 - 1), "extends past end of file"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data := buildFile(nil, []TensorInfo{
+				{Name: "w", Dims: []uint64{4}, Type: F32, Offset: c.offset},
+			}, 32, make([]byte, 16))
+			path := filepath.Join(t.TempDir(), "overflow.gguf")
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f, err := Open(path)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			rc, err := f.TensorData(path, "w")
+			if err == nil {
+				// A reader here would serve bytes from wherever the wrapped offset landed,
+				// which is the defect the comment describes.
+				_, _ = rc.Read(make([]byte, 16))
+				_ = rc.Close()
+				t.Fatal("TensorData accepted an offset that cannot address this file")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not contain %q", err, c.want)
+			}
+			// The value itself, so a message that names the wrong end of the range fails.
+			if !strings.Contains(err.Error(), strconv.FormatUint(c.offset, 10)) &&
+				!strings.Contains(err.Error(), "past end of file") {
+				t.Errorf("error %q does not state the offset %d", err, c.offset)
+			}
+		})
+	}
+}
+
+// TestTensorDataStreamsRatherThanReading checks the property the package and the README both
+// claim: tensor data is streamed, not loaded. "Streams tensor data" is in the README's GGUF
+// row and in doc.go, and nothing asserted it -- the existing test reads a 32-byte tensor,
+// where reading and streaming are indistinguishable.
+//
+// The check is allocation against the size of the tensor, not wall time: a reader that
+// loaded the tensor would have to allocate its 8 MiB, and one that seeks and reads 4 KiB
+// cannot. TotalAlloc is used rather than HeapAlloc so a buffer freed before the reading is
+// finished still counts -- allocating and dropping 8 MiB would still be loading it.
+//
+// Eight MiB rather than something larger because the size is written to a temp file: the
+// property is about the order of magnitude, and a test that writes a gigabyte to prove it
+// would not run anywhere.
+func TestTensorDataStreamsRatherThanReading(t *testing.T) {
+	const tensorBytes = 8 << 20
+	data := buildFile(nil, []TensorInfo{
+		{Name: "big", Dims: []uint64{tensorBytes / 4}, Type: F32},
+	}, 32, make([]byte, tensorBytes))
+	path := filepath.Join(t.TempDir(), "big.gguf")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ti, ok := f.Tensor("big")
+	if !ok {
+		t.Fatal("tensor not found")
+	}
+	if n, _ := ti.Bytes(); n != tensorBytes {
+		t.Fatalf("tensor says %d bytes, want %d", n, tensorBytes)
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	rc, err := f.TensorData(path, "big")
+	if err != nil {
+		t.Fatalf("TensorData: %v", err)
+	}
+	head := make([]byte, 4096)
+	if _, err := io.ReadFull(rc, head); err != nil {
+		_ = rc.Close()
+		t.Fatalf("read: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	runtime.ReadMemStats(&after)
+	alloc := int64(after.TotalAlloc) - int64(before.TotalAlloc)
+	// A generous bound: the reader, the 4 KiB buffer, and the measurement itself. Loading
+	// the tensor would be 8 MiB, two thousand times over.
+	if alloc > tensorBytes/4 {
+		t.Errorf("reading 4 KiB of an %d-byte tensor allocated %d bytes (%.1f MiB), so the "+
+			"data was loaded rather than streamed", tensorBytes, alloc, float64(alloc)/(1<<20))
+	}
+}

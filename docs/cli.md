@@ -36,8 +36,16 @@ orbix bench --model ./model.gguf --concurrency 4 --max-tokens 32
 orbix bench --model ./model.gguf --suite     # every scenario in one table
 
 orbix model inspect ./model.gguf
-orbix model inspect --json ./model.gguf   # machine-readable; values keep their GGUF type
+orbix model inspect --json ./model.gguf   # machine-readable; see the note on arrays below
 ```
+
+In the `--json` output a scalar keeps its GGUF type: integers stay numbers, strings stay
+strings, booleans stay booleans, and a non-finite float becomes the string `"NaN"` or `"+Inf"`
+because JSON has no token for either. An **array** does not: it is rendered as the summary string
+the human table shows, such as `"[151387 uint32]"` for a 151387-element `uint32` array. That is a
+count and an element type, not the elements, which is deliberate for vocabularies whose
+token list runs to six figures -- but it means a script that wants the entries cannot read them
+from this output, and `--json` is not a full fidelity dump of the file.
 
 `orbix model inspect` prints the GGUF layout readably. Its tables cut a metadata value or tensor
 name at 60 bytes with a rune-safe `...`, since one long name otherwise pushes the later columns

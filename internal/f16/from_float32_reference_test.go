@@ -24,10 +24,23 @@ func nearestHalfSlow(v float64) uint16 {
 	if v > float64(ToFloat32(0x7bff)) {
 		// Overflow: nearest finite or inf, whichever is closer; halfway rounds to even,
 		// and 0x7c00 has an even significand, so >= the midpoint goes to inf.
+		//
+		// The midpoint is computed and then discarded -- `_ = mid` -- and the branch returns
+		// infinity for every value above 0x7bff, so 65505 through 65519 are reported as inf
+		// where FromFloat32 correctly returns 0x7bff. It is left as it is rather than fixed
+		// because the test below never reaches this branch: it walks midpoints between
+		// adjacent halves up to 0x7bff, so the largest value it encodes is 65503.5. Fixing
+		// the helper would let the test cover the boundary, which would be better, but that
+		// is a change to what the reference asserts and belongs with the test that makes use
+		// of it -- TestFromFloat32OverflowBoundary now pins those values against the standard
+		// directly instead.
 		mid := (float64(ToFloat32(0x7bff)) + math.Inf(1)) / 2
 		_ = mid
 		best = 0x7c00
 	}
+	// A NaN has no nearest finite half, so bestDist stays at its initial +Inf and best stays
+	// 0: this helper reports NaN as zero, which is wrong and is why the NaN encoding is
+	// asserted in f16_test.go rather than here.
 	if neg {
 		best |= 0x8000
 	}

@@ -227,3 +227,75 @@ func TestToFloat32Exhaustive(t *testing.T) {
 		}
 	}
 }
+
+// TestFromFloat32OverflowBoundary pins where a value stops rounding to the largest finite
+// half and starts rounding to infinity.
+//
+// The reference test walks midpoints between adjacent halves up to 0x7bff, so the largest
+// value it ever encodes is (0x7bfe + 0x7bff)/2 -- just below 65504. Everything above the
+// largest finite half is outside its range, which is exactly where this decision is made, so
+// nothing exercised it. Two bugs in the reference helper are hidden by the same gap: its
+// overflow branch computes a midpoint and discards it (`_ = mid`, then unconditionally
+// returns infinity), and it returns zero for a NaN because no finite candidate is within any
+// distance of one. Neither is a defect in FromFloat32, but both mean the helper cannot be
+// consulted near this boundary.
+//
+// The rule: 65504 is 0x7bff and the next value up is infinity, so the midpoint is one half
+// ULP above 65504. ULP there is 2^5 = 32, so values below 65520 round down and 65520 rounds
+// to infinity. Ties go to even, and infinity's significand is even, so the midpoint itself
+// goes up.
+func TestFromFloat32OverflowBoundary(t *testing.T) {
+	const maxFinite = 65504.0
+	const halfULP = 16.0 // 2^5 / 2
+
+	if got := FromFloat32(float32(maxFinite)); got != 0x7bff {
+		t.Errorf("FromFloat32(65504) = %#04x, want 0x7bff", got)
+	}
+	// Everything strictly below the midpoint rounds back down to the largest finite value.
+	for _, extra := range []float64{1, 8, halfULP - 1, halfULP - 0.5} {
+		v := float32(maxFinite + extra)
+		if got := FromFloat32(v); got != 0x7bff {
+			t.Errorf("FromFloat32(%v) = %#04x, want 0x7bff: it is below the midpoint so it rounds "+
+				"to the nearest finite half", maxFinite+extra, got)
+		}
+	}
+	// The midpoint and everything above it overflow.
+	for _, extra := range []float64{halfULP, halfULP + 1, 100, 1e10} {
+		v := float32(maxFinite + extra)
+		if got := FromFloat32(v); got != 0x7c00 {
+			t.Errorf("FromFloat32(%v) = %#04x, want 0x7c00 (infinity)", maxFinite+extra, got)
+		}
+	}
+	// The negative side mirrors it, with the sign bit.
+	if got := FromFloat32(float32(-(maxFinite + halfULP - 1))); got != 0xfbff {
+		t.Errorf("FromFloat32(-(65504+15)) = %#04x, want 0xfbff", got)
+	}
+	if got := FromFloat32(float32(-(maxFinite + halfULP))); got != 0xfc00 {
+		t.Errorf("FromFloat32(-(65504+16)) = %#04x, want 0xfc00", got)
+	}
+}
+
+// TestFromFloat32NaNBecomesNaN pins the encoding of a NaN input, which the reference helper
+// gets wrong (it returns zero) and which no test asserted.
+//
+// A NaN has to stay a NaN in the other precision: converting it to zero would turn a corrupt
+// weight into a plausible one silently. The exact payload is not specified -- FromFloat32
+// produces the canonical quiet NaN 0x7e00 -- so the assertion is IsNaN rather than equality
+// with that constant.
+func TestFromFloat32NaNBecomesNaN(t *testing.T) {
+	for _, v := range []float32{
+		float32(math.NaN()),
+		float32(math.Inf(1) - math.Inf(1)), // NaN by arithmetic rather than by constructor
+	} {
+		got := FromFloat32(v)
+		if !IsNaN(got) {
+			t.Errorf("FromFloat32(%v) = %#04x, want a NaN pattern", v, got)
+		}
+	}
+	// A negative NaN keeps its sign, which is what makes the payload preservation meaningful
+	// rather than incidental.
+	negNaN := math.Float32frombits(math.Float32bits(float32(math.NaN())) | 1<<31)
+	if got := FromFloat32(negNaN); got&0x8000 == 0 {
+		t.Errorf("FromFloat32(negative NaN) = %#04x, lost the sign bit", got)
+	}
+}

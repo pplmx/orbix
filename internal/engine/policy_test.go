@@ -1326,3 +1326,90 @@ func TestFairBoundsTheGapBetweenTurns(t *testing.T) {
 		})
 	}
 }
+
+// TestFairInterleavesNewArrivalsWithALongRunningSequence covers what Fair is for, in the one
+// shape where it differs from FIFO on a real engine.
+//
+// Everywhere else the two agree: a queue made only of never-served sequences has all its
+// lastServed at -1, so Fair falls back to the id tie-break and matches submission order. The
+// divergence needs a sequence that has already run -- its lastServed is a real round number,
+// so a fresh arrival at -1 outranks it -- competing with a long one that still has budget.
+//
+// Measured: FIFO gave the long sequence rounds 2-13 without a break and served the newcomers
+// afterwards; Fair gave it rounds 2, 3, 8, 13 and then interleaved, with the newcomers taking
+// rounds 9 and 14 onwards. The same total round count in both cases, which is why an earlier
+// attempt to tell them apart by round count reported "no difference" -- an ordering property
+// needs the order observed, not its length.
+func TestFairInterleavesNewArrivalsWithALongRunningSequence(t *testing.T) {
+	trace := func(t *testing.T, policy Priority) map[int32][]int {
+		t.Helper()
+		// One active slot, so each round's choice is visible as a single sequence.
+		e, tok, _ := loadModelPath(t, Options{MaxActive: 1, MaxQueued: 16, Policy: policy})
+		prompt := tok.Encode("hi", false)
+
+		rounds := map[int32][]int{}
+		collect := func(ch <-chan Event, id int32) chan struct{} {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for ev := range ch {
+					if ev.HasToken {
+						rounds[id] = append(rounds[id], ev.Round)
+					}
+				}
+			}()
+			return done
+		}
+
+		// A long sequence starts alone and advances, so its lastServed becomes a real round.
+		long, err := e.Submit(Request{Prompt: prompt, MaxTokens: 12})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		longDone := collect(long, 0)
+		for range 3 {
+			e.Pump()
+		}
+		// Short arrivals while it still has budget: these are the sequences that Fair should
+		// let in ahead of it and FIFO should not.
+		var dones []chan struct{}
+		for id := int32(1); id <= 4; id++ {
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			dones = append(dones, collect(ch, id))
+		}
+		for e.Pump() > 0 {
+		}
+		<-longDone
+		for _, d := range dones {
+			<-d
+		}
+		return rounds
+	}
+
+	fifo := trace(t, PriorityFIFO)
+	fair := trace(t, PriorityFair)
+
+	// The property: a newcomer must reach a round before the long sequence finishes. Under
+	// Fair at least one does; under FIFO none does. Asserting both directions is what makes
+	// this a test of the policies rather than of one of them.
+	longFIFO := fifo[0]
+	firstNewcomerFIFO := fifo[1][0]
+	if firstNewcomerFIFO < longFIFO[len(longFIFO)-1] {
+		t.Errorf("FIFO served a newcomer in round %d, before the long sequence finished in round %d; "+
+			"the comparison below assumes FIFO does not interleave", firstNewcomerFIFO, longFIFO[len(longFIFO)-1])
+	}
+	longFair := fair[0]
+	interleaved := false
+	for id := int32(1); id <= 4; id++ {
+		if len(fair[id]) > 0 && fair[id][0] < longFair[len(longFair)-1] {
+			interleaved = true
+		}
+	}
+	if !interleaved {
+		t.Errorf("Fair did not let any newcomer in before the long sequence finished (%v); "+
+			"that is the property it exists for", fair)
+	}
+}

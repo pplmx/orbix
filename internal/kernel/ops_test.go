@@ -918,3 +918,61 @@ func TestKernelShapeErrorsStateTheNumbers(t *testing.T) {
 		}
 	})
 }
+
+// TestSoftmaxAllInfiniteRow covers the one non-finite shape the test above leaves out: a row
+// where every value is the same infinity.
+//
+// TestSoftmaxPropagatesNonFinite has "-Inf is ordinary" for a row with finite values beside it,
+// and "+Inf as the maximum" for a row where one value is infinite. Neither puts an infinity on
+// every element, which takes a different path through the reduction: max is then that infinity
+// too, so the first subtraction is -Inf - -Inf (or +Inf - +Inf), and both are NaN. The row comes
+// back all NaN, which is the same answer the NaN case gives and for the same reason -- a
+// normaliser that cannot be computed leaves no distribution.
+//
+// The case is reachable from a checkpoint whose weights overflowed a conversion, and it is worth
+// distinguishing from the mixed row because the mixed one is the one that WORKS: a finite value
+// beside -Inf takes all the mass while -Inf contributes exp(-Inf) = 0. A test that only had the
+// mixed row would suggest -Inf is always harmless.
+func TestSoftmaxAllInfiniteRow(t *testing.T) {
+	negInf := float32(math.Inf(-1))
+	posInf := float32(math.Inf(1))
+
+	for _, c := range []struct {
+		name string
+		in   []float32
+	}{
+		{"every value -Inf", []float32{negInf, negInf, negInf}},
+		{"every value +Inf", []float32{posInf, posInf, posInf}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			scores := append([]float32(nil), c.in...)
+			Softmax(scores)
+			for i, v := range scores {
+				if !math.IsNaN(float64(v)) {
+					t.Errorf("Softmax(%v)[%d] = %v, want NaN: the maximum equals the value, so the "+
+						"shift is an infinity minus itself", c.name, i, v)
+				}
+			}
+		})
+	}
+
+	// The contrast, asserted in the same test so the two cannot drift apart: a single -Inf in a
+	// row of finite values leaves a usable distribution, with the -Inf element at zero.
+	mixed := []float32{0, negInf, 1}
+	Softmax(mixed)
+	if mixed[1] != 0 {
+		t.Errorf("the -Inf element is %v, want 0", mixed[1])
+	}
+	var sum float64
+	for _, v := range mixed {
+		sum += float64(v)
+	}
+	if math.Abs(sum-1) > 1e-6 {
+		t.Errorf("the mixed row sums to %v, want 1", sum)
+	}
+	// And it must put the mass where the finite logits say: 1 has a higher logit than 0, so its
+	// weight is larger. Without this the sum check would pass on a uniform row.
+	if !(mixed[2] > mixed[0]) {
+		t.Errorf("weights are %v and %v; the larger logit should take the larger share", mixed[2], mixed[0])
+	}
+}

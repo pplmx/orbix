@@ -2214,3 +2214,74 @@ func TestBudgetIsNeverExceededByOne(t *testing.T) {
 		}
 	}
 }
+
+// TestCancelledSequenceStillPublishesItsWholeBlocks covers what happens to the KV work a
+// cancelled request already did.
+//
+// A cancelled sequence releases its blocks, but the full blocks it had already written are
+// finished data: positions 0..block-1 of its prompt do not depend on whether the generation
+// ran to completion. rememberFullBlock publishes a block when its last position is written
+// for exactly that reason, and the index retains its own reference so resetting the sequence
+// does not take the data away.
+//
+// The failure this rules out is not a crash but a waste that no counter shows: if a cancel
+// dropped those publications, every prefix that a client abandons would cost a full prefill
+// the next time it arrives, and the reuse counter -- which is the only place this is
+// visible -- would read zero for a workload made of abandoned streams.
+//
+// The 51-token prompt is deliberate: 12 whole blocks of 4 plus 3 leftover positions, so the
+// expected figure is 48 and a test that counted the tail as reusable would report 51.
+func TestCancelledSequenceStillPublishesItsWholeBlocks(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{
+		MaxActive: 1, Workers: 2, BlockSize: 4, Blocks: 64, PrefixCache: true,
+	})
+	prompt := tok.Encode("the quick brown fox jumps over the lazy dog several times over", true)
+	if len(prompt) != 51 {
+		t.Fatalf("prompt is %d tokens, want 51 for the block arithmetic below", len(prompt))
+	}
+
+	// Run a request and cancel it after prefill, which is where the whole blocks are written.
+	cancel := make(chan struct{})
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 1000, Cancel: cancel})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	// Drain concurrently with pumping. The buffer holds 64 events and a cancel-after-prefill
+	// still gets a token through before the cancel is observed, so pumping to exhaustion first
+	// would fill it -- the sequence would be retired as abandoned after the two-second grace
+	// instead of cancelled, and the test would pass on the wrong path.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for range ch {
+		}
+	}()
+	// One round is the prefill: it writes every prompt position, which is what publishes the
+	// whole blocks. Pumping to exhaustion here would let the 1000-token budget run out or the
+	// model emit EOS, and cancelling after that tests the finish path rather than the cancel.
+	if e.Pump() == 0 {
+		t.Fatal("the sequence finished on its prefilling round, so it was never cancelled")
+	}
+	close(cancel)
+	for e.Pump() > 0 {
+	}
+	if e.Active() != 0 {
+		t.Fatalf("cancelled sequence is still active")
+	}
+	<-drained
+
+	// The same prompt arriving as a fresh request has to hit those blocks.
+	before := e.Stats().PrefixReused
+	ch2, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2})
+	if err != nil {
+		t.Fatalf("Submit after cancel: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	for range ch2 {
+	}
+	if got, want := e.Stats().PrefixReused-before, uint64(48); got != want {
+		t.Errorf("reused %d positions after a cancelled prefill, want %d (12 whole blocks of 4; "+
+			"the 3-token tail is not a whole block)", got, want)
+	}
+}

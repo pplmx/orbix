@@ -761,3 +761,62 @@ func TestEncodeAddsTheDummyPrefixUnconditionally(t *testing.T) {
 		}
 	}
 }
+
+// TestControlMarkersEncodeButDoNotDecode pins the asymmetry between the two directions for a
+// chat template's markers.
+//
+// EncodeWithSpecials turns <|m|> into its own id, because a template means the token and not
+// the eight characters it is spelled from. Decode then drops that id, because a control piece
+// is markup rather than prose: printing it back would put "<|im_start|>" into a user's reply.
+// So the pair is deliberately not a round trip, and stating it here keeps a later reader from
+// "fixing" either half.
+//
+// The surface form is asserted too, not just the id: without the special the same text encodes
+// to the characters separately, which is what a user typing the marker by hand gets, and the
+// two must differ. That difference is the reason the function exists.
+func TestControlMarkersEncodeButDoNotDecode(t *testing.T) {
+	tok := newTestTokenizer(t)
+	const marker = "<|m|>"
+	tok.specials = append(tok.specials, specialToken{text: marker, id: 1})
+
+	// Plain words on purpose: the fixture vocabulary has no newline piece, so a text with
+	// one would decode to the unknown surface and the assertion would be about that instead.
+	const body = "user hi assistant"
+	// As markup: one id, and the text around it survives it.
+	ids := tok.EncodeWithSpecials(marker+body+marker, false)
+	occurrences := 0
+	for _, id := range ids {
+		if id == 1 {
+			occurrences++
+		}
+	}
+	if occurrences != 2 {
+		t.Errorf("the marker became %d ids in %v, want 2", occurrences, ids)
+	}
+	// As prose: the marker is spelled out, so it cannot be one id.
+	plain := tok.Encode(marker+body+marker, false)
+	for _, id := range plain {
+		if id == 1 {
+			t.Errorf("Encode produced the control id for a marker typed as text: %v", plain)
+		}
+	}
+	if len(plain) <= len(ids) {
+		t.Errorf("the same text encoded to %d ids as markup and %d as prose; the markup form "+
+			"should be shorter because the marker collapses", len(ids), len(plain))
+	}
+
+	// Decoding drops the control ids and keeps what they separated.
+	if got, want := tok.Decode(ids), body; got != want {
+		t.Errorf("Decode = %q, want %q: a control piece is markup, not output", got, want)
+	}
+	// Two adjacent markers produce no tokens at all between them, which is what keeps a
+	// template's spacing intact: an empty gap is not text.
+	adjacent := tok.EncodeWithSpecials(marker+marker, false)
+	if len(adjacent) != 2 {
+		t.Errorf("two adjacent markers gave %d ids %v, want exactly 2 and nothing between",
+			len(adjacent), adjacent)
+	}
+	if got := tok.Decode(adjacent); got != "" {
+		t.Errorf("Decode of two adjacent markers = %q, want empty", got)
+	}
+}

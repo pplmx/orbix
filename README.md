@@ -494,6 +494,14 @@ orbix model inspect --json ./model.gguf   # machine-readable; values keep their 
 `orbix model inspect` is also a learning tool: it prints the GGUF layout in a
 readable form, which is useful when studying how a model file is structured.
 
+`--json` keeps each value the type the file declares, with one exception that the format
+forces: a float that is NaN or infinite cannot be a JSON number, because JSON's grammar has no
+token for either, so it is emitted as the string `"NaN"`, `"+Inf"` or `"-Inf"`. Such a value is
+legal in GGUF -- a float is any 64-bit pattern -- and a checkpoint can carry one as a sentinel
+or from a broken conversion. The alternative was letting one such key fail the whole document:
+before this, `model inspect --json` on a file with a NaN printed `json: unsupported value: NaN`
+and nothing else, so none of the file's other keys could be read.
+
 `orbix bench --suite` runs a fixed set of scenarios and prints them as one table. A
 single throughput number answers one question about one machine; the suite is what shows
 which mechanisms pay for themselves. It pairs each mechanism with a control row -- paged

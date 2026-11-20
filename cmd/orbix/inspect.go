@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -273,6 +274,21 @@ func jsonValue(v gguf.Value) any {
 	case gguf.TypeInt8, gguf.TypeInt16, gguf.TypeInt32, gguf.TypeInt64:
 		return v.Int
 	case gguf.TypeFloat32, gguf.TypeFloat64:
+		// A non-finite float has no JSON representation: encoding/json refuses NaN and both
+		// infinities, and refusing them is correct -- JSON's number grammar has no token for
+		// any of the three. The file is still legal, though: a GGUF float is any 64-bit
+		// pattern, and the reader accepts whatever the bits say, so a checkpoint carrying a
+		// NaN (a broken conversion, a sentinel for "unset") can exist and this command has to
+		// describe it rather than exit with an error that names no key. Measured: a file with
+		// test.nan made `model inspect --json` print "orbix: json: unsupported value: NaN" and
+		// nothing else.
+		//
+		// Emitted as the string strconv produces ("NaN", "+Inf", "-Inf"), which is the one
+		// spelling that survives a JSON round trip while still reading as the value it is. A
+		// null would decode as "absent" and a 0 as a real number, and both lose the fact.
+		if math.IsNaN(v.Float) || math.IsInf(v.Float, 0) {
+			return strconv.FormatFloat(v.Float, 'g', -1, 64)
+		}
 		// The float's own precision, as a number rather than the string FormatFloat builds.
 		// A float32 cannot represent more than its type's digits, and encoding/json would
 		// otherwise print the widened float64 in full -- 9.999999747378752e-06 for 1e-5.

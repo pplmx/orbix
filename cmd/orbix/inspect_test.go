@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -115,6 +117,35 @@ func TestJSONValueKeepsTheDeclaredWidth(t *testing.T) {
 			}
 			if wantT, gotT := reflect.TypeOf(c.want), reflect.TypeOf(got); wantT != gotT {
 				t.Errorf("jsonValue(%v) returned %v, want %v", c.in.Type, gotT, wantT)
+			}
+		})
+	}
+
+	// A non-finite float has to survive to the encoder, and this is where it does so. A GGUF
+	// float is any bit pattern and the reader accepts whatever the bits say, so a checkpoint
+	// carrying a NaN is legal input; encoding/json refuses NaN and both infinities because
+	// JSON's number grammar has no token for them, and a value returned here unchanged makes
+	// the whole document fail rather than one field. Measured before the fix: a file with
+	// test.nan made `model inspect --json` print "orbix: json: unsupported value: NaN" and
+	// nothing else, so no metadata could be read at all.
+	//
+	// The string spelling is asserted rather than merely "not a float", because "NaN", "+Inf"
+	// and "-Inf" are what strconv produces and what a reader can recognise. A null would
+	// decode as absent and a zero as a real number; both lose the fact the file records.
+	nonFinite := []struct {
+		name string
+		in   gguf.Value
+		want string
+	}{
+		{"NaN", gguf.Value{Type: gguf.TypeFloat64, Float: math.NaN()}, "NaN"},
+		{"+Inf", gguf.Value{Type: gguf.TypeFloat64, Float: math.Inf(1)}, "+Inf"},
+		{"-Inf", gguf.Value{Type: gguf.TypeFloat64, Float: math.Inf(-1)}, "-Inf"},
+		{"float32 NaN", gguf.Value{Type: gguf.TypeFloat32, Float: math.NaN()}, "NaN"},
+	}
+	for _, c := range nonFinite {
+		t.Run(c.name, func(t *testing.T) {
+			if got := jsonValue(c.in); got != c.want {
+				t.Errorf("jsonValue(%v) = %#v, want the string %q", c.in.Type, got, c.want)
 			}
 		})
 	}
@@ -370,5 +401,90 @@ func TestInspectMarksAnUnsizeableTypePartial(t *testing.T) {
 	// And the tensor itself still appears, so the reader knows how many there are.
 	if !strings.Contains(out, "w") {
 		t.Errorf("the tensor is missing from the report:\n%s", out)
+	}
+}
+
+// TestInspectJSONSurvivesNonFiniteFloats is the end-to-end half of the NaN case.
+//
+// The unit test above pins what jsonValue returns for one value. This drives the command with
+// a real file, because the failure it guards against was not in the projection alone: encoding
+// a document that held a NaN made the whole write fail, so the command printed one line and
+// exited non-zero, and a reader could get nothing out of a file whose other 17 keys were
+// perfectly ordinary.
+//
+// The assertion is that the output parses as JSON at all, then that the values are where they
+// belong. A test that only checked for the absence of an error would pass on an empty document.
+func TestInspectJSONSurvivesNonFiniteFloats(t *testing.T) {
+	var b []byte
+	var u32 [4]byte
+	var u64 [8]byte
+
+	putStr := func(v string) []byte {
+		binary.LittleEndian.PutUint64(u64[:], uint64(len(v)))
+		return append(append([]byte(nil), u64[:]...), v...)
+	}
+	putKey := func(key string, typ uint32) {
+		b = append(b, putStr(key)...)
+		binary.LittleEndian.PutUint32(u32[:], typ)
+		b = append(b, u32[:]...)
+	}
+	putF64 := func(key string, bits uint64) {
+		putKey(key, 12) // float64
+		binary.LittleEndian.PutUint64(u64[:], bits)
+		b = append(b, u64[:]...)
+	}
+
+	b = append(b, []byte("GGUF")...)
+	binary.LittleEndian.PutUint32(u32[:], 3)
+	b = append(b, u32[:]...)
+	binary.LittleEndian.PutUint64(u64[:], 0) // no tensors
+	b = append(b, u64[:]...)
+
+	// Four entries: the architecture, an ordinary float to prove the document is intact, and
+	// the three non-finite values JSON cannot spell.
+	binary.LittleEndian.PutUint64(u64[:], 5)
+	b = append(b, u64[:]...)
+	putKey("general.architecture", 8) // string
+	b = append(b, putStr("llama")...)
+	putF64("test.finite", math.Float64bits(1.5))
+	putF64("test.nan", math.Float64bits(math.NaN()))
+	putF64("test.inf", math.Float64bits(math.Inf(1)))
+	putF64("test.neg_inf", math.Float64bits(math.Inf(-1)))
+
+	path := filepath.Join(t.TempDir(), "nonfinite.gguf")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = run([]string{"model", "inspect", "--json", path}) })
+	if runErr != nil {
+		t.Fatalf("inspect --json refused a file with a NaN float: %v", runErr)
+	}
+
+	var doc struct {
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	// The finite value has to still be a number: turning every float into a string would fix
+	// the crash by giving up on the common case.
+	if got := doc.Metadata["test.finite"]; got != 1.5 {
+		t.Errorf("test.finite = %#v, want the number 1.5", got)
+	}
+	for key, want := range map[string]string{
+		"test.nan":     "NaN",
+		"test.inf":     "+Inf",
+		"test.neg_inf": "-Inf",
+	} {
+		if got := doc.Metadata[key]; got != want {
+			t.Errorf("%s = %#v, want the string %q", key, got, want)
+		}
+	}
+	// And the rest of the document survives, which is the point: one unusual value must not
+	// cost the reader every other key.
+	if got := doc.Metadata["general.architecture"]; got != "llama" {
+		t.Errorf("general.architecture = %#v, want llama", got)
 	}
 }

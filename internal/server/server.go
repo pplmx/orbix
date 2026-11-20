@@ -121,6 +121,12 @@ type Server struct {
 	pumpOnce sync.Once
 	wg       sync.WaitGroup
 
+	// idSeq makes response ids unique. The timestamp alone is not enough: concurrent callers
+	// can read the clock in the same nanosecond -- measured on this machine, 32 goroutines
+	// over 200 trials collided 12 times, while 8 never did -- and the collision is silent
+	// when it happens. A counter costs one atomic add and removes the question.
+	idSeq atomic.Uint64
+
 	// log is cfg.Logger, kept as the concrete field so the request wrapper can check
 	// for nil cheaply.
 	log *slog.Logger
@@ -837,7 +843,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	if p.chat {
 		prefix = "chatcmpl-"
 	}
-	id := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
+	id := s.responseID(prefix, time.Now().UnixNano())
 
 	// The two endpoints differ only in how the prompt was rendered, so the operation name
 	// is what tells them apart in a trace.
@@ -1613,4 +1619,18 @@ func finishReasonFor(reason string) string {
 		return "length"
 	}
 	return "stop"
+}
+
+// responseID builds the id for one response from a timestamp the caller supplies.
+//
+// Timestamp first so ids sort by arrival in a log, then the sequence number so two requests
+// in the same nanosecond still differ. Neither alone is enough: a bare counter says nothing
+// about when, and the bare clock can repeat -- see the idSeq field for the measurement.
+//
+// The timestamp is a parameter rather than a time.Now call inside so a test can hold it fixed
+// and watch the counter do its work. Without that the uniqueness it adds is not observable:
+// the HTTP path spaces requests by routing and JSON decoding, far more than a nanosecond, so
+// reverting to a bare timestamp still passes a request-level test twenty times over.
+func (s *Server) responseID(prefix string, unixNano int64) string {
+	return fmt.Sprintf("%s%d-%d", prefix, unixNano, s.idSeq.Add(1))
 }

@@ -265,6 +265,18 @@ and not), `/v1/models` (and `/v1/models/{id}`, which the SDKs' `models.retrieve`
 the API's JSON error envelope rather than Go's plain-text one, because the SDKs decode the body
 before they raise: a text 404 reaches the caller as a parse failure, not as a not-found.
 
+Every error body carries a `code`, including the ones a client hits before any field is
+parsed: `invalid_json`, `unsupported_encoding` and `body_too_large` for a body the decoder
+rejected, and `invalid_value`, `missing_required_parameter`, `unsupported_parameter`,
+`context_length_exceeded` and `model_not_found` for a request it understood and refused.
+OpenAI's guidance is to branch on `code` rather than on message text, and a client following
+it could previously tell its prompt was too long from its temperature being negative, but not
+either of those from a malformed body -- those three arrived with no code at all. `param` is
+present when one field is at fault and absent when the failure is about the body as a whole,
+and `type` separates a request error (`invalid_request_error`) from the server's own failure
+(`server_error`) and from capacity (`service_unavailable_error`, which is the one the OpenAI
+SDKs retry).
+
 Unsupported request fields are handled by what a client does with the answer. A field that
 only tunes sampling -- `logit_bias`, `presence_penalty`, `response_format` -- is ignored,
 because the SDKs send such fields whether or not the engine can use them and refusing them

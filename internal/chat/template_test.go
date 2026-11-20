@@ -2898,3 +2898,57 @@ func TestToJSONIndentIsBounded(t *testing.T) {
 		})
 	}
 }
+
+// TestSetEscapesALoopBody pins where an assignment made inside a for body is visible after the
+// loop, which is the one place this package deliberately differs from Jinja.
+//
+// Jinja scopes a for body: an assignment there does not escape it, and a name first assigned
+// inside a loop renders empty afterwards. This package writes to the outermost frame, so the
+// value survives. The comment on scope records the measurement against jinja2 3.1.6 and says
+// the difference is kept because no template in the corpus the package was written for depends
+// on either reading -- Llama 3's assigns and reads are both inside the body, which the two
+// agree on.
+//
+// Nothing tested that, so a change towards Jinja's rule would have been silent. This is the
+// behaviour as it stands, not a claim that it is right: if the decision is ever revisited, the
+// test should be changed in the same commit as the comment that explains it.
+func TestSetEscapesALoopBody(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "a"}, {Role: "user", Content: "b"}}
+
+	for _, c := range []struct {
+		name, src, want string
+	}{
+		{
+			name: "a value set before the loop is unchanged by it",
+			src:  `{% set x = "before" %}{% for m in messages %}{% endfor %}{{ x }}`,
+			want: "before",
+		},
+		{
+			name: "a new name assigned in the body survives the loop",
+			src:  `{% for m in messages %}{% set x = "inside" %}{% endfor %}{{ x }}`,
+			want: "inside",
+		},
+		{
+			name: "the body sees its own assignment",
+			src:  `{% for m in messages %}{% set x = "in" %}{{ x }}{% endfor %}`,
+			want: "inin",
+		},
+		{
+			name: "the last iteration wins after the loop",
+			src:  `{% set z = "a" %}{% for m in messages %}{% set z = m.content %}{{ z }}{% endfor %}-{{ z }}`,
+			want: "ab-b",
+		},
+		{
+			name: "an if body is not a scope either",
+			src:  `{% if true %}{% set y = "iffed" %}{% endif %}{{ y }}`,
+			want: "iffed",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := render(t, c.src, msgs, Inputs{})
+			if got != c.want {
+				t.Errorf("%q rendered %q, want %q", c.src, got, c.want)
+			}
+		})
+	}
+}

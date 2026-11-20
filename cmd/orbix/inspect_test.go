@@ -631,3 +631,76 @@ func TestInspectTruncatesLongTensorNamesOnce(t *testing.T) {
 			len(doc.Tensors[0].Name), len(long))
 	}
 }
+
+// TestInspectCannotBeMadeToPrintExtraRows covers what an untrusted model file can do to the
+// human-readable table.
+//
+// Every string in a GGUF is attacker-controlled: general.name, general.architecture, the
+// metadata values and the tensor names. tabwriter ends a row at a newline and starts a column
+// at a tab, so a name containing both lets the file print statistics about itself that the tool
+// never measured. Measured before the sanitizer existed, a fixture whose general.name was
+// "Evil\nArchitecture\tfake" produced a line reading "Architecture  fake" above the real
+// "Architecture (unknown)" row.
+//
+// The assertion counts lines rather than pattern-matching, because the failure is structural:
+// an injected row is invisible to any check that only looks for the strings the injector
+// planted. The two-directory fixture gives a fixed line count to compare against.
+func TestInspectCannotBeMadeToPrintExtraRows(t *testing.T) {
+	clean := &gguf.File{Metadata: map[string]gguf.Value{
+		"general.name":         {Type: gguf.TypeString, Str: "MyModel"},
+		"general.architecture": {Type: gguf.TypeString, Str: "llama"},
+	}}
+	var cleanBuf bytes.Buffer
+	if err := writeHuman(&cleanBuf, clean, "/x.gguf"); err != nil {
+		t.Fatalf("writeHuman: %v", err)
+	}
+	wantLines := bytes.Count(cleanBuf.Bytes(), []byte("\n"))
+
+	for _, c := range []struct {
+		name  string
+		value string
+	}{
+		{"a newline in general.name", "Evil\nArchitecture\tfake"},
+		{"a carriage return", "Evil\rArchitecture\tfake"},
+		{"only whitespace controls", "\n\t\r"},
+		{"a lone newline", "\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := &gguf.File{Metadata: map[string]gguf.Value{
+				"general.name":         {Type: gguf.TypeString, Str: c.value},
+				"general.architecture": {Type: gguf.TypeString, Str: "llama"},
+			}}
+			var buf bytes.Buffer
+			if err := writeHuman(&buf, f, "/x.gguf"); err != nil {
+				t.Fatalf("writeHuman: %v", err)
+			}
+			if got := bytes.Count(buf.Bytes(), []byte("\n")); got != wantLines {
+				t.Errorf("a name of %q produced %d lines, want %d: the file injected "+
+					"%d of its own", c.value, got, wantLines, got-wantLines)
+			}
+			// The planted text must not appear as a label at the start of a line, which is
+			// what an injected row would look like.
+			for _, line := range strings.Split(buf.String(), "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "fake") {
+					t.Errorf("the file started a line with its own text: %q", line)
+				}
+			}
+		})
+	}
+
+	// The value is still shown, with the separators replaced rather than dropped: hiding it
+	// would leave a reader unable to tell a sanitized name from a truncated one.
+	t.Run("the text survives", func(t *testing.T) {
+		f := &gguf.File{Metadata: map[string]gguf.Value{
+			"general.name":         {Type: gguf.TypeString, Str: "Evil\nArchitecture\tfake"},
+			"general.architecture": {Type: gguf.TypeString, Str: "llama"},
+		}}
+		var buf bytes.Buffer
+		if err := writeHuman(&buf, f, "/x.gguf"); err != nil {
+			t.Fatalf("writeHuman: %v", err)
+		}
+		if !strings.Contains(buf.String(), "Evil Architecture fake") {
+			t.Errorf("the sanitized name is missing from:\n%s", buf.String())
+		}
+	})
+}

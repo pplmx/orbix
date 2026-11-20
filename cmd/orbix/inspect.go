@@ -48,10 +48,10 @@ func writeHuman(w io.Writer, f *gguf.File, path string) error {
 	}
 	arch, archErr := f.Arch()
 
-	fmt.Fprintf(tw, "File\t%s\n", path)
-	fmt.Fprintf(tw, "Name\t%s\n", name)
+	fmt.Fprintf(tw, "File\t%s\n", sanitizeCell(path))
+	fmt.Fprintf(tw, "Name\t%s\n", sanitizeCell(name))
 	if archErr == nil {
-		fmt.Fprintf(tw, "Architecture\t%s\n", arch)
+		fmt.Fprintf(tw, "Architecture\t%s\n", sanitizeCell(arch))
 	} else {
 		fmt.Fprintf(tw, "Architecture\t(unknown)\n")
 	}
@@ -104,7 +104,7 @@ func printHyperparams(tw *tabwriter.Writer, f *gguf.File, arch string) {
 			fmt.Fprintln(tw, "Hyperparameters")
 			printed = true
 		}
-		fmt.Fprintf(tw, "  %s\t%s\n", k.label, formatValue(v))
+		fmt.Fprintf(tw, "  %s\t%s\n", k.label, sanitizeCell(formatValue(v)))
 	}
 }
 
@@ -118,7 +118,7 @@ func printHyperparams(tw *tabwriter.Writer, f *gguf.File, arch string) {
 func printTokenizerLine(tw *tabwriter.Writer, f *gguf.File) {
 	tok, err := tokenize.New(f)
 	if err != nil {
-		fmt.Fprintf(tw, "\nTokenizer\t(unusable: %v)\n", err)
+		fmt.Fprintf(tw, "\nTokenizer\t(unusable: %s)\n", sanitizeCell(err.Error()))
 		return
 	}
 	model, _ := f.String("tokenizer.ggml.model")
@@ -126,7 +126,7 @@ func printTokenizerLine(tw *tabwriter.Writer, f *gguf.File) {
 	if name == "" {
 		name = "(none)"
 	}
-	fmt.Fprintf(tw, "\nTokenizer\t%s, pre-tokenizer %s\n", model, name)
+	fmt.Fprintf(tw, "\nTokenizer\t%s, pre-tokenizer %s\n", sanitizeCell(model), sanitizeCell(name))
 
 	switch {
 	case tok.PreImplemented():
@@ -206,7 +206,7 @@ func printTensors(tw *tabwriter.Writer, ew *errWriter, f *gguf.File) error {
 		// The name is truncated only here: writeJSON emits it whole, because a script reading
 		// the machine-readable form wants to look the tensor up by its real name.
 		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
-			truncateForDisplay(ti.Name, maxValueWidth), ti.Type, shape, size)
+			sanitizeCell(truncateForDisplay(ti.Name, maxValueWidth)), ti.Type, shape, size)
 	}
 	tw.Flush()
 	return ew.err
@@ -401,4 +401,30 @@ func truncateForDisplay(s string, max int) string {
 		keep--
 	}
 	return s[:keep] + "..."
+}
+
+// sanitizeCell makes a value safe to print as one table cell.
+//
+// A model file is untrusted input: general.name, general.architecture, the metadata strings and
+// the tensor names are all whatever the file says, and tabwriter ends a row at a newline and
+// starts a column at a tab. Measured before this existed, a fixture whose general.name was
+// "Evil\nArchitecture\tfake" produced a line reading "Architecture  fake" above the real
+// "Architecture (unknown)" row -- the file could print statistics about itself that the tool
+// never measured.
+//
+// Control characters are replaced with a visible marker rather than dropped, so a reader can
+// tell the value was sanitized instead of wondering why a name looks truncated.
+func sanitizeCell(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
 }

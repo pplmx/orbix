@@ -952,3 +952,36 @@ func TestWriteTableSkipsWritesAfterTheFirstFailure(t *testing.T) {
 			w.calls)
 	}
 }
+
+// TestRunEchoPrintsThePromptFirst covers --echo, which had no test.
+//
+// Without it a run prints only what the model generated, so a reader copying the output into a
+// document gets an answer with no question. With it the prompt is printed first and the generated text
+// follows, which is also why the code decodes only the generated part -- printing the whole output would
+// repeat the prompt.
+func TestRunEchoPrintsThePromptFirst(t *testing.T) {
+	model := suiteModel(t)
+	const prompt = "Once upon a time"
+
+	withEcho := captureStdout(t, func() {
+		if err := cmdRun([]string{"--model", model, "--max-tokens", "4", "--echo", prompt}); err != nil {
+			t.Errorf("run --echo: %v", err)
+		}
+	})
+	withoutEcho := captureStdout(t, func() {
+		if err := cmdRun([]string{"--model", model, "--max-tokens", "4", prompt}); err != nil {
+			t.Errorf("run: %v", err)
+		}
+	})
+
+	if !strings.HasPrefix(withEcho, prompt) {
+		t.Errorf("--echo output does not start with the prompt: %q", withEcho)
+	}
+	if strings.HasPrefix(withoutEcho, prompt) {
+		t.Errorf("output without --echo starts with the prompt: %q", withoutEcho)
+	}
+	// And the prompt appears exactly once: the generated part must not repeat it.
+	if n := strings.Count(withEcho, prompt); n != 1 {
+		t.Errorf("--echo printed the prompt %d times, want 1: %q", n, withEcho)
+	}
+}

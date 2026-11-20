@@ -4413,3 +4413,67 @@ func TestNoCORSAccessControlHeadersIsPartOfTheTextPlainDecision(t *testing.T) {
 		t.Errorf("the preflight response carries Access-Control-Allow-Origin %q", got)
 	}
 }
+
+// TestChatMultiTurnReusesTheSharedPrefix covers the feature end to end rather than per layer.
+//
+// The engine's reuse is tested in its own package, and the CLI's REPL is tested too, but the
+// HTTP path between them had nothing: a change that rendered the conversation differently
+// between turns -- a timestamp, a re-serialised system prompt, a different order of the same
+// messages -- would make every turn's prefix miss, and every test would still pass. The
+// feature exists so that a multi-turn conversation costs one prefill instead of one per turn,
+// and the only way to see it from here is the engine's counter.
+//
+// Measured with a 512-position fixture, block size 16: the first turn reuses nothing, the
+// second reuses 48 positions -- the three whole blocks the two prompts share.
+func TestChatMultiTurnReusesTheSharedPrefix(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 2, BlockSize: 16, Blocks: 64, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.StartPump(context.Background())
+	t.Cleanup(srv.Shutdown)
+
+	// Long enough to span three whole blocks, so there is something to reuse.
+	const first = "Once upon a time there was a small model that could"
+	turn := func(body string) uint64 {
+		t.Helper()
+		post(t, srv.Handler(), "/v1/chat/completions", body)
+		return eng.Stats().PrefixReused
+	}
+
+	one := turn(fmt.Sprintf(
+		`{"messages":[{"role":"user","content":%q}],"max_tokens":2}`, first))
+	if one != 0 {
+		t.Errorf("the first turn reused %d positions; there was nothing cached yet", one)
+	}
+
+	two := turn(fmt.Sprintf(
+		`{"messages":[{"role":"user","content":%q},`+
+			`{"role":"assistant","content":"Yes."},{"role":"user","content":"More?"}],`+
+			`"max_tokens":2}`, first))
+	if two <= one {
+		t.Fatalf("the second turn reused %d positions, the same as the first (%d): the shared "+
+			"prefix did not hit, so every turn pays a full prefill", two, one)
+	}
+	// Whole blocks only, since a partial block is never published.
+	if added := two - one; added%16 != 0 {
+		t.Errorf("the second turn added %d reused positions, which is not a whole number of "+
+			"16-position blocks", added)
+	}
+}

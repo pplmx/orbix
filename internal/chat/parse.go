@@ -61,7 +61,8 @@ func parse(pieces []piece) ([]node, error) {
 		return nil, err
 	}
 	if term.keyword != "" {
-		return nil, fmt.Errorf("chat: unexpected {%% %s %%} with no open block", term.keyword)
+		return nil, fmt.Errorf("chat: unexpected {%% %s %%} with no open block, at offset %d",
+			term.keyword, term.offset)
 	}
 	return nodes, nil
 }
@@ -73,7 +74,11 @@ func parse(pieces []piece) ([]node, error) {
 // site would duplicate the split rules.
 type term struct {
 	keyword string
-	arg     string
+	// offset is where the closing tag begins, so an error about it can point at the line. The
+	// enclosing block reports these, and a template with several if blocks would otherwise
+	// name only the keyword.
+	offset int
+	arg    string
 }
 
 // parseBody parses nodes until a statement that closes the current block, which it
@@ -102,14 +107,14 @@ func (p *parser) parseBody() (nodes []node, t term, err error) {
 			switch keyword {
 			case "if":
 				p.pos++
-				n, err := p.parseIf(rest)
+				n, err := p.parseIf(rest, pc.offset)
 				if err != nil {
 					return nil, term{}, err
 				}
 				nodes = append(nodes, n)
 			case "for":
 				p.pos++
-				n, err := p.parseFor(rest)
+				n, err := p.parseFor(rest, pc.offset)
 				if err != nil {
 					return nil, term{}, err
 				}
@@ -124,9 +129,10 @@ func (p *parser) parseBody() (nodes []node, t term, err error) {
 			case "elif", "else", "endif", "endfor":
 				// The caller consumes this; leaving pos on it is what lets the
 				// enclosing block decide what to do.
-				return nodes, term{keyword: keyword, arg: rest}, nil
+				return nodes, term{keyword: keyword, arg: rest, offset: pc.offset}, nil
 			default:
-				return nil, term{}, fmt.Errorf("chat: unsupported template statement %q", keyword)
+				return nil, term{}, fmt.Errorf("chat: unsupported template statement %q at offset %d",
+					keyword, pc.offset)
 			}
 		}
 	}
@@ -134,7 +140,7 @@ func (p *parser) parseBody() (nodes []node, t term, err error) {
 }
 
 // parseIf parses an if chain, having consumed the {% if %}.
-func (p *parser) parseIf(condSrc string) (node, error) {
+func (p *parser) parseIf(condSrc string, start int) (node, error) {
 	cond, err := parseExpr(condSrc)
 	if err != nil {
 		return nil, err
@@ -148,7 +154,7 @@ func (p *parser) parseIf(condSrc string) (node, error) {
 
 	for {
 		if t.keyword == "" {
-			return nil, fmt.Errorf("chat: {%% if %%} is never closed")
+			return nil, fmt.Errorf("chat: {%% if %%} opened at offset %d is never closed", start)
 		}
 		p.pos++ // consume the terminator now that its keyword is known
 		switch t.keyword {
@@ -177,13 +183,14 @@ func (p *parser) parseIf(condSrc string) (node, error) {
 		case "endif":
 			return out, nil
 		default:
-			return nil, fmt.Errorf("chat: {%% if %%} closed by {%% %s %%}", t.keyword)
+			return nil, fmt.Errorf("chat: {%% if %%} opened at offset %d closed by {%% %s %%} at offset %d",
+				start, t.keyword, t.offset)
 		}
 	}
 }
 
 // parseFor parses a for loop, having consumed the {% for %}.
-func (p *parser) parseFor(header string) (node, error) {
+func (p *parser) parseFor(header string, start int) (node, error) {
 	// The header is "name in expression".
 	name, rest, ok := strings.Cut(header, " in ")
 	if !ok {
@@ -203,9 +210,10 @@ func (p *parser) parseFor(header string) (node, error) {
 	}
 	if t.keyword != "endfor" {
 		if t.keyword == "" {
-			return nil, fmt.Errorf("chat: {%% for %%} is never closed")
+			return nil, fmt.Errorf("chat: {%% for %%} opened at offset %d is never closed", start)
 		}
-		return nil, fmt.Errorf("chat: {%% for %%} closed by {%% %s %%}", t.keyword)
+		return nil, fmt.Errorf("chat: {%% for %%} opened at offset %d closed by {%% %s %%} at offset %d",
+			start, t.keyword, t.offset)
 	}
 	p.pos++
 	return forNode{varName: name, iter: iter, body: body}, nil

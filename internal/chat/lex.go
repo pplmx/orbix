@@ -20,6 +20,13 @@ const (
 // piece is one fragment of a parsed template.
 type piece struct {
 	kind pieceKind
+	// offset is the byte position in the source where this piece begins, so a parse error can
+	// name where it happened. Without it a template of any size reports only what was wrong,
+	// and the reader counts tags to find which one.
+	//
+	// Text pieces carry the position of their first byte as well, since a stray {{ endif }} is
+	// reported from the parser and the position that helps is the tag's, not the block's.
+	offset int
 	// text is the literal text for pieceText, and the trimmed source for the others.
 	text string
 	// trimBefore and trimAfter record a {%- ... -%} or {{- ... -}} marker, which
@@ -92,6 +99,9 @@ func lex(src string) ([]piece, error) {
 			s = strings.TrimRight(s, " \t\r\n")
 		}
 		if s != "" {
+			// A text piece's offset is not needed: every parse error names a tag, because a
+			// literal cannot be malformed. Leaving it zero keeps flushText from having to
+			// track where the pending literal began across a trim.
 			out = append(out, piece{kind: pieceText, text: s})
 		}
 	}
@@ -163,6 +173,9 @@ func lex(src string) ([]piece, error) {
 			text:       strings.TrimSpace(inner),
 			trimBefore: trimBefore,
 			trimAfter:  trimAfter,
+			// i already points past the tag, so the start is recovered by subtracting what
+			// was consumed: the delimiters, the body, and the closing tag.
+			offset: i - (2 + end + len(closeTag)),
 		})
 	}
 	flushText(false)

@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2752,4 +2753,89 @@ func TestArithmeticDetectsOverflow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseErrorsNameTheOffset covers where each parse error happened.
+//
+// A message that says only what was wrong leaves the reader counting tags: a chat template is
+// tens of lines, and "unsupported template statement "bogus"" does not say which one. The
+// lexer now records each tag's byte position, and the two block errors carry both ends -- the
+// opener and the closer -- because "closed by the wrong tag" is a relationship between two
+// places and naming one of them is half an answer.
+//
+// The expected offsets are computed from the source rather than written as numbers, so a
+// change to how offsets are counted shows up as a mismatch here rather than as a set of
+// assertions that were updated to match.
+func TestParseErrorsNameTheOffset(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		src      string
+		wantIdx  []string // substrings whose index in src the message must report
+		wantWord string
+	}{
+		{
+			name:     "an unsupported statement",
+			src:      "line1\nline2\n{% bogus %}",
+			wantIdx:  []string{"{% bogus %}"},
+			wantWord: "unsupported template statement",
+		},
+		{
+			name:     "a closer with no block",
+			src:      "x\n{% endif %}",
+			wantIdx:  []string{"{% endif %}"},
+			wantWord: "with no open block",
+		},
+		{
+			name:     "an if that never closes",
+			src:      "aa\n{% if true %}",
+			wantIdx:  []string{"{% if true %}"},
+			wantWord: "is never closed",
+		},
+		{
+			name:     "a for that never closes",
+			src:      "\n{% for m in messages %}",
+			wantIdx:  []string{"{% for m in messages %}"},
+			wantWord: "is never closed",
+		},
+		{
+			name:     "an if closed by a for",
+			src:      "{% if x %}{% endfor %}",
+			wantIdx:  []string{"{% if x %}", "{% endfor %}"},
+			wantWord: "closed by",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Parse(c.src)
+			if err == nil {
+				t.Fatalf("Parse accepted %q", c.src)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, c.wantWord) {
+				t.Errorf("error %q does not contain %q", msg, c.wantWord)
+			}
+			for _, tag := range c.wantIdx {
+				want := strconv.Itoa(strings.Index(c.src, tag))
+				if !strings.Contains(msg, "offset "+want) {
+					t.Errorf("error %q does not report offset %s (where %q begins in %q)",
+						msg, want, tag, c.src)
+				}
+			}
+		})
+	}
+
+	// A block closed by the wrong tag names both ends: the opener's offset and the closer's.
+	t.Run("both ends of a mismatched pair", func(t *testing.T) {
+		const src = "xx{% if a %}yy{% endfor %}"
+		_, err := Parse(src)
+		if err == nil {
+			t.Fatalf("Parse accepted %q", src)
+		}
+		msg := err.Error()
+		for _, tag := range []string{"{% if a %}", "{% endfor %}"} {
+			want := strconv.Itoa(strings.Index(src, tag))
+			if !strings.Contains(msg, want) {
+				t.Errorf("error %q omits offset %s (where %q begins)", msg, want, tag)
+			}
+		}
+	})
 }

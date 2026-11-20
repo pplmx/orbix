@@ -47,6 +47,18 @@
 // while message mappings are not.
 //
 // The evaluation is deliberately eager and side-effect free: rendering walks the parsed
-// tree once, with no user-visible state and no loops beyond for, so the cost is
-// proportional to the template size and a malformed template cannot hang the server.
+// tree once, with no user-visible state and no loop construct beyond for. There is no while,
+// so no template can fail to terminate on its own.
+//
+// Cost is another matter, and this paragraph used to claim the two together -- "proportional
+// to the template size", with a malformed template unable to hang the server. Nesting is
+// multiplicative, so that is not true. Measured over a list of 8 messages: 5 nested for
+// bodies took 53ms, 6 took 389ms, 7 took 2.6s from a 246-byte template, and 10 still had not
+// returned after 10 seconds. A template is model-file content, so the depth is a property of
+// the file an operator chose to serve rather than of a request.
+//
+// What a request can influence is the list length, and only through a template that already
+// nests: the published templates here sit at depth 1, where cost stays linear in the message
+// count. A server that must not be slowed by its own checkpoint needs the render to be bounded
+// rather than the recursion to be forbidden, and that bound is not implemented.
 package chat

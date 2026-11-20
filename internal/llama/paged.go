@@ -50,6 +50,17 @@ var ErrPoolExhausted = errors.New("llama: block pool exhausted")
 // state, not merely similar state. PrefixIndex exploits that (see prefix.go); the
 // reference count is what keeps a shared block alive until its last holder is done,
 // and what makes releasing it a decrement rather than a free.
+//
+// A PagedKVCache is owned by one sequence and is not safe for concurrent use: every
+// field below is read and written without a lock, because the engine advances a
+// sequence from the pump goroutine alone. The pool it draws from is a different
+// matter -- that one is shared between sequences and guards its own counters -- so
+// the absence of a mutex here says nothing about the pool.
+//
+// Len, BlocksHeld and ReusedPositions are subject to the same rule. They read the
+// fields directly rather than taking a snapshot, so calling one from a second
+// goroutine while the sequence runs is a data race even though each call looks like
+// a plain getter. Verified with the race detector, which reports one.
 type PagedKVCache struct {
 	cfg   Config
 	pool  *BlockPool

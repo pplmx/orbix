@@ -43,16 +43,24 @@ func TestStatsCountOnlyRoundsThatDidWork(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 	// Rounds counts calls where a sequence was still active at the top of Pump -- the calls
-	// that had work to give a policy. The instruction budget does not land on a round
-	// boundary: the sequence is finished by a token inside a round, and the next Pump still
-	// finds it active and counts itself before noticing. So this is an ordering assertion
-	// (rounds strictly fewer than the token budget plus the finish round) rather than an
-	// equality against a count this test would have to guess at.
+	// that had work to give a policy. The sequence is finished by a token inside a round, and
+	// the next Pump still finds it active and counts itself before noticing, so Rounds is one
+	// more than the number of rounds that emitted anything.
+	//
+	// That one is exact rather than a bound. Measured across five shapes -- one sequence at
+	// budgets 1 and 5, two sequences at 3, four at 2, three at 5 -- the difference was 1 every
+	// time, so the tail is a property of the loop rather than a count this test would have to
+	// guess at. The emitting rounds are collected from the events' own Round field, which is
+	// the global round number stamped before the round runs.
 	callCount := 0
+	emitting := map[int]bool{}
 	for e.Pump() > 0 {
 		callCount++
 	}
-	for range ch {
+	for ev := range ch {
+		if ev.HasToken {
+			emitting[ev.Round] = true
+		}
 	}
 
 	s := e.Stats()
@@ -61,6 +69,10 @@ func TestStatsCountOnlyRoundsThatDidWork(t *testing.T) {
 	}
 	if s.Rounds < uint64(callCount) {
 		t.Errorf("Rounds = %d, fewer than the %d productive Pump calls", s.Rounds, callCount)
+	}
+	if got, want := s.Rounds, uint64(len(emitting))+1; got != want {
+		t.Errorf("Rounds = %d, want %d (the %d rounds that emitted plus the one that only "+
+			"noticed the finished sequence)", got, want, len(emitting))
 	}
 	if s.TokensGenerated != 3 {
 		t.Errorf("TokensGenerated = %d, want 3 (the token budget is the count a caller sees)", s.TokensGenerated)

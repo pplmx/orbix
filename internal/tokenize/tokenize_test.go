@@ -1,6 +1,8 @@
 package tokenize
 
 import (
+	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 
@@ -951,5 +953,85 @@ func TestEncodeSurvivesADocumentSizedInput(t *testing.T) {
 	if got := tok.EncodeWithSpecials(text, false); len(got) != len(ids) {
 		t.Errorf("EncodeWithSpecials produced %d tokens against Encode's %d for text with no "+
 			"markers in it", len(got), len(ids))
+	}
+}
+
+// TestNewRejectsATokenTypeOutsideTheFormat pins the range the token_type array may hold.
+//
+// GGUF defines seven roles, 0 through 6. The loader copied whatever integers it found straight
+// into the type slice, and every comparison in this package is an exact match against Control
+// or Unknown, so an unknown value behaved as Normal without anything saying so. Measured on a
+// hand-built vocabulary whose types were all 99: it encoded and decoded exactly like an
+// all-Normal one, while the same file with all 3 (Control) decoded to the empty string. A
+// damaged Control entry is therefore the silent case -- a marker that should be suppressed
+// starts reaching the text.
+//
+// The package's own rule is that a parser reports an unknown enum rather than guessing, which
+// is why this refuses instead of defaulting to Normal.
+func TestNewRejectsATokenTypeOutsideTheFormat(t *testing.T) {
+	// build writes a vocabulary of four pieces with every type set to v.
+	build := func(t *testing.T, v int32) *gguf.File {
+		t.Helper()
+		var b []byte
+		u32 := func(x uint32) { var w [4]byte; binary.LittleEndian.PutUint32(w[:], x); b = append(b, w[:]...) }
+		u64 := func(x uint64) { var w [8]byte; binary.LittleEndian.PutUint64(w[:], x); b = append(b, w[:]...) }
+		str := func(s string) { u64(uint64(len(s))); b = append(b, s...) }
+		tokens := []string{"<unk>", "<s>", "a", "b"}
+		b = append(b, []byte("GGUF")...)
+		u32(3)
+		u64(0) // no tensors
+		u64(3) // three metadata entries
+		str("tokenizer.ggml.tokens")
+		u32(uint32(gguf.TypeArray))
+		u32(uint32(gguf.TypeString))
+		u64(uint64(len(tokens)))
+		for _, tk := range tokens {
+			str(tk)
+		}
+		str("tokenizer.ggml.token_type")
+		u32(uint32(gguf.TypeArray))
+		u32(uint32(gguf.TypeInt32))
+		u64(uint64(len(tokens)))
+		for range tokens {
+			u32(uint32(v))
+		}
+		str("tokenizer.ggml.model")
+		u32(uint32(gguf.TypeString))
+		str("llama")
+		f, err := gguf.Read(bytes.NewReader(b))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		return f
+	}
+
+	// Every defined role must still load, so the check cannot be satisfied by refusing
+	// everything.
+	for _, v := range []int32{0, 1, 2, 3, 4, 5, 6} {
+		if _, err := New(build(t, v)); err != nil {
+			t.Errorf("New rejected the defined type %d: %v", v, err)
+		}
+	}
+
+	// And the values just outside the range must be named, with the offending value and the
+	// range in the message -- "invalid token type" would leave a reader guessing which entry.
+	for _, c := range []struct {
+		v    int32
+		want string
+	}{
+		{7, "7"}, {99, "99"}, {-1, "-1"},
+	} {
+		_, err := New(build(t, c.v))
+		if err == nil {
+			t.Errorf("New accepted the undefined type %d; it would behave as Normal", c.v)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, c.want) {
+			t.Errorf("error %q does not name the value %s", msg, c.want)
+		}
+		if !strings.Contains(msg, "0-6") {
+			t.Errorf("error %q does not name the valid range", msg)
+		}
 	}
 }

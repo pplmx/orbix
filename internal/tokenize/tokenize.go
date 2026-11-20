@@ -424,6 +424,17 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		}
 		t.types = make([]TokenType, len(types))
 		for i, v := range types {
+			if v < int32(Undefined) || v > int32(Byte) {
+				// GGUF's token_type array holds the seven roles above and nothing else.
+				// Carrying an unknown value through would make it behave as Normal -- every
+				// comparison in this package is an exact match against Control or Unknown --
+				// so a damaged Control entry would start reaching the decoded text instead of
+				// being suppressed. Measured before this check: a vocabulary whose types were
+				// all 99 encoded and decoded like all-Normal, and one whose types were all 3
+				// (Control) decoded to the empty string.
+				return nil, fmt.Errorf("tokenize: token %d has type %d, outside the 0-%d range the format defines",
+					i, v, int32(Byte))
+			}
 			t.types[i] = TokenType(v)
 		}
 	} else {

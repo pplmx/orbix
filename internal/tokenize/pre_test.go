@@ -3540,3 +3540,161 @@ func TestPrevRuneStartBoundaries(t *testing.T) {
 		}
 	})
 }
+
+// TestPreNameMappingIsComplete pins which family each tokenizer.ggml.pre name selects.
+//
+// Every other test in this file builds a Tokenizer{pre: preXXX} directly, which exercises
+// the rule but skips the switch in New that chooses it. A name mapped to the wrong family --
+// "deepseek-llm" landing on preGPT2, say -- would tokenize differently from the reference
+// and no existing test would notice, because none of them goes through the name.
+//
+// The table is written out rather than derived because Go cannot enumerate the switch, and
+// that is the point: a new case added to New has to add a line here, where the family it
+// chose is visible in the diff.
+func TestPreNameMappingIsComplete(t *testing.T) {
+	cases := []struct {
+		name string
+		want preType
+	}{
+		{"qwen2", preQwen2},
+		{"deepseek-r1-qwen", preQwen2},
+		{"kormo", preQwen2},
+		{"f2llmv2", preQwen2},
+		{"hunyuan", preQwen2},
+		{"solar-open", preQwen2},
+		{"megrez", preQwen2},
+		{"stablelm2", preQwen2},
+		{"gpt-2", preGPT2},
+		{"phi-2", preGPT2},
+		{"jina-es", preGPT2},
+		{"jina-de", preGPT2},
+		{"gigachat", preGPT2},
+		{"jina-v2-es", preGPT2},
+		{"jina-v2-de", preGPT2},
+		{"a.x-4.0", preGPT2},
+		{"mellum", preGPT2},
+		{"modern-bert", preGPT2},
+		{"olmo", preGPT2},
+		{"mpt", preGPT2},
+		{"jais", preGPT2},
+		{"trillion", preGPT2},
+		{"granite-docling", preGPT2},
+		{"roberta-bpe", preGPT2},
+		{"jina-v1-en", preGPT2},
+		{"jina-v2-code", preGPT2},
+		{"exaone4", preGPT2},
+		{"starcoder", preStarCoder},
+		{"refact", preStarCoder},
+		{"command-r", preStarCoder},
+		{"smollm", preStarCoder},
+		{"codeshell", preStarCoder},
+		{"exaone", preStarCoder},
+		{"minerva-7b", preStarCoder},
+		{"mellum2", preStarCoder},
+		{"deepseek-v3", preDeepseek3},
+		{"hunyuan-dense", preDeepseek3},
+		{"joyai-llm", preDeepseek3},
+		{"hy_v4", preDeepseek3},
+		{"tekken", preTekken},
+		{"nemotron-3.5-embed", preTekken},
+		{"pixtral", preTekken},
+		{"granite-embed-multi-97m", preGPT4O},
+		{"gpt-4o", preGPT4O},
+		{"llama4", preGPT4O},
+		{"inkling2", preGPT4O},
+		{"kanana2", preGPT4O},
+		{"talkie", preGPT4O},
+		{"minimax-m2", preGPT4O},
+		{"chatglm-bpe", preLlama3},
+		{"glm4", preLlama3},
+		{"glm5", preLlama3},
+		{"dbrx", preLlama3},
+		{"smaug-bpe", preLlama3},
+		{"llama-bpe", preLlama3},
+		{"llama3", preLlama3},
+		{"llama-v3", preLlama3},
+		{"falcon3", preLlama3},
+		{"falcon-h1", preLlama3},
+		{"midm-2.0", preLlama3},
+		{"lfm2", preLlama3},
+		{"jina-v5-nano", preLlama3},
+		{"whitespace", preWhitespace},
+		{"bloom", preBloom},
+		{"gpt3-finnish", preBloom},
+		{"poro-chat", preBloom},
+		{"grok-2", preBailingMoE},
+		{"bailingmoe", preBailingMoE},
+		{"bailingmoe2", preBailingMoE},
+		{"llada-moe", preBailingMoE},
+		{"cohere2moe", preTinyAya},
+		{"tiny_aya", preTinyAya},
+		{"exaone-moe", preExaoneMoE},
+		{"tekken-num3", preTekkenNum3},
+		{"youtu", preYoutu},
+		{"spark2_5", preSpark25},
+		{"chameleon", preChameleon},
+		{"k2-horizon", preK2Horizon},
+		{"afmoe", preAfMoE},
+		{"kimi-k2", preKimiK2},
+		{"jais-2", preJais2},
+		{"zonos3", preZonos3},
+		{"minicpm5", preMiniCPM5},
+		{"seed-coder", preSeedCoder},
+		{"qwen35", preQwen35},
+		{"ufakzeka", preUfakzeka},
+		{"flint", preFlint},
+		{"laguna", preLaguna},
+		{"soprano", preSoprano},
+		{"superbpe", preSuperBPE},
+		{"viking", preViking},
+		{"sarvam-moe", preMMBert},
+		{"domyn-small", preMMBert},
+		{"gemma4", preMMBert},
+		{"granite-embed-multi-311m", preMMBert},
+		{"mmbert", preMMBert},
+		{"deepseek-llm", preDeepseekLLM},
+		{"deepseek-coder", preDeepseekCoder},
+		{"falcon", preFalcon},
+		{"default", preNone},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := gguftest.Model{
+				TokenizerModel: "gpt2", Pre: c.name, NoBytes: true,
+			}.Write(t, t.TempDir())
+			f, err := gguf.Open(path)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			tok, err := New(f)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if tok.pre != c.want {
+				t.Errorf("%q selected pre=%d, want %d", c.name, tok.pre, c.want)
+			}
+			if tok.preName != c.name {
+				t.Errorf("%q recorded preName=%q, want the name the file gave", c.name, tok.preName)
+			}
+		})
+	}
+
+	// A name the package does not implement must fall back to preNone rather than to an
+	// arbitrary family: that is what makes an unknown pre-tokenizer behave like no
+	// pre-tokenizer at all.
+	path := gguftest.Model{
+		TokenizerModel: "gpt2", Pre: "not-a-real-pretokenizer", NoBytes: true,
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := New(f)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if tok.pre != preNone {
+		t.Errorf("an unknown name selected pre=%d, want preNone", tok.pre)
+	}
+}

@@ -34,6 +34,14 @@ func newTestServer(t *testing.T) (*Server, *tokenize.Tokenizer) {
 
 // newTestServerModel is newTestServer over a fixture the test describes, for tests that
 // need a property the default does not have -- generation that runs to its budget, say.
+//
+// The server these helpers return is already pumping: newTestServerConfig starts the
+// engine goroutine before returning. A test must not call StartPump again -- two goroutines
+// inside Pump is the one thing the engine's contract forbids, and the result is a data race
+// on the sequence fields rather than a failed assertion, so the mistake looks like a race in
+// the engine instead of a misuse of this helper. Use these for anything that needs
+// generation to advance; call New and StartPump yourself only when the pump start has to be
+// observed, as the shutdown tests do.
 func newTestServerModel(t *testing.T, model gguftest.Model) (*Server, *tokenize.Tokenizer) {
 	t.Helper()
 	return newTestServerConfig(t, model, Config{})
@@ -3963,4 +3971,37 @@ func TestValidationOrderIsFixed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStartPumpIsIdempotent pins that a second call does not start a second pump.
+//
+// The engine permits exactly one goroutine inside Pump -- it owns one set of scratch
+// buffers, so two rounds at once would write the same slices. Shutdown was already guarded
+// by a sync.Once while StartPump was not, and the asymmetry is easy to hit: the test helpers
+// in this file start the pump themselves, so a test that also calls StartPump gets two
+// goroutines and a data race on the sequence fields. Measured before this guard, that
+// arrangement produced four DATA RACE reports from one concurrent request loop, and the
+// report names engine.Pump rather than the second start.
+//
+// The assertion is a concurrent request loop under -race: with the guard one pump serves
+// them, and without it the detector fires. The requests are what make it observable -- an
+// idle server has no sequences for the second pump to race on.
+func TestStartPumpIsIdempotent(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 256})
+	// newTestServerModel already started one. These must be no-ops.
+	srv.StartPump(context.Background())
+	srv.StartPump(context.Background())
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 20 {
+				req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+					strings.NewReader(`{"prompt": "hi", "max_tokens": 2}`))
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+			}
+		})
+	}
+	wg.Wait()
 }

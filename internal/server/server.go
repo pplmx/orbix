@@ -114,6 +114,11 @@ type Server struct {
 	mux      *http.ServeMux
 	stop     chan struct{}
 	stopOnce sync.Once
+	// pumpOnce makes StartPump idempotent, the way stopOnce makes Shutdown idempotent.
+	// A second StartPump would put two goroutines inside Pump, which is the one thing the
+	// engine's contract forbids: measured, it is a data race on the sequence fields rather
+	// than a panic, so the symptom appears in the engine while the cause is here.
+	pumpOnce sync.Once
 	wg       sync.WaitGroup
 
 	// log is cfg.Logger, kept as the concrete field so the request wrapper can check
@@ -243,9 +248,14 @@ func (s *Server) run(ctx context.Context) {
 // where Shutdown's Wait sees a zero counter, returns, and reports a clean stop while the
 // pump is still starting. Run itself cannot close that window because by the time it runs
 // the caller has already been given a goroutine handle.
+// StartPump starts the goroutine that advances the engine. Calling it twice is a no-op
+// rather than a second pump: the engine may have only one goroutine inside Pump, and two
+// would race on the sequence fields it writes there.
 func (s *Server) StartPump(ctx context.Context) {
-	s.wg.Add(1)
-	go s.run(ctx)
+	s.pumpOnce.Do(func() {
+		s.wg.Add(1)
+		go s.run(ctx)
+	})
 }
 
 // Shutdown stops the pump goroutine and waits for it.

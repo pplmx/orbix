@@ -400,6 +400,7 @@ func TestMetricsOmitsPoolMetricsWithoutAPool(t *testing.T) {
 	for _, name := range []string{
 		"orbix_kv_pool_blocks",
 		"orbix_kv_pool_free",
+		"orbix_kv_pool_block_size",
 		"orbix_kv_pool_used_fraction",
 	} {
 		if _, ok := values[name]; ok {

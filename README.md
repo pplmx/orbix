@@ -879,6 +879,18 @@ and queued slots. A paged cache takes blocks as a sequence generates, so memory 
 what is actually in flight. The server prints the figure it computed at startup, and warns
 when a contiguous reservation passes a gibibyte.
 
+A paged server answers `503` with `Retry-After` when the pool cannot hold a request *yet*,
+which is a capacity signal a client or proxy should back off on. It does not answer that for
+a request whose own prompt and budget need more blocks than the pool holds at all: nothing
+another request finishes makes room for it, so retrying only repeats the answer. That case is
+refused up front with a `400` whose message names both counts -- what the request needs and
+what the pool has -- and suggests a shorter prompt, a lower `max_tokens`, or a larger
+`--blocks`. Measured on the 256-position fixture with `--blocks 2 --block-size 16`: an
+11-token prompt asking for 4 tokens returns `400` "needs 3 KV cache blocks ... but the pool
+holds 2", while a shorter prompt against the same idle server returns `200`. Before that
+check existed the request got `503 Retry-After: 1` on every retry, with
+`orbix_kv_pool_free` sitting at 2 the whole time.
+
 `--workers` divides one batched pass across goroutines. What bounds its usefulness is the
 number of independent outputs in a pass, not the number of sequences: a matvec splits by
 output row, so a batch has one row per sequence, but the transposed product behind the output

@@ -722,6 +722,37 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	if room := s.cfg.ContextLen - len(promptTokens); maxTokens > room {
 		maxTokens = room
 	}
+	// A request that cannot fit the block pool is refused now, as a 400, rather than being
+	// submitted and failed later as a 503 with Retry-After.
+	//
+	// Those are two different situations that used to share one answer. A pool that is busy
+	// is temporary: the same request succeeds once another sequence releases its blocks, and
+	// Retry-After is exactly what a client or proxy should act on. A request whose own
+	// prompt plus budget needs more blocks than the pool holds is permanent: nothing another
+	// request does makes room for it, so every retry gets the same 503 and the client backs
+	// off forever. Measured on the 256-position fixture with --blocks 2 --block-size 16 --
+	// two blocks, 32 positions -- an 11-token prompt asking for 4 tokens needs 3 blocks: it
+	// returned 503 with Retry-After 1 on four attempts two seconds apart while
+	// orbix_kv_pool_free stayed at 2, and a shorter prompt succeeded against the same idle
+	// server.
+	//
+	// Refusing costs one multiplication and saves the client a retry loop that cannot end.
+	// The wording names the two numbers a caller can act on, the pool's positions and what
+	// their request needs, because "block pool exhausted" reads as transient.
+	if st := s.eng.Stats(); st.PoolBlocks > 0 {
+		if need, have := blocksNeeded(len(promptTokens)+maxTokens, st.PoolBlockSize),
+			st.PoolBlocks; need > have {
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				promptParam(p.chat), "context_length_exceeded",
+				"this request needs %d KV cache blocks of %d positions (%d positions for the "+
+					"prompt and budget) but the pool holds %d (%d positions), so no other "+
+					"request finishing can make room for it; shorten the prompt or lower "+
+					"max_tokens, or start the server with a larger --blocks",
+				need, st.PoolBlockSize, len(promptTokens)+maxTokens, have,
+				have*st.PoolBlockSize))
+			return
+		}
+	}
 
 	sampler, err := s.sampler(p.temperature, p.topK, p.topP, p.seed)
 	if err != nil {
@@ -1223,6 +1254,23 @@ func (s *Server) stopTokenIDs(stop []string) []int32 {
 		ids = append(ids, enc[0])
 	}
 	return ids
+}
+
+// blocksNeeded is how many KV cache blocks positions positions occupy.
+//
+// The arithmetic is PagedKVCache.ensureBlocks': position p lives in block p/blockSize, so n
+// positions need ceil(n/blockSize) blocks, and a request that generates up to position n-1
+// holds exactly that many. Stated as a function and tested against a literal, because
+// getting it wrong in either direction turns a permanent failure into a retry loop or
+// refuses a request the pool could have served.
+//
+// blockSize <= 0 returns 0: it means the engine has no pool, and a caller that reached here
+// with one has nothing to compare.
+func blocksNeeded(positions, blockSize int) int {
+	if positions <= 0 || blockSize <= 0 {
+		return 0
+	}
+	return (positions + blockSize - 1) / blockSize
 }
 
 // maxBodyBytes is the largest request body this server will read.

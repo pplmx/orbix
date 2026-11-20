@@ -3238,3 +3238,141 @@ func TestIdlePollShiftValue(t *testing.T) {
 			idlePollShift, time.Millisecond<<idlePollShift)
 	}
 }
+
+// TestRequestLargerThanThePoolIsRefusedPermanently covers the two situations that used to
+// share one answer.
+//
+// "block pool exhausted" means the pool is busy, and Retry-After is the right advice: the
+// same request succeeds once another sequence releases its blocks. It also fires when the
+// request's own prompt plus budget can never fit the pool, and then the advice is wrong --
+// nothing another request does makes room, so a client that honours Retry-After retries
+// forever.
+//
+// Measured before the fix, on the fixture with --blocks 2 --block-size 16 (32 positions): an
+// 11-token prompt asking for 4 tokens needs 3 blocks, got 503 with Retry-After 1 on four
+// attempts two seconds apart, while orbix_kv_pool_free stayed at 2. A shorter prompt
+// succeeded against the same idle server, which is what separates the two cases.
+//
+// The refusal is a 400 with the two block counts in the message, because "block pool
+// exhausted" reads as transient and the numbers are what a caller can act on.
+func TestRequestLargerThanThePoolIsRefusedPermanently(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 1, MaxQueued: 1, Blocks: 2, BlockSize: 16,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// The "a request that fits" half needs a pump, because it goes through Submit and waits
+	// for tokens. The refusal below returns before Submit, so it does not.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv.StartPump(ctx)
+
+	// The fixture tokenizer spells a word into several ids, so measure rather than guess:
+	// find the shortest prompt that needs more blocks than the pool holds.
+	over := ""
+	for words := 1; words <= 64; words++ {
+		p := strings.Repeat("word ", words)
+		if need := blocksNeeded(len(tok.Encode(p, cfg.BOSID >= 0))+4, 16); need > 2 {
+			over = p
+			break
+		}
+	}
+	if over == "" {
+		t.Fatal("no prompt within 64 words outgrew a two-block pool; the fixture changed shape")
+	}
+
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": `+quoteJSON(over)+`, "max_tokens": 4}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: a request that can never fit the pool is not transient",
+			resp.StatusCode)
+	}
+	// Retry-After is the advice that made this a defect: a client must not be told to wait
+	// for room that cannot appear.
+	if got := resp.Header.Get("Retry-After"); got != "" {
+		t.Errorf("Retry-After = %q on a permanently unservable request", got)
+	}
+	body := readBody(t, resp)
+	for _, want := range []string{
+		"3 KV cache blocks", // what the request needs, arithmetic stated in the message
+		"2 (32 positions)",  // what the pool holds
+		"context_length_exceeded",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body does not contain %q:\n%s", want, body)
+		}
+	}
+
+	// A request that fits must still be served: the refusal is about the size, not about the
+	// pool existing.
+	fits := post(t, srv.Handler(), "/v1/completions", `{"prompt": "hi", "max_tokens": 2}`)
+	defer func() { _ = fits.Body.Close() }()
+	if fits.StatusCode != http.StatusOK {
+		t.Errorf("a request that fits the pool got %d, want 200", fits.StatusCode)
+	}
+
+	// The chat endpoint reaches the same check with a rendered prompt, so it needs the same
+	// answer -- and a param naming the field that endpoint actually takes, not the other
+	// one's. Measured on the fixture: a six-word message renders to 55 tokens against the
+	// same two-block pool and is refused with param "messages", while "hi" is served.
+	chatOver := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages": [{"role": "user", "content": `+quoteJSON(over)+`}], "max_tokens": 4}`)
+	defer func() { _ = chatOver.Body.Close() }()
+	if chatOver.StatusCode != http.StatusBadRequest {
+		t.Errorf("chat: status = %d, want 400", chatOver.StatusCode)
+	}
+	chatBody := readBody(t, chatOver)
+	if !strings.Contains(chatBody, `"param":"messages"`) {
+		t.Errorf("chat body does not name param messages:\n%s", chatBody)
+	}
+	chatFits := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}`)
+	defer func() { _ = chatFits.Body.Close() }()
+	if chatFits.StatusCode != http.StatusOK {
+		t.Errorf("chat: a request that fits got %d, want 200", chatFits.StatusCode)
+	}
+}
+
+// TestBlocksNeededMatchesTheCache pins the arithmetic the refusal above depends on.
+//
+// PagedKVCache.ensureBlocks puts position p in block p/blockSize, so n positions occupy
+// ceil(n/blockSize) blocks. Recomputed here as a loop over positions rather than the ceiling
+// expression, so a change to either form has to be a real one: an off-by-one in this function
+// either refuses a request the pool could serve or lets the permanent case through to a 503.
+func TestBlocksNeededMatchesTheCache(t *testing.T) {
+	for _, blockSize := range []int{1, 4, 16, 32} {
+		// Count the blocks a sequence actually touches, the way the cache numbers them.
+		for positions := 1; positions <= 4*blockSize+1; positions++ {
+			used := map[int]bool{}
+			for pos := range positions {
+				used[pos/blockSize] = true
+			}
+			if got, want := blocksNeeded(positions, blockSize), len(used); got != want {
+				t.Errorf("blocksNeeded(%d, %d) = %d, want %d", positions, blockSize, got, want)
+			}
+		}
+	}
+	// A server without a pool, and a zero request, have nothing to compare.
+	for _, c := range []struct{ positions, blockSize int }{{0, 16}, {-1, 16}, {10, 0}} {
+		if got := blocksNeeded(c.positions, c.blockSize); got != 0 {
+			t.Errorf("blocksNeeded(%d, %d) = %d, want 0", c.positions, c.blockSize, got)
+		}
+	}
+}

@@ -1,5 +1,9 @@
 # Build output
 /bin/
+# `go build ./...` writes the command's binary into the working directory, which for this
+# module root is ./orbix. The binary is 12 MB and would be easy to stage by accident, so it is
+# ignored by name rather than left to be noticed.
+/orbix
 
 # Local model files; models are downloaded, never committed.
 *.gguf

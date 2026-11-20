@@ -214,6 +214,19 @@ func TestChatBannerNamesEveryCommand(t *testing.T) {
 		}
 	}
 
+	// The other direction, which the comment on chatCommands promises and this test used to
+	// leave out: the banner must not claim a command chatHelp omits. Measured before this was
+	// added: appending ", /bogus" to chatCommands passed.
+	for _, name := range strings.Split(chatCommands, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !strings.Contains(chatHelp, name) {
+			t.Errorf("the banner claims %q but chatHelp never lists it", name)
+		}
+	}
+
 	// And the banner that actually reached the user has to carry it too, so a future
 	// wrapper that printed a different string would fail here rather than nowhere.
 	if !strings.Contains(out, "/stats") {

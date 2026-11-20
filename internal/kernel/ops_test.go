@@ -976,3 +976,46 @@ func TestSoftmaxAllInfiniteRow(t *testing.T) {
 		t.Errorf("weights are %v and %v; the larger logit should take the larger share", mixed[2], mixed[0])
 	}
 }
+
+// TestRMSNormAccumulatesInFloat64 covers the reason the sum of squares is not a float32.
+//
+// The accumulation is in float64 with a comment saying a 4096-wide float32 sum loses enough
+// precision to change the normalized values, but nothing asserted it. The precision loss is
+// the mild half. The severe half is range: a row of large activations squares to more than
+// float32 can hold, so a float32 sum overflows to +Inf and every output of that row becomes
+// zero -- a silently dead head, on a model whose weights are merely at the top of the range
+// rather than corrupt.
+//
+// Measured: [3.4e38, 3.4e38] normalizes to [1.0000001, 1.0000001] in float64 accumulation,
+// and to zero in a float32 one. The subnormal case is the other end, where squaring makes a
+// value vanish entirely.
+func TestRMSNormAccumulatesInFloat64(t *testing.T) {
+	t.Run("large row does not overflow", func(t *testing.T) {
+		// Two values at the top of float32's range: the sum of their squares is about
+		// 2.3e77, far past float32's 3.4e38 limit but inside float64's.
+		src := []float32{3.4e38, 3.4e38}
+		dst := make([]float32, len(src))
+		if err := RMSNorm(dst, src, []float32{1, 1}, 1e-5); err != nil {
+			t.Fatalf("RMSNorm: %v", err)
+		}
+		for i, v := range dst {
+			// Every element is scaled by the same factor, so all outputs are 1/sqrt(1 +
+			// eps/mean) in magnitude -- about 1, and definitely not zero.
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				t.Errorf("dst[%d] = %v, want a finite value", i, v)
+				continue
+			}
+			if v < 0.9 || v > 1.1 {
+				t.Errorf("dst[%d] = %v, want about 1: a float32 accumulation overflows here "+
+					"and makes the row all zeros", i, v)
+			}
+		}
+	})
+
+	// A prediction about the low end was written and removed rather than kept: it assumed a
+	// float32 sum would underflow a subnormal row to zero and produce a different scale, and
+	// measurement showed the opposite -- 1e-38 squared is about 1e-76, which float64 holds
+	// comfortably, so the mean is simply too small to matter against eps and the row normalizes
+	// by 1/sqrt(eps) either way. A test asserting the guess would have failed on correct code.
+
+}

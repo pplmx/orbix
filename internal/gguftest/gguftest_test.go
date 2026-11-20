@@ -346,3 +346,27 @@ func TestWindowLenAndAddBOSReachTheFile(t *testing.T) {
 		}
 	})
 }
+
+// TestNaNScaleTensorMustNameARealTensor keeps the corrupt-fixture option honest.
+//
+// The option exists so a test can ask for a file with a NaN scale in a named tensor. If the
+// name does not match anything the fixture writes, the file it produces is perfectly clean,
+// and a test asserting that the load fails would fail for the right reason but a test
+// asserting nothing would pass while exercising nothing. Erroring here means the next test
+// that reaches for this option cannot get a silently clean file.
+func TestNaNScaleTensorMustNameARealTensor(t *testing.T) {
+	if _, err := (&Model{NaNScaleTensor: "blk.0.no_such.weight"}).Bytes(); err == nil {
+		t.Fatal("an unknown NaNScaleTensor produced a file instead of an error")
+	} else if !strings.Contains(err.Error(), "blk.0.no_such.weight") {
+		t.Errorf("error %q does not name the tensor asked for", err)
+	}
+
+	// A tensor whose element count is not a multiple of Q4_0's 32 cannot be written in that
+	// format, and truncating it to fit would change the model shape rather than corrupt one
+	// scale. blk.0.attn_norm has Hidden elements, so Hidden=30 makes it 30.
+	if _, err := (&Model{Hidden: 30, Heads: 2, FFN: 60, NaNScaleTensor: "blk.0.attn_norm.weight"}).Bytes(); err == nil {
+		t.Error("a 30-element tensor was written as Q4_0, which needs a multiple of 32")
+	} else if !strings.Contains(err.Error(), "multiple of Q4_0") {
+		t.Errorf("error %q does not explain the block requirement", err)
+	}
+}

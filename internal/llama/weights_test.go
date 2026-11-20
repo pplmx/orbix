@@ -4,6 +4,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // TestCheckFiniteRejectsNonFiniteWeights covers the load-time guard.
@@ -70,5 +72,46 @@ func TestCheckFiniteNamesTheFirstTensorInOrder(t *testing.T) {
 		if !strings.Contains(err.Error(), `"a.weight"`) {
 			t.Fatalf("error %q does not name the alphabetically first tensor", err)
 		}
+	}
+}
+
+// TestQuantizedNaNAScaleIsRejectedAtLoad closes the gap between the decoder and the check.
+//
+// checkFinite was tested with hand-built maps and the decoder was tested on its own, but
+// nothing joined them: a GGUF file whose quantized tensor carries a NaN scale is the shape a
+// corrupt or truncated download actually has, and the path from "16 bytes decode to NaN" to
+// "load fails naming the tensor" had no test end to end.
+//
+// The values matter. A Q4_0 block's first two bytes are an F16 scale, and 0x7E00 is the NaN
+// pattern the format allows; the nibbles are zero, so every weight in the block would be
+// 0 * NaN = NaN. Decoding succeeds, which is the point: the decoder's job is to read what the
+// file says, and the load is where a bad file has to be caught.
+//
+// Three tensors rather than one, because they take different routes to the check: an
+// attention projection, the embedding table, and a normalization vector. A guard that only
+// covered the square matrices would pass the first and miss the others.
+func TestQuantizedNaNAScaleIsRejectedAtLoad(t *testing.T) {
+	for _, name := range []string{
+		"blk.0.attn_q.weight",
+		"token_embd.weight",
+		"output_norm.weight",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := gguftest.Model{
+				NoEOS: true, ContextLen: 64, NaNScaleTensor: name,
+			}.Write(t, t.TempDir())
+
+			_, err := New(path)
+			if err == nil {
+				t.Fatal("a NaN scale loaded without error, so generation would run on NaN weights")
+			}
+			// The message has to name the tensor and the position: "the file is corrupt" alone
+			// leaves a user with a 4 GB file and no way to tell which part of it went wrong.
+			for _, want := range []string{name, "NaN", "non-finite"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
 	}
 }

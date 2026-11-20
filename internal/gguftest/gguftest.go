@@ -108,6 +108,16 @@ type Model struct {
 	// Experts and ExpertUsed make the model a mixture of experts.
 	Experts    int
 	ExpertUsed int
+
+	// NaNScaleTensor, when set, is written as Q4_0 with every block's F16 scale set to
+	// NaN instead of as F32 with its usual values. It exists to reach one path: a
+	// quantized tensor whose scale is a legal 16-bit pattern the decoder turns into a NaN
+	// weight, which must be caught at load rather than at generation.
+	//
+	// The name must match one the fixture writes; an unknown name is an error rather than
+	// a silently ignored option, because a test that asked for a corrupt tensor and got a
+	// clean one would pass for the wrong reason.
+	NaNScaleTensor string
 }
 
 // DefaultVocab is a vocabulary of characters and a few words, enough for round trips and
@@ -289,14 +299,49 @@ func (m Model) Bytes() ([]byte, error) {
 	}
 
 	specs := m.tensors()
+	// A named tensor that the fixture does not write would leave the option silently
+	// unused, and a test asking for a corrupt file would then pass against a clean one.
+	if m.NaNScaleTensor != "" {
+		found := false
+		for _, spec := range specs {
+			if spec.name == m.NaNScaleTensor {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("gguftest: NaNScaleTensor %q is not a tensor this fixture writes",
+				m.NaNScaleTensor)
+		}
+	}
+
 	var data []byte
 	infos := make([]gguf.TensorInfo, len(specs))
 	offset := 0
 	for i, spec := range specs {
-		infos[i] = gguf.TensorInfo{Name: spec.name, Dims: spec.dims, Type: gguf.F32}
 		n := int64(1)
 		for _, d := range spec.dims {
 			n *= int64(d)
+		}
+		infos[i] = gguf.TensorInfo{Name: spec.name, Dims: spec.dims, Type: gguf.F32}
+		if spec.name == m.NaNScaleTensor {
+			// Q4_0 with a NaN scale: 32 weights per 18-byte block, the 2-byte F16 scale
+			// set to the NaN pattern and the nibbles left zero. Decoding it produces NaN
+			// weights, which is the value the loader's finite check must reject.
+			if n%32 != 0 {
+				return nil, fmt.Errorf(
+					"gguftest: NaNScaleTensor %q has %d elements, not a multiple of Q4_0's 32",
+					spec.name, n)
+			}
+			infos[i].Type = gguf.Q4_0
+			infos[i].Offset = uint64(offset)
+			block := make([]byte, 18)
+			block[0], block[1] = 0x00, 0x7E // F16 quiet NaN, little endian
+			for range n / 32 {
+				data = append(data, block...)
+			}
+			offset += int(n) / 32 * 18
+			continue
 		}
 		infos[i].Offset = uint64(offset)
 		vals := make([]float32, n)

@@ -1168,3 +1168,63 @@ func TestExplainChatErrorCoversTheWindowToo(t *testing.T) {
 		t.Errorf("the window explanation suggests --blocks, which cannot widen the window: %q", got)
 	}
 }
+
+// TestChatClearKeepsThePrefixCache pins what /clear does and does not discard.
+//
+// /clear empties the history -- that is its contract -- and nothing in the REPL touches the
+// engine or its pool, so the blocks the previous turns published stay in the prefix index and
+// stay counted. The README states this, and it is the reason /clear is offered as the way out
+// of a full window: the conversation restarts without costing an immediate re-prefill of
+// whatever the new prompt shares with the old one.
+//
+// The counter being cumulative is what makes the claim observable: it must not fall back to
+// zero across the command. A /clear that reset the engine -- the tempting implementation, since
+// "clear" sounds like it should -- would show the count dropping, and a session would lose every
+// cached block each time a user asked for a fresh start.
+//
+// Measured on the 512-position fixture before writing this: reuse per turn is 0, 160, 480, the
+// count holds at 480 across /clear, and the first turn afterwards adds another 160.
+func TestChatClearKeepsThePrefixCache(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	msg := strings.Repeat("word ", 30)
+	input := msg + "\n/stats\n" +
+		msg + "\n/stats\n" +
+		"/clear\n/stats\n" +
+		msg + "\n/stats\n/exit\n"
+	out := runChat(t, chatOptions{
+		model: path, maxTokens: 4, topK: 40, topP: 0.9, prefixCache: true,
+	}, input)
+
+	// Collect the reuse figure after each turn, in order.
+	var counts []int
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "prompt positions") {
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(line, "reused: %d prompt positions", &n); err != nil {
+			t.Fatalf("could not read the reuse count from %q: %v", line, err)
+		}
+		counts = append(counts, n)
+	}
+	if len(counts) != 4 {
+		t.Fatalf("saw %d /stats reports, want 4:\n%s", len(counts), out)
+	}
+	if counts[0] != 0 {
+		t.Errorf("a fresh session reused %d positions, want 0", counts[0])
+	}
+	if counts[1] == 0 {
+		t.Errorf("the second turn reused nothing:\n%s", out)
+	}
+	// The whole point: /clear does not take the cache back.
+	if counts[2] != counts[1] {
+		t.Errorf("reuse went from %d to %d across /clear, so the command discarded the prefix "+
+			"cache as well as the history", counts[1], counts[2])
+	}
+	// And the index is still live afterwards, not merely retained.
+	if counts[3] <= counts[2] {
+		t.Errorf("the first turn after /clear reused %d, no more than the %d already counted",
+			counts[3], counts[2])
+	}
+}

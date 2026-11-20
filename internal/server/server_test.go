@@ -3817,3 +3817,82 @@ func TestStreamReportsPoolExhaustionInBand(t *testing.T) {
 			blocking)
 	}
 }
+
+// TestUsageIsIdenticalOnBothPaths compares all three usage fields between the blocking and
+// streaming responses for one request, on both endpoints.
+//
+// TestStreamingUsageCountsEveryGeneratedToken compares completion_tokens only, and only for
+// /v1/completions. The other two fields were never compared, and the two paths compute them
+// from different sources: the blocking body takes len(out) and len(promptTokens), while the
+// stream accumulates a counter that the terminal event's Generated figure completes. The
+// comment beside that counter records the original defect -- a stream that counted only the
+// events its loop had read reported 2 where the blocking body reported 17 -- so the two
+// agreeing is the property, not an accident.
+//
+// Measured: 11/6/17 on both paths for the completions cases (with and without a stop string)
+// and 17/6/23 for chat. The stop case is worth including because it is where completion_tokens
+// and the delivered text diverge: six tokens were generated, the reply is shorter, and the
+// field follows the generation.
+func TestUsageIsIdenticalOnBothPaths(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"completions", "/v1/completions", `{"prompt": "Once upon a time", "max_tokens": 6}`},
+		{"completions with a stop string", "/v1/completions",
+			`{"prompt": "Once upon a time", "max_tokens": 6, "stop": ["\n"]}`},
+		{"chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 6}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var blocking struct {
+				Usage *usage `json:"usage"`
+			}
+			if err := json.Unmarshal([]byte(readBody(t, post(t, h, c.path, c.body))),
+				&blocking); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if blocking.Usage == nil {
+				t.Fatal("the blocking body carries no usage")
+			}
+			if blocking.Usage.TotalTokens != blocking.Usage.PromptTokens+blocking.Usage.CompletionTokens {
+				t.Errorf("blocking total_tokens = %d, but %d + %d = %d",
+					blocking.Usage.TotalTokens, blocking.Usage.PromptTokens,
+					blocking.Usage.CompletionTokens,
+					blocking.Usage.PromptTokens+blocking.Usage.CompletionTokens)
+			}
+
+			streamBody := strings.Replace(c.body, `"max_tokens"`,
+				`"stream": true, "stream_options": {"include_usage": true}, "max_tokens"`, 1)
+			var streamed *usage
+			for _, line := range strings.Split(readBody(t, post(t, h, c.path, streamBody)), "\n") {
+				payload, ok := strings.CutPrefix(line, "data: ")
+				if !ok || payload == "[DONE]" {
+					continue
+				}
+				var chunk struct {
+					Usage *usage `json:"usage"`
+				}
+				if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+					t.Fatalf("chunk %q is not JSON: %v", payload, err)
+				}
+				if chunk.Usage != nil {
+					streamed = chunk.Usage
+				}
+			}
+			if streamed == nil {
+				t.Fatal("the stream carried no usage chunk")
+			}
+			// Every field, not just the completion count.
+			if *streamed != *blocking.Usage {
+				t.Errorf("usage differs between paths for one request:\nblocking %+v\nstream   %+v",
+					*blocking.Usage, *streamed)
+			}
+		})
+	}
+}

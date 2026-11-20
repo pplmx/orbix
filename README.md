@@ -611,9 +611,15 @@ orbix_kv_pool_used_fraction 0
 The exposition format is written by hand rather than through a client library, for the
 same reason the GGUF parser is: a family is three lines -- `# HELP`, `# TYPE`, and one
 sample -- and the hand-written encoder is read by the code review rather than trusted as
-a dependency. Fourteen families come to 46 lines, because a labelled series costs one
-line per value. The tests parse the output back the way
+a dependency. Sixteen families come to 52 lines on a paged server, because a labelled
+series costs one line per value. The tests parse the output back the way
 a scraper would, so a HELP line in the wrong place fails a test instead of a dashboard.
+
+The count depends on the configuration, which is worth knowing before comparing two
+scrapes: a contiguous server exports twelve families (the four `kv_pool_*` gauges are
+omitted without a pool, since a zero would read as "the pool is empty" rather than "there is
+no pool"), and `--otlp-endpoint` adds one more. The families are only omitted, never
+exported as zero, for that reason.
 
 Three of the metrics exist because their failure mode is invisible in latency until it is
 already failing. `orbix_requests_queued` growing against a steady round rate is a
@@ -631,6 +637,17 @@ byte count. With the split, a server whose clients keep leaving shows it as
 network or timeout problem rather than a model problem. The parts always sum to
 `orbix_requests_finished_total`; the tests assert that, so a reason missed in the engine
 breaks a test instead of quietly unbalancing a dashboard.
+
+`orbix_requests_refused_queue_full_total` and `orbix_requests_refused_pool_total` count the
+requests answered `503`. They are the server's own counters rather than the engine's, because
+a refused request never enters the engine -- counting it as submitted would make the admission
+rate look better than it is, and that is deliberate. The consequence was that refusals
+appeared nowhere at all: measured with `--max-active 1 --max-queued 1` and 24 requests in
+bursts of eight, 16 were refused with `503` while `orbix_requests_submitted_total` read 8 and
+the queue gauge sat at 0, so a server shedding two thirds of its load reported nothing wrong.
+Two families rather than one, because the fixes differ: a full backlog wants a deeper
+`--max-queued` or more replicas, while an exhausted pool wants more `--blocks` or shorter
+prompts.
 
 ### The access log
 

@@ -743,3 +743,68 @@ func TestEscapeLabelValue(t *testing.T) {
 		}
 	}
 }
+
+// TestMetricsCountRefusedRequests covers the number that was missing entirely.
+//
+// A request refused for want of capacity never entered the engine, so it appears in none of
+// the engine's counters -- by design, since counting it as submitted would make the admission
+// rate look better than it is. That left refusals invisible everywhere: measured with
+// --max-active 1 --max-queued 1 and 24 requests in bursts of 8, 16 were refused with 503 while
+// orbix_requests_submitted_total read 8 and the queue gauge sat at 0, so a deployment shedding
+// two thirds of its load looked perfectly healthy.
+//
+// The two causes are separate families because they call for different fixes: a full backlog
+// wants more --max-queued or more replicas, an exhausted pool wants more --blocks or shorter
+// prompts. A single total would say capacity is short without saying which.
+func TestMetricsCountRefusedRequests(t *testing.T) {
+	// One active plus one queued: saturating the backlog takes three concurrent requests.
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{MaxActive: 1, MaxQueued: 1})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	before := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_queue_full_total")
+
+	// Fill the engine directly: a handler blocks until its sequence produces a token, and
+	// nothing pumps here.
+	ids := tok.Encode("Once upon a time", true)
+	for range 2 {
+		if _, err := eng.Submit(engine.Request{Prompt: ids, MaxTokens: 4}); err != nil {
+			t.Fatalf("filling the engine: %v", err)
+		}
+	}
+	for range 3 {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "Once upon a time", "max_tokens": 4}`)
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("status = %d with a full backlog, want 503", resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+
+	after := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_queue_full_total")
+	if got := after - before; got != 3 {
+		t.Errorf("queue-full refusals rose by %v, want 3", got)
+	}
+	// The pool counter must not move for a backlog refusal: the causes are separate.
+	if got := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_pool_total"); got != 0 {
+		t.Errorf("pool refusals = %v after backlog refusals, want 0", got)
+	}
+}

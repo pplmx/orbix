@@ -65,6 +65,25 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.gauge("round_max_active", "Sequences a round can advance.",
 		"gauge", float64(st.MaxActive))
 
+	// Refusals are a server-side decision, so they are not in engine.Stats: Submit returns
+	// ErrQueueFull and the pool error arrives on an event, and neither reaches the engine's
+	// counters -- by design, since a request that never entered the queue must not inflate
+	// the admission rate. That left them invisible: measured with --max-active 1 --max-queued
+	// 1 and 24 requests in bursts of 8, 16 were refused with 503 while
+	// orbix_requests_submitted_total still read 8 and the queue gauge sat at 0, so a
+	// deployment shedding most of its load looked healthy.
+	//
+	// Two families rather than one labelled series, because the causes need different
+	// reactions: a full queue wants more --max-queued or more replicas, while an exhausted
+	// pool wants more --blocks or shorter prompts. A single "refused" total would say
+	// capacity is short without saying which.
+	b.help("requests_refused_queue_full_total",
+		"Requests refused with 503 because the backlog was full, in cumulative total.",
+		"counter", s.refusedQueueFull.Load())
+	b.help("requests_refused_pool_total",
+		"Requests refused with 503 because the KV pool had no room, in cumulative total.",
+		"counter", s.refusedPool.Load())
+
 	// The pool block counts are only meaningful for a paged engine. Exporting zeros for
 	// a contiguous one would make "the pool is empty" indistinguishable from "there is no
 	// pool", so they are omitted entirely instead.

@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
@@ -118,6 +119,20 @@ type Server struct {
 	// log is cfg.Logger, kept as the concrete field so the request wrapper can check
 	// for nil cheaply.
 	log *slog.Logger
+
+	// refused counts requests turned away for lack of capacity, by status. It lives here
+	// rather than in the engine because that is where the decision is made: Submit returns
+	// ErrQueueFull and the pool error arrives on an event, and neither reaches the engine's
+	// own counters -- by design, since a request that never entered the queue must not make
+	// the admission rate look better than it is.
+	//
+	// The gap that left: those requests were invisible everywhere. Measured with
+	// --max-active 1 --max-queued 1 and 24 requests in bursts of 8, 16 were refused with
+	// 503 and orbix_requests_submitted_total still read 8, so a deployment shedding most of
+	// its load reported a healthy admission rate and a queue gauge pinned at 0. Refusal is
+	// the capacity signal an operator acts on, and it needs its own number.
+	refusedQueueFull atomic.Uint64
+	refusedPool      atomic.Uint64
 }
 
 // New builds a server around a loaded engine and tokenizer.
@@ -804,6 +819,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		// formed and would succeed later. 503 with Retry-After is what a client or proxy
 		// knows to back off on, where 400 would tell it to stop sending this at all.
 		if errors.Is(err, engine.ErrQueueFull) {
+			s.refusedQueueFull.Add(1)
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusServiceUnavailable, err.Error())
 			return
@@ -830,6 +846,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 			// with Retry-After is what a client backs off on, and 500 would have it
 			// treat a temporary condition as a permanent one.
 			if errors.Is(ev.Err, llama.ErrPoolExhausted) {
+				s.refusedPool.Add(1)
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusServiceUnavailable, ev.Err.Error())
 				return

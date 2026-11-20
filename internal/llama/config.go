@@ -252,8 +252,23 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		cfg.RopeBase = v
 	}
 	cfg.RopeScale = 1
-	if v, ok := f.Get[float32](arch + ".rope.scale_linear"); ok && v > 0 {
-		cfg.RopeScale = v
+	if v, ok := f.Get[float32](arch + ".rope.scale_linear"); ok {
+		// A zero or negative scale keeps the default, which is this key's documented
+		// behaviour: scaling by zero would collapse every position onto one, and the schema
+		// has no value that means "off", so a non-positive one is read as absent.
+		//
+		// A non-finite one is not that. "v > 0" let +Inf through, and it is the worst of
+		// the values here: the angle is +Inf, math.Cos(+Inf) is NaN, and the rotation is NaN
+		// at every position including 0 -- measured cos[1][0] NaN against 0.5403023 for
+		// scale 1. NaN was silently downgraded to the default, which is at least usable but
+		// still means the file said something the loader discarded without saying so. Both
+		// are refused now; the range cases keep their old behaviour.
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return Config{}, fmt.Errorf("llama: rope.scale_linear %v is not a finite number", v)
+		}
+		if v > 0 {
+			cfg.RopeScale = v
+		}
 	}
 	// Any scaling scheme other than the linear one changes the rotation itself.
 	// Refusing is the honest option: applying the plain rotation to a

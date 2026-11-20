@@ -471,6 +471,26 @@ func TestLoadConfigRejects(t *testing.T) {
 			wantAll: []string{"+Inf"},
 		},
 		{
+			// The old check was "ok && v > 0", so every unusable value silently became
+			// the default 1: the model ran at positions the header did not describe.
+			name: "NaN rope scale",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.rope.scale_linear", f32Val(float32(math.NaN()))})
+			},
+			want:    "is not a finite number",
+			wantAll: []string{"NaN"},
+		},
+		{
+			// +Inf passed the old check and poisoned every position, including 0:
+			// the angle is +Inf and math.Cos(+Inf) is NaN.
+			name: "infinite rope scale",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.rope.scale_linear", f32Val(float32(math.Inf(1)))})
+			},
+			want:    "is not a finite number",
+			wantAll: []string{"+Inf"},
+		},
+		{
 			name: "unsupported rope scaling",
 			mutate: func(c *tinyConfig) []kv {
 				return append(c.kvs(), kv{"llama.rope.scaling.type", strVal("yarn")})

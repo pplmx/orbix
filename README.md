@@ -1012,6 +1012,15 @@ holds 2", while a shorter prompt against the same idle server returns `200`. Bef
 check existed the request got `503 Retry-After: 1` on every retry, with
 `orbix_kv_pool_free` sitting at 2 the whole time.
 
+A streaming request cannot be told any of that. Its `200` and its headers are gone before the
+pool runs out, so the failure arrives in the stream as a chunk with `finish_reason: "error"`
+and the reason in a top-level `error` field -- no status code and no `Retry-After`, and a
+client cannot tell a temporary capacity problem from a permanent one without reading the
+message. This is the SSE format's constraint rather than a choice, which is why the refusal
+counters still move on that path: `orbix_requests_refused_pool_total` is the only signal that
+survives, and leaving it out made a streaming deployment report no capacity problem at all
+while refusing every request.
+
 `--workers` divides one batched pass across goroutines. What bounds its usefulness is the
 number of independent outputs in a pass, not the number of sequences: a matvec splits by
 output row, so a batch has one row per sequence, but the transposed product behind the output

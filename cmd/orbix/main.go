@@ -60,7 +60,11 @@ func run(args []string) error {
 		return cmdServe(args[1:])
 	case "model":
 		return cmdModel(args[1:])
-	case "version":
+	// The same courtesy help gets, for the other flag every CLI has. Before this,
+	// `orbix --version` exited 1 with `unknown command "--version"` while `orbix --help`
+	// printed the usage and exited 0, so the two conventions disagreed for no reason a user
+	// could see. `-v` is accepted because that is the short form the habit reaches for.
+	case "version", "-v", "--version":
 		return cmdVersion(args[1:])
 	case "help", "-h", "--help":
 		usage()

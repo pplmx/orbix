@@ -1899,3 +1899,56 @@ func TestEveryCommandAgreesOnThePromptTokenCount(t *testing.T) {
 		t.Errorf("all three reported %d prompt tokens", fromRun)
 	}
 }
+
+// TestVersionAcceptsTheWholeWordFlag covers the one global flag that was rejected while its
+// sibling was accepted.
+//
+// `orbix --help` printed the usage and exited 0, but `orbix --version` exited 1 with
+// `unknown command "--version"` -- the same shape of argument, two opposite answers, and no
+// reason a user could infer from the help text. Every CLI has both flags, so the failing half
+// is the one that breaks a habit rather than the one that surprises.
+//
+// -v is accepted too because that is the short form the habit reaches for. The forwarding is
+// asserted as well: --version passes its remaining arguments to the subcommand, so
+// --version --json produces the JSON document rather than the text report.
+func TestVersionAcceptsTheWholeWordFlag(t *testing.T) {
+	for _, flag := range []string{"--version", "-v"} {
+		t.Run(flag, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				if err := run([]string{flag}); err != nil {
+					t.Fatalf("%s: %v", flag, err)
+				}
+			})
+			if !strings.HasPrefix(out, "orbix ") {
+				t.Errorf("%s printed %q, want the version banner", flag, out)
+			}
+			// The text report, not just one line: a caller checking commit or cgo reads
+			// these too.
+			for _, want := range []string{"commit:", "go:", "platform:", "cgo:"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("%s output is missing %q:\n%s", flag, want, out)
+				}
+			}
+		})
+	}
+
+	// Argument forwarding, so the flag is a path to the subcommand and not a separate report.
+	out := captureStdout(t, func() {
+		if err := run([]string{"--version", "--json"}); err != nil {
+			t.Fatalf("--version --json: %v", err)
+		}
+	})
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--version --json did not print JSON: %v\n%s", err, out)
+	}
+	if _, ok := got["version"]; !ok {
+		t.Errorf("--version --json produced no version field: %v", got)
+	}
+
+	// An unknown trailing argument is still refused, so accepting the flag did not turn into
+	// accepting everything after it.
+	if err := run([]string{"--version", "bogus"}); err == nil {
+		t.Error("--version accepted an unknown argument")
+	}
+}

@@ -468,3 +468,61 @@ func TestNewTokenizerSortsSpecialsLongestFirst(t *testing.T) {
 			"though the vocabulary lists the shorter one first", got, want)
 	}
 }
+
+// TestBpeKeepMatchesGPT2sThreeRanges checks the byte table against GPT-2's stated ranges
+// rather than against the round trip that consumes it.
+//
+// The round trip that does have teeth on this table needs a real byte-level checkpoint
+// (TestRoundTripEveryRuneByteLevel), so in CI nothing checked the table's definition. What
+// can be checked without one is that definition. The comment on bpeKeep says the original
+// list is '!'..'~', 0xA1..0xAC and 0xAE..0xFF, and that leaving the Latin-1 ranges out
+// "shifts every later byte by 94 -- so 0xCC, which should be itself, becomes U+016E".
+// Recomputing the three ranges here is what makes that comment a checked claim: a dropped or
+// added entry fails with the byte named, whatever any vocabulary says.
+//
+// Verified against a mutation that really changes the mapping -- clearing bpeKeep[0xCC],
+// which is the bug the comment describes. Both this test and the fixture's whole-code-point
+// sweep fail on it, so the two are complementary rather than one standing in for the other.
+// Worth recording how the first attempt went wrong: swapping 0xC3 and 0xC4, the change the
+// roundtrip comments cite as the historical defect, is a no-op here. Both bytes are inside
+// 0xAE..0xFF, so both entries are true and swapping them changes nothing -- which made two
+// different tests look blind until the mutation itself was checked.
+func TestBpeKeepMatchesGPT2sThreeRanges(t *testing.T) {
+	var want [256]bool
+	for b := '!'; b <= '~'; b++ {
+		want[b] = true
+	}
+	for b := 0xA1; b <= 0xAC; b++ {
+		want[b] = true
+	}
+	for b := 0xAE; b <= 0xFF; b++ {
+		want[b] = true
+	}
+	for b := range 256 {
+		if got := bpeKeep[b]; got != want[b] {
+			t.Errorf("bpeKeep[0x%02X] = %v, want %v: GPT-2 keeps '!'..'~', 0xA1..0xAC and "+
+				"0xAE..0xFF and escapes everything else", b, got, want[b])
+		}
+	}
+
+	// The escaping is one-to-one and total: every byte has a rune, and no two bytes share
+	// one. A collision would decode two different bytes to the same character.
+	if len(bpeBytes) != 256 {
+		t.Fatalf("bpeBytes maps %d runes, want one per byte", len(bpeBytes))
+	}
+	seen := make(map[byte]rune, 256)
+	for r, b := range bpeBytes {
+		if prev, dup := seen[b]; dup {
+			t.Errorf("byte 0x%02X is spelled by both %q and %q", b, prev, r)
+		}
+		seen[b] = r
+	}
+
+	// The inverse property at the value the comment names: with the Latin-1 ranges in place,
+	// 0xCC maps to itself.
+	for _, b := range []byte{0x21, 0x41, 0x7E, 0xA1, 0xAC, 0xAE, 0xCC, 0xFF} {
+		if got := bpeBytes[rune(b)]; got != b {
+			t.Errorf("bpeBytes[%q] = 0x%02X, want 0x%02X (byte kept as itself)", rune(b), got, b)
+		}
+	}
+}

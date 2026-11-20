@@ -2687,3 +2687,69 @@ func TestPlusConcatenatesRatherThanAdds(t *testing.T) {
 		})
 	}
 }
+
+// TestArithmeticDetectsOverflow covers the one arithmetic operator this package implements.
+//
+// Subtraction is checked rather than wrapped. The operands are arbitrary text: a value from
+// the message list or a set literal reaches Atoi, so a number near the int64 limits can arrive.
+// Measured before the check, "-9223372036854775808" minus 1 rendered "9223372036854775807" and
+// MaxInt64 minus -1 wrapped the other way -- a template that subtracted to index a list would
+// then read whatever element happened to sit at the wrapped position, with nothing to notice.
+//
+// The boundaries on both sides are asserted, including the two values just inside them, so a
+// check that rejected everything near a limit would fail here rather than pass.
+func TestArithmeticDetectsOverflow(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "a"}}
+
+	render := func(t *testing.T, a, b string) (string, error) {
+		t.Helper()
+		tpl, err := Parse(fmt.Sprintf(`{%% set a = "%s" %%}{{ a - (%s) }}`, a, b))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		return tpl.Render(msgs, Inputs{})
+	}
+
+	for _, c := range []struct{ name, a, b string }{
+		{"max minus a negative", "9223372036854775807", "-1"},
+		{"min minus one", "-9223372036854775808", "1"},
+		{"min minus a larger positive", "-9223372036854775808", "9223372036854775807"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := render(t, c.a, c.b)
+			if err == nil {
+				t.Fatalf("%s - %s did not report an overflow", c.a, c.b)
+			}
+			if !strings.Contains(err.Error(), "overflow") {
+				t.Errorf("error %q does not say what happened", err)
+			}
+			// Both operands, so a template author can find the expression.
+			for _, want := range []string{c.a, c.b} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not state the operand %q", err, want)
+				}
+			}
+		})
+	}
+
+	// The values that are representable still work, on both sides of zero and at the limits
+	// themselves. A guard that wrapped or rejected either boundary would fail here.
+	for _, c := range []struct{ name, a, b, want string }{
+		{"ordinary", "10", "3", "7"},
+		{"both negative", "-10", "-3", "-7"},
+		{"zero", "0", "0", "0"},
+		{"max minus one", "9223372036854775807", "1", "9223372036854775806"},
+		{"min plus one minus one", "-9223372036854775807", "1", "-9223372036854775808"},
+		{"max minus a large negative", "9223372036854775806", "-1", "9223372036854775807"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := render(t, c.a, c.b)
+			if err != nil {
+				t.Fatalf("%s - %s was rejected: %v", c.a, c.b, err)
+			}
+			if got != c.want {
+				t.Errorf("%s - %s = %q, want %q", c.a, c.b, got, c.want)
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package chat
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -395,6 +396,15 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		}
 		switch t.op {
 		case "-":
+			// Overflow is checked rather than wrapped. A template that indexes with
+			// loop.index - 1 never comes near a limit, but the operands are arbitrary text from
+			// the message list, so a value near MinInt64 can reach here -- measured, "-9223372036854775808"
+			// minus 1 rendered "9223372036854775807", and MaxInt64 minus -1 wrapped the other
+			// way. Wrapping turns a number the template did not ask for into output, while an
+			// error names the operands; the alternative is silent wrong text in a prompt.
+			if (b > 0 && a < math.MinInt64+b) || (b < 0 && a > math.MaxInt64+b) {
+				return value{}, fmt.Errorf("chat: arithmetic overflow: %d - %d", a, b)
+			}
 			return strValue(strconv.Itoa(a - b)), nil
 		default:
 			return value{}, fmt.Errorf("chat: unsupported arithmetic operator %q", t.op)

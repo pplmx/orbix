@@ -974,3 +974,78 @@ func TestMetricsCountPoolRefusals(t *testing.T) {
 			"separate and a client treats them differently", got)
 	}
 }
+
+// TestMetricsCountStreamingPoolRefusals covers the path where the counter is the only signal
+// left.
+//
+// A streaming response has already sent its 200 by the time the pool runs out, so the status
+// code cannot say why it failed and there is nowhere to put Retry-After. The failure reaches
+// the client in the stream as finish_reason "error" with a message, and that is all the
+// protocol allows -- but the refusal counter is not constrained by the protocol, and leaving it
+// out made a streaming deployment report zero pool refusals while refusing every request.
+// Measured: four streaming requests against an exhausted pool left the counter at 0, against 4
+// for the same four sent blocking.
+//
+// The blocking path is asserted in the same test so the two are seen to agree; the difference
+// in what the client receives is TestStreamReportsPoolExhaustionInBand.
+func TestMetricsCountStreamingPoolRefusals(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	// Small pool against MaxActive, so four concurrent sequences run out of blocks while
+	// generating, which is the only way to reach this path: a request needing more than the
+	// pool holds is refused earlier with a 400.
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 4, MaxQueued: 4, Blocks: 5, BlockSize: 4, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pumpCtx, stopPump := context.WithCancel(context.Background())
+	t.Cleanup(stopPump)
+	srv.StartPump(pumpCtx)
+
+	before := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_pool_total")
+
+	// Four streaming requests at once: they are admitted and then compete for blocks.
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Once upon a time", "max_tokens": 6, "stream": true}`)
+			buf := make([]byte, 8192)
+			for {
+				if _, err := resp.Body.Read(buf); err != nil {
+					break
+				}
+			}
+			_ = resp.Body.Close()
+		})
+	}
+	wg.Wait()
+
+	after := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_pool_total")
+	if got := after - before; got == 0 {
+		t.Fatalf("pool refusals did not move after four streaming requests lost the race for "+
+			"blocks: a streaming deployment would report no capacity problem at all (before=%v "+
+			"after=%v)", before, after)
+	}
+	// The queue counter must stay out of it, as on the blocking path.
+	if got := num(t, parseMetrics(t, scrape(t, srv.Handler())),
+		"orbix_requests_refused_queue_full_total"); got != 0 {
+		t.Errorf("queue-full refusals = %v after streaming pool refusals, want 0", got)
+	}
+}

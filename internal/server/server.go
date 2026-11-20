@@ -1024,6 +1024,18 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 		if ev.Err != nil {
 			// The response has already started, so a status code is no longer
 			// available: report the failure in the stream and stop.
+			//
+			// The refusal counters still move, even though the client cannot be told the
+			// cause through a status code. They are what an operator watches, and a
+			// streaming deployment whose requests all lose the race for blocks would
+			// otherwise report zero pool refusals while refusing every one of them --
+			// measured, four streaming requests against an exhausted pool left
+			// refused_pool_total at 0 against 4 for the same four sent blocking. The
+			// count is the only signal that survives the protocol's inability to say it
+			// in the response.
+			if errors.Is(ev.Err, llama.ErrPoolExhausted) {
+				s.refusedPool.Add(1)
+			}
 			send(map[string]any{"choices": []map[string]any{{
 				"index": 0, "delta": map[string]string{}, "finish_reason": "error",
 			}}, "error": ev.Err.Error()})

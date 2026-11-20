@@ -3704,3 +3704,116 @@ func TestDisconnectFreesTheSlotForTheNextRequest(t *testing.T) {
 		return st.FinishedByReason[engine.FinishCancel]+st.FinishedByReason[engine.FinishAbandoned] == 1
 	}, "the client-gone request was not counted as cancelled or abandoned")
 }
+
+// TestStreamReportsPoolExhaustionInBand pins what a streaming client gets when the pool runs
+// out, which is not a status code.
+//
+// The response has sent its 200 by the time blocks run short, so neither 503 nor Retry-After can
+// be delivered; the failure arrives in the stream as finish_reason "error" with the reason in a
+// top-level "error" field. That is a protocol constraint rather than an oversight, but it has a
+// consequence worth stating: a streaming client cannot tell a temporary capacity problem from a
+// permanent one, so it has to read the message. The blocking endpoint answers the same condition
+// with 503 and Retry-After, and this test records both so the asymmetry is not mistaken for one
+// endpoint being wrong.
+func TestStreamReportsPoolExhaustionInBand(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 4, MaxQueued: 4, Blocks: 5, BlockSize: 4, PrefixCache: true,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pumpCtx, stopPump := context.WithCancel(context.Background())
+	t.Cleanup(stopPump)
+	srv.StartPump(pumpCtx)
+
+	// Collect the streaming responses concurrently so four sequences are in flight at once.
+	bodies := make([]string, 4)
+	statuses := make([]int, 4)
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Once upon a time", "max_tokens": 6, "stream": true}`)
+			statuses[i] = resp.StatusCode
+			var sb strings.Builder
+			buf := make([]byte, 8192)
+			for {
+				n, err := resp.Body.Read(buf)
+				sb.Write(buf[:n])
+				if err != nil {
+					break
+				}
+			}
+			_ = resp.Body.Close()
+			bodies[i] = sb.String()
+		})
+	}
+	wg.Wait()
+
+	exhausted := 0
+	for i, body := range bodies {
+		// The status is 200 because headers went out first; that is the constraint.
+		if statuses[i] != http.StatusOK {
+			t.Errorf("request %d: status = %d, want 200: headers are already sent when the pool "+
+				"runs out", i, statuses[i])
+		}
+		if !strings.Contains(body, "block pool exhausted") {
+			continue
+		}
+		exhausted++
+		// The reason has to reach the client, in the shape the format allows.
+		if !strings.Contains(body, `"finish_reason":"error"`) {
+			t.Errorf("request %d: the in-band failure has no finish_reason error:\n%s", i, body)
+		}
+		if !strings.Contains(body, `"error":"`) {
+			t.Errorf("request %d: the in-band failure carries no message:\n%s", i, body)
+		}
+	}
+	if exhausted == 0 {
+		t.Fatalf("none of the four streaming requests reported an exhausted pool, so this run "+
+			"says nothing about the in-band path:\n%q", bodies)
+	}
+
+	// The blocking endpoint says the same thing with a status code, which is the contrast that
+	// makes the streaming form a constraint rather than a choice.
+	blocking := make([]int, 4)
+	retries := make([]string, 4)
+	for i := range 4 {
+		wg.Go(func() {
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Once upon a time", "max_tokens": 6}`)
+			blocking[i] = resp.StatusCode
+			retries[i] = resp.Header.Get("Retry-After")
+			_ = resp.Body.Close()
+		})
+	}
+	wg.Wait()
+
+	refused := 0
+	for i := range 4 {
+		if blocking[i] == http.StatusServiceUnavailable {
+			refused++
+			if retries[i] == "" {
+				t.Errorf("blocking request %d got 503 without Retry-After", i)
+			}
+		}
+	}
+	if refused == 0 {
+		t.Errorf("no blocking request was refused, so the comparison is not being made: %v",
+			blocking)
+	}
+}

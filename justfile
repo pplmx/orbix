@@ -243,6 +243,9 @@ clean:
     @# The compiler's own cache is shared across projects and lives outside the tree; removing
     @# it here would slow every other Go checkout on the machine.
     @rm -rf bin .rumdl_cache .cache
+    @# `go build ./...` writes ./orbix at the module root; .gitignore lists it for the same
+    @# reason and this list mirrors that one.
+    @rm -f orbix
     @find . -name '*.test' -type f -delete
     @find . -name '*.out' -type f -delete
     @find . -name '*.prof' -type f -delete

@@ -820,3 +820,97 @@ func TestControlMarkersEncodeButDoNotDecode(t *testing.T) {
 		t.Errorf("Decode of two adjacent markers = %q, want empty", got)
 	}
 }
+
+// TestChatEncodingResolvesControlPiecesInMessageText records a behaviour that is currently
+// reachable from the HTTP API and that nobody has decided about.
+//
+// /v1/chat/completions encodes its prompt with EncodeWithSpecials, because a rendered chat
+// template is markup: the "<|im_start|>" the template writes has to become one control token
+// rather than six characters. The side effect is that the same resolution applies to text the
+// client wrote, and the server cannot tell the two apart -- renderChat concatenates the
+// template and the message content into one string before this call.
+//
+// Measured on the fixture vocabulary: a message containing "<s>", "</s>" or "<unk>" encodes
+// to a run that contains the control id (1, 2, 0 respectively), three ids in total, where the
+// same text through Encode -- the path /v1/completions takes -- is five to seven ordinary
+// characters. llama.cpp's llama_tokenize defaults to parse_special=false for exactly this
+// reason, so a client that wants a marker taken literally has no way to ask for it here.
+//
+// This test pins the current behaviour rather than endorsing it. Fixing it means encoding the
+// template's own markers separately from the interpolated content, which changes the renderer's
+// contract and both call sites (the server and the CLI's chat command); that is a decision for
+// the maintainer, not a silent change. If that is done, this test should fail and be rewritten
+// to assert the safe behaviour.
+func TestChatEncodingResolvesControlPiecesInMessageText(t *testing.T) {
+	tok := newTestTokenizer(t)
+
+	// newTestTokenizer marks pieces Control in types but does not build the specials list --
+	// that happens in New -- so EncodeWithSpecials would fall through to plain encoding and
+	// this test would measure nothing. Build it the way New does.
+	type control struct {
+		text string
+		id   int32
+	}
+	var controls []control
+	for id := range tok.tokens {
+		if tok.types[id] == Control {
+			controls = append(controls, control{text: tok.tokens[id], id: int32(id)})
+			tok.specials = append(tok.specials, specialToken{text: tok.tokens[id], id: int32(id)})
+		}
+	}
+	if len(controls) == 0 {
+		t.Skip("the fixture vocabulary has no control pieces")
+	}
+
+	for _, c := range controls {
+		t.Run(c.text, func(t *testing.T) {
+			// A marker embedded in text the way a client would send it.
+			const text = "please quote THIS literally"
+			withMarker := "please quote " + c.text + " literally"
+
+			chat := tok.EncodeWithSpecials(withMarker, false)
+			plain := tok.Encode(withMarker, false)
+
+			// The marker resolves to the control id on the chat path...
+			found := false
+			for _, id := range chat {
+				if id == c.id {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("EncodeWithSpecials(%q) = %v, which does not contain the control id %d: "+
+					"this test records the behaviour, so a change here is the fix landing",
+					withMarker, chat, c.id)
+			}
+			// ...and to ordinary characters on the completions path, which is the difference
+			// that makes the chat endpoint an injection surface rather than a spelling rule.
+			for _, id := range plain {
+				if id == c.id {
+					t.Errorf("Encode(%q) contains the control id %d; the completions path is "+
+						"documented as taking text literally", withMarker, c.id)
+				}
+			}
+			if len(plain) <= len(chat) {
+				t.Errorf("the same text is %d ids as prose and %d as markup; the marker should "+
+					"collapse to one id on the markup path", len(plain), len(chat))
+			}
+			// The control-free control: text without the marker must not gain one.
+			if ids := tok.EncodeWithSpecials(text, false); containsID(ids, c.id) {
+				t.Errorf("text without the marker encoded to %v, which contains the control id %d",
+					ids, c.id)
+			}
+		})
+	}
+}
+
+// containsID reports whether ids holds want.
+func containsID(ids []int32, want int32) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}

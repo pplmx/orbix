@@ -77,6 +77,9 @@ func cmdServe(args []string) error {
 	prefixCache := fs.Bool("prefix-cache", false, "reuse KV blocks across requests that share a prompt prefix (needs --blocks)")
 	otlpEndpoint := fs.String("otlp-endpoint", "", "OTLP/HTTP collector for traces, e.g. http://localhost:4318; empty disables tracing")
 	logFormat := fs.String("log-format", defaultLogFormat, "access log format: "+logFormatChoices)
+	shutdownGraceFlag := fs.Duration("shutdown-grace", shutdownGrace,
+		"how long a SIGTERM or SIGINT waits for in-flight responses before cutting them; "+
+			"a cut stream ends without [DONE]")
 	policy := fs.String("policy", "fifo", "admission policy when more requests are ready than --max-active: fifo, shortest, or fair")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -105,6 +108,13 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("serve: --otlp-endpoint %q is not an http(s) URL with a host",
 				*otlpEndpoint)
 		}
+	}
+	// A negative grace cannot be a bounded drain: context.WithTimeout with a negative duration
+	// is already expired, so every shutdown would cut every response while claiming to drain.
+	// Zero is allowed and means "do not wait", which is a real choice for a process whose
+	// requests are already being retried elsewhere.
+	if *shutdownGraceFlag < 0 {
+		return fmt.Errorf("serve: --shutdown-grace must not be negative (0 means do not wait)")
 	}
 	// The listen address is checked here, with the other flags, for the reason --otlp-endpoint
 	// is: net.Listen runs after engine.New, so a typo in --addr used to cost a full model load
@@ -367,11 +377,21 @@ func cmdServe(args []string) error {
 		return drainAndStop(httpSrv, func() {
 			cancel()
 			srv.Shutdown()
-		}, shutdownGrace)
+		}, *shutdownGraceFlag)
 	}
 }
 
-// shutdownGrace bounds how long an in-flight response may delay a shutdown.
+// shutdownGrace is the default bound on how long an in-flight response may delay a shutdown.
+//
+// It is a default rather than a constant because five seconds is not long enough for a real
+// generation. Measured on this engine: Llama 3.2 1B produces 64 tokens in 5.04 s and 128 in
+// 10.4 s; TinyLlama 1.1B needs 5.17 s for 64; Qwen2.5-0.5B needs 3.41 s. So an ordinary reply
+// from a modest model already sits at or past the grace, and a rolling restart will cut it.
+// The comment here used to say the value was "long enough that ordinary replies finish", which
+// those numbers contradict.
+//
+// `--shutdown-grace` lets a deployment choose: a few seconds for a service whose clients retry,
+// minutes for one that would rather finish than restart fast.
 const shutdownGrace = 5 * time.Second
 
 // drainAndStop stops an HTTP server and the engine pump behind it, in that order.

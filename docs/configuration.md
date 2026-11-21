@@ -42,6 +42,7 @@ Paged cache, on `serve`, `chat` and `bench`:
 | `--addr`                   | Listen address, `:8080` by default                                  |
 | `--log-format`             | Access log to stderr: `text`, `json`, or `off`                      |
 | `--otlp-endpoint`          | OTLP/HTTP collector for traces; unset means no tracing              |
+| `--shutdown-grace`         | SIGTERM/SIGINT drain time for in-flight replies; 5s, 0 means none   |
 
 `run` and `chat` conversation options:
 

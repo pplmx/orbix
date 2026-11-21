@@ -306,6 +306,14 @@ func TestServeRejectsFlagCombinationsThatCannotWork(t *testing.T) {
 			why:  "net.Listen runs after engine.New, so the typo cost a full model load first",
 		},
 		{
+			// A negative duration is already expired, so every shutdown would cut every
+			// response while claiming to drain.
+			name: "negative shutdown grace",
+			args: []string{"--shutdown-grace", "-1s"},
+			want: "--shutdown-grace",
+			why:  "context.WithTimeout with a negative duration returns immediately",
+		},
+		{
 			name: "listen address with a port that is not a number",
 			args: []string{"--addr", "127.0.0.1:http"},
 			want: "--addr",

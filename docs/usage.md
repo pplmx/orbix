@@ -123,10 +123,29 @@ with a stream that finishes in about 20 ms, the same signal exited in 21 ms with
 and their `[DONE]` intact -- which is the drain doing its job rather than the cut.
 
 A client cannot distinguish that cut from a dropped connection, so a deployer who drains a pod
-should treat a stream that ends without `[DONE]` as incomplete rather than as finished. The
-grace is a constant rather than a flag: it is short enough that a rolling restart is quick and
-long enough that ordinary replies finish, and an operator who needs a different value needs a
-different policy than "drain, then stop".
+should treat a stream that ends without `[DONE]` as incomplete rather than as finished.
+
+Five seconds is not enough for a real generation, so `--shutdown-grace` sets it. Measured on
+this engine, a 64-token reply takes 5.04 s on Llama 3.2 1B, 5.17 s on TinyLlama 1.1B and 3.41 s
+on Qwen2.5-0.5B; 128 tokens on Llama 3.2 takes 10.4 s. An ordinary reply from a modest model
+therefore sits at or past the default, and a rolling restart under load will cut it.
+
+The flag is worth setting in one direction or the other:
+
+```bash
+# A service whose clients retry: restart fast and let them.
+orbix serve --model ./model.gguf --shutdown-grace 0
+
+# A batch service that would rather finish the reply than restart promptly.
+orbix serve --model ./model.gguf --shutdown-grace 60s
+```
+
+Measured on the same request -- Llama 3.2 1B, 40 tokens, `SIGTERM` one second in: at
+`--shutdown-grace 1s` the server exited in 1591 ms with 19 chunks and no `[DONE]`; at `30s` it
+drained in 3205 ms with all 42 chunks and their `[DONE]`. At `0` it exited in 676 ms with 9
+chunks and logged `the 0s grace expired`. A negative value is refused, because
+`context.WithTimeout` with a negative duration is already expired -- every shutdown would cut
+every response while claiming to drain.
 
 `X-Accel-Buffering` is nginx-specific and consumed rather than forwarded (it is in the default
 hidden-header set), so a two-tier nginx chain needs `proxy_pass_header X-Accel-Buffering` on the

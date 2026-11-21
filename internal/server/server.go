@@ -969,8 +969,21 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	if st := s.eng.Stats(); st.PoolBlocks > 0 {
 		if need, have := blocksNeeded(len(promptTokens)+maxTokens, st.PoolBlockSize),
 			st.PoolBlocks; need > have {
+			// param names whichever side accounts for more of the request, because the check
+			// compares prompt+budget and either can be what makes it unservable. Naming the
+			// prompt field unconditionally was wrong for the shape a caller is most likely to
+			// hit by accident: "Hi" with max_tokens 2000 is 2002 positions, and a client that
+			// follows `param` shortens a two-token prompt while the budget stays the reason.
+			// The reverse -- a long prompt with a small budget -- is what this test's fixture
+			// builds, and there the prompt field is the right answer. Splitting on which is
+			// larger gets both right; it is also the split the message itself already makes
+			// by printing both numbers.
+			blamed := promptParam(p.chat)
+			if maxTokens > len(promptTokens) {
+				blamed = "max_tokens"
+			}
 			writeRequestError(w, http.StatusBadRequest, newParamError(
-				promptParam(p.chat), "context_length_exceeded",
+				blamed, "context_length_exceeded",
 				"this request needs %d KV cache blocks of %d positions (%d positions for the "+
 					"prompt and budget) but the pool holds %d (%d positions), so no other "+
 					"request finishing can make room for it; shorten the prompt or lower "+

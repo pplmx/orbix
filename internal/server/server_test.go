@@ -5300,3 +5300,77 @@ func TestRenderFallbackIsNotRepeatedByRequest(t *testing.T) {
 		t.Errorf("warned about a fallback the caller already announced:\n%s", buf.String())
 	}
 }
+
+// TestPoolRefusalNamesTheLargerSide covers which field a permanent-capacity refusal blames.
+//
+// The check compares prompt+budget against the pool, so either side can be what makes a
+// request unservable, and the param has to say which. It always named the prompt field, which
+// is wrong for the shape a caller hits by accident: "Hi" with max_tokens 2000 is 2002
+// positions, and a client that follows `param` shortens a two-token prompt while the budget
+// stays the reason -- the retry fails identically.
+//
+// Both directions are asserted, because a fix that always blamed max_tokens would pass the
+// first half and mislead on the second.
+func TestPoolRefusalNamesTheLargerSide(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	// Two blocks: small enough that either side can be the reason, large enough that the
+	// server is otherwise usable. The pool size is fixed at construction, so it cannot be
+	// adjusted on the server afterwards.
+	eng, err := engine.New(path, engine.Options{
+		MaxActive: 1, MaxQueued: 1, Blocks: 2, BlockSize: 16,
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		body string
+		want string
+		why  string
+	}{
+		{
+			name: "budget dominates",
+			body: `{"prompt": "hi", "max_tokens": 200}`,
+			want: `"param":"max_tokens"`,
+			why:  "a two-token prompt is never what to shorten here",
+		},
+		{
+			// The prompt has to outgrow the pool without outgrowing the window, or the check
+			// under test never runs: a 200-word prompt is 1001 fixture tokens, which the
+			// prompt-length check rejects first -- and that one names "prompt" too, so the
+			// assertion passed with the pool logic inverted. 40 words is ~200 tokens against a
+			// 512-position window and a 32-position pool: unservable, but for the pool reason.
+			name: "prompt dominates",
+			body: `{"prompt": ` + quoteJSON(strings.TrimSpace(strings.Repeat("word ", 40))) +
+				`, "max_tokens": 2}`,
+			want: `"param":"prompt"`,
+			why:  "the budget is already two tokens, so the prompt is the side to shorten",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/completions", c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			if body := readBody(t, resp); !strings.Contains(body, c.want) {
+				t.Errorf("body does not name %s (%s):\n%s", c.want, c.why, body)
+			}
+		})
+	}
+}

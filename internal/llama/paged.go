@@ -350,9 +350,27 @@ func (c *PagedKVCache) Reset() error {
 // what a shared block is: a run of positions whose keys and values no holder may
 // modify. A cache that adopted part of a block would append into it and corrupt the
 // other holders.
+//
+// A block id may appear at most once. Two entries for one id would make two of this
+// sequence's positions alias a block, and the append into the second would rewrite the
+// first in place -- inside a block other holders are reading. PrefixIndex.Match is what
+// normally guarantees this; the check here is because this function is the point where
+// the read-only-shared-block invariant is enforced, so a caller cannot reintroduce the
+// corruption by handing over a list the index did not produce.
 func (c *PagedKVCache) adopt(blocks []int32) error {
 	if len(c.blocks) != 0 || c.len != 0 {
 		return fmt.Errorf("llama: adopt into a cache that already holds %d positions", c.len)
+	}
+	// Validate the whole list before taking a single reference: a repeat found part way
+	// through would otherwise leave the blocks retained so far recorded in the cache, and
+	// the error path below only undoes a failed retain, not a successful one.
+	seen := make(map[int32]bool, len(blocks))
+	for _, id := range blocks {
+		if seen[id] {
+			return fmt.Errorf("llama: adopt block %d twice; two positions would alias one block",
+				id)
+		}
+		seen[id] = true
 	}
 	for _, id := range blocks {
 		if err := c.pool.retain(id); err != nil {

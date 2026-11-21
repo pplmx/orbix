@@ -623,6 +623,49 @@ func TestAdoptRollsBackOnFailure(t *testing.T) {
 	}
 }
 
+// TestAdoptRefusesARepeatedBlock covers the alias guard.
+//
+// Two entries naming one block make two of the sequence's positions the same storage, and
+// an append into the second rewrites the first in place -- inside a block other holders are
+// reading. PrefixIndex.Match is what normally prevents such a list from being produced, but
+// adopt is where the read-only-shared-block invariant is enforced, so it refuses rather than
+// trusting its caller.
+//
+// The refcount assertion is the half a merely-refusing check would miss: the repeat is
+// detected before retain runs, so a reject must leave the count exactly as it was.
+func TestAdoptRefusesARepeatedBlock(t *testing.T) {
+	cfg := testConfig()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	donor := pool.New()
+	for pos := range 2 {
+		if err := donor.ensureBlocks(pos); err != nil {
+			t.Fatalf("ensureBlocks: %v", err)
+		}
+	}
+	block := donor.blocks[0]
+	before := pool.RefCount(block)
+
+	target := pool.New()
+	if err := target.adopt([]int32{block, block}); err == nil {
+		t.Fatal("adopt accepted the same block twice")
+	} else if !strings.Contains(err.Error(), "twice") {
+		t.Errorf("error %q does not say the block was repeated", err)
+	}
+	if got := pool.RefCount(block); got != before {
+		t.Errorf("RefCount(%d) = %d after the rejection, want %d: the repeat was caught before retain",
+			block, got, before)
+	}
+	if got := target.BlocksHeld(); got != 0 {
+		t.Errorf("the rejected adopt left %d blocks in the cache, want 0", got)
+	}
+	if got := target.Len(); got != 0 {
+		t.Errorf("the rejected adopt left %d positions, want 0", got)
+	}
+}
+
 // TestPagedSpansRejectsPositionsBeyondTheAllocatedBlocks covers the ceiling-division guard.
 //
 // spans computes need = ceil(n/block) and refuses when that exceeds the blocks the cache

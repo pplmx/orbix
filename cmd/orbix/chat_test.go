@@ -1479,3 +1479,37 @@ func TestChatBannerIsRightBeforeTheFirstTurn(t *testing.T) {
 		t.Errorf("the banner does not carry the renderer's reason:\n%s", firstLine)
 	}
 }
+
+// TestChatExplainsAnOverflowOnce covers a message the REPL printed dozens of times.
+//
+// A conversation that no longer fits the window fails identically on every later turn, because
+// a failed turn does not grow the history. The explanation says exactly that -- and then
+// repeated itself. Measured on the 128-position fixture: 40 inputs produced 34 copies of the
+// same paragraph, each ending "the next turn will fail the same way".
+//
+// The first is worth reading in full. Later ones keep the numbers and the reason and drop the
+// advice that has already been given.
+func TestChatExplainsAnOverflowOnce(t *testing.T) {
+	var in strings.Builder
+	// Enough padding to overflow a 128-position window, then a /clear and enough to overflow
+	// again, so the reset is covered too.
+	for i := range 20 {
+		_, _ = fmt.Fprintf(&in, "Message %d with enough padding words to fill the window\n", i)
+	}
+	in.WriteString("/clear\n")
+	for i := range 20 {
+		_, _ = fmt.Fprintf(&in, "Second %d with enough padding words to fill the window up\n", i)
+	}
+	in.WriteString("/exit\n")
+
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 4, topK: 40}, in.String())
+
+	if got := strings.Count(out, "no longer fits the model's window"); got != 2 {
+		t.Errorf("the full explanation appeared %d times, want 2 (one per conversation, since "+
+			"/clear starts over):\n%s", got, out)
+	}
+	// The short form still has to say why, and point at the command that helps.
+	if !strings.Contains(out, "(unchanged; /clear starts over)") {
+		t.Errorf("later overflows are not reported concisely:\n%s", out)
+	}
+}

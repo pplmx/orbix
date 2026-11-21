@@ -216,6 +216,12 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	var history []chatTurn
 	// notedFallback records that the session has already explained a render-time fallback.
 	notedFallback := false
+	// notedContextFull records that the session has already explained a conversation that no
+	// longer fits. The failure repeats identically on every later turn -- it is the same
+	// conversation against the same window -- so the full explanation is worth reading once
+	// and is noise after that. Measured on the 128-position fixture: 34 identical paragraphs
+	// for 40 inputs, each one saying the next turn would fail the same way.
+	notedContextFull := false
 	// notedCut records that the session has already explained a turn the window stopped.
 	// Separate from notedFallback because the two are unrelated: a session can hit either
 	// without the other, and sharing one flag would silence the second explanation.
@@ -260,6 +266,12 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 			if done {
 				return nil
 			}
+			if line == "/clear" {
+				// A fresh conversation is a fresh explanation: the short form above says
+				// "(unchanged; /clear starts over)", so after a /clear the next overflow has to
+				// be described in full again or the advice points at a command already used.
+				notedContextFull = false
+			}
 			continue
 		}
 
@@ -267,8 +279,19 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 		if err != nil {
 			// A failed turn leaves the history untouched, so the next question is
 			// asked against the same context rather than against a broken one.
-			if _, werr := fmt.Fprintf(out, "error: %v\n", explainChatError(err)); werr != nil {
-				return werr
+			if explained := explainChatError(err); errors.Is(err, errContextFull) && notedContextFull {
+				// The full text says the next turn fails the same way; once that has been read,
+				// repeating it verbatim for every later input is the opposite of help.
+				if _, werr := fmt.Fprintf(out, "error: %v (unchanged; /clear starts over)\n", err); werr != nil {
+					return werr
+				}
+			} else {
+				if _, werr := fmt.Fprintf(out, "error: %v\n", explained); werr != nil {
+					return werr
+				}
+				if errors.Is(err, errContextFull) {
+					notedContextFull = true
+				}
 			}
 			continue
 		}

@@ -8,15 +8,63 @@ export ORBIX_MODEL=./models/llama-3-8b-q4_0.gguf
 orbix serve --max-active 32 --policy shortest --blocks 2048 --block-size 16 --prefix-cache
 ```
 
+Flags shared by every command that generates:
+
 | Flag                       | What it controls                                                    |
 | -------------------------- | ------------------------------------------------------------------- |
 | `--model`                  | Checkpoint path; falls back to `ORBIX_MODEL`                        |
+| `--max-tokens`             | Cap on generated tokens, not counting the prompt                    |
+| `--workers`                | Kernel goroutines per batched pass; 0 means one per CPU             |
+
+Sampling, on `run` and `chat` only (the server takes these per request):
+
+| Flag      | What it controls                                                       |
+| --------- | ---------------------------------------------------------------------- |
+| `--temp`  | Sampling temperature; 0 means greedy, which is the default             |
+| `--top-k` | Top-k cutoff; 0 disables it. Applies only with `--temp` > 0            |
+| `--top-p` | Nucleus cutoff in (0,1]; 0 disables it. Applies only with `--temp` > 0 |
+
+Paged cache, on `serve`, `chat` and `bench`:
+
+| Flag                       | What it controls                                                    |
+| -------------------------- | ------------------------------------------------------------------- |
+| `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context  |
+| `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix             |
+| `--no-prefix-cache`        | `chat` only: turn reuse off, which is otherwise on for a REPL       |
+
+`serve` and `bench`:
+
+| Flag                       | What it controls                                                    |
+| -------------------------- | ------------------------------------------------------------------- |
 | `--max-active`             | Sequences advanced per round, and therefore the batch size          |
 | `--max-queued`             | Backlog accepted before new requests get 503; 0 means 8x max-active |
 | `--policy`                 | Which sequences fill a round: `fifo`, `shortest`, or `fair`         |
-| `--workers`                | Kernel goroutines per batched pass; 0 means one per CPU             |
-| `--blocks`, `--block-size` | Paged KV cache; without them each request reserves a whole context  |
-| `--prefix-cache`           | Reuse KV blocks across requests sharing a prompt prefix             |
+| `--addr`                   | Listen address, `:8080` by default                                  |
+| `--log-format`             | Access log to stderr: `text`, `json`, or `off`                      |
+| `--otlp-endpoint`          | OTLP/HTTP collector for traces; unset means no tracing              |
+
+`run` and `chat` conversation options:
+
+| Flag       | What it controls                                                     |
+| ---------- | -------------------------------------------------------------------- |
+| `--ctx`    | Context length; 0 uses the model's trained window, larger is refused |
+| `--seed`   | `run` only: sampling seed; no effect without `--temp`                |
+| `--stats`  | `run` only: timings and token counts to stderr                       |
+| `--echo`   | `run` only: print the prompt before the generated text               |
+| `--system` | `chat` only: system prompt for the session                           |
+
+`bench` workload:
+
+| Flag                       | What it controls                                                    |
+| -------------------------- | ------------------------------------------------------------------- |
+| `--concurrency`            | Requests in flight at once                                          |
+| `--requests`               | Requests per measurement                                            |
+| `--prompt`                 | Prompt text for the measurement                                     |
+| `--suite`                  | Run every scenario as one table; fixes the flags it would ignore    |
+
+Every one of these is registered once in `cmd/orbix/flags.go` when several commands share it, so
+the wording is the same wherever it appears. `orbix <command> -h` prints the same list with the
+per-command defaults.
 
 `--block-size` above the model's context is refused when reuse is on: prefix reuse matches whole
 blocks, so a block the context can never fill is never published and `--prefix-cache` would reuse

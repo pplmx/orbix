@@ -1009,19 +1009,15 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, created int64, p generateParams, promptTokens []int32) {
 	var out []int32
 	reason := "stop"
-	for ev := range ch {
+	// An error stops the drain and is reported after it, rather than inside the callback: a
+	// callback cannot return from this function, and writing a status from inside one would
+	// leave the drain still reading a channel nobody wants.
+	var failure error
+	closed := drainEvents(r.Context(), ch, func(ev engine.Event) {
 		if ev.Err != nil {
-			// A pool that ran out is capacity, not a fault in the request or the server:
-			// the same request succeeds once another sequence releases its blocks. 503
-			// with Retry-After is what a client backs off on, and 500 would have it
-			// treat a temporary condition as a permanent one.
-			if errors.Is(ev.Err, llama.ErrPoolExhausted) {
-				s.refusedPool.Add(1)
-				w.Header().Set("Retry-After", "1")
-				writeError(w, http.StatusServiceUnavailable, ev.Err.Error())
-				return
+			if failure == nil {
+				failure = ev.Err
 			}
-			writeError(w, http.StatusInternalServerError, ev.Err.Error())
 			return
 		}
 		if ev.HasToken {
@@ -1030,6 +1026,28 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 		if ev.Done {
 			reason = ev.FinishReason
 		}
+	})
+	if failure != nil {
+		// A pool that ran out is capacity, not a fault in the request or the server: the same
+		// request succeeds once another sequence releases its blocks. 503 with Retry-After is
+		// what a client backs off on, and 500 would have it treat a temporary condition as a
+		// permanent one.
+		if errors.Is(failure, llama.ErrPoolExhausted) {
+			s.refusedPool.Add(1)
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, failure.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, failure.Error())
+		return
+	}
+	if !closed {
+		// The request was abandoned before the sequence finished, so what arrived is a prefix
+		// and there is no honest 200 to build from it. Saying so gives the client a status it
+		// can retry on; the alternative was no response at all.
+		writeError(w, http.StatusServiceUnavailable,
+			"the request was abandoned before it finished")
+		return
 	}
 	text := s.tok.DecodeCompletion(out)
 	// A stop string is text, and generation halts where it would appear. OpenAI's API takes
@@ -1087,6 +1105,32 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-c
 // in the same stream carries "usage": null. A client written against the documented shape
 // distinguishes the two by choices being empty, and one that reads usage off every chunk
 // without a null there would see the field missing rather than absent.
+// drainEvents feeds every event on ch to fn until the channel closes or ctx is done.
+//
+// It returns true when the channel closed -- the sequence finished, one way or another -- and
+// false when ctx was cancelled first, which means the request is being abandoned: the client
+// hung up, or the server is shutting down and will not advance this sequence again.
+//
+// A `for ev := range ch` cannot express the second case, and that is a real difference rather
+// than a stylistic one. The channel is closed by the engine when it finishes a sequence, and a
+// sequence the pump never advances again is never finished, so the range blocks until the
+// process exits and the client gets nothing. Measured against a real server: four non-streaming
+// requests in flight at a 3-second shutdown grace all came back as curl exit 52, "empty reply
+// from server", while the same four at a 60-second grace answered 200.
+func drainEvents(ctx context.Context, ch <-chan engine.Event, fn func(engine.Event)) bool {
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return true
+			}
+			fn(ev)
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
 func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, created int64, chat bool, stop []string, includeUsage bool, promptTokens int) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {

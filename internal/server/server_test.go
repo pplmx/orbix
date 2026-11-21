@@ -5017,3 +5017,68 @@ func TestBlockingDisconnectReturnsTheBlocksToo(t *testing.T) {
 			before.PoolFree-after.PoolFree, before.PoolBlocks, before.PoolFree)
 	}
 }
+
+// TestBlockingResponseReturnsWhenThePumpStops covers the shutdown case the disconnect test above
+// cannot reach.
+//
+// That test cancels the request while the pump is running, so the engine finishes the sequence,
+// the channel closes, and the handler unblocks through the ordinary path. A shutdown is
+// different in the one way that matters: the pump stops, so nothing ever finishes the sequence
+// and nothing ever closes the channel. A handler that only ranges over the channel then blocks
+// until the process exits, and the client gets no response at all -- measured against a real
+// server as curl exit 52, "empty reply from server", for four requests in flight at a 3-second
+// grace.
+//
+// The assertion is that the handler returns and writes a status, not which status: 503 is what
+// it does now, and a future change to 499 or 500 would still be a response the client can act
+// on. What it must not do is hang.
+func TestBlockingResponseReturnsWhenThePumpStops(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 2048}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	eng, err := engine.New(path, engine.Options{MaxActive: 1, MaxQueued: 4})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	modelCfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: modelCfg.Name, ContextLen: modelCfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pumpCtx, stopPump := context.WithCancel(context.Background())
+	srv.StartPump(pumpCtx)
+
+	reqCtx, cancelRequest := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		strings.NewReader(`{"prompt": "Once upon a time", "max_tokens": 1000}`)).WithContext(reqCtx)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.Handler().ServeHTTP(w, req)
+	}()
+	waitFor(t, 5*time.Second, func() bool { return eng.Active() > 0 },
+		"request never reached the engine")
+
+	// This is the shutdown sequence: stop the pump first, then cancel the request. The order is
+	// what makes it a shutdown rather than a disconnect, and it is the case that used to hang.
+	stopPump()
+	srv.Shutdown()
+	cancelRequest()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler did not return after the pump stopped: a client in flight at " +
+			"shutdown gets no response at all")
+	}
+	if w.Code == 0 {
+		t.Error("the handler returned without writing a response")
+	}
+}

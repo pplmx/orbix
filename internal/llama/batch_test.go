@@ -1433,3 +1433,75 @@ func TestLogitsForCachedMatchesAFreshPrefill(t *testing.T) {
 		}
 	}
 }
+
+// TestLogitsForCachedHonoursTheWindow is the sliding-window half of the fully-cached path.
+//
+// TestLogitsForCachedMatchesAFreshPrefill covers a Qwen2 model with no window. Mistral's
+// sliding window is the other per-file property that changes what attention reads, and
+// logitsForCached has its own trimSpans call for it. Removing that call left the entire
+// package green: every existing window test drives the ordinary prefill or decode path,
+// where the trimming lives in attentionBatch/attention, and no test combined a window with
+// a prefix that the index had cached in full.
+//
+// Measured with the trim removed from attentionCached: the cached path differs from a fresh
+// prefill at 291 of 363 logits. Without the window at all it would be a different set of
+// numbers, so the test also asserts the model really carries a window.
+func TestLogitsForCachedHonoursTheWindow(t *testing.T) {
+	// Four positions of window against an eight-position prompt: the trim has to drop
+	// something for the assertion to mean anything.
+	const window, blockSize = 4, 4
+	path := gguftest.Model{
+		Arch: "qwen2", AttnBias: true, ContextLen: 128, WindowLen: window,
+	}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if cfg.WindowLen != window {
+		t.Fatalf("WindowLen = %d, want %d: the fixture's window did not load, so this test "+
+			"would not exercise the trim", cfg.WindowLen, window)
+	}
+
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: blockSize, Blocks: 64})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+
+	// Two whole blocks, and more positions than the window, so the last position can see
+	// only the recent ones.
+	prompt := make([]int32, 2*blockSize)
+	if len(prompt) <= window {
+		t.Fatalf("the prompt is %d positions and the window %d, so nothing would be trimmed",
+			len(prompt), window)
+	}
+	for i := range prompt {
+		prompt[i] = int32(1 + i%5)
+	}
+
+	first := pool.New()
+	fresh, err := m.PrefillWithPrefix(first, prompt, 0)
+	if err != nil {
+		t.Fatalf("first PrefillWithPrefix: %v", err)
+	}
+	fresh = append([]float32(nil), fresh...)
+
+	second := pool.New()
+	cached, err := m.PrefillWithPrefix(second, prompt, 0)
+	if err != nil {
+		t.Fatalf("second PrefillWithPrefix: %v", err)
+	}
+	cached = append([]float32(nil), cached...)
+
+	if got := second.ReusedPositions(); got != len(prompt) {
+		t.Fatalf("the second pass reused %d of %d positions; the whole prompt has to match",
+			got, len(prompt))
+	}
+	for i := range fresh {
+		if fresh[i] != cached[i] {
+			t.Fatalf("logit %d: cached %.9g, fresh %.9g -- the fully-cached path has to "+
+				"apply the sliding window as well", i, cached[i], fresh[i])
+		}
+	}
+}

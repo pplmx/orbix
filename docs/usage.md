@@ -131,6 +131,30 @@ a larger body cannot describe a prompt the model could attend over. Anything ove
 `413` without reading the rest; unbounded, a 64 MiB request spent 82 seconds being read and
 tokenized before the server could say it was too long.
 
+## Embedding it in a Go service
+
+Not supported today, and the reason is structural rather than an omission. Every package that
+would do the work lives under `internal/`, which Go forbids another module from importing:
+
+```text
+use of internal package github.com/pplmx/orbix/internal/engine not allowed
+```
+
+That is deliberate for now -- `internal/` is what makes the package boundaries a rule the compiler
+enforces rather than a convention, and the layers have moved enough that a frozen public API would
+have been a liability. The interfaces in [Core interfaces](architecture.md#core-interfaces) are
+the shape such an API would take; the table there says which of them exist and which do not, and
+nothing in this section should be read as a promise that they are reachable.
+
+What works instead:
+
+- **Run the server and talk HTTP.** `orbix serve` is the supported integration surface, and it is
+  the OpenAI shape, so the client libraries already exist: see
+  [Serve a GGUF model](#serve-a-gguf-model), and the `curl` calls there are the contract.
+- **Fork or copy what you need.** The code is structured to be read, and `internal/engine` is the
+  entry point a fork would call: `engine.New(path, engine.Options{...})` returns an engine,
+  `Submit` queues, `Pump` advances a round, and `Stats` reports. That is what the CLI does.
+
 ## Cross-compile
 
 ```bash

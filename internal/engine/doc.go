@@ -28,7 +28,7 @@
 // retires the sequence, freeing its slot. Without that bound one stalled reader would
 // hold a slot and stall the shared pump for everyone, which is the failure that made the
 // bound necessary. The consequence for a consumer is a real one and is written down in
-// the README: drain as you go, because a stream nobody reads is abandoned rather than
+// docs/usage.md: drain as you go, because a stream nobody reads is abandoned rather than
 // paused.
 //
 // The package sits above llama and below the serving layer. It knows about

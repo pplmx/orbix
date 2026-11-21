@@ -10,8 +10,8 @@ import (
 //
 // It is a local type rather than llama.Greedy so the server's default cannot be
 // changed by an edit to the sampler package: a local engine whose output stops
-// being reproducible is a debugging trap, and the README promises greedy as the
-// default.
+// being reproducible is a debugging trap, and Options.Temperature documents greedy
+// as the server's default.
 type greedySampler struct{}
 
 // Next returns the argmax of logits.

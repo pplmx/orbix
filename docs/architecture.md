@@ -101,9 +101,6 @@ concerns rather than arithmetic ones.
 Each package has a `doc.go` explaining what the layer is responsible for. Read in this order and
 the concepts arrive in the order a request travels through them.
 
-Each package has a `doc.go` explaining what the layer is responsible for; read in this order and
-the concepts arrive in the order a request travels through them.
-
 | #   | Package                                                                                | Concept                                          |
 | --- | -------------------------------------------------------------------------------------- | ------------------------------------------------ |
 | 1   | [`internal/gguf`](../internal/gguf/doc.go)                                             | Model file layout; tensors by offset, not loaded |

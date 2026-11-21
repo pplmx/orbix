@@ -106,8 +106,6 @@ the same kind of shortfall as a `note:` line for the case the suite cannot hit -
 leaves less room than `--max-tokens` asks for -- naming both counts, because `finish: length`
 reads as "the budget was reached" either way.
 
-`orbix serve` also exports the same numbers over `/metrics` in Prometheus text format,
-
 ## Metrics
 
 `orbix serve` exports these numbers over `/metrics` in Prometheus text format, so a suite's

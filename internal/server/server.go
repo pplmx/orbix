@@ -183,7 +183,7 @@ func New(eng *engine.Engine, tok *tokenize.Tokenizer, cfg Config) (*Server, erro
 	//
 	// It is method-less on purpose: a Go mux grants a method-less pattern the path, so a
 	// request to a known route with the wrong method lands here rather than getting the
-	// mux's own 405. That 405 is load-bearing -- README's CORS note rests on OPTIONS
+	// mux's own 405. That 405 is load-bearing -- docs/usage.md's CORS note rests on OPTIONS
 	// answering it, since a cross-origin application/json request then never leaves the
 	// preflight -- so handleUnimplemented restores it for a route that exists.
 	mux.HandleFunc("/v1/", s.handleUnimplemented)
@@ -528,7 +528,7 @@ var v1Routes = map[string]string{
 //     the same answer the mux gives when the fallback is absent. OPTIONS lands here, which is
 //     the CORS preflight: answering 404 instead would tell a browser the route is missing,
 //     while 405 tells it the method is not allowed, and the preflight fails either way -- but
-//     only the 405 is true, and README's account of the CORS gap depends on it.
+//     only the 405 is true, and docs/usage.md's account of the CORS gap depends on it.
 //   - The path is not a route at all. That is a 404 in the API's envelope, so an SDK that
 //     called an endpoint this engine does not implement raises a not-found rather than a
 //     JSON parse error.
@@ -1162,7 +1162,8 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	}
 	// A character split across the last tokens is still held by the decoder, waiting for a
 	// byte that never arrives. Without this the stream would end one character short of what
-	// the same sequence produces without streaming, which is the contract README states.
+	// the same sequence produces without streaming, which breaks the contract
+	// TestStreamingReassemblesToSameText states.
 	if tail := dec.Flush(); tail != "" {
 		if !send(chunkPayload(chat, tail)) {
 			return
@@ -1432,8 +1433,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) er
 	// usable at all, so checking the header would trade a documented convenience for less exposure
 	// than the word "bypass" suggests: the page still cannot read anything, and the request path
 	// it needs is the one already documented for curl -d. What closes the exposure is binding
-	// loopback or authenticating in front, which is what the README's "No CORS and no
-	// authentication" section tells a deployer to do.
+	// loopback or authenticating in front, which is what the "No CORS and no authentication"
+	// section of docs/usage.md tells a deployer to do.
 	if enc := r.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
 		return fmt.Errorf("%w: %s; send the body uncompressed", errUnsupportedEncoding, enc)
 	}

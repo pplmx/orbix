@@ -213,9 +213,22 @@ it needs, which is a capacity signal a client or proxy should back off on. A req
 merely arrives while the pool is empty is not refused: it is admitted and waits for blocks to
 come back, because every active sequence advances one token at a time and releases the blocks
 of a finished one. Measured with four blocks and four concurrent requests: `orbix_kv_pool_free`
-read 0 while a fifth request needing two blocks answered 200. It does not answer that for
-a request whose own prompt and budget need more blocks than the pool holds at all: nothing
-another request finishes makes room for it, so retrying only repeats the answer. That case is
+read 0 while a fifth request needing two blocks answered 200.
+
+That wait is latency, and it is the thing to size `--blocks` for. On the same saturated server
+the fifth request took 3.62 seconds to answer, against 1.79-2.06 seconds for the same request
+on an idle one -- so about 1.7 of those seconds were spent waiting for a block, queueing behind
+four 20-token requests that each held one to completion. A deployment whose latency budget
+cannot absorb that needs more blocks, not a different policy: no scheduling rule makes a block
+available sooner.
+
+The base figure is worth seeing too. Two seconds for 20 tokens on Llama 3.2 1B is the engine's
+own speed on this host -- 9.6 tok/s measured with `run --stats` on the same checkpoint -- not
+overhead the pool introduced.
+
+The 503 is not the answer for a request whose own prompt and budget need more blocks than the
+pool holds at all: nothing another request finishes makes room for it, so retrying only repeats
+the answer. That case is
 refused up front with a `400` whose message names both counts -- what the request needs and
 what the pool has -- and suggests a shorter prompt, a lower `max_tokens`, or a larger
 `--blocks`. Measured on the 256-position fixture with `--blocks 2 --block-size 16`: an

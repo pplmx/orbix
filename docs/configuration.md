@@ -170,6 +170,11 @@ On one stream instead of eight: stories15M q4_0, 128 tokens from one prompt, 64.
 one worker against 228.7-236.2 at 32 (3.52x-3.67x). The synthetic fixture reaches 3.9x because
 its projection is large next to the per-round overhead; a 19 MB model does not.
 
+Above 32 the plateau is flat measured four ways, not two: 64 greedy tokens from one prompt on the
+same checkpoint took 245-256 ms at 32 workers, 240-255 ms at 64, 234-247 ms at 96 and 243-253 ms
+at 128 over two runs each -- overlapping ranges, with no trend in the worker count. Raising the
+default would buy nothing on a wide host, which is why it stays at one goroutine per CPU.
+
 For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that way
 (131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes), against 32 KiB for the synthetic fixtures.
 Any model with a long window should be run with `--blocks`.

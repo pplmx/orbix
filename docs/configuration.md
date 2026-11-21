@@ -268,6 +268,24 @@ reported 128 while `GOMAXPROCS` reported 4. So a container gets four workers by 
 than a hundred and twenty-eight competing for four cores -- which is the useful behaviour, and
 worth knowing before reading the worker figures above as if they applied to a capped pod.
 
+The default is also the best value there, not merely a safe one. In the same four-CPU scope,
+stories15M q4_0 with 64 greedy tokens:
+
+| `--workers` | tok/s (two runs) |
+| ----------- | ---------------- |
+| 1           | 66.6, 66.4       |
+| 2           | 120.7, 121.2     |
+| 4 (default) | 192.3, 193.2     |
+| 8           | 196.2, 194.7     |
+
+Scaling rises to the quota and flattens past it -- 1.82 times at two workers and 2.90 at four,
+not the 2x and 4x a linear reading would predict, because the kernels have a serial part and
+because four jobs on four CPUs still contend. Eight workers, twice the quota, land 1-2% above
+four: inside the spread between runs, so the plateau is flat rather than falling. The automatic
+value sits on that plateau rather than inside the climb, which is the property that matters.
+`--workers 0` and an explicit `--workers 4` measured 189.4 and 192.3 -- the same within
+run-to-run noise, which is what "0 means GOMAXPROCS" should look like.
+
 For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that way
 (131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes), against 32 KiB for the synthetic fixtures.
 Any model with a long window should be run with `--blocks`.

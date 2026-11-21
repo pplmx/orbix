@@ -1060,3 +1060,67 @@ func TestRMSNormZeroEpsOnAZeroRow(t *testing.T) {
 		}
 	})
 }
+
+// TestMatVecAndOneRowMatMulAgree pins the equivalence the two forward paths rely on.
+//
+// llama has two forward paths and they reach different kernels for the same projection:
+// forward.go calls MatVec for a single sequence (attention.go's cached path too), while
+// batch.go calls MatMulTransposed for every batched prefill and decode. At the vocabulary
+// projection that means the same weights are read through matVecRows on one path and through
+// matMulTransposedCols with m=1 on the other. Nothing compared them.
+//
+// The gap matters because a divergence here is invisible end to end. Both kernels are
+// parallel and both are bit-identical to their own serial form, so a test that compares
+// batched output against batched output -- or single against single -- cannot see it. It
+// would show up as a prompt whose logits change when a second request is admitted, which is
+// the one thing TestInterleavingMatchesSequentialResults exists to rule out, and that test
+// only exercises the batched path on both sides.
+//
+// The two implementations are not sharing code: one loops over rows of b with a scalar sum,
+// the other tiles rows of a and indexes dst[i*n+j]. Both accumulate in float32 in the same
+// order over the same products, which is what makes this an equality rather than an
+// approximation.
+func TestMatVecAndOneRowMatMulAgree(t *testing.T) {
+	r := NewRunner(4)
+	// Sizes that straddle the parallel threshold and the 8-row tile: k below it, k above it,
+	// and an odd width that leaves a partial tile.
+	shapes := []struct{ n, k int }{
+		{n: 1, k: 1},
+		{n: 3, k: 5},
+		{n: 7, k: 64},
+		{n: 130, k: 257},
+		{n: 1000, k: 288},
+	}
+	for _, s := range shapes {
+		t.Run(sizeName(s.n, s.k, "shape"), func(t *testing.T) {
+			// The values have to be ones float32 cannot hold exactly, or the test proves
+			// nothing: my first version used i%9/8 and i%5/4, every one a binary fraction,
+			// and reversing the accumulation order left the comparison green. Irrational
+			// and repeating fractions make the sum depend on the order, which is the
+			// property under test -- the two kernels must accumulate in the same order, not
+			// merely agree in exact arithmetic.
+			a := make([]float32, s.n*s.k)
+			for i := range a {
+				a[i] = float32(math.Sin(float64(i)+1)) / 3
+			}
+			v := make([]float32, s.k)
+			for i := range v {
+				v[i] = float32(math.Cos(float64(i)+1)) * 0.7
+			}
+			want := make([]float32, s.n)
+			got := make([]float32, s.n)
+			if err := r.MatVec(want, a, v, s.n, s.k); err != nil {
+				t.Fatalf("MatVec: %v", err)
+			}
+			if err := r.MatMulTransposed(got, v, a, 1, s.n, s.k); err != nil {
+				t.Fatalf("MatMulTransposed: %v", err)
+			}
+			for j := range want {
+				if got[j] != want[j] {
+					t.Fatalf("column %d: one-row MatMulTransposed = %v, MatVec = %v",
+						j, got[j], want[j])
+				}
+			}
+		})
+	}
+}

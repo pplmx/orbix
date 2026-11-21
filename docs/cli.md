@@ -15,6 +15,13 @@ all blocks free, meaning the request is larger than the pool can ever hold.
 so the next prompts still attach what they share with the old history -- which is what makes it a
 way out of a full window rather than a fresh start.
 
+A turn the window cut short says so, once per session: `(the 128-token window is full, so the
+128-token budget was cut to 104; /clear or lower --max-tokens)`. Without it a cut reply is
+indistinguishable from one the model ended itself, since both stop mid-sentence. The note is
+printed once rather than under every later turn, because the limit is a property of the
+conversation and every turn after the first cut runs into it. `run --stats` prints the same
+figures as a `note:` line, and `bench` reports them in its `NOTE` column.
+
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
 | `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization, and whether this build reproduces the model's pre-tokenizer | v0.1   |

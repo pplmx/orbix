@@ -538,14 +538,14 @@ func TestDrainChatEvents(t *testing.T) {
 		close(ch)
 
 		var out strings.Builder
-		var reply strings.Builder
-		if err := drainChatEvents(ch, &out, newDecoder(t), &reply); err != nil {
+		var ended chatTurnResult
+		if err := drainChatEvents(ch, &out, newDecoder(t), &ended); err != nil {
 			t.Fatalf("drainChatEvents: %v", err)
 		}
 		// Whatever the fixture's pieces spell, the display and the gathered reply agree:
 		// that equality is what makes /history show what the user saw.
-		if out.String() != reply.String() {
-			t.Errorf("displayed %q but collected %q", out.String(), reply.String())
+		if out.String() != ended.reply {
+			t.Errorf("displayed %q but collected %q", out.String(), ended.reply)
 		}
 	})
 
@@ -555,8 +555,9 @@ func TestDrainChatEvents(t *testing.T) {
 		ch <- engine.Event{Err: wantErr}
 		close(ch)
 
-		var out, reply strings.Builder
-		err := drainChatEvents(ch, &out, newDecoder(t), &reply)
+		var out strings.Builder
+		var ended chatTurnResult
+		err := drainChatEvents(ch, &out, newDecoder(t), &ended)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("drainChatEvents returned %v, want the engine error", err)
 		}
@@ -568,9 +569,9 @@ func TestDrainChatEvents(t *testing.T) {
 		ch <- engine.Event{HasToken: true, Token: 3}
 		close(ch)
 
-		var reply strings.Builder
+		var ended chatTurnResult
 		// A writer that refuses everything: the terminal has gone away.
-		err := drainChatEvents(ch, failingWriter{err: wantErr}, newDecoder(t), &reply)
+		err := drainChatEvents(ch, failingWriter{err: wantErr}, newDecoder(t), &ended)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("drainChatEvents returned %v, want the write error", err)
 		}
@@ -580,8 +581,9 @@ func TestDrainChatEvents(t *testing.T) {
 		// An open, empty channel: the default branch must return rather than block, or the
 		// REPL would hang between turns.
 		ch := make(chan engine.Event)
-		var out, reply strings.Builder
-		if err := drainChatEvents(ch, &out, newDecoder(t), &reply); err != nil {
+		var out strings.Builder
+		var ended chatTurnResult
+		if err := drainChatEvents(ch, &out, newDecoder(t), &ended); err != nil {
 			t.Fatalf("drainChatEvents: %v", err)
 		}
 	})
@@ -825,6 +827,111 @@ func TestChatRefusesAConversationThatFillsTheContext(t *testing.T) {
 	}
 	if !strings.Contains(out2.String(), "history is empty") {
 		t.Errorf("a refused turn left something in the history:\n%s", out2.String())
+	}
+}
+
+// TestChatSaysWhenTheWindowCutTheBudget covers the note a turn prints when the window,
+// rather than the model, ended it.
+//
+// `run --stats` prints the same note and `bench` reports it in its NOTE column, so chat was
+// the one front end that let a cut budget look like a model that finished its sentence.
+// Measured on the real 128-position stories checkpoint before the note existed: a turn asking
+// for 128 tokens produced 104 and said nothing.
+//
+// Both halves are asserted, because the note would be worse than useless if it fired on every
+// short reply: a budget the model simply did not fill must stay silent. A non-streaming
+// reasoning would count the two as one case -- both produce fewer tokens than asked -- and
+// only finish_reason tells them apart.
+func TestChatSaysWhenTheWindowCutTheBudget(t *testing.T) {
+	// A small window so the room left after a short prompt is easy to exhaust, and NoEOS so
+	// the model never stops on its own: with an EOS in the vocabulary a "fewer tokens than
+	// asked" reply could be either case and the fixture would not distinguish them.
+	path := gguftest.Model{ContextLen: 32, NoEOS: true}.Write(t, t.TempDir())
+
+	t.Run("cut by the window", func(t *testing.T) {
+		// A budget past any possible room: the window is what stopped it.
+		out := runChat(t, chatOptions{model: path, maxTokens: 32},
+			"Hello there friend\n/exit\n")
+		if !strings.Contains(out, "window is full") {
+			t.Errorf("a reply cut by the window did not say so:\n%s", out)
+		}
+		// The numbers are what makes the note actionable: without them the user cannot tell
+		// how much to lower --max-tokens by, or how close the conversation is to the limit.
+		if !strings.Contains(out, "32-token window") {
+			t.Errorf("the note does not name the window:\n%s", out)
+		}
+		if strings.Contains(out, "0-token budget was cut to 0") {
+			t.Errorf("the note has no figures in it:\n%s", out)
+		}
+	})
+
+	t.Run("not cut", func(t *testing.T) {
+		// A budget far below the room left: the model runs out of budget, not of window,
+		// and the reply is shorter than --max-tokens for the ordinary reason.
+		out := runChat(t, chatOptions{model: path, maxTokens: 1},
+			"Hello there friend\n/exit\n")
+		if strings.Contains(out, "window is full") {
+			t.Errorf("a turn that was not cut by the window printed the cut note:\n%s", out)
+		}
+	})
+}
+
+// TestWindowCutTheBudget covers the rule itself, including the case a fixture cannot build.
+//
+// The subtest above can only reach "length": a constructed model's argmax lands on any token
+// but the end-of-sequence one -- that is why gguftest has a NoEOS flag at all -- so a turn
+// that really finishes on EOS is not producible here. Testing the predicate directly is what
+// keeps the finish reason load-bearing: without it, "generated < budget" would be true for
+// every reply a model ended itself, and the note would appear on perfectly ordinary turns.
+func TestWindowCutTheBudget(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		turn   chatTurnResult
+		budget int
+		want   bool
+	}{
+		{
+			name: "the window cut it", turn: chatTurnResult{finishReason: "length", generated: 27},
+			budget: 300, want: true,
+		},
+		{
+			name: "the budget was reached", turn: chatTurnResult{finishReason: "length", generated: 32},
+			budget: 32, want: false,
+		},
+		{
+			// The model ended the turn itself: fewer tokens than asked, and not the window.
+			name: "the model stopped", turn: chatTurnResult{finishReason: "stop", generated: 9},
+			budget: 300, want: false,
+		},
+		{
+			name: "a cancelled turn", turn: chatTurnResult{finishReason: "cancel", generated: 5},
+			budget: 300, want: false,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := windowCutTheBudget(c.turn, c.budget); got != c.want {
+				t.Errorf("windowCutTheBudget(%+v, %d) = %v, want %v", c.turn, c.budget, got, c.want)
+			}
+		})
+	}
+}
+
+// TestChatSaysWhenTheWindowCutTheBudgetOnce pins that the note is printed once per session,
+// not under every later reply.
+//
+// The condition is a property of the conversation rather than of each turn -- once the history
+// is long enough that the budget gets cut, every subsequent turn gets cut too -- so repeating
+// it would put a line under every reply for the rest of a session that has already read it.
+// This is the same shape as the render-fallback note, and the two flags are separate so
+// silencing one does not silence the other.
+func TestChatSaysWhenTheWindowCutTheBudgetOnce(t *testing.T) {
+	path := gguftest.Model{ContextLen: 32, NoEOS: true}.Write(t, t.TempDir())
+	// Several turns, each guaranteed to be cut: the prompt grows and the budget stays larger
+	// than the remaining room.
+	out := runChat(t, chatOptions{model: path, maxTokens: 32},
+		"One two three\nOne two three\nOne two three\n/exit\n")
+	if got, want := strings.Count(out, "window is full"), 1; got != want {
+		t.Errorf("the cut note appeared %d times, want %d once:\n%s", got, want, out)
 	}
 }
 

@@ -204,6 +204,10 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	var history []chatTurn
 	// notedFallback records that the session has already explained a render-time fallback.
 	notedFallback := false
+	// notedCut records that the session has already explained a turn the window stopped.
+	// Separate from notedFallback because the two are unrelated: a session can hit either
+	// without the other, and sharing one flag would silence the second explanation.
+	notedCut := false
 	var systemTurn string
 	if opts.system != "" {
 		systemTurn = opts.system
@@ -247,7 +251,7 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 			continue
 		}
 
-		reply, err := chatTurnOnce(out, eng, tok, systemTurn, history, line, opts)
+		turn, err := chatTurnOnce(out, eng, tok, systemTurn, history, line, opts)
 		if err != nil {
 			// A failed turn leaves the history untouched, so the next question is
 			// asked against the same context rather than against a broken one.
@@ -256,9 +260,27 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 			}
 			continue
 		}
+		// The window can be what stopped a turn, and the reply alone does not say so: a turn
+		// that asked for 128 tokens and produced 104 reads as a model that finished its
+		// sentence, which is what a model stopping on its own looks like too. `run --stats`
+		// prints a note for the same case and `bench` reports it in its NOTE column, so this
+		// is the one front end that was silent about it. Measured on the 128-position stories
+		// model: `chat --max-tokens 128` generated 104 of a requested 128 with nothing said.
+		//
+		// Announced once per session, like the render fallback below: the limit is a property
+		// of the conversation rather than of each turn, and a note under every reply would be
+		// noise in exactly the session that has already read it.
+		if !notedCut && windowCutTheBudget(turn, opts.maxTokens) {
+			notedCut = true
+			if _, werr := fmt.Fprintf(out, "(the %d-token window is full, so the %d-token "+
+				"budget was cut to %d; /clear or lower --max-tokens)\n",
+				turn.contextLen, opts.maxTokens, turn.generated); werr != nil {
+				return werr
+			}
+		}
 		history = append(history,
 			chatTurn{role: "user", text: line},
-			chatTurn{role: "assistant", text: reply},
+			chatTurn{role: "assistant", text: turn.reply},
 		)
 		// The template can parse and still fail to render this conversation -- an
 		// unsupported field on a message, for instance. That fallback happens inside the
@@ -280,6 +302,21 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 			}
 		}
 	}
+}
+
+// windowCutTheBudget reports whether the window, rather than the model, ended a turn.
+//
+// Both ways a turn can end short look identical in the text: a reply that stops because the
+// window ran out and one that stops because the model emitted its end-of-sequence token both
+// finish mid-sentence or mid-word. What separates them is the engine's finish reason. "length"
+// with fewer tokens than the budget asked for means the budget was cut to fit; "stop" with
+// fewer means the model chose to stop, and saying the window cut it would be false.
+//
+// It is a named predicate rather than an inline condition because the second half is the one
+// that is easy to get wrong: "generated < budget" alone is true for every reply a model ends
+// itself, and a note printed then is worse than no note at all.
+func windowCutTheBudget(turn chatTurnResult, budget int) bool {
+	return turn.finishReason == "length" && turn.generated < budget
 }
 
 // cfgForBlocks returns the context length the pool has to cover.
@@ -369,17 +406,38 @@ func explainChatError(err error) error {
 		" context, always helps", err)
 }
 
-func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, system string, history []chatTurn, user string, opts chatOptions) (string, error) {
+// chatTurnResult is what one turn produced beyond its text.
+//
+// The text is the reply; the two figures beside it describe how the turn ended. They exist
+// because a turn can stop for a reason the text cannot show: finishing on an end-of-sequence
+// token and being cut off by the window both end mid-sentence or mid-word, and only
+// finishReason plus the count of what was generated tells them apart.
+type chatTurnResult struct {
+	// reply is the assistant's text, exactly what was printed.
+	reply string
+	// finishReason is the engine's reason for stopping: "stop" (an end-of-sequence token
+	// or a stop id), "length" (the budget or the window ran out), "cancel", "abandoned",
+	// or "error".
+	finishReason string
+	// generated is how many tokens the sequence produced in total, from the terminal
+	// event. It is the engine's figure rather than the number of events this loop read,
+	// for the reason Event.Generated documents.
+	generated int
+	// contextLen is the model's window, which is what a "length" finish ran into.
+	contextLen int
+}
+
+func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, system string, history []chatTurn, user string, opts chatOptions) (chatTurnResult, error) {
 	prompt := opts.renderer.Render(chatTurns(system, history, user))
 	cfg := eng.Model().Config()
 	// The chat transcript is markup, not prose: its markers are control tokens the
 	// model was trained to see, so they have to be matched whole.
 	ids := tok.EncodeWithSpecials(prompt, cfg.BOSID >= 0)
 	if len(ids) == 0 {
-		return "", fmt.Errorf("prompt encoded to no tokens")
+		return chatTurnResult{}, fmt.Errorf("prompt encoded to no tokens")
 	}
 	if len(ids) >= cfg.ContextLen {
-		return "", fmt.Errorf("%w: conversation is %d tokens, context is %d",
+		return chatTurnResult{}, fmt.Errorf("%w: conversation is %d tokens, context is %d",
 			errContextFull, len(ids), cfg.ContextLen)
 	}
 
@@ -410,11 +468,14 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 		Sampler:   sampler,
 	})
 	if err != nil {
-		return "", err
+		return chatTurnResult{}, err
 	}
 
+	// The reply accumulates in the result rather than in a second builder: the history has to
+	// keep exactly the text that was printed, and two builders made that agreement a thing to
+	// maintain rather than a thing that holds by construction.
+	var ended chatTurnResult
 	dec := tok.Seq()
-	var reply strings.Builder
 	// The engine advances sequences only inside Pump, so this loop drives the model
 	// and drains the channel in one goroutine. Nothing else can make progress, which
 	// is why a REPL needs no locks and no goroutine per token.
@@ -423,22 +484,26 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 	// one scheduling round. Pump reports how many sequences are still active, so a
 	// zero means the sequence finished this round and the remainder can be drained.
 	for {
-		if err := drainChatEvents(ch, out, dec, &reply); err != nil {
-			return "", err
+		if err := drainChatEvents(ch, out, dec, &ended); err != nil {
+			return chatTurnResult{}, err
 		}
 		if eng.Pump() == 0 {
 			// The final round may have emitted tokens before the sequence closed; the
 			// channel is closed by now, so this drains to completion and returns.
 			for ev := range ch {
 				if ev.Err != nil {
-					return "", ev.Err
+					return chatTurnResult{}, ev.Err
 				}
 				if ev.HasToken {
 					text := dec.Token(ev.Token)
 					if _, err := fmt.Fprint(out, text); err != nil {
-						return "", err
+						return chatTurnResult{}, err
 					}
-					reply.WriteString(text)
+					ended.reply += text
+				}
+				if ev.Done {
+					ended.finishReason = ev.FinishReason
+					ended.generated = ev.Generated
 				}
 			}
 			// A character split across the last tokens is still held by the decoder,
@@ -446,14 +511,15 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 			// reply differ from the non-streaming decode of the same tokens.
 			if tail := dec.Flush(); tail != "" {
 				if _, err := fmt.Fprint(out, tail); err != nil {
-					return "", err
+					return chatTurnResult{}, err
 				}
-				reply.WriteString(tail)
+				ended.reply += tail
 			}
 			if _, err := fmt.Fprintln(out); err != nil {
-				return "", err
+				return chatTurnResult{}, err
 			}
-			return reply.String(), nil
+			ended.contextLen = cfg.ContextLen
+			return ended, nil
 		}
 	}
 }
@@ -463,7 +529,7 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 //
 // It must not block: more events only arrive while Pump runs, so waiting here would
 // deadlock against the engine rather than make progress.
-func drainChatEvents(ch <-chan engine.Event, out io.Writer, dec *tokenize.StreamDecoder, reply *strings.Builder) error {
+func drainChatEvents(ch <-chan engine.Event, out io.Writer, dec *tokenize.StreamDecoder, ended *chatTurnResult) error {
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -473,7 +539,7 @@ func drainChatEvents(ch <-chan engine.Event, out io.Writer, dec *tokenize.Stream
 					if _, err := fmt.Fprint(out, tail); err != nil {
 						return err
 					}
-					reply.WriteString(tail)
+					ended.reply += tail
 				}
 				return nil
 			}
@@ -485,7 +551,14 @@ func drainChatEvents(ch <-chan engine.Event, out io.Writer, dec *tokenize.Stream
 				if _, err := fmt.Fprint(out, text); err != nil {
 					return err
 				}
-				reply.WriteString(text)
+				ended.reply += text
+			}
+			// The terminal event can arrive in a round that still had tokens to drain, so
+			// it is recorded here as well as in the closing loop -- otherwise a turn whose
+			// stop landed one round early would report no reason at all.
+			if ev.Done {
+				ended.finishReason = ev.FinishReason
+				ended.generated = ev.Generated
 			}
 		default:
 			return nil

@@ -179,3 +179,43 @@ func TestNewKVCacheRejectsAnUnaddressableOrUnavailableSize(t *testing.T) {
 		}
 	})
 }
+
+// TestNewKVCacheRejectsZeroWidthsWithoutPanicking pins the two guards that stand between a
+// zero-width config and an integer divide by zero.
+//
+// TestNewKVCacheRejectsBadGeometry already asserts the refusals, but it cannot tell which
+// guard produced them: the geometry check refuses a zero KVHeads or HeadDim, and the
+// kvDim <= 0 check below it refuses the same configs again because kvDim is their product.
+// Either alone is enough. Measured with both removed and only the Layers check left:
+// NewKVCache panics with "runtime error: integer divide by zero" rather than returning an
+// error, which for a library reached from a model file's own metadata is a crash on bad
+// input.
+//
+// This test does not distinguish the two guards -- neither does the code, since they carry
+// the same message -- but it fails if both are removed, which is the state a future
+// simplification would reach by deleting "the redundant one" twice.
+func TestNewKVCacheRejectsZeroWidthsWithoutPanicking(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"zero kv heads", Config{Layers: 2, KVHeads: 0, HeadDim: 16}},
+		{"zero head width", Config{Layers: 2, KVHeads: 2, HeadDim: 0}},
+		{"both zero", Config{Layers: 2, KVHeads: 0, HeadDim: 0}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("NewKVCache(%+v) panicked: %v", c.cfg, r)
+				}
+			}()
+			cache, err := NewKVCache(c.cfg, 8)
+			if err == nil {
+				t.Fatalf("NewKVCache(%+v) returned a cache, want an error", c.cfg)
+			}
+			if cache != nil {
+				t.Error("a refused config returned a cache")
+			}
+		})
+	}
+}

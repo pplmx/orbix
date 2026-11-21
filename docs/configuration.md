@@ -56,7 +56,13 @@ server cannot express a zero-token request (`max_tokens` is an integer, so 0 is 
 from absent), a REPL turn generating nothing answers with an empty line, and a benchmark of zero
 tokens is not a measurement. Negative values are refused everywhere.
 
-A config file is on the roadmap, not in the code.
+A config file is a decision this project has not made, not a gap waiting to be filled. The
+roadmap in the performance page is a reading order and is complete; this sentence used to
+say a config file was "on the roadmap", which pointed at a list that never contained one.
+The reason there is no such file is recorded in `AGENTS.md`'s dependency table: one
+environment variable and zero configuration sources is why viper and Koanf were not adopted,
+and a config file would give those decisions a different answer rather than merely adding a
+feature.
 
 `--policy` needs a reason rather than a definition. `fifo`, the default, is submission order.
 `shortest` takes the least remaining work first, which keeps a queue of mixed-size requests from

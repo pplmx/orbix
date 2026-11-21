@@ -70,14 +70,25 @@ chat endpoint are worth knowing before pointing a client at it:
   A template using syntax outside the subset is reported at parse time; one calling a
   function this package does not implement fails at render time instead, because the parser
   accepts any call. Either way the server falls back to a neutral `Role: content`
-  transcript, printing which of the two it is using at startup. The fallback matters: a
-  half-rendered template would produce a prompt that looks plausible and is wrong, while a
-  neutral transcript is merely less good than the model's own format.
+  transcript. The fallback matters: a half-rendered template would produce a prompt that
+  looks plausible and is wrong, while a neutral transcript is merely less good than the
+  model's own format.
+
+  A parse-time failure is printed at startup as `chat: neutral transcript (reason)`. A
+  render-time one cannot be, because nothing has been rendered yet, so `serve` reports it as
+  a single `WARN` record on the first conversation that falls back, carrying the renderer's
+  reason. It is logged once rather than per request, since such a template fails every time.
+  Measured with a template of `{{ messages[99].content }}`: the banner said `chat: model
+  template`, both requests answered 200 out of the neutral transcript, and the warning named
+  `index 99 outside a sequence of 1`. Without that record the deployment looks like it is using
+  the model's format while every prompt is in the neutral one.
   If you would rather control the prompt, send it to `/v1/completions`, which passes
   text through verbatim.
+
 - **`stop` is matched on decoded text, but only a single-token string stops generation
   early.** A four-token string like `"中国的首都"` truncates correctly and still runs to its
   budget unread; `"\n"` encodes to one token and halts the sequence itself.
+
 - **`stop` takes any number of strings, not OpenAI's four.** The documented limit there is
   `maxItems: 4`; this server accepts a hundred and honours all of them -- measured, a request
   whose only match was in the fifth slot stopped at it. A client that enforces four is not

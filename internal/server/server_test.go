@@ -2,11 +2,13 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -5193,5 +5195,62 @@ func TestStopListBeyondFourStillMatches(t *testing.T) {
 	if strings.Contains(stopped.Choices[0].Text, match) {
 		t.Errorf("output %q contains the stop string %q from the fifth slot",
 			stopped.Choices[0].Text, match)
+	}
+}
+
+// TestRenderFallbackIsWarnedOnce covers the one way a broken chat template can hide.
+//
+// A template that compiles but cannot render every conversation is the case neither the
+// startup banner nor the renderer's own return value makes visible: the banner reads
+// UsesModelTemplate before any request has rendered, and renderReason is only written when a
+// render fails. Measured end to end with a template of "{{ messages[99].content }}": the banner
+// said "chat: model template", every request answered 200 out of the neutral transcript, and
+// nothing in the log said so.
+//
+// A template that never compiled is deliberately not covered here: the banner already prints
+// "chat: neutral transcript (reason)" for it, so warning again at request time would only repeat
+// what the operator was told at startup.
+func TestRenderFallbackIsWarnedOnce(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	model := gguftest.Model{NoEOS: true, ContextLen: 256, ChatTemplate: `{{ messages[99].content }}`}
+	// The renderer is built from the same file the server loads, the way cmd/orbix does it,
+	// because the fallback under test is a property of this template rather than of the server.
+	path := model.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	renderer, err := engine.NewChatRenderer(gf)
+	if err != nil {
+		t.Fatalf("NewChatRenderer: %v", err)
+	}
+	if !renderer.HasTemplate() {
+		t.Fatal("the template did not compile, so this test would exercise the banner case " +
+			"rather than the render-time one it is written for")
+	}
+	srv, _ := newTestServerConfig(t, model,
+		Config{Logger: logger, ChatRenderer: renderer})
+
+	// Two requests, so "once" is distinguishable from "never" and from "once per request".
+	for i := range 2 {
+		resp := post(t, srv.Handler(), "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}`)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d = %d, want 200: a render fallback must not fail the request",
+				i, resp.StatusCode)
+		}
+	}
+
+	const want = "chat template is not in use"
+	if got := strings.Count(buf.String(), want); got != 1 {
+		t.Errorf("logged the fallback warning %d times over two requests, want 1:\n%s",
+			got, buf.String())
+	}
+	// The reason has to name what went wrong; "the template fell back" alone leaves the
+	// operator with nothing to fix.
+	if !strings.Contains(buf.String(), "index 99 outside a sequence") {
+		t.Errorf("the warning does not carry the renderer's reason:\n%s", buf.String())
 	}
 }

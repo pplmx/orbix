@@ -132,6 +132,11 @@ type Server struct {
 	// for nil cheaply.
 	log *slog.Logger
 
+	// chatFallbackOnce makes the render-fallback warning appear once rather than per request.
+	// A template that compiles but cannot render every conversation falls back on every one of
+	// them, so an unguarded warning would fill the log with the same line.
+	chatFallbackOnce sync.Once
+
 	// refused counts requests turned away for lack of capacity, by status. It lives here
 	// rather than in the engine because that is where the decision is made: Submit returns
 	// ErrQueueFull and the pool error arrives on an event, and neither reaches the engine's
@@ -823,7 +828,30 @@ func (s *Server) renderChat(msgs []chatMessage) string {
 	// Render always returns a usable prompt: a model template that fails at render time
 	// falls back to the neutral transcript inside the renderer, so this call cannot
 	// leave the request without a prompt.
-	return s.cfg.ChatRenderer.Render(turns)
+	prompt := s.cfg.ChatRenderer.Render(turns)
+	// The fallback is silent otherwise, and the startup banner cannot catch this case: it
+	// reads UsesModelTemplate before any request has rendered, and renderReason is only
+	// written when a render fails. Measured with a template of "{{ messages[99].content }}":
+	// the banner said "chat: model template", every request answered 200 from the neutral
+	// transcript, and nothing in the log said so.
+	//
+	// Warned once because such a template fails on every conversation, and a line per request
+	// would bury every other message.
+	//
+	// HasTemplate is the guard rather than "a fallback reason is set", because the two cases
+	// already differ at startup: a template that never compiled prints
+	// "chat: neutral transcript (reason)" in the banner, so a request-time warning would only
+	// repeat it. This warning is for the case the banner cannot see -- compiled, reported as in
+	// use, and failing from the first conversation onwards.
+	if s.cfg.ChatRenderer != nil && s.cfg.ChatRenderer.HasTemplate() {
+		s.chatFallbackOnce.Do(func() {
+			if reason := s.cfg.ChatRenderer.FallbackReason(); reason != "" {
+				s.Logger().Warn("the model's chat template is not in use; prompts are using "+
+					"the neutral transcript instead", slog.String("reason", reason))
+			}
+		})
+	}
+	return prompt
 }
 
 // generateParams is what both endpoints share once their JSON is decoded.

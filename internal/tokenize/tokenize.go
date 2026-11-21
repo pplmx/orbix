@@ -384,6 +384,14 @@ func looksByteLevel(tokens []string) bool {
 	return space && newline && !sentencePiece
 }
 
+// New builds a tokenizer from the vocabulary and merge table in a GGUF file.
+//
+// It is the only entry point: a Tokenizer's behaviour is fixed by the file's
+// tokenizer.ggml.model, so there is nothing to configure afterwards. Every error it returns
+// means the file cannot be tokenized faithfully -- a vocabulary whose parallel arrays differ
+// in length, a merge table referring to a piece that is not in the vocabulary, or a model
+// name this package has no implementation for -- and the message names the field, because the
+// fix is on the conversion side rather than in the caller.
 func New(f *gguf.File) (*Tokenizer, error) {
 	tokens, ok := f.Strings("tokenizer.ggml.tokens")
 	if !ok {

@@ -83,6 +83,17 @@ func tensorBytes(ti gguf.TensorInfo) (int64, error) {
 		ti.Name, ti.N(), ti.Type)
 }
 
+// Tensor returns one tensor's weights dequantized to float32, in row-major order.
+//
+// The result is the tensor as the model uses it, not as the file stores it: a Q4_0 block
+// becomes its 32 floats, so a caller never sees the packed layout or has to know which
+// formats exist. Each call decodes afresh, so the returned slice belongs to the caller and
+// subsequent calls are unaffected by anything done to it.
+//
+// The error distinguishes three cases a caller handles differently: no tensor by that name,
+// a type this package cannot decode, and a shape whose byte count would overflow. Each message
+// names the tensor, because a model file with a bad entry usually has several and the first
+// failure is only useful if it says which one.
 func (l *Loader) Tensor(name string) ([]float32, error) {
 	ti, ok := l.file.Tensor(name)
 	if !ok {

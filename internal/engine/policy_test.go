@@ -1171,6 +1171,11 @@ func TestStreamRequestSetsTheStreamAttribute(t *testing.T) {
 // Measured on the fixture with MaxActive 1 and budgets 16, 8, 4, 2 in submission order:
 // FIFO serves them on rounds 2, 19, 28, 33 while shortest serves 19, 10, 5, 2 -- the
 // two-token request moves from round 33 to round 2, and the sixteen-token one from 2 to 19.
+//
+// Those three sequences are the table docs/configuration.md prints for this queue, and Fair
+// is its third row: 5, 6, 7, 8, one turn apiece in submission order. That row was the one
+// nothing pinned -- the fair tests check the admit decision and the bound on the gap, neither
+// of which says what the four rounds are -- so it is asserted here with the other two.
 func TestShortestServesTheShortestFirstWhateverTheSubmissionOrder(t *testing.T) {
 	path := gguftest.Model{NoEOS: true}.Write(t, t.TempDir())
 	budgets := []int{16, 8, 4, 2}
@@ -1225,7 +1230,21 @@ func TestShortestServesTheShortestFirstWhateverTheSubmissionOrder(t *testing.T) 
 		t.Errorf("shortest served the 2-token request on round %d, FIFO on round %d: the "+
 			"policy changed nothing", shortest[smallest], fifo[smallest])
 	}
-	t.Logf("FIFO first-token rounds %v; shortest %v", fifo, shortest)
+
+	// Fair is the third row of the table docs/configuration.md prints for this same queue,
+	// and it was the one nothing asserted: the fair tests here check the admit decision and
+	// the bound on the gap, neither of which says what the four rounds are. Its shape is
+	// "one turn apiece, then round-robin", so the rounds have to increase by exactly one --
+	// decreasing would be shortest, and a jump would mean somebody was passed over.
+	fair := firstRounds(t, PriorityFair)
+	for i := 1; i < len(fair); i++ {
+		if fair[i] != fair[i-1]+1 {
+			t.Errorf("fair first-token rounds %v: each request should take the next round in "+
+				"submission order, so consecutive entries differ by one", fair)
+		}
+	}
+
+	t.Logf("FIFO first-token rounds %v; shortest %v; fair %v", fifo, shortest, fair)
 }
 
 // TestFairBoundsTheGapBetweenTurns checks the property PriorityFair is named for.

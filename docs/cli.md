@@ -93,8 +93,15 @@ request's own first token. Three rows need a word because their numbers look fla
   speed, with 16 sequences sharing one pool instead of each reserving a whole context.
 - **The policy rows do the same work and can exceed `--max-tokens`.** A policy reorders a fixed
   quantity of work, so `TOK/S` and `ELAPSED` there are machine load rather than a property of
-  the scheduler; the round in `NOTE` is the property (2 under `shortest`, 63 under `fifo`).
-  The rows raise any budget below 60 tokens so there is a queue to order.
+  the scheduler. The round in `NOTE` is the property, and what it has to show is the ordering:
+  under `shortest` the short request's first token arrives within the first handful of rounds,
+  under `fifo` it waits behind the long one for a number of rounds that scales with that
+  request's budget. The exact round is not worth comparing against a table -- measured
+  repeatedly at `--max-tokens 60` on the 256-position fixture, `shortest` landed on round 3 or 4
+  and `fifo` on 64 or 65, so the run-to-run noise is a round or two even on one machine. Read
+  the two figures as "a few rounds" against "one round per token of the long request". The rows
+  raise any budget below 60 tokens so there is a queue to order, which the `NOTE` says when it
+  happens.
 - **The prefix rows run their four requests one after another.** A concurrent burst prefills
   them together, so no request arrives after another cached its prefix. Both rows repeat the
   prompt until it spans two blocks, because a block is published only once its last position

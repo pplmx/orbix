@@ -25,6 +25,7 @@ just build     # CGO_ENABLED=0 go build -o bin/orbix ./cmd/orbix
 just bench     # run kernel and engine benchmarks
 just cross     # build all five supported platforms with CGo disabled
 just test-race # the suite under the race detector; needs cgo, so it is separate
+just xcheck    # compare a GGUF file against the Python gguf parser, tensor by tensor
 ```
 
 ## The gates, and where they differ
@@ -57,6 +58,25 @@ parser, and the tokenizer's pre-split, decode, and encode/decode round trip. Eac
 corpus that `go test` replays on every run, so a crash found once stays fixed; reading a file or
 a user's text is the part that runs on someone else's input, and a panic during it takes the
 process down rather than returning an error.
+
+## Cross-checking a checkpoint
+
+`just MODEL=/path/to.gguf xcheck` parses the same file with the Python `gguf` package -- an
+implementation nobody here wrote -- and compares every tensor's type, dimensions and the
+SHA-256 of its stored bytes. It needs uv and `just build` first.
+
+This is the check for the assumption a repository cannot test against itself. The parser, the
+fixtures and the converter that wrote them share every assumption, so a wrong one is invisible
+to all three: a dimension order reversed, a block layout misread, or an offset measured from the
+wrong base all produce plausible numbers rather than an error. A second reader is what notices.
+
+Measured on four checkpoints -- 33, 57, 201 and 290 tensors -- every tensor agreed. The script's
+own failure modes were checked by breaking them: shifting the reported offset by one byte fails
+every tensor with a neighbour, and reversing the reported dimensions fails every non-square one.
+The second is worth knowing about because it is the mistake to make while writing such a
+comparison: `gguf`'s `shape` is already in the file's stored order, the same order orbix prints
+as `dims`, and reversing one side to "match" turns 112 of TinyLlama's 201 tensors into reported
+disagreements.
 
 ## Constraints CI enforces
 

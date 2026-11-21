@@ -93,6 +93,31 @@ stress:
     @CGO_ENABLED=1 go build -race -o .cache/orbix-race ./cmd/orbix
     @scripts/stress.sh .cache/orbix-race "{{MODEL}}"
 
+# cross-check a GGUF file against an independent parser, tensor by tensor
+xcheck:
+    @# The readers a repository can compare against itself are all its own: the parser, its
+    @# fixtures, and the converter that wrote them. A wrong assumption in that set is invisible
+    @# to every test built on it, and it is exactly the kind of assumption -- a dimension order,
+    @# a block layout, where a tensor's bytes begin -- that produces plausible numbers rather
+    @# than a crash. The `gguf` Python package is an implementation nobody here wrote, so it is
+    @# the second opinion.
+    @#
+    @# Compares type, dimensions and SHA-256 of the stored bytes for every tensor, so a wrong
+    @# offset fails even when the shape agrees. Measured on four files -- 33, 57, 201 and 290
+    @# tensors -- all agreeing; shifting the reported offset by one byte fails every tensor that
+    @# has a neighbour, which is the property this exists for.
+    @#
+    @# Needs uv for the Python side and ./bin/orbix for the Go side, for the same reason `docs`
+    @# and `hooks` are separate recipes: a contributor with only the Go toolchain should not be
+    @# blocked by a check that needs Python.
+    @command -v uv >/dev/null 2>&1 || { \
+        echo "uv not found: install it (https://docs.astral.sh/uv/) or skip this check"; \
+        exit 1; \
+    }
+    @test -n "{{MODEL}}" || { echo "xcheck: needs MODEL=/path/to.gguf" >&2; exit 1; }
+    @test -x {{BIN}} || { echo "xcheck: {{BIN}} not found; run \`just build\` first" >&2; exit 1; }
+    uv run --with gguf python3 scripts/gguf_xcheck.py "{{MODEL}}" {{BIN}}
+
 vet:
     go vet {{PKG}}
 

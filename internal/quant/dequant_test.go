@@ -1312,3 +1312,79 @@ func TestSizeAgreesWithTheCodecTable(t *testing.T) {
 		}
 	}
 }
+
+// TestBlockSizesMatchTheFormatDefinitions recomputes every block size from its layout
+// rather than comparing the two tables against each other.
+//
+// TestCodecsMatchGGUF checks that this package's table agrees with gguf's, and that is a
+// different question: both are hand-written constants, so a byte count copied wrongly into
+// both passes. Only arithmetic from the format's own field layout catches that. The K-quants
+// are the ones worth spelling out -- five formats whose sizes are 84, 110, 144, 176 and 210,
+// numbers that share no pattern and that a reader cannot sanity-check by eye.
+//
+// Each sum below follows the layout comment on the corresponding decoder. The terms are
+// written as the fields they count so a change to a layout has to change this test too.
+func TestBlockSizesMatchTheFormatDefinitions(t *testing.T) {
+	const (
+		f16     = 2   // one half-precision scalar
+		qkK     = 256 // weights in a K-quant super-block
+		perByte = 2   // one packed byte holds two 4-bit codes
+		q4Bytes = qkK / perByte
+	)
+	cases := []struct {
+		typ   gguf.QuantType
+		block int
+		size  int
+		// why spells the layout out in the terms above, so the expected number is derived
+		// here rather than restated.
+		why string
+	}{
+		// Q4_0: d, then 32 4-bit codes = 16 bytes.
+		{gguf.Q4_0, 32, f16 + 32/perByte, "F16 d + 32 nibbles"},
+		// Q4_1: d, m, then the same codes.
+		{gguf.Q4_1, 32, f16 + f16 + 32/perByte, "F16 d + F16 m + 32 nibbles"},
+		// Q5_0: d, a 4-byte high-bit mask, then 16 bytes of low nibbles.
+		{gguf.Q5_0, 32, f16 + 4 + 32/perByte, "F16 d + 4-byte qh + 32 nibbles"},
+		// Q5_1: the same plus m.
+		{gguf.Q5_1, 32, f16 + f16 + 4 + 32/perByte, "F16 d + F16 m + 4-byte qh + 32 nibbles"},
+		// Q8_0: d, then one signed byte per weight.
+		{gguf.Q8_0, 32, f16 + 32, "F16 d + 32 int8"},
+		// IQ4_NL: d, then 16 bytes of nibbles.
+		{gguf.IQ4_NL, 32, f16 + 32/perByte, "F16 d + 32 nibbles"},
+		// Q2_K: 16 scale/min bytes (one per sub-block of 16), 64 code bytes, d, dmin.
+		{gguf.Q2_K, qkK, 16 + qkK/4 + f16 + f16, "16 scales + 256 2-bit + F16 d + F16 dmin"},
+		// Q3_K: 32 mask bytes (256 high bits), 64 code bytes (256 2-bit lows), 12 scale
+		// bytes (16 sub-blocks x 6 bits), d.
+		{gguf.Q3_K, qkK, 32 + qkK/4 + 12 + f16, "32 hmask + 256 2-bit + 12 scales + F16 d"},
+		// Q4_K: d, dmin, 12 packed scale/min bytes (8 sub-blocks x 6+6 bits), 128 codes.
+		{gguf.Q4_K, qkK, f16 + f16 + 12 + q4Bytes, "F16 d + F16 dmin + 12 scales + 256 nibbles"},
+		// Q5_K: Q4_K's header plus a 32-byte high-bit plane.
+		{gguf.Q5_K, qkK, f16 + f16 + 12 + 32 + q4Bytes, "F16 d + F16 dmin + 12 scales + 32 qh + 256 nibbles"},
+		// Q6_K: 128 low-nibble bytes, 64 high-2-bit bytes, 16 scale bytes (one int8 scale
+		// per 16-weight sub-block, so 256/16 of them -- not the 32-weight sub-block the
+		// other K-quants use), d.
+		{gguf.Q6_K, qkK, q4Bytes + qkK/4 + qkK/16 + f16, "256 low nibbles + 256 high 2-bit + 16 scales + F16 d"},
+	}
+	for _, c := range cases {
+		t.Run(c.typ.String(), func(t *testing.T) {
+			got, ok := codecs[c.typ]
+			if !ok {
+				t.Fatalf("%s has no decoder", c.typ)
+			}
+			if got.block != c.block {
+				t.Errorf("weights per block = %d, want %d", got.block, c.block)
+			}
+			if got.size != c.size {
+				t.Errorf("bytes per block = %d, want %d (%s)", got.size, c.size, c.why)
+			}
+			// And the same arithmetic has to hold in the file-format table, which is what
+			// sizeOf consults when it offsets into a tensor.
+			if declared, ok := c.typ.Size(int64(c.block)); !ok {
+				t.Errorf("gguf has no size for %s", c.typ)
+			} else if declared != int64(c.size) {
+				t.Errorf("gguf says %d bytes per block, the layout gives %d (%s)",
+					declared, c.size, c.why)
+			}
+		})
+	}
+}

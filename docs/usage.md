@@ -118,11 +118,11 @@ and what the client receives depends on the endpoint:
 
 - **A stream** ends mid-token, without `[DONE]` and without an error chunk. Everything up to
   that point arrived normally, so the client has partial text.
-- **A non-streaming request** receives no HTTP response at all -- not a 503, not a truncated
-  body. The connection closes and the client reports an empty reply (`curl` exit 52, or
-  `RemoteDisconnected` in Python's http.client). Measured: four concurrent non-streaming
-  requests against four slots at a 3-second grace all came back empty; the same four at a
-  60-second grace all answered 200 in 12.1 seconds.
+- **A non-streaming request** receives `503` with a body explaining that the request was
+  abandoned before it finished. Earlier versions closed the connection with no response at
+  all, which a client cannot tell apart from a crash: measured, four concurrent non-streaming
+  requests against four slots at a 3-second grace all died as `curl` exit 52, "empty reply from
+  server". They now all answer 503, and the same four at a 60-second grace still answer 200.
 
 The server logs `shutdown: a response was still in flight when the 5s grace expired; it was cut`
 to stdout either way, so the cut is visible on the server side even when the client learns

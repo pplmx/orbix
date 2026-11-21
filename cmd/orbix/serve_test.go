@@ -465,7 +465,7 @@ func TestDrainAndStopStopsThePumpAfterTheDrain(t *testing.T) {
 		t.Fatal("the handler never started")
 	}
 
-	if err := drainAndStop(httpSrv, stopPump, 5*time.Second); err != nil {
+	if err := drainAndStop(httpSrv, func() {}, stopPump, 5*time.Second); err != nil {
 		t.Fatalf("drainAndStop: %v", err)
 	}
 	select {
@@ -515,7 +515,7 @@ func TestDrainAndStopReportsACutStream(t *testing.T) {
 	// Give the request time to reach the handler, so the drain has something to wait for.
 	time.Sleep(200 * time.Millisecond)
 
-	if err := drainAndStop(httpSrv, func() {}, 100*time.Millisecond); err != nil {
+	if err := drainAndStop(httpSrv, func() {}, func() {}, 100*time.Millisecond); err != nil {
 		t.Errorf("drainAndStop returned %v for a stream cut at the grace period, want nil", err)
 	}
 }

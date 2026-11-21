@@ -56,6 +56,24 @@ func newHTTPServer(h http.Handler, idle, readHeader time.Duration) *http.Server 
 	}
 }
 
+// newHTTPServerWithRequests gives every request a base context the caller can cancel.
+//
+// Shutdown needs it. http.Server.Shutdown stops accepting and waits for handlers to return, but
+// nothing cancels their contexts, so a handler waiting for an engine that will not advance again
+// has no reason to give up: it blocks until the process exits and the client receives nothing at
+// all. Measured against this server, four non-streaming requests in flight at a 3-second grace
+// all came back as curl exit 52, "empty reply from server"; the same four at a 60-second grace
+// answered 200.
+//
+// With a cancellable base context, the handlers see Done, take their cancellation branch, and
+// write a 503 the client can act on.
+func newHTTPServerWithRequests(h http.Handler, idle, readHeader time.Duration,
+	base context.Context) *http.Server {
+	srv := newHTTPServer(h, idle, readHeader)
+	srv.BaseContext = func(net.Listener) context.Context { return base }
+	return srv
+}
+
 // The log format is a switch whose default arm is an error, so the flag's initial value has to
 // be one of the accepted spellings. Both are named here rather than at the two sites, so the
 // help text, the default, and the error cannot drift apart.
@@ -283,7 +301,12 @@ func cmdServe(args []string) error {
 	// port, and a caller (or a test) needs the one it got.
 	url := "http://" + ln.Addr().String()
 
-	httpSrv := newHTTPServer(srv.Handler(), 120*time.Second, 10*time.Second)
+	// Requests get a context of their own so a drain that runs out of grace can cancel them.
+	// It is separate from the pump's context, which has to keep the engine advancing until the
+	// in-flight responses are done with it.
+	reqCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	httpSrv := newHTTPServerWithRequests(srv.Handler(), 120*time.Second, 10*time.Second, reqCtx)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -380,7 +403,7 @@ func cmdServe(args []string) error {
 		return nil
 	case <-sig:
 		fmt.Println("\nshutting down")
-		return drainAndStop(httpSrv, func() {
+		return drainAndStop(httpSrv, cancelRequests, func() {
 			cancel()
 			srv.Shutdown()
 		}, grace)
@@ -399,6 +422,11 @@ func cmdServe(args []string) error {
 // `--shutdown-grace` lets a deployment choose: a few seconds for a service whose clients retry,
 // minutes for one that would rather finish than restart fast.
 const shutdownGrace = 5 * time.Second
+
+// shutdownSettle bounds how long a cancelled handler gets to write its response after a drain
+// has expired. Writing a status is not work that takes time; the bound is here so a handler that
+// ignores its cancellation cannot hold the process open.
+const shutdownSettle = 2 * time.Second
 
 // shutdownNote reports the effective drain grace as a banner line.
 //
@@ -435,10 +463,16 @@ func shutdownNote(grace time.Duration) string {
 //
 // The drain's own return value is otherwise passed through: a listener failure is worth
 // reporting.
-func drainAndStop(httpSrv *http.Server, stopPump func(), grace time.Duration) error {
+func drainAndStop(httpSrv *http.Server, cancelRequests, stopPump func(), grace time.Duration) error {
 	ctx, done := context.WithTimeout(context.Background(), grace)
 	defer done()
 	err := httpSrv.Shutdown(ctx)
+	// Whatever is still running now has no reason to finish on its own, so it is told to stop
+	// and given a moment to write its answer. Shutdown has already given up on waiting, but the
+	// connections are still open: a handler that returns within this window still reaches the
+	// client, which is the difference between a 503 and a connection that dies silently.
+	cancelRequests()
+	settleHandlers(httpSrv)
 	// The pump stops after the drain, whichever way the drain ended: a stream that outlived
 	// the grace period was cut by Shutdown, and leaving the pump running would keep advancing
 	// a sequence nobody can read.
@@ -448,6 +482,24 @@ func drainAndStop(httpSrv *http.Server, stopPump func(), grace time.Duration) er
 		return nil
 	}
 	return err
+}
+
+// settleHandlers waits for handlers that were cancelled to write their responses.
+//
+// A second Shutdown is the wait: the first one returned when its context expired, but it closed
+// the listener and the connections are still open, so a handler that returns now still reaches
+// its client. Calling Shutdown again blocks until every handler has returned, and the bounded
+// context keeps a handler that ignores its cancellation from holding the process open.
+//
+// The alternative was to let cmdServe return, which exits the process and takes the pending
+// writes with it -- measured as curl exit 52, "empty reply from server", for four requests in
+// flight at a 3-second grace.
+func settleHandlers(httpSrv *http.Server) {
+	ctx, done := context.WithTimeout(context.Background(), shutdownSettle)
+	defer done()
+	// The error is the deadline expiring, which is this function's own bound rather than a
+	// failure: a handler that has still not returned by then is one nothing can help.
+	_ = httpSrv.Shutdown(ctx)
 }
 
 // contiguousMemoryNote describes the KV footprint of the contiguous cache, which is the mode

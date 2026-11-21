@@ -89,6 +89,14 @@ type Config struct {
 	// responsible for a file it otherwise does not touch.
 	ChatRenderer *engine.ChatRenderer
 
+	// ChatFallbackAnnounced says the caller has already told the operator that the renderer
+	// falls back -- typically a startup banner that probed the template. It suppresses the
+	// request-time warning for a fallback that was known before the first request, so the
+	// same fact is not reported twice. A fallback the caller could not have seen still
+	// warns, which is why this is a flag the caller sets rather than a condition the server
+	// infers: only the caller knows what it printed.
+	ChatFallbackAnnounced bool
+
 	// Logger receives one record per request and any server-side failure. Nil discards
 	// records, so a caller that does not configure logging pays almost nothing: the
 	// request wrapper checks for nil before measuring anything.
@@ -838,12 +846,12 @@ func (s *Server) renderChat(msgs []chatMessage) string {
 	// Warned once because such a template fails on every conversation, and a line per request
 	// would bury every other message.
 	//
-	// HasTemplate is the guard rather than "a fallback reason is set", because the two cases
-	// already differ at startup: a template that never compiled prints
-	// "chat: neutral transcript (reason)" in the banner, so a request-time warning would only
-	// repeat it. This warning is for the case the banner cannot see -- compiled, reported as in
-	// use, and failing from the first conversation onwards.
-	if s.cfg.ChatRenderer != nil && s.cfg.ChatRenderer.HasTemplate() {
+	// ChatFallbackAnnounced is the guard, not "a fallback reason is set": a caller whose
+	// banner already named the fallback has told the operator once, and repeating it per
+	// process would be noise. What still warns is a fallback the caller could not have
+	// announced -- a template that renders the startup probe and then fails on a real
+	// conversation, which only the server sees.
+	if s.cfg.ChatRenderer != nil && !s.cfg.ChatFallbackAnnounced {
 		s.chatFallbackOnce.Do(func() {
 			if reason := s.cfg.ChatRenderer.FallbackReason(); reason != "" {
 				s.Logger().Warn("the model's chat template is not in use; prompts are using "+

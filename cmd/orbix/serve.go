@@ -251,6 +251,15 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Probe the template with a one-turn conversation so the banner below can be right the
+	// first time. UsesModelTemplate reads renderReason, which only a failed render writes, so
+	// before this line a template that compiles but cannot render printed "chat: model
+	// template" -- the banner said one thing and every request did another. chat does the same
+	// probe for the same reason; see chatSession.
+	//
+	// The request-time warning in internal/server stays: it is what catches a template that
+	// renders some conversations and not others, which a single probe cannot know about.
+	renderer.Render([]engine.Turn{{Role: "user", Text: "hi"}})
 
 	// Tracing is opt-in and off by default: a collector is one more thing that can be
 	// down, and a server whose traces have nowhere to go should not behave differently.
@@ -286,8 +295,12 @@ func cmdServe(args []string) error {
 		ContextLen:   cfg.ContextLen,
 		Temperature:  0,
 		ChatRenderer: renderer,
-		Trace:        traceExporter,
-		Logger:       accessLog,
+		// The banner below names the fallback whenever the probe found one, so the server does
+		// not repeat it per process. A template that renders the probe and then fails a real
+		// conversation is still unannounced, and the server warns for that.
+		ChatFallbackAnnounced: !renderer.UsesModelTemplate(),
+		Trace:                 traceExporter,
+		Logger:                accessLog,
 	})
 	if err != nil {
 		return err

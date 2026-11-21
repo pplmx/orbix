@@ -87,6 +87,9 @@ func newTestServerConfig(t *testing.T, model gguftest.Model, extra Config) (*Ser
 	if extra.ChatRenderer != nil {
 		conf.ChatRenderer = extra.ChatRenderer
 	}
+	if extra.ChatFallbackAnnounced {
+		conf.ChatFallbackAnnounced = extra.ChatFallbackAnnounced
+	}
 	if extra.Logger != nil {
 		conf.Logger = extra.Logger
 	}
@@ -5252,5 +5255,48 @@ func TestRenderFallbackIsWarnedOnce(t *testing.T) {
 	// operator with nothing to fix.
 	if !strings.Contains(buf.String(), "index 99 outside a sequence") {
 		t.Errorf("the warning does not carry the renderer's reason:\n%s", buf.String())
+	}
+}
+
+// TestRenderFallbackIsNotRepeatedByRequest covers a caller that already announced the fallback.
+//
+// cmd/orbix's serve probes the template before printing its banner, so a template that cannot
+// render is named there as "chat: neutral transcript (reason)". The request-time warning would
+// then report the same fact a second time, once per process. Measured before this flag existed:
+// the banner named the render reason and one WARN record repeated it.
+//
+// The flag is the caller's to set because only the caller knows what it printed; this test
+// pins the server half, that announcing it suppresses the record.
+func TestRenderFallbackIsNotRepeatedByRequest(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	model := gguftest.Model{NoEOS: true, ContextLen: 256, ChatTemplate: `{{ messages[99].content }}`}
+	path := model.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	renderer, err := engine.NewChatRenderer(gf)
+	if err != nil {
+		t.Fatalf("NewChatRenderer: %v", err)
+	}
+	// The probe the banner does, so the renderer holds the reason the banner would have shown.
+	renderer.Render([]engine.Turn{{Role: "user", Text: "hi"}})
+	if renderer.UsesModelTemplate() {
+		t.Fatal("the probe did not record a fallback, so this test would prove nothing")
+	}
+
+	srv, _ := newTestServerConfig(t, model, Config{
+		Logger: logger, ChatRenderer: renderer, ChatFallbackAnnounced: true,
+	})
+	resp := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}`)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("request = %d, want 200: the answer is unaffected, only the logging is",
+			resp.StatusCode)
+	}
+	if strings.Contains(buf.String(), "chat template is not in use") {
+		t.Errorf("warned about a fallback the caller already announced:\n%s", buf.String())
 	}
 }

@@ -74,14 +74,17 @@ chat endpoint are worth knowing before pointing a client at it:
   looks plausible and is wrong, while a neutral transcript is merely less good than the
   model's own format.
 
-  A parse-time failure is printed at startup as `chat: neutral transcript (reason)`. A
-  render-time one cannot be, because nothing has been rendered yet, so `serve` reports it as
-  a single `WARN` record on the first conversation that falls back, carrying the renderer's
-  reason. It is logged once rather than per request, since such a template fails every time.
-  Measured with a template of `{{ messages[99].content }}`: the banner said `chat: model
-  template`, both requests answered 200 out of the neutral transcript, and the warning named
-  `index 99 outside a sequence of 1`. Without that record the deployment looks like it is using
-  the model's format while every prompt is in the neutral one.
+  Both kinds are named in the startup banner, which probes the template with one throwaway
+  conversation before choosing its line: `serve` prints `chat: neutral transcript (reason)`
+  and `chat` prints the same. Measured with a template of `{{ messages[99].content }}`, the
+  banner reads `chat: neutral transcript (chat: render: index 99 outside a sequence of 1)`
+  rather than claiming the model's template is in use.
+
+  A template that survives the probe and then fails on a real conversation still exists, and
+  only `serve` can see it, so it reports one `WARN` record on the first such conversation,
+  carrying the same reason. It is logged once rather than per request, since such a template
+  fails every time, and it is suppressed when the banner already named the fallback -- the
+  caller sets that flag, because only the caller knows what it printed.
   If you would rather control the prompt, send it to `/v1/completions`, which passes
   text through verbatim.
 

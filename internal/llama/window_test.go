@@ -906,3 +906,62 @@ func TestRunnerReportsTheConfiguredWorkers(t *testing.T) {
 		t.Errorf("Workers() = %d on the second call, want %d", again, first)
 	}
 }
+
+// TestAttendMatchesAHandComputedCase pins attend's arithmetic against values worked out on
+// paper, rather than against another path through the same code.
+//
+// Every other test of attention compares two routes -- batched against per-token, cached
+// against uncached, paged against contiguous -- and that cannot see a change to the shared
+// arithmetic, because the change moves both sides together. Measured: replacing the softmax
+// call with a no-op left all twelve packages green while turning the logits of a five-token
+// forward pass from [1.8292313 3.9255004 ...] into [0.29347706 2.8286347 ...]. Two routes
+// agreeing says nothing when both are wrong.
+//
+// The numbers below are chosen so the expected output is exact in float32 and derivable by
+// reading: two positions, a two-wide query, equal scores (so the weights are exactly 1/2),
+// and values that are 1 and 3 in each component. The output is therefore
+// (1+3)/2 = 2 in both components, and every intermediate step is a value a reader can
+// check without running anything.
+func TestAttendMatchesAHandComputedCase(t *testing.T) {
+	// Two positions, two components each, laid out contiguously (stride 2).
+	keys := []float32{
+		1, 0, // position 0
+		1, 0, // position 1: identical key, so both scores are equal
+	}
+	values := []float32{
+		1, 1, // position 0
+		3, 3, // position 1
+	}
+	q := []float32{1, 0}
+	n := 2
+	// scale 1 keeps the dot products as the integers above.
+	keysSpans := []span{{data: keys, stride: 2, rows: 2, width: 2}}
+	valuesSpans := []span{{data: values, stride: 2, rows: 2, width: 2}}
+	scores := make([]float32, n)
+	out := make([]float32, 2)
+
+	if err := attend(q, keysSpans, valuesSpans, n, scores, out, 1); err != nil {
+		t.Fatalf("attend: %v", err)
+	}
+	// Both scores are dot(q, key) = 1, so after the softmax each weight is 1/2 and the
+	// output is the midpoint of the two values.
+	for j, want := range []float32{2, 2} {
+		if out[j] != want {
+			t.Errorf("out[%d] = %v, want %v (midpoint of 1 and 3)", j, out[j], want)
+		}
+	}
+
+	// A peaked case, where the softmax matters most: one key scores far above the other, so
+	// its value should dominate almost completely.
+	keys[2], keys[3] = -1000, 0 // position 1 now scores ~0 against a query of {1,0}
+	// Recompute: position 0 scores 1, position 1 scores -1000. After the softmax the first
+	// weight is 1/(1+e^-1001) which is 1 in float32, so the output is value 0 exactly.
+	if err := attend(q, keysSpans, valuesSpans, n, scores, out, 1); err != nil {
+		t.Fatalf("attend: %v", err)
+	}
+	for j, want := range []float32{1, 1} {
+		if out[j] != want {
+			t.Errorf("peaked case: out[%d] = %v, want %v (value 0 dominates)", j, out[j], want)
+		}
+	}
+}

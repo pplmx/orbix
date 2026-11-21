@@ -460,7 +460,9 @@ func TestParallelMatchesSerialWeights(t *testing.T) {
 	// A constructed model: the property is that eight workers give the serial answer
 	// exactly, and it holds for any weights because every output row is computed by one
 	// worker in the serial order.
-	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	// Wide enough that the vocabulary projection clears kernel minParallelWork, so the
+	// eight-worker model really does split its products; see the work assertion below.
+	path := gguftest.Model{NoEOS: true, ContextLen: 256, Hidden: 256, Heads: 4, FFN: 512}.Write(t, t.TempDir())
 	serial, err := NewWithOptions(path, Options{Workers: 1})
 	if err != nil {
 		t.Fatalf("NewWithOptions(serial): %v", err)
@@ -471,6 +473,16 @@ func TestParallelMatchesSerialWeights(t *testing.T) {
 	}
 
 	c := serial.Config()
+	// The parallel path is only exercised if some product crosses the kernel's threshold.
+	// Asserted rather than assumed: the fixture used to be the default 32-wide model, whose
+	// largest product was 11,616 -- both "serial" and "parallel" then ran on one goroutine
+	// and this test compared an implementation against itself.
+	const minParallelWork = 1 << 15
+	if work := c.Hidden * c.VocabSize; work < minParallelWork {
+		t.Fatalf("the fixture's largest product is %d multiply-adds, below the %d where "+
+			"kernels start splitting, so neither model would be parallel", work, minParallelWork)
+	}
+
 	prompt := fixtureTokens(c, 5)
 
 	seqCache, err := NewKVCache(c, c.ContextLen)

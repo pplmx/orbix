@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -379,6 +380,78 @@ func TestPrefixChainLinksBlocks(t *testing.T) {
 	}
 	if links != 2 {
 		t.Errorf("%d linked entries, want 2", links)
+	}
+}
+
+// TestMatchReportsEachBlockOnce covers a prompt that repeats a block. Keys are the token
+// run alone, with no position, so "1 2 1 2" at a two-token block size finds one entry
+// twice. Reporting it twice is corruption rather than a wasted hit: adopt makes two of the
+// sequence's positions alias that block, and appending to the second overwrites the first's
+// keys and values in place -- inside a block every other holder is reading.
+//
+// The assertion is on the block ids and on the original's position 0, because a length
+// check alone would pass while both entries still named the same block.
+func TestMatchReportsEachBlockOnce(t *testing.T) {
+	cfg := testConfig()
+	pool := pagedPool(t, cfg, 2)
+	idx := pool.EnablePrefixCache()
+	dim := cfg.kvDim()
+
+	tokens := []int32{1, 2, 1, 2}
+	producer := pool.New()
+	for pos := range len(tokens) {
+		for l := range cfg.Layers {
+			kk := make([]float32, dim)
+			vv := make([]float32, dim)
+			for i := range kk {
+				kk[i] = float32(pos*100 + i)
+				vv[i] = float32(pos*100 + i)
+			}
+			if _, _, err := producer.appendKV(l, kk, vv, pos); err != nil {
+				t.Fatalf("appendKV(%d): %v", pos, err)
+			}
+		}
+		producer.setLen(pos + 1)
+		if err := producer.rememberFullBlock(tokens, pos); err != nil {
+			t.Fatalf("rememberFullBlock(%d): %v", pos, err)
+		}
+	}
+
+	n, blocks := idx.Match(tokens)
+	if n != 2 {
+		t.Errorf("Match = %d positions, want 2: the match stops at the repeated block", n)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("Match returned blocks %v, want one", blocks)
+	}
+
+	// The block it did hand over must not be the one the original appends into. Writing
+	// past the adopted prefix is exactly what a longer prompt does on its next block.
+	readPos0 := func(c *PagedKVCache) []float32 {
+		spans, _, err := c.spans(0, 0, 1)
+		if err != nil {
+			t.Fatalf("spans: %v", err)
+		}
+		return slices.Clone(spans[0].data[:4])
+	}
+	before := readPos0(producer)
+
+	adopter := pool.New()
+	if err := adopter.adopt(blocks); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	kk := make([]float32, dim)
+	vv := make([]float32, dim)
+	for i := range kk {
+		kk[i] = -7
+		vv[i] = -7
+	}
+	if _, _, err := adopter.appendKV(0, kk, vv, adopter.Len()); err != nil {
+		t.Fatalf("appendKV past the adopted prefix: %v", err)
+	}
+	if after := readPos0(producer); !slices.Equal(before, after) {
+		t.Errorf("appending past the adopted prefix rewrote the original's position 0: %v -> %v",
+			before, after)
 	}
 }
 

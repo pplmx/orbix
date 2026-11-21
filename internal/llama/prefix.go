@@ -1,6 +1,9 @@
 package llama
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // PrefixIndex remembers token prefixes whose keys and values are already in the
 // pool, so a later request that starts with the same tokens can attach them
@@ -102,6 +105,15 @@ func (p *BlockPool) PrefixIndex() *PrefixIndex { return p.index }
 //
 // The returned blocks are not retained: the caller must retain the ones it keeps
 // before letting another request run, which PagedKVCache.adopt does.
+//
+// A block is reported at most once. Keys are the token run alone, with no position, so a
+// prompt that repeats a block -- "1 2 1 2" at a two-token block size is the smallest --
+// finds the same entry twice. Handing that entry over twice would make two of the
+// sequence's positions alias one block, and the second one's append would overwrite the
+// first's keys and values in place: the shared block is read by every other holder too, so
+// the damage is silent and reaches them. The match therefore stops at the first repeat, and
+// the positions after it are prefilled instead. Matching less costs a forward pass;
+// matching wrongly costs correctness.
 func (x *PrefixIndex) Match(tokens []int32) (n int, blocks []int32) {
 	if x == nil || len(tokens) == 0 {
 		return 0, nil
@@ -114,16 +126,18 @@ func (x *PrefixIndex) Match(tokens []int32) (n int, blocks []int32) {
 		if !ok || !sameTokens(entry.tokens, tokens[off:off+size]) {
 			break
 		}
+		if slices.Contains(blocks, entry.block) {
+			break
+		}
 		blocks = append(blocks, entry.block)
 	}
 	return len(blocks) * size, blocks
 }
 
-// Remember records that block id holds the blockSize tokens at off in tokens.
+// Remember records that block id holds tokens, continuing parent when parent is non-zero.
 //
-// A block is only remembered once it is full: a partial block will still be
-// appended to, so its contents are not yet a reusable prefix.
-// Remember records that block holds tokens, continuing parent when parent is non-zero.
+// The run is always exactly one block: a partial block will still be appended to, so its
+// contents are not yet a reusable prefix, and the length check below is what refuses one.
 //
 // parent is the key returned by the Remember call for the preceding block of the same
 // prompt, or zero to start a chain. The caller supplies it because only the caller knows

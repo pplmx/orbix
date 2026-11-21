@@ -39,10 +39,15 @@
 // qwen2-0.5b (Q8_0, F32), a Mixtral-format MoE model whose expert weights are 3-D
 // tensors (Q2_K, Q3_K, Q5_K, Q6_K, Q8_0, F32), llama3.2 (Q2_K, Q3_K, Q4_K, Q6_K, F32),
 // and a 1.9 GB all-F32 checkpoint. That is 1009 tensors across eight formats, all
-// byte-identical. The comparison is not a test in this package: it needs the
-// third-party reader and a multi-gigabyte checkpoint, and a unit test may depend on
-// neither. It is a check a person runs, which is why the result is written down here --
-// otherwise the next reader has only the claim.
+// byte-identical.
+//
+// That comparison used to be a check a person ran by hand, with the result written down
+// here because nothing else could reproduce it. It is now `just MODEL=<file> xcheck`:
+// scripts/gguf_xcheck.py compares type, dimensions and the SHA-256 of every tensor
+// against the Python parser. Measured again with it, the six files above sum to exactly
+// 1009 and every tensor agrees, so the figure is reproducible rather than remembered.
+// The reason it is still not a unit test is unchanged -- it needs a third-party reader
+// and multi-gigabyte checkpoints, and a unit test may depend on neither.
 //
 // The per-format tests in this package are a different kind of evidence, and worth
 // distinguishing. TestKQuantRoundTrip pins exact values from a known block. The

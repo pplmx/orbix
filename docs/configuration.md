@@ -249,8 +249,9 @@ and they are the whole attribution: there is one span per request, not one per s
 
 A request the server refuses before it reaches the engine produces **no span at all**. A pool
 that cannot hold the request, a missing prompt, a bad sampler value: all are refused with a 400
-and never become a sequence, so nothing is recorded. Measured: a request refused for needing more
-KV blocks than the pool holds posted nothing to the collector. Tracing is not an audit log, then;
+and never become a sequence, so nothing is recorded. Measured on one server with one collector:
+a request refused for needing 126 KV blocks from a 32-block pool posted nothing, while an
+accepted request beside it posted its one span. Tracing is not an audit log, then;
 `/metrics` counts refusals, and the access log records the status, but a per-request trace of a
 rejected call needs one of those rather than this.
 

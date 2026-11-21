@@ -652,6 +652,14 @@ func TestTracingRecordsRequestSpans(t *testing.T) {
 		if !strings.Contains(body, `"intValue":"`+itoa(len(prompt))+`"`) {
 			t.Errorf("input token count is not %d:\n%s", len(prompt), body)
 		}
+		// Exactly one span, which the test's own name claims and nothing checked. The Trace
+		// field's comment promised "a span for this request and for each round that advances
+		// it" for several rounds while no round span existed; counting here is what would
+		// have caught the comment drifting away from the code, and it fails the other way
+		// too if a future change starts emitting one span per round without saying so.
+		if n := strings.Count(body, `"spanId"`); n != 1 {
+			t.Errorf("got %d spans for one request, want exactly 1:\n%s", n, body)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the collector received no trace")
 	}

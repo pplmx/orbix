@@ -198,7 +198,7 @@ differently:
 | What happened                                          | Answer                         | What a client does |
 | ------------------------------------------------------ | ------------------------------ | ------------------ |
 | The backlog is full (`--max-queued` reached)           | `503` + `Retry-After`, at once | back off and retry |
-| The pool is full right now but will free up            | `503` + `Retry-After`          | back off and retry |
+| A running sequence cannot get a block it needs         | `503` + `Retry-After`          | back off and retry |
 | The request needs more blocks than the pool ever holds | `400`                          | shorten it         |
 
 The first is answered immediately rather than after a wait -- measured, 15 ms for a request
@@ -208,8 +208,12 @@ now. Measured with `--max-active 1 --max-queued 2`: three requests accepted (one
 waiting) and the next two refused with `engine: too many requests waiting (2 queued for 1 active
 slots)`.
 
-A paged server answers `503` with `Retry-After` when the pool cannot hold a request *yet*,
-which is a capacity signal a client or proxy should back off on. It does not answer that for
+A paged server answers `503` with `Retry-After` when a *running* sequence cannot get the block
+it needs, which is a capacity signal a client or proxy should back off on. A request that
+merely arrives while the pool is empty is not refused: it is admitted and waits for blocks to
+come back, because every active sequence advances one token at a time and releases the blocks
+of a finished one. Measured with four blocks and four concurrent requests: `orbix_kv_pool_free`
+read 0 while a fifth request needing two blocks answered 200. It does not answer that for
 a request whose own prompt and budget need more blocks than the pool holds at all: nothing
 another request finishes makes room for it, so retrying only repeats the answer. That case is
 refused up front with a `400` whose message names both counts -- what the request needs and

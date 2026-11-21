@@ -113,9 +113,20 @@ Three things remain the deployment's job, because no application header can expr
 A shutdown is bounded too, and this one is visible to every streaming client. `SIGTERM` (or
 `SIGINT`) stops accepting new requests, lets in-flight responses finish, and only then stops
 the pump -- so an ordinary stream completes normally, `[DONE]` included. The drain waits at
-most `shutdownGrace`, which is five seconds. A response still running when it expires is cut:
-the stream ends without `[DONE]` and without an error chunk, and the server logs `shutdown: a
-response was still in flight when the 5s grace expired; it was cut` to stdout.
+most `shutdownGrace`, which is five seconds. A response still running when it expires is cut,
+and what the client receives depends on the endpoint:
+
+- **A stream** ends mid-token, without `[DONE]` and without an error chunk. Everything up to
+  that point arrived normally, so the client has partial text.
+- **A non-streaming request** receives no HTTP response at all -- not a 503, not a truncated
+  body. The connection closes and the client reports an empty reply (`curl` exit 52, or
+  `RemoteDisconnected` in Python's http.client). Measured: four concurrent non-streaming
+  requests against four slots at a 3-second grace all came back empty; the same four at a
+  60-second grace all answered 200 in 12.1 seconds.
+
+The server logs `shutdown: a response was still in flight when the 5s grace expired; it was cut`
+to stdout either way, so the cut is visible on the server side even when the client learns
+nothing.
 
 Measured two ways. On Llama 3.2 1B at `--max-tokens 500`, `SIGTERM` two seconds in waited the
 full 5606 ms, delivered 75 chunks, and closed the connection with no `[DONE]`. On stories15M

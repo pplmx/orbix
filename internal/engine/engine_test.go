@@ -1659,6 +1659,83 @@ func TestPrefixCacheSharedWhileConcurrent(t *testing.T) {
 	}
 }
 
+// TestPrefixCacheSharedAcrossDivergingPrompts covers the case the identical-prompt test
+// above cannot reach.
+//
+// TestPrefixCacheSharedWhileConcurrent runs three copies of one prompt, so every request
+// attaches the same blocks and then decodes from the same place. A sequence that wrote
+// through a shared block would corrupt its neighbours' KV -- but also its own, because they
+// all hold the same positions, so the damage would show up as a disagreement only if the
+// writes happened to diverge. Here the prompts share a prefix and then part company, which
+// is the shape a chat server sees: a common system prompt, different user turns. The shared
+// blocks must stay read-only while each sequence appends past them.
+//
+// Reuse is asserted as having happened (PrefixReused > 0), because without that the test
+// would pass on an engine that never shared anything and say nothing about the invariant.
+func TestPrefixCacheSharedAcrossDivergingPrompts(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+
+	// Eight shared tokens with a four-position block: exactly two blocks every prompt has.
+	shared := []int32{1, 2, 3, 4, 5, 6, 7, 8}
+	prompts := [][]int32{
+		append(append([]int32{}, shared...), 20, 21, 22, 23),
+		append(append([]int32{}, shared...), 30, 31, 32, 33),
+		append(append([]int32{}, shared...), 40, 41, 42, 43),
+	}
+
+	run := func(cache bool) ([][]int32, uint64) {
+		t.Helper()
+		e, err := New(path, Options{BlockSize: 4, Blocks: 256, MaxActive: 8, PrefixCache: cache})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		chans := make([]<-chan Event, len(prompts))
+		for i, p := range prompts {
+			ch, err := e.Submit(Request{Prompt: p, MaxTokens: 6})
+			if err != nil {
+				t.Fatalf("Submit %d: %v", i, err)
+			}
+			chans[i] = ch
+		}
+		for e.Pump() > 0 {
+		}
+		out := make([][]int32, len(prompts))
+		for i, ch := range chans {
+			out[i], _ = collect(t, ch)
+		}
+		return out, e.Stats().PrefixReused
+	}
+
+	plain, plainReused := run(false)
+	cached, cachedReused := run(true)
+
+	if plainReused != 0 {
+		t.Errorf("the cache-off run reported %d reused positions", plainReused)
+	}
+	if cachedReused == 0 {
+		t.Fatal("no positions were reused, so this test does not exercise sharing")
+	}
+	// Each of the three requests can attach two blocks, so the most the counter can report
+	// after the first is 8 positions apiece.
+	if cachedReused > uint64(8*len(prompts)) {
+		t.Errorf("reused %d positions, but the three prompts share only %d each",
+			cachedReused, len(shared))
+	}
+
+	for i := range prompts {
+		if len(cached[i]) != len(plain[i]) {
+			t.Fatalf("request %d: cached produced %d tokens, uncached %d",
+				i, len(cached[i]), len(plain[i]))
+		}
+		for j := range cached[i] {
+			if cached[i][j] != plain[i][j] {
+				t.Fatalf("request %d token %d: cached %d, uncached %d -- a sequence read KV "+
+					"state belonging to another", i, j, cached[i][j], plain[i][j])
+			}
+		}
+	}
+}
+
 // TestFractionFull pins the arithmetic behind orbix_kv_pool_used_fraction.
 //
 // The gauge is the one reading that says a paged deployment is close to refusing requests,

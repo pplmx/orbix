@@ -147,6 +147,20 @@ order, as the round each got its first token:
 | `shortest` | 19, 10, 5, 2       | exactly inverted: the 2-token request moved from round 33 to round 2 |
 | `fair`     | 5, 6, 7, 8         | one turn apiece first, then round-robin from there                   |
 
+Rounds are the unit the engine schedules in; what an operator waits is wall-clock, and the gap
+there is larger than the round numbers suggest. Measured on Llama 3.2 1B with `--max-active 1`
+and a 60-token request already running, a second request budgeted 4 tokens waited:
+
+| Policy     | Wait for the short request |
+| ---------- | -------------------------- |
+| `fifo`     | 5820, 7563, 8365 ms        |
+| `shortest` | 776, 942, 797 ms           |
+
+A median of 7563 ms against 797 ms is 9.5 times, and the ranges do not overlap at all: the
+slowest `shortest` run, 942 ms, is six times faster than the fastest `fifo` run, 5820 ms. The mechanism is the
+same as the round table: under `fifo` the short request sits behind the full 60 tokens, while
+`shortest` picks it at the next scheduling decision and finishes it in a handful of rounds.
+
 The two cache layouts differ in what they reserve. A contiguous cache reserves the whole context
 for every accepted request on arrival: `context x KV width x layers`, times the active and queued
 slots. A paged cache takes blocks as a sequence generates, so memory follows what is in flight.

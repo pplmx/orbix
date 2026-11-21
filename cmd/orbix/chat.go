@@ -654,13 +654,20 @@ func chatCommand(out io.Writer, line string, history *[]chatTurn, stats func() e
 			return false, err
 		}
 		st := stats()
-		if _, err := fmt.Fprintf(out, "  turns:      %d\n", len(*history)/2); err != nil {
+		// turns is the live conversation; the two counters below it are totals for the whole
+		// session. Printing them side by side without saying so made /clear look broken: it
+		// reset turns to 0 while tokens and reused stayed put, which reads as stale numbers
+		// rather than as a different question being answered. The labels say which is which.
+		if _, err := fmt.Fprintf(out, "  turns:      %d in this conversation\n",
+			len(*history)/2); err != nil {
 			return false, err
 		}
-		if _, err := fmt.Fprintf(out, "  tokens:     %d generated\n", st.TokensGenerated); err != nil {
+		if _, err := fmt.Fprintf(out, "  tokens:     %d generated this session\n",
+			st.TokensGenerated); err != nil {
 			return false, err
 		}
-		if _, err := fmt.Fprintf(out, "  reused:     %d prompt positions from shared prefixes\n", st.PrefixReused); err != nil {
+		if _, err := fmt.Fprintf(out, "  reused:     %d prompt positions from shared prefixes this session\n",
+			st.PrefixReused); err != nil {
 			return false, err
 		}
 		// The pool, when the session has one, because running out of it is the one failure

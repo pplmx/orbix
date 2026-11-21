@@ -625,14 +625,18 @@ func TestChatCommandStatsAndHistory(t *testing.T) {
 			t.Fatalf("chatCommand: %v", err)
 		}
 		got := out.String()
-		if !strings.Contains(got, "turns:      2") {
-			t.Errorf("/stats reported %q, want 2 turns for four messages", got)
-		}
-		if !strings.Contains(got, "tokens:     7 generated") {
-			t.Errorf("/stats did not report the token count:\n%s", got)
-		}
-		if !strings.Contains(got, "reused:     32 prompt positions") {
-			t.Errorf("/stats did not report the reuse count:\n%s", got)
+		// Each line says whether it is live or cumulative, because they disagree after
+		// /clear: turns resets and the two counters do not. Asserting the qualifier is what
+		// makes that distinction part of the contract rather than an editorial choice the
+		// next person can drop.
+		for _, want := range []string{
+			"turns:      2 in this conversation",
+			"tokens:     7 generated this session",
+			"reused:     32 prompt positions from shared prefixes this session",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("/stats is missing %q:\n%s", want, got)
+			}
 		}
 	})
 

@@ -192,6 +192,22 @@ The server prints the figure it computed at startup and warns past a gibibyte. I
 [the weights section](#the-weights-are-held-as-float32-which-is-the-memory-figure-to-plan-with),
 which is usually the larger of the two.
 
+Three capacity failures look alike from the client and are not the same, so they are answered
+differently:
+
+| What happened                                          | Answer                         | What a client does |
+| ------------------------------------------------------ | ------------------------------ | ------------------ |
+| The backlog is full (`--max-queued` reached)           | `503` + `Retry-After`, at once | back off and retry |
+| The pool is full right now but will free up            | `503` + `Retry-After`          | back off and retry |
+| The request needs more blocks than the pool ever holds | `400`                          | shorten it         |
+
+The first is answered immediately rather than after a wait -- measured, 15 ms for a request
+arriving against a one-slot server whose single queue place was taken. Queueing it behind work
+that is already queued would only lengthen every client's timeout for an answer that is known
+now. Measured with `--max-active 1 --max-queued 2`: three requests accepted (one running, two
+waiting) and the next two refused with `engine: too many requests waiting (2 queued for 1 active
+slots)`.
+
 A paged server answers `503` with `Retry-After` when the pool cannot hold a request *yet*,
 which is a capacity signal a client or proxy should back off on. It does not answer that for
 a request whose own prompt and budget need more blocks than the pool holds at all: nothing

@@ -1541,3 +1541,35 @@ func TestChatExplainsAPoolExhaustionOnce(t *testing.T) {
 		t.Errorf("the later pool failures are not reported concisely:\n%s", out)
 	}
 }
+
+// TestChatSaysWhenClearCannotHelp covers the overflow that /clear cannot fix.
+//
+// The message used to recommend starting over unconditionally. That is right when the history
+// is what outgrew the window and wrong when a single message cannot fit it -- and --system is
+// the way to hit the second case without typing anything. Measured on the 128-position fixture
+// with a system prompt of 120 words: the first turn overflowed at 131 tokens, and /clear
+// followed by the same input overflowed again, because the system prompt is re-sent every turn.
+//
+// The advice now separates the two cases, which is the only version a reader can act on.
+func TestChatSaysWhenClearCannotHelp(t *testing.T) {
+	sys := strings.TrimSpace(strings.Repeat("padding words here ", 40))
+	out := runChat(t, chatOptions{
+		model: chatModel(t), maxTokens: 4, topK: 40, system: sys,
+	}, "hi\n/clear\nhi again\n/exit\n")
+
+	if got := strings.Count(out, "no longer fits the model's window"); got < 1 {
+		t.Fatalf("an oversized system prompt produced no overflow at all:\n%s", out)
+	}
+	// The qualifier is the point: without it the message tells the reader to run a command
+	// that cannot help.
+	if !strings.Contains(out, "not if the system prompt alone is longer than the window") {
+		t.Errorf("the overflow advice does not distinguish a history that outgrew the window "+
+			"from a system prompt that never fit:\n%s", out)
+	}
+	// And /clear really does not help here, which is why the distinction is worth making.
+	afterClear := out[strings.Index(out, "history cleared"):]
+	if !strings.Contains(afterClear, "no longer fits the model's window") {
+		t.Errorf("the conversation recovered after /clear, so this test no longer describes "+
+			"an overflow /clear cannot fix:\n%s", out)
+	}
+}

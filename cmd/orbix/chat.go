@@ -448,8 +448,9 @@ func explainChatError(err error) error {
 	if errors.Is(err, errContextFull) {
 		return fmt.Errorf("%w -- this conversation no longer fits the model's window, and the"+
 			" next turn will fail the same way because a failed turn does not grow the history;"+
-			" /clear starts over, and the model's window is fixed, so a longer --system or a"+
-			" smaller --max-tokens only helps by leaving room for fewer turns", err)
+			" /clear starts over, which helps if the history is what overflowed but not if the"+
+			" system prompt alone is longer than the window; a smaller --max-tokens leaves room"+
+			" for more turns, and the window itself is fixed by the model", err)
 	}
 	if !errors.Is(err, llama.ErrPoolExhausted) {
 		return err

@@ -8,6 +8,12 @@ which is 0 until the history outgrows a block.
 `/stats` also reports the KV pool, `N of M blocks free (S positions each, T total)`, because
 running out is one of two failures a session hits repeatedly, the other being the conversation
 outgrowing the window. Both errors say retrying changes nothing and which flag is the way out.
+The overflow advice separates the two ways to reach it: `/clear` helps when the history is
+what outgrew the window, and does not when a single message -- usually `--system` -- never fit
+it. Measured on the 128-position fixture with a 120-word system prompt: the first turn
+overflowed at 131 tokens and `/clear` followed by the same input overflowed again, because the
+system prompt is re-sent every turn.
+
 Each of those is explained in full once per conversation; every later attempt in the same
 conversation prints the numbers and `(unchanged; /clear starts over)` instead of repeating the
 paragraph, and `/clear` restores the full version for the next one. The rule covers both

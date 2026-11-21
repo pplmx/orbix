@@ -120,11 +120,19 @@ func TestDecodeQ4_0Layout(t *testing.T) {
 	// The nibble interleaving is the easiest part of this format to get
 	// wrong, and a wrong layout silently transposes halves of a matrix.
 	//
-	// Use codes that identify their index: code j = j % 16. Then weight j
-	// must decode to (j%16 - 8) * scale.
+	// The codes must be ASYMMETRIC between the two halves. This test used to set
+	// code j = j % 16, which makes codes[j+16] = (j+16)%16 = codes[j] -- the low and
+	// high nibble of every byte then hold the same value, so swapping the halves changes
+	// nothing and the interleaving went untested despite the comment above saying it is
+	// "the easiest part of this format to get wrong". Verified: with the symmetric codes,
+	// a decoder that swapped the halves passed every test in this package.
+	//
+	// Now the low half counts up and the high half counts down, so every position has a
+	// distinct neighbour and a swap is visible at 32 of 32 positions.
 	codes := make([]int, 32)
-	for j := range codes {
-		codes[j] = j % 16
+	for j := 0; j < 16; j++ {
+		codes[j] = j
+		codes[j+16] = 15 - j
 	}
 	const scale = 0.5
 	src := q4_0Block(t, codes, scale)

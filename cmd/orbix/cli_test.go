@@ -1491,6 +1491,19 @@ func TestRunStatsReport(t *testing.T) {
 	if strings.Contains(stderr, "bytes\n") {
 		t.Errorf("the cache line still prints a raw byte count:\n%s", stderr)
 	}
+	// "load:" has to cover the whole load, not only the weight loader. It used to start
+	// timing after gguf.Open and tokenize.New, and on the 553 MiB Llama 3.2 checkpoint
+	// gguf.Open alone takes 1.47 s -- measured, wall-clock exceeded load+gen by 2.4 s with
+	// nothing in the report accounting for it.
+	//
+	// This asserts the shape rather than a duration: the fixture is a few kilobytes, so the
+	// open it now includes is too fast for a threshold to separate reliably -- a first
+	// attempt asserting load > 0 ms passed with the timer moved back. What is checkable here
+	// is that the line parses and reads as a duration; the timing window itself is pinned by
+	// the comment in run.go and by the measurement it records.
+	if !regexp.MustCompile(`load:\s+\d+(\.\d+)?(ns|µs|ms|s)\b`).MatchString(stderr) {
+		t.Errorf("the load line is not a duration:\n%s", stderr)
+	}
 
 	// The completion on stdout must not repeat the prompt: the prompt is echoed only with
 	// --echo, which is not set here.

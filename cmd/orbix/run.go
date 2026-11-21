@@ -75,8 +75,12 @@ func cmdRun(args []string) error {
 	}
 
 	// Open the file twice: once for metadata and the tokenizer, once for the
-	// weights. The directory parse is cheap and keeps the two concerns from
-	// sharing a handle that the weight loader closes.
+	// weights. The directory parse keeps the two concerns from sharing a handle
+	// that the weight loader closes -- but it is not cheap, which is why the load
+	// timer starts before it. Measured on the 553 MiB Llama 3.2 file: gguf.Open
+	// alone takes 1.47 s, and a report that began timing at NewWithOptions below
+	// left that out of "load:" while wall-clock showed it.
+	t0 := time.Now()
 	gf, err := gguf.Open(*model)
 	if err != nil {
 		return err
@@ -86,7 +90,6 @@ func cmdRun(args []string) error {
 		return err
 	}
 
-	t0 := time.Now()
 	m, err := llama.NewWithOptions(*model, llama.Options{Workers: *workers})
 	if err != nil {
 		return err

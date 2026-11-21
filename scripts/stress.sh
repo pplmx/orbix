@@ -5,9 +5,12 @@
 #
 # Usage: scripts/stress.sh <race-binary> <checkpoint>
 #
-# Exits non-zero if the race detector reported anything, if the server returned a 5xx, or if
-# orbix_requests_active did not return to zero. The last one is the leak check: a stale
-# sequence holds its KV blocks, and the gauge is how that shows up without reading heap dumps.
+# Exits non-zero if the race detector reported anything, if the server returned a 5xx, if
+# orbix_requests_active did not return to zero, or if no request was ever cancelled or
+# abandoned. The gauge is the leak check: a stale sequence holds its KV blocks, and the
+# number is how that shows up without reading heap dumps. The last condition is the
+# self-check -- a run that cancelled nothing exercised no disconnect, so the other three
+# passed having tested little, and saying "ok" there is worse than failing.
 set -uo pipefail
 
 bin=${1:?usage: stress.sh <race-binary> <checkpoint>}

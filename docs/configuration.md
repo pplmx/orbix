@@ -165,20 +165,20 @@ and a 60-token request already running, a second request budgeted 4 tokens waite
 
 | Policy     | Wait for the short request |
 | ---------- | -------------------------- |
-| `fifo`     | 5820, 7563, 8365 ms        |
-| `shortest` | 776, 942, 797 ms           |
+| `fifo`     | 5230, 5105, 5066 ms        |
+| `shortest` | 544, 422, 761 ms           |
 
-Three runs gave 5820-8365 ms against 776-942 ms, so the ranges do not overlap: the slowest
-`shortest` run is still several times faster than the fastest `fifo` one. The mechanism is the
-same as the round table: under `fifo` the short request sits behind the full 60 tokens, while
-`shortest` picks it at the next scheduling decision and finishes it in a handful of rounds.
+A median of 5105 ms against 544 ms is 9.4 times, and no run of one policy came within six times
+of any run of the other. The mechanism is the same as the round table: under `fifo` the short
+request sits behind the full 60 tokens, while `shortest` picks it at the next scheduling
+decision and finishes it in a handful of rounds.
 
-**The ratio is not a number to plan with, and this is the only place in the page that measures
-wall-clock.** The host's load average sat near 100 throughout -- 128 cores, mostly another
-project's tests -- and later repeats of a *different* shape (six 4-token requests arriving behind
-six 30-token ones) ranged 24-63 seconds for `fifo` against 3.5-6.9 for `shortest`. The two
-policies stayed well separated in every run, which is the finding; the factor between them is
-not, because it moves with whatever else the machine is doing.
+These numbers were re-taken on an idle host after an earlier attempt on a loaded one, and the
+comparison is worth recording because of how much the environment moved. The same measurement
+under a load average near 100 gave 5820-8365 ms against 776-942 ms: 9.5 times by median where
+the idle host gave 9.4, while the individual figures ran 14% to 73% high. The ratio is the
+property; the milliseconds are the machine. Take the ordering from this page and re-measure the
+timings on the host that will run them.
 
 The rounds in the table above are the load-independent statement. The timings are here to show
 that a round is not a fixed amount of time, and that a queue reordered by remaining work is felt

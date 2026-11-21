@@ -259,9 +259,8 @@ func cmdServe(args []string) error {
 	// summary above gives no count, and `run --stats` reports params only to a caller who asked
 	// for stats on a one-shot generation. On Llama 3.2 1B it is 4.6 GiB, which a 553 MiB file
 	// gives no hint of.
-	weightsBytes := eng.Model().W.Params() * 4
 	fmt.Printf("weights:    %s resident (4 bytes per parameter, widened from the file at load)\n",
-		humanBytes(weightsBytes))
+		humanBytes(weightsResidentBytes(eng.Model().W)))
 	// Say what the contiguous cache costs, which nothing else reports. A paged cache prints
 	// its pool size below from the pool itself; a contiguous one reserves a whole context per
 	// accepted request, so the backlog multiplies whatever one request costs and the model
@@ -437,6 +436,21 @@ func poolCapacityWarning(capacity, contextLen int) string {
 		"so requests longer than %d are refused with 400 (they can never fit, so retrying "+
 		"does not help); raise --blocks or --block-size",
 		capacity, contextLen, capacity)
+}
+
+// weightsResidentBytes is what the loaded weights occupy, and it is exactly 4 bytes per
+// parameter.
+//
+// The name says "resident" rather than "size" because those differ here: a 553 MiB Llama 3.2
+// file holds 4.6 GiB once every tensor has been widened to float32, and the file size predicts
+// neither this figure nor the peak the process reaches. Params counts every float32 the model
+// holds -- including all of a mixture-of-experts model's experts, not just the ones a token
+// routes to -- so multiplying by the width of a float32 is the whole calculation.
+//
+// A function rather than an inline `Params() * 4` so the arithmetic has a name a test can call.
+// It was inline for one round, and the banner line it fed had no test at all.
+func weightsResidentBytes(w *llama.Weights) int64 {
+	return w.Params() * 4
 }
 
 // humanBytes renders a byte count the way an operator reads it: whole kibibytes below a

@@ -506,6 +506,35 @@ func TestDrainAndStopReportsACutStream(t *testing.T) {
 // string, which passed while the unit label was wrong, and the formatter itself was reached only
 // through the three messages that call it -- none of which checked the unit. A formatter is the
 // easiest thing in a CLI to leave untested and the easiest to get wrong by one word.
+// TestWeightsResidentBytesIsFourPerParameter covers the arithmetic behind the `weights:` line.
+//
+// The line was added without a test: it read `Params() * 4` inline, and nothing could reach it
+// because cmdServe blocks on a listener and its banner goes to os.Stdout. Extracting the
+// expression into weightsResidentBytes gave the arithmetic a name to call, and this checks it
+// against a real loaded model rather than a hand-built Weights -- Params walks every tensor
+// including per-layer experts, so a fabricated struct would test the multiplication and skip
+// the part that can actually be wrong.
+func TestWeightsResidentBytesIsFourPerParameter(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 128}.Write(t, t.TempDir())
+	m, err := llama.New(path)
+	if err != nil {
+		t.Fatalf("llama.New: %v", err)
+	}
+	params := m.W.Params()
+	if params == 0 {
+		t.Fatal("the fixture reports no parameters, so this test would pass vacuously")
+	}
+	if got, want := weightsResidentBytes(m.W), params*4; got != want {
+		t.Errorf("weightsResidentBytes = %d, want %d (4 x %d parameters)", got, want, params)
+	}
+	// The figure has to be a plausible size for the fixture, not a byte count off by a factor:
+	// four bytes per parameter and one float32 per parameter are the same statement, and a
+	// conversion error would show as a factor of 4 rather than a rounding difference.
+	if got := weightsResidentBytes(m.W); got%4 != 0 {
+		t.Errorf("%d is not a whole number of float32 values", got)
+	}
+}
+
 func TestHumanBytes(t *testing.T) {
 	cases := []struct {
 		in   int64

@@ -226,3 +226,38 @@ Keeping the model in its quantized form and decoding per matmul would remove the
 the cost of speed, since each weight would be decoded once per use rather than once per load.
 That trade is not taken here: a decoder in the inner loop is a different engine, and this one
 is written to be read.
+
+## Tracing covers requests that reach the engine
+
+`--otlp-endpoint` posts OTLP/HTTP+JSON to a collector. What arrives is one span per request, and
+the attributes are the OpenTelemetry `gen_ai` ones plus two of this engine's own:
+
+| Attribute                    | Meaning                                        |
+| ---------------------------- | ---------------------------------------------- |
+| `gen_ai.request.model`       | The name the request asked for                 |
+| `gen_ai.response.model`      | The name this server answers as                |
+| `gen_ai.request.max_tokens`  | The budget the request asked for               |
+| `gen_ai.usage.input_tokens`  | Prompt tokens, counted after tokenization      |
+| `gen_ai.usage.output_tokens` | Tokens actually generated                      |
+| `orbix.prefill_ms`           | Milliseconds from span start until prefill     |
+| `orbix.decode_ms`            | Milliseconds from prefill until the span ended |
+
+Measured against a live collector on Llama 3.2 1B with a 7-token prompt and `max_tokens: 8`:
+`input_tokens` 7, `output_tokens` 8, `prefill_ms` 238, `decode_ms` 797. The two timing
+attributes are what make a slow answer attributable to prefill or to decode instead of a guess,
+and they are the whole attribution: there is one span per request, not one per scheduling round.
+
+A request the server refuses before it reaches the engine produces **no span at all**. A pool
+that cannot hold the request, a missing prompt, a bad sampler value: all are refused with a 400
+and never become a sequence, so nothing is recorded. Measured: a request refused for needing more
+KV blocks than the pool holds posted nothing to the collector. Tracing is not an audit log, then;
+`/metrics` counts refusals, and the access log records the status, but a per-request trace of a
+rejected call needs one of those rather than this.
+
+The exporter never blocks the request path. Spans are queued in memory and dropped when the
+queue is full or a send fails, with `orbix_trace_spans_dropped_total` as the record. Measured
+against a collector that accepted connections and never replied: ten requests stayed at about
+20 ms each and the server kept serving; a 300-request flood across 16 clients still answered
+every request and dropped 139 of 300 spans in one run and 235 in another. The count is a race
+between the sender and the flood rather than a fixed number, so plan for a large fraction to be
+dropped under load and read the counter rather than assuming a rate.

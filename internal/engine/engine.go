@@ -94,9 +94,15 @@ type Request struct {
 	// generate its whole token budget into a channel nobody reads.
 	Cancel <-chan struct{}
 
-	// Trace, when non-nil, records a span for this request and for each round that
-	// advances it, so a slow answer can be attributed to prefill, queueing, or decode
-	// rather than guessed at.
+	// Trace, when non-nil, records one span for this request, carrying orbix.prefill_ms and
+	// orbix.decode_ms so a slow answer can be attributed to prefill or decode rather than
+	// guessed at.
+	//
+	// One span, not one per round: those two attributes are the whole attribution, and they
+	// come from a timestamp taken when prefill returns. This comment said "a span for each
+	// round that advances it" while nothing in the package created a round span -- measured
+	// with a live collector, a request that decoded three tokens produced exactly one span,
+	// named for the operation.
 	//
 	// It is per-request rather than per-engine because a caller may trace some traffic
 	// and not other traffic, and because an engine shared by an untraced caller must not

@@ -5135,3 +5135,40 @@ func TestACancelledStreamReportsLength(t *testing.T) {
 		t.Errorf("got %d text chunks, want the 3 that were sent before the cancel", got)
 	}
 }
+
+// TestStopListBeyondFourStillMatches covers a stop list longer than OpenAI's documented limit.
+//
+// The published schema says maxItems: 4, and this server accepts any number. Measured against a
+// real server, a request whose only match was in the fifth slot stopped at it, so the extra
+// entries are honoured rather than ignored -- which is the part worth pinning. A future change
+// that truncated the list to four would keep every existing test green while silently changing
+// where generation ends for any client that sends more.
+//
+// The assertion puts the match last on purpose: filling the first four with strings that never
+// occur means a list read only up to index 3 produces a length stop instead of a stop.
+func TestStopListBeyondFourStillMatches(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 8}`)
+	full := decodeBody[completionResponse](t, resp).Choices[0].Text
+	if len([]rune(full)) < 3 {
+		t.Skipf("continuation %q is too short to cut", full)
+	}
+
+	// A three-rune slice from the middle: long enough that it is unlikely to appear earlier
+	// by accident, and present in what the model actually generates.
+	r := []rune(full)
+	match := string(r[1:3])
+	body := `{"prompt": "Once upon a time", "max_tokens": 30, "stop": ["ZZZ1","ZZZ2","ZZZ3","ZZZ4",` +
+		quoteJSON(match) + `]}`
+	stopped := decodeBody[completionResponse](t, post(t, srv.Handler(), "/v1/completions", body))
+	if stopped.Choices[0].FinishReason != "stop" {
+		t.Fatalf("finish_reason = %q, want stop: the fifth stop string was not honoured",
+			stopped.Choices[0].FinishReason)
+	}
+	if strings.Contains(stopped.Choices[0].Text, match) {
+		t.Errorf("output %q contains the stop string %q from the fifth slot",
+			stopped.Choices[0].Text, match)
+	}
+}

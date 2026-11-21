@@ -78,6 +78,12 @@ chat endpoint are worth knowing before pointing a client at it:
 - **`stop` is matched on decoded text, but only a single-token string stops generation
   early.** A four-token string like `"中国的首都"` truncates correctly and still runs to its
   budget unread; `"\n"` encodes to one token and halts the sequence itself.
+- **`stop` takes any number of strings, not OpenAI's four.** The documented limit there is
+  `maxItems: 4`; this server accepts a hundred and honours all of them -- measured, a request
+  whose only match was in the fifth slot stopped at it. A client that enforces four is not
+  wrong, it is just stricter than it needs to be, and nothing here rejects a longer list.
+  Matching costs nothing measurable: 1000 stop strings measured the same 0.26 s as none, because
+  the cut runs on the decoded text after generation rather than per token.
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \

@@ -149,6 +149,63 @@ func (s *scope) child() *scope { return &scope{vars: map[string]value{}, parent:
 // renderer walks a node tree, accumulating output.
 type renderer struct {
 	buf strings.Builder
+	// nodes counts node evaluations for this render, so a template whose nesting makes the
+	// work exponential stops before it allocates rather than after. See maxRenderNodes.
+	nodes int
+}
+
+// maxRenderNodes bounds the node evaluations one render may perform.
+//
+// The output bound alone is not enough: reaching it costs the work that produced it.
+// Measured over 8 messages on a template nesting for-loops, the output multiplied by the
+// message count per level, so six levels took 420ms to produce 256 KiB and eight took 17.4s
+// to produce 16 MiB -- and a render that stops *at* the byte bound has already done all
+// that work. Counting evaluations catches the same shape in milliseconds.
+//
+// The budget is generous against real templates: the published ones nest one level, so an
+// eight-message conversation evaluates on the order of a hundred nodes. A hundred thousand
+// leaves three orders of magnitude of headroom while cutting the exponential case off
+// long before it becomes visible.
+const maxRenderNodes = 100_000
+
+// maxRenderBytes bounds one render's output, as a second line of defence.
+//
+// The node budget above stops the exponential shape; this one stops a template that stays
+// within the node count and still emits something enormous -- a single tojson of a large
+// value, say. 16 MiB is far above any prompt a model could attend to (the largest context
+// this engine documents is 128k positions, and the request body bound allows 48 bytes per
+// position, so about 6 MiB) and far below what a runaway render reaches. The error is
+// reported rather than the output truncated: a truncated prompt still looks like a prompt,
+// and the model would answer the wrong question.
+const maxRenderBytes = 16 << 20
+
+// errRenderTooLarge marks a render that exceeded its size or work budget.
+//
+// It names the bound, not the message count: the count is the caller's, and it tells a
+// template author nothing about which construct multiplied.
+var errRenderTooLarge = errors.New("chat: rendered prompt exceeds the renderer's bound")
+
+// charge counts one node evaluation, failing once the render has done more than
+// maxRenderNodes of them.
+func (r *renderer) charge() error {
+	r.nodes++
+	if r.nodes > maxRenderNodes {
+		return fmt.Errorf("%w (more than %d nodes evaluated)", errRenderTooLarge, maxRenderNodes)
+	}
+	return nil
+}
+
+// write appends to the buffer, failing once the render has produced more than
+// maxRenderBytes.
+//
+// Every write goes through here rather than calling buf.WriteString directly, so a new
+// node type cannot grow the output past the bound by forgetting the check.
+func (r *renderer) write(s string) error {
+	if r.buf.Len()+len(s) > maxRenderBytes {
+		return fmt.Errorf("%w (%d bytes)", errRenderTooLarge, maxRenderBytes)
+	}
+	r.buf.WriteString(s)
+	return nil
 }
 
 // renderNodes runs each node in order.
@@ -190,11 +247,16 @@ func evalCond(e expr, sc *scope) (value, error) {
 }
 
 // renderNode runs one node.
+//
+// The evaluation is charged before the work, so a template that multiplies itself is
+// stopped by the count rather than by an allocation it has already made.
 func (r *renderer) renderNode(n node, sc *scope) error {
+	if err := r.charge(); err != nil {
+		return err
+	}
 	switch t := n.(type) {
 	case textNode:
-		r.buf.WriteString(t.text)
-		return nil
+		return r.write(t.text)
 	case exprNode:
 		v, err := evalExpr(t.expr, sc)
 		if err != nil {
@@ -204,8 +266,7 @@ func (r *renderer) renderNode(n node, sc *scope) error {
 		if err != nil {
 			return err
 		}
-		r.buf.WriteString(out)
-		return nil
+		return r.write(out)
 	case setNode:
 		v, err := evalExpr(t.expr, sc)
 		if err != nil {

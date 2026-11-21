@@ -69,5 +69,9 @@
 // What a request can influence is the list length, and only through a template that already
 // nests: the published templates here sit at depth 1, where cost stays linear in the message
 // count. A server that must not be slowed by its own checkpoint needs the render to be bounded
-// rather than the recursion to be forbidden, and that bound is not implemented.
+// rather than the recursion to be forbidden, and that is what maxRenderNodes does -- it stops
+// the exponential shape in milliseconds rather than seconds, far above anything a real
+// template reaches (a 40-message conversation over a single-level loop evaluates about 200
+// nodes; the budget is 100,000). maxRenderBytes is the second line of defence, for a template
+// that stays within the node count and still emits something enormous.
 package chat

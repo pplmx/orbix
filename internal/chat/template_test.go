@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -2948,6 +2949,76 @@ func TestSetEscapesALoopBody(t *testing.T) {
 			got := render(t, c.src, msgs, Inputs{})
 			if got != c.want {
 				t.Errorf("%q rendered %q, want %q", c.src, got, c.want)
+			}
+		})
+	}
+}
+
+// TestNestedLoopsAreBounded covers the work budget.
+//
+// Nesting multiplies the output by the message count per level, so a template of a few
+// hundred bytes renders to an unbounded amount of work: measured over 8 messages, six
+// nested for-loops took 420ms for 256 KiB and eight took 17.4s for 16 MiB. The template is
+// model-file content, but the message list is request-controlled, so a caller could spend
+// the server's time and memory on a prompt that could never fit the context.
+//
+// The output bound alone would not have caught it: reaching 16 MiB is what costs 17
+// seconds, so a render that fails *at* the byte bound has already paid for it. The node
+// budget stops the same shape in milliseconds, which is why the depth used here is one that
+// used to run for tens of seconds.
+func TestNestedLoopsAreBounded(t *testing.T) {
+	msgs := make([]Message, 8)
+	for i := range msgs {
+		msgs[i] = Message{Role: "user", Content: "x"}
+	}
+
+	// A one-level template is the shape every published checkpoint uses; it must be
+	// untouched by the budget, at a message count larger than a real conversation.
+	t.Run("a real shape is unaffected", func(t *testing.T) {
+		one, err := Parse(`{% for m in messages %}{{ m.content }}{% endfor %}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		out, err := one.Render(msgs, Inputs{})
+		if err != nil {
+			t.Fatalf("a single-level loop was refused: %v", err)
+		}
+		if want := strings.Repeat("x", len(msgs)); out != want {
+			t.Errorf("rendered %q, want %q", out, want)
+		}
+	})
+
+	for _, depth := range []int{8, 10} {
+		t.Run(strconv.Itoa(depth)+" nested loops", func(t *testing.T) {
+			var b strings.Builder
+			b.WriteString("{% for m in messages %}")
+			for range depth - 1 {
+				b.WriteString("{% for m in messages %}")
+			}
+			b.WriteString("{{ m.content }}")
+			for range depth - 1 {
+				b.WriteString("{% endfor %}")
+			}
+			b.WriteString("{% endfor %}")
+
+			tpl, err := Parse(b.String())
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			start := time.Now()
+			out, err := tpl.Render(msgs, Inputs{})
+			elapsed := time.Since(start)
+			if err == nil {
+				t.Fatalf("a %d-level nest rendered %d bytes without an error", depth, len(out))
+			}
+			if !errors.Is(err, errRenderTooLarge) {
+				t.Errorf("error %v does not carry errRenderTooLarge", err)
+			}
+			// The bound exists to keep this cheap, so the test asserts it: 17 seconds was
+			// the measured cost of the shape this replaces.
+			if elapsed > 2*time.Second {
+				t.Errorf("the render took %v to refuse, which is the cost the budget exists "+
+					"to avoid", elapsed.Round(time.Millisecond))
 			}
 		})
 	}

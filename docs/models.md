@@ -29,8 +29,39 @@ constructed files.
 
 Quantization is checked at the block level rather than by comparing generations across formats:
 exact-value tests on constructed blocks for the 32-weight formats, a round-trip error bound for
-the K-quants, and a real K-quant tensor when `MODEL_KQUANT` is set. Comparing one prompt's
+the K-quants, and a real tensor from a real checkpoint for both families. Comparing one prompt's
 continuation across formats would test the model more than the decoder.
+
+The constructed-block tests assert value by value, which is the only way to catch a permutation
+-- swapping two nibbles reorders the weights and leaves every statistic untouched. The real-file
+tests cover the other class: a decoder that reads a scale, a minimum or a quant field from the
+wrong place still produces a well-ordered matrix, but one with a mean far from zero or a spread
+off by orders of magnitude. Measured by breaking `decodeQ4_1`: reading the min slot as the scale
+moved the mean to -0.512 and the spread to 0.518, both outside the bounds; the nibble swap was
+caught only by the constructed-block test.
+
+The 32-weight formats each have their own gate, because they live in different files and a
+machine holding one should be able to check it. Any checkpoint carrying the type works as long as
+its tensors are that type; the download below is 118-136 MB per format:
+
+```bash
+repo=RichardErkhov/ivnle_-_tinystories-lay8-hs512-hd8-33M-gguf
+for q in Q4_1 Q5_0 Q5_1 IQ4_NL; do
+  curl -sSL -o "/tmp/ts-$q.gguf" \
+    "https://huggingface.co/$repo/resolve/main/tinystories-lay8-hs512-hd8-33M.$q.gguf"
+done
+MODEL_Q4_1=/tmp/ts-Q4_1.gguf MODEL_Q5_0=/tmp/ts-Q5_0.gguf \
+MODEL_Q5_1=/tmp/ts-Q5_1.gguf MODEL_IQ4_NL=/tmp/ts-IQ4_NL.gguf \
+CGO_ENABLED=0 go test ./internal/quant/ -run TestRealWeightMatrixStats -v
+```
+
+Measured on those four: 65,667,072 values each, standard deviation 0.0427 and a mean within
+1e-5 of zero in all four -- the agreement a correct decoder should show across formats of the
+same weights. `orbix run` on each produces the same text.
+
+A file that carries none of the requested type fails rather than skips: the gate was set, so
+something was meant to be checked, and a skip there would report success for a file that could
+not answer the question.
 
 TinyLlama 1.1B Q2_K exercises more of the engine: 22 layers, grouped-query attention (32 heads
 over 4 KV heads), and a chat template the stories model lacks. It is also the file `MODEL_KQUANT`

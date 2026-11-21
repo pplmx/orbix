@@ -5130,6 +5130,21 @@ func TestACancelledStreamOmitsDone(t *testing.T) {
 		t.Errorf("got %d text chunks, want the 3 that were sent before the cancel", got)
 	}
 
+	// The chat endpoint shares streamResponse, so a cut chat stream must lose its sentinel too.
+	// Asserted rather than assumed: the two endpoints build different object names and delta
+	// shapes through the same code, and a fix applied to one path only is exactly the kind of
+	// split that leaves half the surface reporting a complete reply.
+	chatCh := make(chan engine.Event, 8)
+	chatCh <- engine.Event{Token: 5, HasToken: true}
+	chatCh <- engine.Event{Done: true, FinishReason: "cancel"}
+	close(chatCh)
+	recChat := httptest.NewRecorder()
+	srv.streamResponse(recChat, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		chatCh, "chatcmpl-test", 1700000000, true, nil, false, 0)
+	if strings.Contains(recChat.Body.String(), "data: [DONE]") {
+		t.Errorf("a cancelled chat stream sent [DONE]:\n%s", recChat.Body.String())
+	}
+
 	// A stream that finishes normally is unchanged, which is the half that would break every
 	// client if the suppression were applied too broadly.
 	ok := make(chan engine.Event, 8)

@@ -1927,8 +1927,15 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 //   - "tool_calls" does not apply: this server does not parse tool calls.
 //
 // cancel maps to "length" rather than "stop" because the generation did not complete on its own:
-// the sequence was cut short by the client leaving. The schema has no value for that, and the
-// client that caused it has already gone, so the response is read by a log or a proxy.
+// the sequence was cut short by something outside the model. The schema has no value for that, so
+// any choice is wrong about the cause; "length" at least says the reply is not what the request
+// asked for.
+//
+// It carries no claim about the token budget, and a caller must not read it as one. Two things
+// can cancel a sequence: a client that hung up, and a shutdown that gave up draining. The first
+// leaves nobody to read the answer; the second leaves a client that is still listening and would
+// reasonably conclude it got the whole reply. That is why the streaming path withholds its [DONE]
+// sentinel on a cancel -- the sentinel, not this value, is how a cut stream is recognised.
 //
 // abandoned follows the same reasoning but keeps "stop", which is the mapping that was in place
 // before this function existed. Changing it is a behavioural change rather than a consolidation and

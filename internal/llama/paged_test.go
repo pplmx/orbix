@@ -2,6 +2,7 @@ package llama
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -715,6 +716,108 @@ func TestPagedSpansRejectsPositionsBeyondTheAllocatedBlocks(t *testing.T) {
 	// still fail above even if only the partial case regressed.
 	if _, _, err := c.spans(0, 0, 3*blockSize); err == nil {
 		t.Error("spans accepted a third block's worth of positions")
+	}
+}
+
+// TestAdoptedBlocksStayReadOnly checks the invariant adopt's own comment states: a shared
+// block is a run of positions whose keys and values no holder may modify, and a sequence
+// that adopts one may only append past it.
+//
+// It is checked directly rather than through a whole-model run, because a token comparison
+// cannot see the failure. An earlier attempt mutated the engine's prefill to adopt fewer
+// blocks than it matched and the output stayed correct -- the engine simply recomputed the
+// positions, which is the right answer obtained a slower way. The corruption that matters
+// is a write landing inside a block somebody else is still reading, and that has to be
+// observed on the block's contents.
+//
+// Verified by making appendKV ignore which block a position belongs to and write into the
+// first one: the test reports every position of the adopted prefix changing from its own
+// values to the appended ones. Reading only a single position is not enough -- with
+// four-position blocks, an append at position 8 lands at slot 0, so a check on position 5
+// alone misses it.
+func TestAdoptedBlocksStayReadOnly(t *testing.T) {
+	cfg := testConfig()
+	const blockSize = 4
+	pool := pagedPool(t, cfg, blockSize)
+	dim := cfg.kvDim()
+
+	// A producer fills two whole blocks, each position's keys tagged with its index so a
+	// later overwrite is unmistakable.
+	producer := pool.New()
+	const positions = 2 * blockSize
+	for pos := range positions {
+		for l := range cfg.Layers {
+			k := make([]float32, dim)
+			v := make([]float32, dim)
+			for i := range k {
+				k[i] = float32(pos*100 + i)
+				v[i] = float32(pos*100 + i)
+			}
+			if _, _, err := producer.appendKV(l, k, v, pos); err != nil {
+				t.Fatalf("appendKV(%d): %v", pos, err)
+			}
+		}
+		producer.setLen(pos + 1)
+	}
+	if got := len(producer.blocks); got != 2 {
+		t.Fatalf("the producer holds %d blocks, want 2", got)
+	}
+
+	// readRow returns the first head's keys at pos, copied out: spans hands back a view.
+	readRow := func(c *PagedKVCache, pos int) []float32 {
+		t.Helper()
+		spans, _, err := c.spans(0, 0, pos+1)
+		if err != nil {
+			t.Fatalf("spans(%d): %v", pos, err)
+		}
+		seen := 0
+		for _, sp := range spans {
+			for r := range sp.rows {
+				if seen == pos {
+					return slices.Clone(sp.row(r))
+				}
+				seen++
+			}
+		}
+		t.Fatalf("position %d is not covered by the cache's spans", pos)
+		return nil
+	}
+
+	before := make([][]float32, positions)
+	for pos := range positions {
+		before[pos] = readRow(producer, pos)
+	}
+
+	adopter := pool.New()
+	if err := adopter.adopt(producer.blocks); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	// Append past the adopted prefix. This has to allocate a third block; a cache that
+	// wrote into one of the adopted ones would corrupt the producer.
+	for pos := positions; pos < positions+blockSize; pos++ {
+		for l := range cfg.Layers {
+			k := make([]float32, dim)
+			v := make([]float32, dim)
+			for i := range k {
+				k[i] = -7
+				v[i] = -7
+			}
+			if _, _, err := adopter.appendKV(l, k, v, pos); err != nil {
+				t.Fatalf("adopter appendKV(%d): %v", pos, err)
+			}
+		}
+		adopter.setLen(pos + 1)
+	}
+	if got := len(adopter.blocks); got != 3 {
+		t.Errorf("the adopter holds %d blocks after appending past %d positions, want 3",
+			got, positions)
+	}
+
+	for pos := range positions {
+		if after := readRow(producer, pos); !slices.Equal(before[pos], after) {
+			t.Errorf("appending past the adopted prefix rewrote position %d: %v -> %v",
+				pos, before[pos], after)
+		}
 	}
 }
 

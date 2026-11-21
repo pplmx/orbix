@@ -46,6 +46,14 @@ orbix model inspect ./model.gguf
 orbix model inspect --json ./model.gguf   # machine-readable; see the note on arrays below
 ```
 
+An empty prompt is accepted by `run` and refused by `serve`, and the difference is deliberate.
+`run ""` encodes to the model's BOS token alone -- `--stats` reports `prompt: 1 tokens` -- and
+generates from there, which is a completion from scratch and a thing this command can do.
+`serve` answers `400` with `missing_required_parameter` on `prompt`, because an HTTP request
+whose prompt is empty or whitespace-only is a client that sent nothing, and generating a story
+from it is work nobody asked for. `chat` sidesteps the question: a line that is empty or only
+whitespace is skipped before it becomes a turn, so the model is never asked to answer nothing.
+
 In the `--json` output a scalar keeps its GGUF type: integers stay numbers, strings stay
 strings, booleans stay booleans, and a non-finite float becomes the string `"NaN"` or `"+Inf"`
 because JSON has no token for either. An **array** does not: it is rendered as the summary string

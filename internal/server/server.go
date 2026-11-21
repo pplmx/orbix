@@ -212,7 +212,6 @@ func (s *Server) Handler() http.Handler { return s.logRequest(s.mux) }
 const idlePollShift = 3
 
 func (s *Server) run(ctx context.Context) {
-	defer s.wg.Done()
 	// idle counts consecutive rounds with no active sequences; it selects the backoff.
 	idle := 0
 	for {
@@ -271,10 +270,7 @@ func (s *Server) run(ctx context.Context) {
 // check; rejecting nil here would imply the function could otherwise do something sensible
 // with it, and there is nothing to do. The one production caller passes the signal context.
 func (s *Server) StartPump(ctx context.Context) {
-	s.pumpOnce.Do(func() {
-		s.wg.Add(1)
-		go s.run(ctx)
-	})
+	s.pumpOnce.Do(func() { s.wg.Go(func() { s.run(ctx) }) })
 }
 
 // Shutdown stops the pump goroutine and waits for it.

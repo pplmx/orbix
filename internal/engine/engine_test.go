@@ -205,6 +205,25 @@ func TestSubmitRejectsBadRequests(t *testing.T) {
 	if _, err := e.Submit(Request{Prompt: tok.Encode("x", true), MaxTokens: -1}); err == nil {
 		t.Error("Submit accepted a negative token budget")
 	}
+	// Zero is accepted, and means "prefill and generate nothing". This is the other half of
+	// the boundary above, and it was untested: changing the check from < 0 to <= 0 left the
+	// package green while making the engine refuse a budget the CLI documents (run's
+	// --max-tokens 0 is described as "prefill only"). The CLI itself does not go through
+	// Submit -- cmd/orbix/run.go drives Prefill directly -- so nothing caught it end to end
+	// either, which is why the assertion lives here, on the API that owns the rule.
+	ch, err := e.Submit(Request{Prompt: tok.Encode("x", true), MaxTokens: 0})
+	if err != nil {
+		t.Fatalf("Submit refused a zero token budget: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	out, reason := collect(t, ch)
+	if len(out) != 0 {
+		t.Errorf("a zero budget generated %d tokens, want 0", len(out))
+	}
+	if reason != "length" {
+		t.Errorf("finish reason = %q, want length: zero is a reached budget, not a stop", reason)
+	}
 }
 
 func TestMaxTokensRespected(t *testing.T) {

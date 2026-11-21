@@ -364,6 +364,40 @@ func TestReadRejectsBadInput(t *testing.T) {
 	}
 }
 
+// TestReadRejectsEveryOtherVersion pins the check as an equality, not a floor.
+//
+// Only version 2 was tested, and that shape passes under `version < Version` just as well as
+// under `version != Version`. The difference matters for what comes next: a later GGUF
+// revision may change the tensor-info layout, and a parser that accepts it would then read
+// the directory at the wrong offsets and produce a model with plausible shapes and wrong
+// weights rather than an error. The versions above the current one are the ones nobody has
+// written a test for, because there is nothing to test yet -- which is exactly why the
+// refusal has to be pinned before that changes.
+//
+// The doc comment on Version says earlier revisions are "rejected rather than guessed at";
+// the code rejects every other revision, and this says so.
+func TestReadRejectsEveryOtherVersion(t *testing.T) {
+	good := buildFile(nil, nil, 0, nil)
+	for _, v := range []uint32{0, 1, 2, Version + 1, Version + 2, 99, 1 << 31} {
+		t.Run(strconv.FormatUint(uint64(v), 10), func(t *testing.T) {
+			b := append([]byte(nil), good...)
+			binary.LittleEndian.PutUint32(b[4:], v)
+			_, err := Read(bytes.NewReader(b))
+			if err == nil {
+				t.Fatalf("Read accepted version %d, want a version error", v)
+			}
+			if !strings.Contains(err.Error(), "version") {
+				t.Fatalf("Read(version %d) = %v, want a version error", v, err)
+			}
+			// The message has to name the version it saw, or a reader holding a file with an
+			// unexpected revision learns nothing from the failure.
+			if !strings.Contains(err.Error(), strconv.FormatUint(uint64(v), 10)) {
+				t.Errorf("error %q does not state the version found (%d)", err, v)
+			}
+		})
+	}
+}
+
 func TestOpenMissingFile(t *testing.T) {
 	if _, err := Open(filepath.Join(t.TempDir(), "absent.gguf")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Open(missing) = %v, want a not-exist error", err)

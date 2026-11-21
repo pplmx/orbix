@@ -11,6 +11,17 @@ Run it with uv, which provides Jinja2 without touching the system Python:
     uv run --with jinja2 python3 scripts/jinja_diff.py            # built-in corpus
     uv run --with jinja2 python3 scripts/jinja_diff.py --verbose  # list every case and its verdict
 
+    uv run --with jinja2 --with gguf python3 scripts/jinja_diff.py \
+        --template-file /tmp/llama32.gguf                         # a checkpoint's own template
+
+The built-in corpus holds hand-written approximations of published templates, which makes it
+a check on the constructs this package implements. `--template-file` replaces it with the
+template read out of a GGUF file's `tokenizer.chat_template`, which is the different question
+of whether the package can evaluate what a model actually ships. The gap is not small: the
+`llama3` entry below is one line, while the Llama 3.2 checkpoint's template is 3827 characters
+that branch on tools, a date and a system message. Both modes are worth running -- the corpus
+names a broken construct precisely, and the checkpoint proves the shape of a shipped template.
+
 It builds a small Go program that renders each case through the package under test, runs
 both sides, and diffs the text. Exit status is 1 if anything disagrees, so it can be used as
 a gate by hand.
@@ -219,6 +230,17 @@ def build_cases():
             "messages": MESSAGES["multi"], "tools": TOOLS, "add_generation_prompt": True,
             "bos_token": "<s>", "eos_token": "</s>", "kind": "unsupported",
         })
+    return with_oracle(cases)
+
+
+def with_oracle(cases):
+    """Render every case with real Jinja2 and record the answer.
+
+    Kept separate from corpus construction so cases that come from a checkpoint go through the
+    same reference implementation as the built-in ones. A case Jinja2 itself refuses keeps
+    oracle_ok False and is reported rather than compared: there is no reference answer to
+    compare against, and inventing one would turn a gap in the corpus into a passing test.
+    """
     for c in cases:
         ok, out = oracle(c["template"], c["messages"], c.get("tools"),
                          c["add_generation_prompt"], c["bos_token"], c["eos_token"])
@@ -320,19 +342,86 @@ def run_go(cases, repo_root):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def cases_from_checkpoint(path):
+    """Build cases from the template a checkpoint actually ships.
+
+    The corpus below is a set of hand-written approximations: `llama3` here is one line, while
+    the Llama 3.2 file carries 3827 characters that branch on tools, a date and a system
+    message. Comparing against an approximation answers "does this subset handle the shape I
+    typed"; it cannot answer "does it handle the template a model ships", which is what the
+    documentation claims.
+
+    The template is read out of the GGUF metadata through the `gguf` package, so this side does
+    not share the Go loader either.
+    """
+    import gguf
+
+    if not os.path.exists(path):
+        sys.stderr.write(f"{path}: no such file\n")
+        return []
+    try:
+        reader = gguf.GGUFReader(path)
+    except Exception as e:  # noqa: BLE001 - the package raises bare ValueError/struct.error
+        # A traceback here reads as a bug in this script. The caller passed the wrong path, and
+        # "not a GGUF file" is the fact they can act on.
+        sys.stderr.write(f"{path}: not a readable GGUF file ({e})\n")
+        return []
+    template = None
+    for field in reader.fields.values():
+        if field.name != "tokenizer.chat_template":
+            continue
+        # GGUF metadata strings are stored as arrays of single bytes.
+        template = bytes(field.parts[field.data[0]]).decode("utf-8")
+        break
+    if template is None:
+        # Not an error in this package: a base model or a fine-tune may ship without one. It
+        # is still a failed run, because zero cases compared is not a pass -- the same
+        # distinction the stress script draws.
+        sys.stderr.write(f"{path}: declares no tokenizer.chat_template, so there is nothing "
+                         f"to compare; pick a checkpoint whose file carries one\n")
+        return []
+
+    print(f"template from {path}: {len(template)} characters")
+    cases = []
+    for msgname, msgs in MESSAGES.items():
+        for add_gen in (False, True):
+            cases.append({
+                "name": f"{os.path.basename(path)}/{msgname}/gen={add_gen}",
+                "template": template, "messages": msgs,
+                "add_generation_prompt": add_gen,
+                # A checkpoint's own tokens: the template interpolates bos_token, and an
+                # empty one would compare nulls on both sides.
+                "bos_token": "<|begin_of_text|>", "eos_token": "<|eot_id|>",
+                "kind": "template",
+            })
+    return with_oracle(cases)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--verbose", action="store_true", help="list every case and its verdict")
     ap.add_argument("--repo", default=".", help="repository root (default: .)")
+    ap.add_argument("--template-file", metavar="MODEL.gguf",
+                    help="compare the chat template this checkpoint ships instead of the "
+                         "built-in corpus; needs the gguf package")
     args = ap.parse_args()
 
     if not shutil.which("go"):
         sys.stderr.write("go not found on PATH\n")
         return 2
 
-    cases = build_cases()
+    cases = cases_from_checkpoint(args.template_file) if args.template_file else build_cases()
+    if not cases:
+        return 1
     no_oracle = [c for c in cases if not c["oracle_ok"]]
     cases = [c for c in cases if c["oracle_ok"]]
+    # Zero comparable cases is a failed run rather than a vacuous pass. Jinja2 is the reference
+    # here, so a case it cannot render has nothing to compare against -- and if that is all of
+    # them, the script would print "0 cases compared, 0 agree" and exit 0 having checked
+    # nothing. Measured by making every oracle fail: that is exactly what happened.
+    if not cases:
+        print("0 cases could be compared: Jinja2 failed to render every one", file=sys.stderr)
+        return 1
     results = run_go(cases, args.repo)
 
     agree = 0

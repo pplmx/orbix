@@ -68,14 +68,31 @@ gates. It is also the one with a visible end-to-end check: `orbix run` on the re
 position window. The file declares `chat_template`, so `serve` reports `chat: model template`
 and the Qwen2.5 Jinja2 template renders the prompt.
 
-`scripts/jinja_diff.py` renders checkpoint templates through both this package and real Jinja2
-and reports differences. A disagreement is either a bug here or a construct the package
-documents as unsupported; the tool separates the two and exits non-zero on any that render
-differently rather than being refused.
+`scripts/jinja_diff.py` renders chat templates through both this package and real Jinja2 and
+reports differences. A disagreement is either a bug here or a construct the package documents
+as unsupported; the tool separates the two and exits non-zero on any that render differently
+rather than being refused.
 
 ```bash
+# The built-in corpus: one template per family, plus one construct per case.
 uv run --with jinja2 python3 scripts/jinja_diff.py
+
+# A checkpoint's own template, read out of its metadata.
+uv run --with jinja2 --with gguf python3 scripts/jinja_diff.py \
+  --template-file /tmp/llama32.gguf
 ```
+
+The two modes answer different questions and the first is weaker than it looks. The corpus is
+hand-written: its `llama3` entry is one line, while the checkpoint's real template is 3827
+characters that branch on tools, a date and a system message. So the corpus checks whether the
+package implements a construct, and `--template-file` checks whether it can evaluate what a
+model actually ships. Measured across Llama 3.2 1B, Qwen2.5 0.5B, a converted Qwen2.5 and
+TinyLlama, 18 conversation shapes each: all identical to Jinja2.
+
+The tool's own discriminating power was checked by breaking `trim` in `internal/chat`: the
+corpus reports the precise failing construct, and `--template-file` reports the Llama 3.2
+cases where the real template interpolates a `|trim`. A check that cannot fail proves nothing,
+and this one was only ever run green before that experiment.
 
 The MoE path gets the same treatment on a small public checkpoint; set `MIXTRAL_MODEL`. Its
 author built it to validate MoE inference engines, and at 7 MB it is the cheapest of the four

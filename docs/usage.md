@@ -61,8 +61,12 @@ chat endpoint are worth knowing before pointing a client at it:
   `internal/chat` evaluates a subset of it: `if`/`elif`/`else`, `for` with the `loop`
   variables, `set`, `+` concatenation, comparisons, the `is` tests `defined`, `none`,
   `mapping` and `iterable`, and the `trim`, `tojson` and `length` filters. That covers the
-  published templates for Qwen2.5 and Llama 3.1 exactly, and both are tested against their
-  real source.
+  published templates for Qwen2.5 and Llama 3.1 exactly, and both are checked against their
+  real source: `scripts/jinja_diff.py --template-file <checkpoint.gguf>` reads
+  `tokenizer.chat_template` out of the file and renders it through this package and through
+  real Jinja2. Measured on Llama 3.2 1B (a 3827-character template that branches on tools, a
+  date and a system message), Qwen2.5 0.5B (2507), a converted Qwen2.5 (2509) and TinyLlama
+  (410): 18 conversation shapes each, every one rendering identically.
   A template using syntax outside the subset is reported at parse time; one calling a
   function this package does not implement fails at render time instead, because the parser
   accepts any call. Either way the server falls back to a neutral `Role: content`

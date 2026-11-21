@@ -1447,3 +1447,31 @@ func TestChatSystemPromptReachesTheModel(t *testing.T) {
 			"reached the model would look exactly like this", withSystem, plain)
 	}
 }
+
+// TestChatBannerIsRightBeforeTheFirstTurn covers the case the startup banner used to get wrong.
+//
+// The banner chose between "the model's own chat template" and the neutral transcript by
+// reading UsesModelTemplate, which reports the renderReason a failed render writes. Before the
+// first turn no render has happened, so a template that compiles but cannot render got the
+// first wording -- and the correction was printed after the reply, leaving two lines that
+// disagreed. Measured with "{{ messages[99].content }}": banner first, correction after.
+//
+// The probe that fixes it renders one throwaway turn at startup, so the assertion here is about
+// the banner alone: it has to name the fallback before any user turn is answered.
+func TestChatBannerIsRightBeforeTheFirstTurn(t *testing.T) {
+	path := gguftest.Model{
+		NoEOS: true, ContextLen: 512, ChatTemplate: `{{ messages[99].content }}`,
+	}.Write(t, t.TempDir())
+	out := runChat(t, chatOptions{model: path, maxTokens: 2, topK: 40}, "Once upon a time\n/exit\n")
+
+	// The first line is the banner. Everything after it may legitimately mention the
+	// fallback; the point is that the banner does not claim the template works.
+	firstLine, _, _ := strings.Cut(out, "\n")
+	if !strings.Contains(firstLine, "neutral transcript") {
+		t.Errorf("the banner claims the model's template is in use for a template that "+
+			"cannot render:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "index 99 outside a sequence") {
+		t.Errorf("the banner does not carry the renderer's reason:\n%s", firstLine)
+	}
+}

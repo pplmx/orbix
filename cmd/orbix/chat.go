@@ -131,6 +131,18 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 		return err
 	}
 	opts.renderer = renderer
+	// Probe the template with a one-turn conversation before choosing the banner.
+	//
+	// UsesModelTemplate reads renderReason, which is only written when a render fails, so
+	// before this probe the banner said "the model's own chat template" for a template that
+	// could never render -- and then printed the correction after the first answer, leaving
+	// two lines that disagreed. Measured with a template of "{{ messages[99].content }}":
+	// banner first, correction after the reply.
+	//
+	// The probe is a real render rather than a check, because that is what the renderer
+	// records: it costs one template evaluation at startup, which a REPL can afford, and it
+	// leaves the renderer in the state every later turn will be in anyway.
+	renderer.Render([]engine.Turn{{Role: "user", Text: "hi"}})
 	// Say which format is in use. It is worth one line: a model whose template was
 	// not applied answers in a shape the caller did not expect, and knowing that from
 	// the start is the difference between a bug report and a mystery.

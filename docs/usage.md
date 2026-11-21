@@ -125,6 +125,12 @@ and their `[DONE]` intact -- which is the drain doing its job rather than the cu
 A client cannot distinguish that cut from a dropped connection, so a deployer who drains a pod
 should treat a stream that ends without `[DONE]` as incomplete rather than as finished.
 
+The effective value is printed at startup, so it is visible before a signal arrives:
+
+```text
+shutdown:  5s grace for in-flight responses, then they are cut
+```
+
 Five seconds is not enough for a real generation, so `--shutdown-grace` sets it. Measured on
 this engine, a 64-token reply takes 5.04 s on Llama 3.2 1B, 5.17 s on TinyLlama 1.1B and 3.41 s
 on Qwen2.5-0.5B; 128 tokens on Llama 3.2 takes 10.4 s. An ordinary reply from a modest model

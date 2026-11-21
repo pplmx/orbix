@@ -116,6 +116,11 @@ func cmdServe(args []string) error {
 	if *shutdownGraceFlag < 0 {
 		return fmt.Errorf("serve: --shutdown-grace must not be negative (0 means do not wait)")
 	}
+	// Resolved once and used by both the banner and the drain. Reading *shutdownGraceFlag at each
+	// site instead let a mutation of one pass every test: the banner would still report the
+	// configured value while the drain used the default. One variable makes that disagreement
+	// impossible to write.
+	grace := *shutdownGraceFlag
 	// The listen address is checked here, with the other flags, for the reason --otlp-endpoint
 	// is: net.Listen runs after engine.New, so a typo in --addr used to cost a full model load
 	// before it was reported. Measured on the 2 GB Qwen2 file, `--addr not-an-addr` spent 3.2
@@ -287,6 +292,7 @@ func cmdServe(args []string) error {
 	fmt.Printf("orbix serving %s on %s\n", cfg, url)
 	queued := defaultQueued(*maxQueued, *maxActive)
 	fmt.Printf("scheduling: %d active, %d queued max, %s policy\n", *maxActive, queued, schedPolicy)
+	fmt.Printf("%s", shutdownNote(grace))
 	// The weights, before any cache exists. LoadWeights widens every tensor to float32 once,
 	// so this figure follows the parameter count and not the file size -- and it is usually
 	// the largest number an operator has to plan around. Nothing else prints it: the model
@@ -377,7 +383,7 @@ func cmdServe(args []string) error {
 		return drainAndStop(httpSrv, func() {
 			cancel()
 			srv.Shutdown()
-		}, *shutdownGraceFlag)
+		}, grace)
 	}
 }
 
@@ -393,6 +399,24 @@ func cmdServe(args []string) error {
 // `--shutdown-grace` lets a deployment choose: a few seconds for a service whose clients retry,
 // minutes for one that would rather finish than restart fast.
 const shutdownGrace = 5 * time.Second
+
+// shutdownNote reports the effective drain grace as a banner line.
+//
+// The line exists so an operator can see that --shutdown-grace took effect without waiting for a
+// signal, and it is the only observable form of the wiring: the flag reaches drainAndStop
+// through one expression that no test can reach, and drainAndStop prints the grace only when it
+// expires. Pulling the text into a function gives that value something to assert on.
+//
+// It names the consequence rather than only the number. "5s" alone does not tell a reader what
+// happens at five seconds; "then they are cut" does, and it is the fact a streaming client sees.
+func shutdownNote(grace time.Duration) string {
+	if grace == 0 {
+		// Zero is a special case worth spelling out: "0s grace, then they are cut" reads like a
+		// mistake rather than a choice.
+		return "shutdown:  configured not to wait; in-flight responses are cut immediately\n"
+	}
+	return fmt.Sprintf("shutdown:  %s grace for in-flight responses, then they are cut\n", grace)
+}
 
 // drainAndStop stops an HTTP server and the engine pump behind it, in that order.
 //

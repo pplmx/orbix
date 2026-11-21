@@ -556,6 +556,45 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
+// TestShutdownNoteReportsTheEffectiveGrace pins the value the flag actually reaches.
+//
+// --shutdown-grace had a validation test and nothing else. The value reached drainAndStop
+// through one expression that no in-process test can reach -- cmdServe blocks on a listener
+// after a full model load -- so ignoring the flag left the whole suite green. Measured:
+// replacing `*shutdownGraceFlag` with the constant shutdownGrace passed every test.
+//
+// This test does not close that hole, and does not claim to. It pins the formatter, which is
+// what the banner's readability rests on. Two changes close the rest: the flag is resolved once
+// into a `grace` variable that both the banner and the drain read, so the two can no longer
+// disagree; and the banner reports the resolved value, so an operator starting a server sees
+// which grace is in effect without waiting for a signal. Proving the drain honours it still
+// needs a subprocess, which this repository has no precedent for.
+func TestShutdownNoteReportsTheEffectiveGrace(t *testing.T) {
+	for _, c := range []struct {
+		grace time.Duration
+		want  string
+	}{
+		{5 * time.Second, "5s grace for in-flight responses, then they are cut"},
+		{30 * time.Second, "30s grace for in-flight responses, then they are cut"},
+		{90 * time.Second, "1m30s grace for in-flight responses, then they are cut"},
+		// Zero is a choice, not a mistake, and reads as one.
+		{0, "configured not to wait; in-flight responses are cut immediately"},
+	} {
+		got := shutdownNote(c.grace)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("shutdownNote(%v) = %q, want it to contain %q", c.grace, got, c.want)
+		}
+		if !strings.HasSuffix(got, "\n") {
+			t.Errorf("shutdownNote(%v) = %q, want a trailing newline so the banner does not run into the next line", c.grace, got)
+		}
+	}
+	// The line has to name the consequence, not only the duration: a reader who sees "5s" alone
+	// does not learn that responses are cut at five seconds.
+	if !strings.Contains(shutdownNote(time.Second), "cut") {
+		t.Error("the note does not say what happens when the grace expires")
+	}
+}
+
 // TestWeightsResidentBytesIsFourPerParameter covers the arithmetic behind the `weights:` line.
 //
 // The line was added without a test: it read `Params() * 4` inline, and nothing could reach it

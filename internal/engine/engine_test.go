@@ -2099,12 +2099,14 @@ func TestAbandonedSequenceIsCountedAsAbandoned(t *testing.T) {
 // TestPromptThatFillsTheContextIsAcceptedButCannotGenerate covers the accepted boundary.
 //
 // Submit refuses a prompt longer than the window and accepts one that equals it. The accepted
-// case still has to end cleanly: the sequence prefills, samples the single token the prefill's
-// logits support, and is then finished by sample's own check before any decode runs -- a decode
-// at position ContextLen would address a row the cache does not have.
+// case still has to end cleanly: the sequence prefills, has no position left to generate at,
+// and finishes with "length" rather than an error. A decode at position ContextLen would
+// address a row the cache does not have, so no token may be produced at all.
 //
-// That ordering is what the test pins. Reported generated=1 with finish_reason "length", and no
-// error, because the prompt used its whole budget rather than a defect.
+// This used to expect one token -- the one the prefill's logits would have predicted -- which
+// was the defect rather than the contract: sample emitted it and *then* checked the position,
+// so the token reached the caller and TokensGenerated while being one the model could never
+// decode. The window is a position count, and a full prompt has used all of them.
 func TestPromptThatFillsTheContextIsAcceptedButCannotGenerate(t *testing.T) {
 	e, tok, _ := loadModelPath(t, Options{})
 	cfg := e.model.Config()
@@ -2145,14 +2147,77 @@ func TestPromptThatFillsTheContextIsAcceptedButCannotGenerate(t *testing.T) {
 	if generated = last.Generated; generated != tokens {
 		t.Errorf("Generated = %d but %d token events arrived", generated, tokens)
 	}
-	if tokens != 1 {
-		t.Errorf("%d tokens generated from a full window, want exactly 1 (the prefill's own)",
-			tokens)
+	if tokens != 0 {
+		t.Errorf("%d tokens generated from a full window, want 0: every position is taken by "+
+			"the prompt, so there is nowhere for a generated token to live", tokens)
 	}
 
 	// One token past the window is still refused, so the boundary is the window itself.
 	if _, err := e.Submit(Request{Prompt: append(prompt, prompt[0]), MaxTokens: 5}); err == nil {
 		t.Error("Submit accepted a prompt one token longer than the context")
+	}
+}
+
+// TestWindowAllowsExactlyTheRemainingPositions pins the budget arithmetic at every offset
+// from a full window, not just at the boundary.
+//
+// The window is a position count: a prompt of length p may generate ContextLen-p tokens,
+// the last of them at position ContextLen-1. Reading the boundary alone would miss the
+// off-by-one this guards -- a sample that emits before checking the position produces
+// room+1 tokens at *every* prompt length, and only the full-window case looks obviously
+// wrong. Measured on a 16-position fixture before the fix: prompt 15 gave 2, prompt 14
+// gave 3, prompt 13 gave 4.
+func TestWindowAllowsExactlyTheRemainingPositions(t *testing.T) {
+	const ctxLen = 16
+	for _, promptLen := range []int{ctxLen, ctxLen - 1, ctxLen - 2, 1} {
+		t.Run(strconv.Itoa(promptLen), func(t *testing.T) {
+			path := gguftest.Model{NoEOS: true, ContextLen: ctxLen}.Write(t, t.TempDir())
+			e, err := New(path, Options{MaxActive: 1})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			prompt := make([]int32, promptLen)
+			for i := range prompt {
+				prompt[i] = 1
+			}
+			// A budget far past the window, so the window is what stops the sequence.
+			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: ctxLen * 2})
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			var tokens int
+			var reason string
+			for round := 0; round < ctxLen*3; round++ {
+				e.Pump()
+			drain:
+				for {
+					select {
+					case ev, ok := <-ch:
+						if !ok {
+							break drain
+						}
+						if ev.HasToken {
+							tokens++
+						}
+						if ev.Done {
+							reason = ev.FinishReason
+						}
+					default:
+						break drain
+					}
+				}
+			}
+			if want := ctxLen - promptLen; tokens != want {
+				t.Errorf("prompt %d generated %d tokens, want %d: positions %d..%d are what the "+
+					"window has left", promptLen, tokens, want, promptLen, ctxLen-1)
+			}
+			if reason != "length" {
+				t.Errorf("finish reason %q, want %q", reason, "length")
+			}
+			if got := e.Stats().TokensGenerated; got != uint64(tokens) {
+				t.Errorf("TokensGenerated = %d but %d token events arrived", got, tokens)
+			}
+		})
 	}
 }
 

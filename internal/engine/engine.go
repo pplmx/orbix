@@ -627,6 +627,19 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 		e.finish(s, Event{Done: true, FinishReason: "stop"})
 		return 0, false
 	}
+	// The window is checked before the token leaves, not after. A token sampled at
+	// position ContextLen would be one the model cannot then decode: appendKV refuses that
+	// position, so sample returns false and the token is never fed back -- it is a
+	// prediction about a position outside the window, delivered to the caller and counted
+	// in TokensGenerated as though it were part of the sequence. Measured on a 16-position
+	// fixture, the boundary used to produce room+1 tokens at every prompt length.
+	//
+	// Checking here also keeps the reported budget honest: cmd/orbix prints "the window cut
+	// the budget to N", and N has to be the number of tokens the window actually allows.
+	if s.pos >= cfg.ContextLen {
+		e.finish(s, Event{Done: true, FinishReason: "length"})
+		return 0, false
+	}
 	s.out = append(s.out, tok)
 	// Count the token only once the caller has it. Stats documents TokensGenerated as "the
 	// tokens a caller was told about", and emit refuses when the buffer is full and nobody
@@ -645,10 +658,6 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 	e.tokensGenerated++
 	e.mu.Unlock()
 
-	if s.pos >= cfg.ContextLen {
-		e.finish(s, Event{Done: true, FinishReason: "length"})
-		return 0, false
-	}
 	return tok, true
 }
 

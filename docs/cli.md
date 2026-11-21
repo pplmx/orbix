@@ -127,10 +127,33 @@ orbix_requests_queued 0
 orbix_kv_pool_used_fraction 0
 ```
 
+The full set, in the order the handler writes them:
+
+| Family                                    | Type    | Present when      | What it says                                                  |
+| ----------------------------------------- | ------- | ----------------- | ------------------------------------------------------------- |
+| `orbix_requests_submitted_total`          | counter | always            | Requests accepted into the engine                             |
+| `orbix_requests_finished_total`           | counter | always            | Requests that reached their end, whatever the reason          |
+| `orbix_requests_finished_by_reason_total` | counter | always            | The same, split by `reason` label                             |
+| `orbix_tokens_generated_total`            | counter | always            | Tokens delivered to callers                                   |
+| `orbix_rounds_total`                      | counter | always            | Scheduling rounds that advanced at least one sequence         |
+| `orbix_prefix_positions_reused_total`     | counter | always            | Prompt positions served from a shared KV prefix               |
+| `orbix_requests_active`                   | gauge   | always            | Sequences being advanced right now                            |
+| `orbix_requests_queued`                   | gauge   | always            | Accepted requests waiting for a slot                          |
+| `orbix_round_max_active`                  | gauge   | always            | Sequences a round can advance                                 |
+| `orbix_requests_refused_queue_full_total` | counter | always            | 503s because the backlog was full                             |
+| `orbix_requests_refused_pool_total`       | counter | always            | 503s because the KV pool had no room                          |
+| `orbix_kv_pool_blocks`                    | gauge   | paged             | Blocks in the shared pool                                     |
+| `orbix_kv_pool_free`                      | gauge   | paged             | Unused blocks                                                 |
+| `orbix_kv_pool_block_size`                | gauge   | paged             | Positions one block holds                                     |
+| `orbix_kv_pool_used_fraction`             | gauge   | paged             | Share of blocks in use                                        |
+| `orbix_trace_spans_dropped_total`         | counter | `--otlp-endpoint` | Spans discarded because the export queue was full or failed   |
+| `orbix_model_info`                        | gauge   | always            | Constant 1, labelled `model` with the checkpoint being served |
+
 The exposition is written by hand rather than through a client library, for the same reason
 the GGUF parser is: a family is three lines, and the encoder is read by code review rather than
 trusted as a dependency. Sixteen families come to 52 lines on a paged server, because a
-labelled series costs one line per value.
+labelled series costs one line per value -- measured, and the table above lists seventeen rows
+because it also covers the one family that only a traced deployment has.
 
 The count depends on the configuration: a contiguous server exports twelve families (the four
 `kv_pool_*` gauges are omitted without a pool, since a zero would read as "the pool is empty"),

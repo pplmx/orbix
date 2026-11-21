@@ -153,6 +153,36 @@ chunks and logged `the 0s grace expired`. A negative value is refused, because
 `context.WithTimeout` with a negative duration is already expired -- every shutdown would cut
 every response while claiming to drain.
 
+**A grace long enough for one request is not long enough for a full batch.** Concurrent
+requests share one engine, so their remaining time is the batch's, not one reply's. Measured:
+eight concurrent 128-token streams on Llama 3.2 1B were all cut after the full 30-second grace
+(816 chunks, 0 of 8 with `[DONE]`). Those 816 chunks are 102 tokens per stream in 30 seconds, so
+each stream advanced at 3.4 tok/s -- a quarter of the 12 tok/s one stream gets alone -- and 128
+tokens would need about 38 seconds at that rate -- and with a 60-second grace that batch did
+finish, in 38571 ms, all eight with their `[DONE]`. The same batch at 32 tokens per stream
+finished inside a 180-second grace in 9.0 seconds.
+
+So the value to set is what `--max-active` in-flight replies need from the model, not what one
+reply needs. Per-stream throughput is roughly the shared throughput divided by the active
+stream count, so the drain a batch needs grows with both `--max-tokens` and `--max-active`.
+
+A deployment that cannot leave that much time -- a Kubernetes `terminationGracePeriodSeconds`
+defaults to 30 -- should lower `--max-tokens`, reduce `--max-active` during deploys, or accept
+that the last batch is cut and have clients retry. The last is the case `--shutdown-grace 0`
+makes explicit rather than surprising: a process that does not wait cannot truncate anything
+half-way through waiting for it.
+
+**`--shutdown-grace` must fit inside the orchestrator's own grace period, not the other way
+round.** Kubernetes sends `SIGTERM`, waits `terminationGracePeriodSeconds` (30 by default), then
+`SIGKILL`. A `--shutdown-grace` longer than that is never reached: measured with `SIGTERM` and a
+`SIGKILL` three seconds later, the process died at exit 137 with 46 chunks delivered and no
+`[DONE]`, and the `shutdown: ... grace expired` line was never printed because the process was
+gone before its own timer fired. That is worse than a clean cut, and it is silent.
+
+So keep `--shutdown-grace` below `terminationGracePeriodSeconds`, leaving enough of the
+difference for the process to act on its own deadline, or raise the pod's grace to match what
+the batch needs. The two values are one decision, made in two files.
+
 `X-Accel-Buffering` is nginx-specific and consumed rather than forwarded (it is in the default
 hidden-header set), so a two-tier nginx chain needs `proxy_pass_header X-Accel-Buffering` on the
 inner tier. HAProxy and Envoy forward bytes as they arrive and need nothing; Caddy flushes

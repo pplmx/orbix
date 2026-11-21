@@ -416,6 +416,25 @@ func TestRunnerMatMulTransposedIsExactUnderBothSplits(t *testing.T) {
 // BenchmarkBatchAmortizes is the evidence that batched decode is worth building:
 // it compares B matvecs against one m=B product at the vocabulary projection,
 // which is where a decode step spends most of its time.
+//
+// Read the batch=1 row with care, because it disagrees with the others and it is the one a
+// reader is most likely to quote. There the batched form is slower, and that is not an
+// argument against the batched path. Both sides are parallel: MatVec splits over rows and
+// MatMulTransposed with m=1 splits over columns, so the row compares two parallel spellings
+// of one problem, not batched against serial. What it shows is that matVecRows has the
+// tighter inner loop when there is only one row to reuse.
+//
+// The size of that gap is not worth writing down: three runs of this benchmark put it at
+// 1.33x, 1.24x and 1.29x depending on load, and a direct probe over the same shape -- the
+// same product, timed in a test rather than a benchmark -- measured 1.09x. The direction is
+// stable, the number is not, which is why this paragraph states no nanoseconds.
+//
+// The crossover is what the benchmark is for: from batch=4 upward the batched form wins by
+// roughly 1.5x and the margin widens with B, so a decode round with two or more sequences is
+// better off batched. Engine.decode has no branch on batch size and always takes the batched
+// path, including for the single active sequence that makes it n=1; the cost of doing so is
+// this row, and the benefit is that the vocabulary weights are read through one loop shape
+// instead of two.
 func BenchmarkBatchAmortizes(b *testing.B) {
 	runner := NewRunner(runtime.GOMAXPROCS(0))
 	const vocab, hidden = 32000, 288

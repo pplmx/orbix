@@ -116,8 +116,19 @@ the pump -- so an ordinary stream completes normally, `[DONE]` included. The dra
 most `shutdownGrace`, which is five seconds. A response still running when it expires is cut,
 and what the client receives depends on the endpoint:
 
-- **A stream** ends mid-token, without `[DONE]` and without an error chunk. Everything up to
-  that point arrived normally, so the client has partial text.
+- **A stream** ends mid-token and then claims it finished normally: the connection closes with
+  a `[DONE]` sentinel and a final chunk whose `finish_reason` is `"length"`, even though the
+  token budget was nowhere near exhausted. Measured on Llama 3.2 1B with `max_tokens: 4000`
+  and a 1-second grace: 49 delta chunks, then `finish_reason: "length"` and `[DONE]`. The same
+  request with no shutdown at all was still streaming after 120 seconds with 994 chunks and no
+  `[DONE]`.
+
+  So a client cannot tell a cut stream from a complete one by the protocol alone. The cut comes
+  from the server cancelling the request, which makes the engine finish the sequence with reason
+  `cancel`, and `cancel` is reported as `"length"`. Treating that as a real length stop costs
+  nothing when it is one and hides a truncated reply when it is not; the server log line below
+  is the only place the distinction is recorded.
+
 - **A non-streaming request** receives `503` with a body explaining that the request was
   abandoned before it finished. Earlier versions closed the connection with no response at
   all, which a client cannot tell apart from a crash: measured, four concurrent non-streaming

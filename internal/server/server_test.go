@@ -5082,3 +5082,56 @@ func TestBlockingResponseReturnsWhenThePumpStops(t *testing.T) {
 		t.Error("the handler returned without writing a response")
 	}
 }
+
+// TestACancelledStreamReportsLength pins what a cut stream tells the client, and the fact that
+// it is a lie worth knowing about.
+//
+// A shutdown cancels the request, the engine finishes the sequence with reason "cancel", and
+// finishReasonFor maps that to "length". So a stream cut at 49 of 4000 tokens ends with
+// finish_reason "length" and a [DONE] sentinel, which is byte-for-byte what a real budget stop
+// looks like. Measured against a real server: 49 delta chunks then "length" + [DONE], while the
+// same request with no shutdown was still streaming after 120 seconds with 994 chunks and no
+// [DONE].
+//
+// The test asserts the current mapping rather than a better one, because changing it is a
+// protocol decision: the OpenAI schema has no value for "the server went away", so the honest
+// alternatives are an error event or omitting [DONE], and both change what every cut client
+// sees. Pinning the behaviour makes such a change a deliberate edit to this test rather than a
+// silent change to the wire format.
+func TestACancelledStreamReportsLength(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	ch := make(chan engine.Event, 8)
+	for range 3 {
+		ch <- engine.Event{Token: 5, HasToken: true}
+	}
+	// This is what the engine emits when sample sees a cancelled request.
+	ch <- engine.Event{Done: true, FinishReason: "cancel"}
+	close(ch)
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.streamResponse(rec, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+			ch, "cmpl-test", 1700000000, false, nil, false, 0)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamResponse did not return")
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("the stream has no [DONE] sentinel: a client cannot tell it ended at all")
+	}
+	if !strings.Contains(body, `"finish_reason":"length"`) {
+		t.Errorf("a cancelled stream did not report length; the mapping changed and the docs "+
+			"describing it need to change too:\n%s", body)
+	}
+	// The text that did arrive is still delivered: a cut stream is a prefix, not nothing.
+	if got := strings.Count(body, `"text":"`); got < 3 {
+		t.Errorf("got %d text chunks, want the 3 that were sent before the cancel", got)
+	}
+}

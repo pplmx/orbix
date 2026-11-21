@@ -1204,6 +1204,9 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 
 	dec := s.tok.Seq()
 	reason := "stop"
+	// cancelled marks a stream the engine stopped because it was told to. It suppresses the
+	// [DONE] sentinel; see the Done branch below for why that is the honest signal.
+	cancelled := false
 	// generated counts engine tokens for the usage chunk; see the HasToken branch.
 	generated := 0
 	// seen is the text already handed to the client, kept only when a stop string has to
@@ -1305,6 +1308,14 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 		}
 		if ev.Done {
 			reason = ev.FinishReason
+			// A cancel is the engine being told to stop, which on a shutdown is this server
+			// going away rather than the model finishing. The stream cannot say so with
+			// finish_reason -- the schema has no value for it -- but it can decline to send
+			// the completion sentinel, and that is the one signal a client already knows
+			// how to read: no [DONE] means the stream was cut.
+			if ev.FinishReason == "cancel" {
+				cancelled = true
+			}
 		}
 	}
 	// A character split across the last tokens is still held by the decoder, waiting for a
@@ -1371,6 +1382,13 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", ub); err != nil {
 			return
 		}
+	}
+	if cancelled {
+		// No [DONE]: the stream did not complete, and saying it did is the difference between
+		// a client that retries and one that keeps a truncated reply. Flushing what is already
+		// buffered still happens so the deltas that did arrive are delivered.
+		flusher.Flush()
+		return
 	}
 	_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()

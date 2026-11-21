@@ -5083,22 +5083,20 @@ func TestBlockingResponseReturnsWhenThePumpStops(t *testing.T) {
 	}
 }
 
-// TestACancelledStreamReportsLength pins what a cut stream tells the client, and the fact that
-// it is a lie worth knowing about.
+// TestACancelledStreamOmitsDone covers the one honest signal a cut stream can send.
 //
 // A shutdown cancels the request, the engine finishes the sequence with reason "cancel", and
-// finishReasonFor maps that to "length". So a stream cut at 49 of 4000 tokens ends with
-// finish_reason "length" and a [DONE] sentinel, which is byte-for-byte what a real budget stop
-// looks like. Measured against a real server: 49 delta chunks then "length" + [DONE], while the
-// same request with no shutdown was still streaming after 120 seconds with 994 chunks and no
-// [DONE].
+// the OpenAI schema has no finish_reason for "the server went away" -- so the chunked reason is
+// whatever the schema allows, and the earlier behaviour used "length". Measured against a real
+// server at max_tokens 4000 with a 1-second grace, that produced 50 delta chunks followed by
+// finish_reason "length" and a [DONE] sentinel, which is byte-for-byte what a complete reply
+// looks like. A client had no way to tell it was truncated.
 //
-// The test asserts the current mapping rather than a better one, because changing it is a
-// protocol decision: the OpenAI schema has no value for "the server went away", so the honest
-// alternatives are an error event or omitting [DONE], and both change what every cut client
-// sees. Pinning the behaviour makes such a change a deliberate edit to this test rather than a
-// silent change to the wire format.
-func TestACancelledStreamReportsLength(t *testing.T) {
+// The sentinel is what actually says "you have everything", so it is what is withheld: a stream
+// cut by a cancel ends without [DONE], which every SSE client already treats as incomplete.
+// The finish_reason stays as it is, because inventing a value the schema does not define would
+// break clients that switch on it.
+func TestACancelledStreamOmitsDone(t *testing.T) {
 	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
 
 	ch := make(chan engine.Event, 8)
@@ -5123,16 +5121,26 @@ func TestACancelledStreamReportsLength(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "data: [DONE]") {
-		t.Errorf("the stream has no [DONE] sentinel: a client cannot tell it ended at all")
-	}
-	if !strings.Contains(body, `"finish_reason":"length"`) {
-		t.Errorf("a cancelled stream did not report length; the mapping changed and the docs "+
-			"describing it need to change too:\n%s", body)
+	if strings.Contains(body, "data: [DONE]") {
+		t.Errorf("a cancelled stream sent the [DONE] sentinel, so a client reads it as a "+
+			"complete reply:\n%s", body)
 	}
 	// The text that did arrive is still delivered: a cut stream is a prefix, not nothing.
 	if got := strings.Count(body, `"text":"`); got < 3 {
 		t.Errorf("got %d text chunks, want the 3 that were sent before the cancel", got)
+	}
+
+	// A stream that finishes normally is unchanged, which is the half that would break every
+	// client if the suppression were applied too broadly.
+	ok := make(chan engine.Event, 8)
+	ok <- engine.Event{Token: 5, HasToken: true}
+	ok <- engine.Event{Done: true, FinishReason: "length"}
+	close(ok)
+	rec2 := httptest.NewRecorder()
+	srv.streamResponse(rec2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
+		ok, "cmpl-test", 1700000000, false, nil, false, 0)
+	if !strings.Contains(rec2.Body.String(), "data: [DONE]") {
+		t.Error("a normally finished stream lost its [DONE] sentinel")
 	}
 }
 

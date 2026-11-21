@@ -122,18 +122,22 @@ the pump -- so an ordinary stream completes normally, `[DONE]` included. The dra
 most `shutdownGrace`, which is five seconds. A response still running when it expires is cut,
 and what the client receives depends on the endpoint:
 
-- **A stream** ends mid-token and then claims it finished normally: the connection closes with
-  a `[DONE]` sentinel and a final chunk whose `finish_reason` is `"length"`, even though the
-  token budget was nowhere near exhausted. Measured on Llama 3.2 1B with `max_tokens: 4000`
-  and a 1-second grace: 49 delta chunks, then `finish_reason: "length"` and `[DONE]`. The same
-  request with no shutdown at all was still streaming after 120 seconds with 994 chunks and no
-  `[DONE]`.
+- **A stream** ends mid-token and **without a `[DONE]` sentinel**. That is the signal: every SSE
+  client already treats a stream that stops before `[DONE]` as incomplete, and it is the one
+  honest thing this server can say, because the OpenAI schema has no `finish_reason` for "the
+  server went away". Measured on Llama 3.2 1B with `max_tokens: 4000` and a 1-second grace: 50
+  delta chunks, a final chunk with `finish_reason: "length"`, and then the connection closes
+  with no sentinel. The same request with no shutdown was still streaming after 120 seconds with
+  994 chunks.
 
-  So a client cannot tell a cut stream from a complete one by the protocol alone. The cut comes
-  from the server cancelling the request, which makes the engine finish the sequence with reason
-  `cancel`, and `cancel` is reported as `"length"`. Treating that as a real length stop costs
-  nothing when it is one and hides a truncated reply when it is not; the server log line below
-  is the only place the distinction is recorded.
+  The finish chunk still carries `"length"`, and that part is not a claim about the token budget:
+  the cut comes from the server cancelling the request, the engine finishes the sequence with
+  reason `cancel`, and `cancel` is reported as `"length"` because nothing else in the schema fits.
+  Read the absence of `[DONE]`, not the finish reason. Earlier versions sent the sentinel too,
+  which made a cut stream byte-for-byte identical to a complete one.
+
+  A client that hung up instead of being cut sees the same reason but nobody is reading, so the
+  distinction costs nothing there.
 
 - **A non-streaming request** receives `503` with a body explaining that the request was
   abandoned before it finished. Earlier versions closed the connection with no response at

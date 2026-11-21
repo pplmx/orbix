@@ -169,3 +169,45 @@ its projection is large next to the per-round overhead; a 19 MB model does not.
 For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that way
 (131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes), against 32 KiB for the synthetic fixtures.
 Any model with a long window should be run with `--blocks`.
+
+## The weights are held as float32, which is the memory figure to plan with
+
+The KV cache is not the only resident cost, and on a small quantized model it is not the
+largest one. `llama.LoadWeights` widens every tensor into a `[]float32` once at load, so the
+forward pass works in plain floats and never decodes a block again. The consequence is that
+resident memory follows the model's **parameter count**, not its file size: 4 bytes per
+parameter, whatever the file was compressed to.
+
+Measured peak RSS, one request, `orbix run --max-tokens 1`:
+
+| Checkpoint                  | File    | Parameters | Peak RSS | File x |
+| --------------------------- | ------- | ---------- | -------- | ------ |
+| stories15M Q4_0             | 18 MiB  | 24.4 M     | 136 MiB  | 7.6    |
+| Llama 3.2 1B Q2_K/Q3_K/Q4_K | 553 MiB | 1.24 B     | 5.3 GiB  | 9.6    |
+| TinyLlama 1.1B Q2_K         | 461 MiB | 1.10 B     | 4.3 GiB  | 9.5    |
+| Qwen2.5-0.5B Q8_0           | 644 MiB | 630 M      | 3.0 GiB  | 4.8    |
+
+The exact resident figure is four bytes times the parameter count, which is the column to
+read; the file-size column is there only to show how little it predicts. Do not try to derive
+one from the other by a single ratio. Radically compressed files grow more (TinyLlama is 2.6
+bits per weight and expands 9.5x) and lightly compressed ones less (Qwen2.5 Q8_0 is 8.5 bits
+and expands 4.8x), but neither is `32 / bits_per_weight`, because every file also carries
+tensors that were never quantized -- the per-layer norms and often the output projection are
+F32 already and do not grow at all. Measured against that formula the four rows above come out
+at 7.1x, 12.3x and 3.8x where 7.6x, 9.5x and 4.8x were observed.
+
+A 7B Q4_0 checkpoint is roughly 3.7 GiB on disk and needs about 26 GiB resident, which is more
+than most hosts have -- that is a property of this design, not a misconfiguration, and it is
+why the project runs small checkpoints.
+
+Planning a deployment means adding the two costs: the widened weights above, plus whatever
+`--blocks` sets aside for KV. On Llama 3.2 1B the weights alone are 4.6 GiB
+(1.24 G parameters x 4 bytes) before any cache exists, so the 8 GiB-per-request contiguous
+figure further up is on top of that, not instead of it. The measured 5.3 GiB peak for that
+model is those weights plus however many KV pages a single short request happened to touch --
+the reservation is virtual, so a longer prompt makes the same server larger.
+
+Keeping the model in its quantized form and decoding per matmul would remove the expansion at
+the cost of speed, since each weight would be decoded once per use rather than once per load.
+That trade is not taken here: a decoder in the inner loop is a different engine, and this one
+is written to be read.

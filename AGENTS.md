@@ -29,12 +29,13 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外四个是辅助配方，不进门槛，但会用得上：
+上面是门槛和发布入口。另外五个是辅助配方，不进门槛，但会用得上：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题
 just vet     # go vet，check 的子集；改 PKG 收紧范围：just PKG=./internal/gguf vet
 just clean   # 删 bin/、.rumdl_cache、.cache 和 *.test/*.out/*.prof；不碰 go build 的全局缓存
+just isolate # 测试顺序依赖与状态泄漏：-count=2 -shuffle=on；改测试辅助或包级变量后跑
 just         # 不带配方等价于 just check
 ```
 

@@ -57,7 +57,23 @@ test-race:
     @# recipe could never have succeeded, because CGO_ENABLED=0 is exported to every recipe.
     CGO_ENABLED=1 go test -count=1 -race {{PKG}}
 
-# run go vet
+# check the suite for order dependencies and state leaks
+isolate:
+    @# Two properties `test` cannot show, because it runs each package once in source order.
+    @#
+    @# -shuffle=on runs each package's tests in a different order. A test that only passes
+    @# because an earlier one left something behind -- a package-level table, a file, an
+    @# environment variable -- fails here and names its seed, so the failure reproduces.
+    @#
+    @# -count=2 runs every test twice in one process. A test that is not idempotent, or that
+    @# closes something the second run needs, fails on the second pass. The engine and the
+    @# paged cache hold the state that matters, but the flag is cheap everywhere.
+    @#
+    @# Not part of `check`: a shuffled failure names a seed rather than a bug, and the gate
+    @# is meant to answer yes or no. Run this after touching test helpers, package-level
+    @# variables, or anything with a Close.
+    go test -count=2 -shuffle=on {{PKG}}
+
 vet:
     go vet {{PKG}}
 

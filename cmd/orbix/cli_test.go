@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1479,6 +1480,16 @@ func TestRunStatsReport(t *testing.T) {
 	// A parameter count of zero would be a fabricated number; the fixture has weights.
 	if strings.Contains(stderr, "params: 0\n") {
 		t.Errorf("stats report claims zero parameters:\n%s", stderr)
+	}
+	// The cache size is a byte figure in a report where every other number carries a unit.
+	// It printed the raw count -- "1769472 bytes" on the fixture, "8589934592 bytes" on a
+	// 128k-window checkpoint -- while serve's banner rendered the same quantity as MiB.
+	if !regexp.MustCompile(`cache:\s+\d+/\d+ positions, \d+(\.\d+)? (KiB|MiB|GiB)`).
+		MatchString(stderr) {
+		t.Errorf("the cache line does not report a human-readable size:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "bytes\n") {
+		t.Errorf("the cache line still prints a raw byte count:\n%s", stderr)
 	}
 
 	// The completion on stdout must not repeat the prompt: the prompt is echoed only with

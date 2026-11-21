@@ -164,10 +164,10 @@ func cmdRun(args []string) error {
 		n := len(generated)
 		fmt.Fprintf(os.Stderr,
 			"\nmodel:  %s\nparams: %d\nload:   %v\nprompt: %d tokens\n"+
-				"gen:    %d tokens in %v (%.1f tok/s)\ncache:  %d/%d positions, %d bytes\n",
+				"gen:    %d tokens in %v (%.1f tok/s)\ncache:  %d/%d positions, %s\n",
 			cfg, m.W.Params(), loadTime.Round(time.Millisecond), promptLen,
 			n, genTime.Round(time.Millisecond), float64(n)/genTime.Seconds(),
-			cache.Len(), cache.Cap(), cache.Bytes())
+			cache.Len(), cache.Cap(), humanBytes(int64(cache.Bytes())))
 		// A budget larger than the window is silently cut down to fit, which is the useful
 		// behaviour -- but a run that asked for 128 and produced 123 looks like the model
 		// stopped early, so say when the window is what stopped it. The test is the cache

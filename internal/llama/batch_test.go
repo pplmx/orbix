@@ -1275,3 +1275,78 @@ func TestEmbedBatchGuardsTheTokenNotTheOffset(t *testing.T) {
 		t.Fatal("off+Hidden is negative here, so this fixture does not demonstrate the trap")
 	}
 }
+
+// TestBatchMatchesSequentialExactly is the bit-identical half of the same contract.
+//
+// TestBatchMatchesSequential allows a 1e-3 difference, which is the right tolerance for a
+// test over a checkpoint whose arithmetic is only available through the model. It cannot
+// show the stronger claim batch.go makes -- that Prefill is "identical to calling Forward
+// once per token" -- and on the default fixture it demonstrates nothing about parallelism
+// at all: that model is 8 hidden wide with an 11-token vocabulary, so every product is far
+// below kernel minParallelWork (32768) and both paths run on one goroutine.
+//
+// This one is built to cross that threshold (256 hidden x 363 vocab = 92,928 multiply-adds
+// in the vocabulary projection alone) and is given eight workers, so the row and column
+// splits actually divide. Every logit is then compared with ==, not a tolerance: the
+// kernels' contract is that parallelism never reassociates a reduction, so a single bit of
+// difference means that contract was broken somewhere.
+func TestBatchMatchesSequentialExactly(t *testing.T) {
+	// Wide enough that the vocabulary projection clears minParallelWork several times over.
+	const hidden, ffn, layers = 256, 512, 2
+	path := gguftest.Model{Hidden: hidden, Heads: 4, FFN: ffn, Layers: layers}.Write(t, t.TempDir())
+	m, err := NewWithOptions(path, Options{Workers: 8})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
+	}
+	cfg := m.Config()
+
+	// The threshold is a kernel constant, so it is restated here with its arithmetic: if it
+	// were raised past this fixture's work, this test would silently stop exercising the
+	// parallel path and keep passing.
+	const minParallelWork = 1 << 15
+	if work := cfg.Hidden * cfg.VocabSize; work < minParallelWork {
+		t.Fatalf("the fixture's largest product is %d multiply-adds, below the %d where "+
+			"kernels start splitting; this test would not exercise parallelism",
+			work, minParallelWork)
+	}
+
+	tokens := make([]int32, 6)
+	for i := range tokens {
+		tokens[i] = int32(1 + i%7)
+	}
+
+	seqCache, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seqLast []float32
+	for pos, tok := range tokens {
+		last, err := m.Forward(seqCache, int(tok), pos)
+		if err != nil {
+			t.Fatalf("Forward(%d): %v", pos, err)
+		}
+		if pos == len(tokens)-1 {
+			seqLast = append([]float32(nil), last...)
+		}
+	}
+
+	batchCache, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchLast, err := m.Prefill(batchCache, tokens, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+
+	if len(seqLast) != len(batchLast) {
+		t.Fatalf("%d logits from the per-token path, %d from the batched one",
+			len(seqLast), len(batchLast))
+	}
+	for i := range seqLast {
+		if seqLast[i] != batchLast[i] {
+			t.Fatalf("logit %d differs: per-token %.9g, batched %.9g -- batching is a "+
+				"restructuring, so these must be bit-identical", i, seqLast[i], batchLast[i])
+		}
+	}
+}

@@ -8,11 +8,12 @@ which is 0 until the history outgrows a block.
 `/stats` also reports the KV pool, `N of M blocks free (S positions each, T total)`, because
 running out is one of two failures a session hits repeatedly, the other being the conversation
 outgrowing the window. Both errors say retrying changes nothing and which flag is the way out.
-An overflow is explained in full once per conversation; every later attempt in the same
+Each of those is explained in full once per conversation; every later attempt in the same
 conversation prints the numbers and `(unchanged; /clear starts over)` instead of repeating the
-paragraph, and `/clear` restores the full version for the next one. Measured on the
-128-position fixture: 40 inputs produced 34 copies of the same paragraph before this, each one
-ending "the next turn will fail the same way".
+paragraph, and `/clear` restores the full version for the next one. The rule covers both
+failures, since both repeat until the conversation is cleared. Measured before it: 40 inputs
+against the 128-position fixture produced 34 copies of the overflow paragraph, and eight inputs
+against `--blocks 4` produced six copies of the pool one.
 The total is there because the free count alone misleads: a session refused every turn may show
 all blocks free, meaning the request is larger than the pool can ever hold.
 

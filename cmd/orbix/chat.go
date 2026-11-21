@@ -216,12 +216,16 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 	var history []chatTurn
 	// notedFallback records that the session has already explained a render-time fallback.
 	notedFallback := false
-	// notedContextFull records that the session has already explained a conversation that no
-	// longer fits. The failure repeats identically on every later turn -- it is the same
-	// conversation against the same window -- so the full explanation is worth reading once
-	// and is noise after that. Measured on the 128-position fixture: 34 identical paragraphs
-	// for 40 inputs, each one saying the next turn would fail the same way.
-	notedContextFull := false
+	// notedStuck records which repeating failures the session has already explained. A
+	// conversation that no longer fits its window, and one that outgrew the pool, both fail
+	// identically on every later turn -- a failed turn does not grow the history -- so the
+	// full explanation is worth reading once and is noise after that. Measured on the
+	// 128-position fixture: 34 identical overflow paragraphs for 40 inputs; measured with
+	// --blocks 4, six identical pool paragraphs for eight.
+	//
+	// Keyed by the sentinel rather than kept as two booleans, because these are the same
+	// defect and the next repeating failure should join them rather than grow a third flag.
+	notedStuck := map[error]bool{}
 	// notedCut records that the session has already explained a turn the window stopped.
 	// Separate from notedFallback because the two are unrelated: a session can hit either
 	// without the other, and sharing one flag would silence the second explanation.
@@ -270,7 +274,7 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 				// A fresh conversation is a fresh explanation: the short form above says
 				// "(unchanged; /clear starts over)", so after a /clear the next overflow has to
 				// be described in full again or the advice points at a command already used.
-				notedContextFull = false
+				notedStuck = map[error]bool{}
 			}
 			continue
 		}
@@ -279,18 +283,18 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 		if err != nil {
 			// A failed turn leaves the history untouched, so the next question is
 			// asked against the same context rather than against a broken one.
-			if explained := explainChatError(err); errors.Is(err, errContextFull) && notedContextFull {
+			if kind := repeatingFailure(err); kind != nil && notedStuck[kind] {
 				// The full text says the next turn fails the same way; once that has been read,
 				// repeating it verbatim for every later input is the opposite of help.
 				if _, werr := fmt.Fprintf(out, "error: %v (unchanged; /clear starts over)\n", err); werr != nil {
 					return werr
 				}
 			} else {
-				if _, werr := fmt.Fprintf(out, "error: %v\n", explained); werr != nil {
+				if _, werr := fmt.Fprintf(out, "error: %v\n", explainChatError(err)); werr != nil {
 					return werr
 				}
-				if errors.Is(err, errContextFull) {
-					notedContextFull = true
+				if kind != nil {
+					notedStuck[kind] = true
 				}
 			}
 			continue
@@ -394,6 +398,24 @@ type chatTurn struct {
 // window has the same trap for the same reason -- history only grows on a successful turn --
 // but arrives as a plain encoding check rather than an engine error, so it needed a marker.
 var errContextFull = errors.New("context window full")
+
+// repeatingFailure classifies the failures that repeat identically until the conversation is
+// cleared, returning the sentinel that identifies the kind or nil for a one-off error.
+//
+// Both kinds share the property that matters here: the next turn is asked against the same
+// history, so it fails in the same way, and the full advice is worth reading exactly once.
+// errors.Is is the test rather than equality, because each comes wrapped in the context that
+// names the sizes.
+func repeatingFailure(err error) error {
+	switch {
+	case errors.Is(err, errContextFull):
+		return errContextFull
+	case errors.Is(err, llama.ErrPoolExhausted):
+		return llama.ErrPoolExhausted
+	default:
+		return nil
+	}
+}
 
 // explainChatError adds what the caller can do about an error the engine reports bare.
 //

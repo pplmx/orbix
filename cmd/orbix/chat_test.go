@@ -1513,3 +1513,31 @@ func TestChatExplainsAnOverflowOnce(t *testing.T) {
 		t.Errorf("later overflows are not reported concisely:\n%s", out)
 	}
 }
+
+// TestChatExplainsAPoolExhaustionOnce is the same rule for the other repeating failure.
+//
+// A conversation that outgrew the pool fails identically on every later turn for the same
+// reason an overflow does: the failed turn does not grow the history. The overflow half was
+// fixed first and left this one repeating -- measured with --blocks 4, six copies of the pool
+// paragraph for eight inputs.
+//
+// Keyed by the sentinel rather than by a second boolean, so this test and the overflow one are
+// asserting one rule rather than two.
+func TestChatExplainsAPoolExhaustionOnce(t *testing.T) {
+	var in strings.Builder
+	for i := range 8 {
+		_, _ = fmt.Fprintf(&in, "Message %d with a good amount of padding words to grow the pool\n", i)
+	}
+	in.WriteString("/exit\n")
+
+	out := runChat(t, chatOptions{
+		model: chatModel(t), maxTokens: 4, topK: 40, blocks: 4, blockSize: 16, prefixCache: true,
+	}, in.String())
+
+	if got := strings.Count(out, "outgrew the pool"); got != 1 {
+		t.Errorf("the pool explanation appeared %d times, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, "(unchanged; /clear starts over)") {
+		t.Errorf("the later pool failures are not reported concisely:\n%s", out)
+	}
+}

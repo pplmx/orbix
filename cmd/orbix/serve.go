@@ -253,6 +253,15 @@ func cmdServe(args []string) error {
 	fmt.Printf("orbix serving %s on %s\n", cfg, url)
 	queued := defaultQueued(*maxQueued, *maxActive)
 	fmt.Printf("scheduling: %d active, %d queued max, %s policy\n", *maxActive, queued, schedPolicy)
+	// The weights, before any cache exists. LoadWeights widens every tensor to float32 once,
+	// so this figure follows the parameter count and not the file size -- and it is usually
+	// the largest number an operator has to plan around. Nothing else prints it: the model
+	// summary above gives no count, and `run --stats` reports params only to a caller who asked
+	// for stats on a one-shot generation. On Llama 3.2 1B it is 4.6 GiB, which a 553 MiB file
+	// gives no hint of.
+	weightsBytes := eng.Model().W.Params() * 4
+	fmt.Printf("weights:    %s resident (4 bytes per parameter, widened from the file at load)\n",
+		humanBytes(weightsBytes))
 	// Say what the contiguous cache costs, which nothing else reports. A paged cache prints
 	// its pool size below from the pool itself; a contiguous one reserves a whole context per
 	// accepted request, so the backlog multiplies whatever one request costs and the model

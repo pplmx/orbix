@@ -132,7 +132,10 @@ order, as the round each got its first token:
 The two cache layouts differ in what they reserve. A contiguous cache reserves the whole context
 for every accepted request on arrival: `context x KV width x layers`, times the active and queued
 slots. A paged cache takes blocks as a sequence generates, so memory follows what is in flight.
-The server prints the figure it computed at startup and warns past a gibibyte.
+The server prints the figure it computed at startup and warns past a gibibyte. It prints a
+`weights:` line beside it for the part that exists before any request arrives -- see
+[the weights section](#the-weights-are-held-as-float32-which-is-the-memory-figure-to-plan-with),
+which is usually the larger of the two.
 
 A paged server answers `503` with `Retry-After` when the pool cannot hold a request *yet*,
 which is a capacity signal a client or proxy should back off on. It does not answer that for
@@ -199,6 +202,12 @@ at 7.1x, 12.3x and 3.8x where 7.6x, 9.5x and 4.8x were observed.
 A 7B Q4_0 checkpoint is roughly 3.7 GiB on disk and needs about 26 GiB resident, which is more
 than most hosts have -- that is a property of this design, not a misconfiguration, and it is
 why the project runs small checkpoints.
+
+A mixture-of-experts file is worth calling out separately, because its file size is the least
+predictive of all: every expert is widened and held even though only `expert_used_count` of them
+run per token. Measured on TitanML's 101 MiB Tiny Mixtral test file, which has 8 experts at 2
+per token, the startup banner reports `weights: 942.1 MiB` -- nine times the file, and all of it
+resident for a model that computes with a quarter of it.
 
 Planning a deployment means adding the two costs: the widened weights above, plus whatever
 `--blocks` sets aside for KV. On Llama 3.2 1B the weights alone are 4.6 GiB

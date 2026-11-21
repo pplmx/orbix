@@ -32,6 +32,7 @@ FUZZTIME := env("FUZZTIME", "30s")
 # The commit range `just commits` checks. Defaults to a whole branch; a shallow CI checkout has
 # no origin/main, so the workflow passes its own range explicitly.
 RANGE := env("RANGE", "origin/main..HEAD")
+MODEL := env("MODEL", "")
 
 # The local gate. `just` with no arguments runs this.
 default: check
@@ -73,6 +74,24 @@ isolate:
     @# is meant to answer yes or no. Run this after touching test helpers, package-level
     @# variables, or anything with a Close.
     go test -count=2 -shuffle=on {{PKG}}
+
+# drive a race-enabled server with concurrent mixed load
+stress:
+    @# The race detector needs cgo, and the server it instruments is the thing under test, so
+    @# this builds a race binary rather than reusing bin/orbix. Like `test-race`, it produces no
+    @# shippable artifact.
+    @#
+    @# What this covers that `test-race` cannot: the unit tests only race the concurrency that
+    @# appears in them. This exercises the paths a deployed server actually mixes -- plain
+    @# requests, SSE streams, and clients that disconnect mid-stream -- against one engine, which
+    @# is where KV block recycling and goroutine teardown collide.
+    @#
+    @# Needs a checkpoint: `just MODEL=/path/to.gguf stress`. There is no synthetic fallback,
+    @# because the disconnect path this exists to exercise needs a request that takes long
+    @# enough to interrupt, and the in-repo fixtures finish in single-digit milliseconds.
+    @test -n "{{MODEL}}" || { echo "stress: needs MODEL=/path/to.gguf" >&2; exit 1; }
+    @CGO_ENABLED=1 go build -race -o .cache/orbix-race ./cmd/orbix
+    @scripts/stress.sh .cache/orbix-race "{{MODEL}}"
 
 vet:
     go vet {{PKG}}

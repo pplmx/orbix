@@ -29,13 +29,14 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外五个是辅助配方，不进门槛，但会用得上：
+上面是门槛和发布入口。另外六个是辅助配方，不进门槛，但会用得上：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题
 just vet     # go vet，check 的子集；改 PKG 收紧范围：just PKG=./internal/gguf vet
 just clean   # 删 bin/、.rumdl_cache、.cache 和 *.test/*.out/*.prof；不碰 go build 的全局缓存
 just isolate # 测试顺序依赖与状态泄漏：-count=2 -shuffle=on；改测试辅助或包级变量后跑
+just stress  # 竞态版二进制跑混合负载（非流式/SSE/中途取消）；要 MODEL=<真实 gguf>，验 active 归零
 just         # 不带配方等价于 just check
 ```
 
@@ -113,7 +114,8 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - 验证一条回归测试有没有判别力，要靠改动被测代码后重跑，不是靠读代码推断。改动时注意**同文本多处出现**：`moeRowsFromBatch` 和 `moeRowsFromDecode` 的构造体逐字相同，用 Python `str.replace` 不加限定会打到第一个，于是测出来「注入不生效」而实际是没打到目标。改完用 `git diff` 确认命中位置。
 - 断言错误消息时，断言**消息里的数据**，不要断言它周围的模板文字。`strings.Contains(err, "tokens")` 对 `"prompt is too many tokens"` 成立而没有任何尺寸；`strings.Contains(err, "does not implement")` 是模板前缀，与它后面拼进去的原因无关。2026-11 连着修了四处这类：上下文溢出只断言 `"tokens"` 没断言两个数字，413 只断言 `"too large"` 没断言字节上限，形状字段拒绝只断言字段名没断言原因，词表并行数组的两条长度检查则一条都没测。每条都是把断言换成消息里的具体值（数字、上限、原因短语、两个计数）之后才抓得住对应变异。
 - 真实模型的交叉验证用独立参考实现（`uv run --with gguf`）解析同一文件，逐张量比对 SHA-256。
-- `just test-race` 只覆盖测试里出现的并发。手动验证用 `CGO_ENABLED=1 go build -race` 出一个竞态版二进制，跑 `serve --max-active N`（配 `--blocks --block-size --prefix-cache` 开共享缓存），再打并发混合负载：非流式、SSE 流式、以及用 `timeout` 中途取消的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`，且 `orbix_requests_active` 归零——队列泄漏和竞态一样会让这个数停在非零。
+- `just test-race` 只覆盖测试里出现的并发。整机验证用 `just MODEL=<真实 gguf> stress`：它编出竞态版二进制，起 `serve`（`--max-active 1` + 共享缓存），再打混合负载——非流式、SSE 流式，以及排队中被客户端放弃的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`、没有 5xx、且 `orbix_requests_active` 归零。
+- 那个脚本要求取消/放弃计数非零，否则以失败退出：小 fixture 生成只要几毫秒，取消窗口容易错过，脚本就会在什么都没测到的情况下报 ok。第一次写它时消息里的模型名取错了字段，所有请求都是 404、从未进入引擎，而脚本仍报告「no request was cancelled」——测试没跑起来和测试通过，输出必须能区分。
 
 ## 文档
 

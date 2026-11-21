@@ -5321,11 +5321,13 @@ func TestPoolRefusalNamesTheLargerSide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tokenize: %v", err)
 	}
-	// Two blocks: small enough that either side can be the reason, large enough that the
-	// server is otherwise usable. The pool size is fixed at construction, so it cannot be
-	// adjusted on the server afterwards.
+	// Eight blocks against a 512-position window: the window is large enough for the budget
+	// to survive truncation, and the pool is small enough that prompt+budget still exceeds it.
+	// Two blocks was too small -- a chat turn is ~20 tokens of markup before any content, and
+	// with that pool the truncation left nothing for the budget half of the comparison to win.
+	// The pool size is fixed at construction, so it cannot be adjusted on the server after.
 	eng, err := engine.New(path, engine.Options{
-		MaxActive: 1, MaxQueued: 1, Blocks: 2, BlockSize: 16,
+		MaxActive: 1, MaxQueued: 1, Blocks: 8, BlockSize: 16,
 	})
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
@@ -5338,15 +5340,28 @@ func TestPoolRefusalNamesTheLargerSide(t *testing.T) {
 
 	cases := []struct {
 		name string
+		path string
 		body string
 		want string
 		why  string
 	}{
 		{
 			name: "budget dominates",
-			body: `{"prompt": "hi", "max_tokens": 200}`,
+			path: "/v1/completions",
+			body: `{"prompt": "hi", "max_tokens": 400}`,
 			want: `"param":"max_tokens"`,
 			why:  "a two-token prompt is never what to shorten here",
+		},
+		{
+			// The chat endpoint reaches the same check through a rendered prompt, and the
+			// field it names when the prompt wins is "messages" rather than "prompt". Both
+			// directions are checked here because blaming one field unconditionally passes
+			// whichever half is not tested.
+			name: "chat budget dominates",
+			path: "/v1/chat/completions",
+			body: `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200}`,
+			want: `"param":"max_tokens"`,
+			why:  "a one-word message is not what to shorten",
 		},
 		{
 			// The prompt has to outgrow the pool without outgrowing the window, or the check
@@ -5355,15 +5370,28 @@ func TestPoolRefusalNamesTheLargerSide(t *testing.T) {
 			// assertion passed with the pool logic inverted. 40 words is ~200 tokens against a
 			// 512-position window and a 32-position pool: unservable, but for the pool reason.
 			name: "prompt dominates",
+			path: "/v1/completions",
 			body: `{"prompt": ` + quoteJSON(strings.TrimSpace(strings.Repeat("word ", 40))) +
 				`, "max_tokens": 2}`,
 			want: `"param":"prompt"`,
 			why:  "the budget is already two tokens, so the prompt is the side to shorten",
 		},
+		{
+			// The chat side of "prompt dominates" needs a prompt large enough to outgrow the
+			// pool whose budget is still smaller. 40 words renders to ~115 tokens, so a budget
+			// of 2 gives 117 positions -- eight blocks, which fits. 60 words renders to ~175,
+			// and 175+2 rounds up past eight.
+			name: "chat prompt dominates",
+			path: "/v1/chat/completions",
+			body: `{"messages": [{"role": "user", "content": ` +
+				quoteJSON(strings.TrimSpace(strings.Repeat("word ", 60))) + `}], "max_tokens": 2}`,
+			want: `"param":"messages"`,
+			why:  "the chat endpoint names its own field, not the completions one",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			resp := post(t, srv.Handler(), "/v1/completions", c.body)
+			resp := post(t, srv.Handler(), c.path, c.body)
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400", resp.StatusCode)

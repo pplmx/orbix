@@ -1362,3 +1362,74 @@ func TestBatchMatchesSequentialExactly(t *testing.T) {
 		}
 	}
 }
+
+// TestLogitsForCachedMatchesAFreshPrefill covers the one path that never runs the ordinary
+// prefill: when every block of a prompt is already in the prefix index, PrefillWithPrefix
+// calls logitsForCached, which computes the last position's logits from stored keys and
+// values instead of recomputing them.
+//
+// Nothing tested it. The branch needs a prompt that is an exact multiple of the block size
+// -- one token longer and the match covers all but the last position, so the ordinary
+// prefill runs -- and it needs a model whose attention carries a bias, because that is the
+// part logitsForCached does differently: the key and value are already stored, but the query
+// comes from a fresh projection, so its bias has to be applied here or not at all. The
+// Qwen2 family is the one with bias, and every existing prefix-reuse test uses llama.
+//
+// Measured with the query bias removed from attentionCached: the cached path then differs
+// from a fresh prefill at 351 of 363 logits, all by a little, which is exactly the shape a
+// missing bias has.
+func TestLogitsForCachedMatchesAFreshPrefill(t *testing.T) {
+	// Qwen2 is the family with attention bias; AttnBias writes the q/k/v bias tensors.
+	path := gguftest.Model{Arch: "qwen2", AttnBias: true, ContextLen: 128}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if !cfg.AttnBias {
+		t.Fatalf("the fixture has no attention bias, so the branch this test targets is " +
+			"not exercised")
+	}
+
+	const blockSize = 4
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: blockSize, Blocks: 64})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+
+	// Exactly two whole blocks, so the second call matches the entire prompt.
+	prompt := make([]int32, 2*blockSize)
+	for i := range prompt {
+		prompt[i] = int32(1 + i%5)
+	}
+
+	first := pool.New()
+	fresh, err := m.PrefillWithPrefix(first, prompt, 0)
+	if err != nil {
+		t.Fatalf("first PrefillWithPrefix: %v", err)
+	}
+	// Copied immediately: the returned slice is the batch buffer, which the next pass reuses.
+	fresh = append([]float32(nil), fresh...)
+
+	second := pool.New()
+	cached, err := m.PrefillWithPrefix(second, prompt, 0)
+	if err != nil {
+		t.Fatalf("second PrefillWithPrefix: %v", err)
+	}
+	cached = append([]float32(nil), cached...)
+
+	if got := second.ReusedPositions(); got != len(prompt) {
+		t.Fatalf("the second pass reused %d positions of %d; the whole prompt has to match "+
+			"for logitsForCached to run", got, len(prompt))
+	}
+	if len(fresh) != len(cached) {
+		t.Fatalf("%d logits from the fresh pass, %d from the cached one", len(fresh), len(cached))
+	}
+	for i := range fresh {
+		if fresh[i] != cached[i] {
+			t.Fatalf("logit %d: cached %.9g, fresh %.9g -- the fully-cached path has to "+
+				"reproduce a fresh prefill exactly", i, cached[i], fresh[i])
+		}
+	}
+}

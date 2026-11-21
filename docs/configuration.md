@@ -14,7 +14,7 @@ Flags shared by every command that generates:
 | -------------------------- | ------------------------------------------------------------------- |
 | `--model`                  | Checkpoint path; falls back to `ORBIX_MODEL`                        |
 | `--max-tokens`             | Cap on generated tokens, not counting the prompt                    |
-| `--workers`                | Kernel goroutines per batched pass; 0 means one per CPU             |
+| `--workers`                | Kernel goroutines per batched pass; 0 means one per available CPU   |
 
 Sampling, on `run` and `chat` only (the server takes these per request):
 
@@ -261,6 +261,12 @@ Above 32 the plateau is flat measured four ways, not two: 64 greedy tokens from 
 same checkpoint took 245-256 ms at 32 workers, 240-255 ms at 64, 234-247 ms at 96 and 243-253 ms
 at 128 over two runs each -- overlapping ranges, with no trend in the worker count. Raising the
 default would buy nothing on a wide host, which is why it stays at one goroutine per CPU.
+
+"One per CPU" is `runtime.GOMAXPROCS(0)`, not the host's core count, and the two differ wherever
+a CPU quota is set. Measured in a scope limited to four CPUs of a 128-core host: `NumCPU` still
+reported 128 while `GOMAXPROCS` reported 4. So a container gets four workers by default rather
+than a hundred and twenty-eight competing for four cores -- which is the useful behaviour, and
+worth knowing before reading the worker figures above as if they applied to a capped pod.
 
 For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that way
 (131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes), against 32 KiB for the synthetic fixtures.

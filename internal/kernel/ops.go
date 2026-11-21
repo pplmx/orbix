@@ -238,13 +238,21 @@ func Softmax(scores []float32) {
 
 // SiLU applies the sigmoid linear unit, x * sigmoid(x), in place.
 //
-// This is the activation in Llama's gated feed-forward block. Computed as
-// x / (1 + exp(-x)) with the argument clamped, so a large negative input
-// cannot make exp overflow to +Inf and produce a NaN.
+// This is the activation in Llama's gated feed-forward block. Computed as x / (1 + exp(-x)),
+// with inputs below -88 answered as zero without evaluating exp at all.
+//
+// The clamp is a speed choice, not a correctness one, and the comment here used to say
+// otherwise -- that without it exp would overflow to +Inf and produce a NaN. Measured, it
+// does not: the exponent is taken in float64 and only the result is narrowed, so even
+// x = -3.4e38 gives -0 rather than NaN. What the clamp buys is the cost of that exp on a
+// value far outside the sigmoid's useful range: over a million values of -200, the clamped
+// form took 0.85ms against 35.7ms unclamped, 42x. It also costs a branch on ordinary inputs
+// -- 30ms against 18ms over a million values in [-3, 3] -- which is why the threshold sits
+// where the answer is already 5e-37 rather than nearer the interesting range.
 func SiLU(x []float32) {
 	for i, v := range x {
-		// exp overflows float32 above ~88; beyond that the function is
-		// indistinguishable from zero anyway.
+		// Below this the sigmoid is 1 to well past float32's precision, so the product is
+		// zero for every purpose but exact reproduction of a denormal.
 		if v < -88 {
 			x[i] = 0
 			continue

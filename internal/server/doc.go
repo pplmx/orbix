@@ -30,12 +30,24 @@
 // through verbatim.
 //
 // A request-validation error carries a "code": invalid_json, unsupported_encoding and
-// body_too_large for a body the decoder rejected, and invalid_value,
-// missing_required_parameter, unsupported_parameter, context_length_exceeded and
-// model_not_found for a request it understood and refused. OpenAI's guidance is to branch on
-// "code" rather than on message text, and paramError exists to keep the code paired with the
-// field that produced it. "param" is present when one field is at fault and absent when the
-// failure is about the body as a whole.
+// body_too_large for a body the decoder rejected, invalid_type for a field whose JSON type
+// is wrong, and invalid_value, missing_required_parameter, unsupported_parameter,
+// context_length_exceeded and model_not_found for a request it understood and refused.
+// OpenAI's guidance is to branch on "code" rather than on message text, and paramError
+// exists to keep the code paired with the field that produced it. "param" is present when
+// one field is at fault and absent when the failure is about the body as a whole.
+//
+// invalid_type is separate from invalid_json because the two ask different things of the
+// caller: a body that did not parse has to be re-sent, while a field of the wrong type has to
+// be edited, and the answer names which field -- {"max_tokens": "8"} is 400 invalid_type with
+// param max_tokens. Folding the second into the first was the earlier behaviour, and an SDK
+// branching on code read "your JSON is broken" for a body that parsed.
+//
+// A chat message's content is OpenAI's union: a string, or an array of {"type","text"}
+// parts. Both are accepted and their text is what reaches the prompt. A part of any other
+// type -- an image_url, say -- is refused with unsupported_parameter and
+// param messages.content rather than dropped, because answering the text of a message that
+// also carried an image would reply to a question the caller did not ask.
 //
 // Capacity and internal failures have no code. A full queue answers 503 with
 // service_unavailable_error and a message, and a broken stream likewise: there is no field

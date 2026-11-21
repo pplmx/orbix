@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -372,9 +373,97 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// chatMessage is one turn of a chat request.
+//
+// Content is a string or an array of content parts, which are OpenAI's two spellings for
+// the same field and both appear in real clients: the Python SDK sends the array form
+// whenever a message is built from parts, and a plain string otherwise. Only the text is
+// turned into a prompt, so a text part contributes its text and every other part type is
+// refused -- a request carrying an image would otherwise be answered from its text alone,
+// which is a reply to a question the caller did not ask.
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content chatContent `json:"content"`
+}
+
+// chatContent is a message body: a JSON string, or an array of {"type","text"} parts.
+//
+// It decodes both into the text a prompt can be rendered from, and it answers the failures
+// itself, in the envelope's terms, because the decoder's own message would name this Go
+// type rather than the field the caller sent.
+type chatContent string
+
+// chatContentParam is the JSON path every refusal about this field names. The message index
+// is deliberately not part of it: the type is decoded without knowing which message it
+// belongs to, and a path with a made-up index is worse than one the whole field shares.
+const chatContentParam = "messages.content"
+
+// chatContentPart is one entry of the array form. Both members are strings, so a part that
+// arrives with the wrong types is reported as such rather than silently becoming "".
+type chatContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// UnmarshalJSON accepts either spelling and keeps the text.
+//
+// null is an empty body rather than an error: an assistant turn in a transcript a client is
+// replaying can carry it, and an empty string is what this server would render for it
+// anyway.
+//
+// Every value here arrives already parsed by the outer decoder, so the bytes are valid JSON
+// and the only failure either branch can actually see is a type error. The bare `return err`
+// arms are the honest fallback for a decoder that grew another failure mode, not a case this
+// server can reach; they are left uncovered rather than forced.
+func (c *chatContent) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "null" {
+		return nil
+	}
+	if b[0] != '[' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			var te *json.UnmarshalTypeError
+			if errors.As(err, &te) {
+				return unmarshalTypeFailure(chatContentParam,
+					"a string or an array of text parts", te)
+			}
+			return err
+		}
+		*c = chatContent(s)
+		return nil
+	}
+	var parts []chatContentPart
+	if err := json.Unmarshal(b, &parts); err != nil {
+		// The entries are typed, so the decoder knows which member went wrong but not how
+		// to say it without naming a Go struct. want is the shape the caller has to write.
+		var te *json.UnmarshalTypeError
+		if errors.As(err, &te) {
+			return unmarshalTypeFailure(chatContentParam,
+				"an array of objects with a string \"type\" and a string \"text\"", te)
+		}
+		return newParamError(chatContentParam, "invalid_value",
+			"%s must be a string or an array of text parts: %s", chatContentParam, err)
+	}
+	var text strings.Builder
+	for i, p := range parts {
+		switch p.Type {
+		case "text":
+			text.WriteString(p.Text)
+		case "":
+			// A part with no type is not a text part this server can recognise, and
+			// reading its "text" anyway would be guessing at the caller's intent.
+			return newParamError(chatContentParam, "missing_required_parameter",
+				"content part %d of %s has no \"type\"; this server renders parts of "+
+					"type \"text\"", i, chatContentParam)
+		default:
+			return newParamError(chatContentParam, "unsupported_parameter",
+				"this server renders text content only: content part %d of %s has type "+
+					"%q, and dropping it would answer a question the caller did not ask",
+				i, chatContentParam, p.Type)
+		}
+	}
+	*c = chatContent(text.String())
+	return nil
 }
 
 type completionRequest struct {
@@ -413,6 +502,16 @@ type completionRequest struct {
 // stopField accepts OpenAI's two spellings: a string or an array of strings.
 type stopField []string
 
+// UnmarshalJSON decodes either spelling, and answers a wrong type itself.
+//
+// The errors json.Unmarshal returns here carry no field path -- a custom unmarshaller is
+// handed the value alone, so the decoder has no struct field to name -- and the generic
+// answer for that is "the request body must be a JSON object", which is wrong for a body that
+// is an object and has one bad member. Measured before this: {"prompt":"x","stop":5} answered
+// with that sentence instead of naming stop.
+//
+// As in chatContent's decoder, the bytes here are already valid JSON, so the type error is
+// the only failure these arms can see and the bare `return err` arms are a fallback.
 func (f *stopField) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 || string(b) == "null" {
 		return nil
@@ -420,6 +519,10 @@ func (f *stopField) UnmarshalJSON(b []byte) error {
 	if b[0] == '[' {
 		var list []string
 		if err := json.Unmarshal(b, &list); err != nil {
+			var te *json.UnmarshalTypeError
+			if errors.As(err, &te) {
+				return unmarshalTypeFailure("stop", "a string or an array of strings", te)
+			}
 			return err
 		}
 		*f = list
@@ -427,6 +530,10 @@ func (f *stopField) UnmarshalJSON(b []byte) error {
 	}
 	var one string
 	if err := json.Unmarshal(b, &one); err != nil {
+		var te *json.UnmarshalTypeError
+		if errors.As(err, &te) {
+			return unmarshalTypeFailure("stop", "a string or an array of strings", te)
+		}
 		return err
 	}
 	*f = []string{one}
@@ -715,7 +822,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderChat(msgs []chatMessage) string {
 	turns := make([]engine.Turn, len(msgs))
 	for i, m := range msgs {
-		turns[i] = engine.Turn{Role: m.Role, Text: m.Content}
+		turns[i] = engine.Turn{Role: m.Role, Text: string(m.Content)}
 	}
 	// Render always returns a usable prompt: a model template that fails at render time
 	// falls back to the neutral transcript inside the renderer, so this call cannot
@@ -1462,9 +1569,135 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) er
 		if errors.As(err, &tooBig) {
 			return fmt.Errorf("%w: body exceeds %d bytes", errBodyTooLarge, tooBig.Limit)
 		}
+		// A value of the wrong type is not a malformed body: the client wrote valid JSON
+		// and named a field, so it can be told which one. Reporting it as invalid_json
+		// sends a caller looking for a syntax error in a body that parses, and it is the
+		// one failure this path still shared with a genuinely broken document. Measured
+		// before this branch existed: {"max_tokens":"8"} answered 400 invalid_json with no
+		// param, and an OpenAI SDK surfaces that as a malformed request rather than as
+		// "max_tokens must be a number".
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			return &typeMismatchError{typeErr: typeErr}
+		}
+		// A field's own UnmarshalJSON can already know what to say -- chat content is the
+		// case that does -- and it says it in the envelope's terms rather than as a decode
+		// failure. Passing it through keeps that answer instead of replacing it with
+		// "invalid JSON" and a Go type name.
+		var pe *paramError
+		if errors.As(err, &pe) {
+			return pe
+		}
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	return nil
+}
+
+// typeMismatchError is a request field that arrived as the wrong JSON type.
+//
+// It exists to keep two facts the decoder knows and the envelope needs: which field, and
+// what type it actually got. json.UnmarshalTypeError carries both, but its message is Go's
+// -- "cannot unmarshal string into Go struct field chatRequest.max_tokens of type int" --
+// which names a struct the client never sent and a type no client thinks in. The message
+// here says the same thing in the caller's terms, because the caller is who has to edit
+// their request.
+type typeMismatchError struct {
+	typeErr *json.UnmarshalTypeError
+	// field overrides the decoder's field path. It is set by a field with its own
+	// UnmarshalJSON, which the decoder hands the value alone: there is no struct field in
+	// scope to name, so the type that refused the value supplies its own JSON key.
+	field string
+	// want overrides the expected type when the field accepts more than one. The decoder
+	// reports the Go type it was trying to build at the point it failed, which for a union
+	// (chat content, stop strings) is one arm of several rather than the whole rule.
+	want string
+}
+
+// Error renders the failure the way the caller has to read it: the field, the type it sent
+// and the type it should have sent.
+func (e *typeMismatchError) Error() string {
+	if e.param() == "" {
+		return fmt.Sprintf("the request body must be a JSON object, but it is %s",
+			jsonTypeName(e.typeErr.Value))
+	}
+	want := e.want
+	if want == "" {
+		want = goTypeName(e.typeErr.Type)
+	}
+	return fmt.Sprintf("%s must be %s, but it is %s", e.param(),
+		want, jsonTypeName(e.typeErr.Value))
+}
+
+// param is the request field at fault, as the path the caller can find in their body.
+//
+// The decoder builds it from the JSON keys it walked, so it is already the caller's
+// vocabulary: "max_tokens" for a top-level field and "messages.0.role" for one inside an
+// array element. It is empty only when the body was not an object at all, where there is no
+// field to name.
+func (e *typeMismatchError) param() string {
+	if e.field != "" {
+		return e.field
+	}
+	return e.typeErr.Field
+}
+
+// unmarshalTypeFailure builds the refusal for a field that decodes itself.
+//
+// The decoder's field path is empty on this path, so key and want have to come from the
+// field: key is the JSON name the caller wrote, and want is the rule the value broke.
+func unmarshalTypeFailure(key, want string, te *json.UnmarshalTypeError) error {
+	return &typeMismatchError{typeErr: te, field: key, want: want}
+}
+
+// writeTypeMismatch answers a request whose JSON parsed but whose fields did not fit.
+//
+// The code is OpenAI's own invalid_type, and that is the point of the whole branch: a
+// client that branches on `code` could not tell a wrong-typed field from a truncated body,
+// and the two have nothing in common to act on -- one is an edit, the other is a resend.
+func writeTypeMismatch(w http.ResponseWriter, err *typeMismatchError) {
+	writeRequestError(w, http.StatusBadRequest, newParamError(
+		err.param(), "invalid_type", "%s", err.Error()))
+}
+
+// jsonTypeName says what a JSON value is, in the words the spec uses.
+//
+// The decoder reports the value as "string", "number 1.5" or "object", so the leading word
+// is the type and anything after it is the offending value. Naming the type alone is what
+// a caller needs; quoting a long object back at them is not.
+func jsonTypeName(value string) string {
+	if v, _, ok := strings.Cut(value, " "); ok {
+		return v
+	}
+	return value
+}
+
+// goTypeName says what a Go field is declared as, in JSON's words.
+//
+// The decoder hands back a reflect.Type whose String() is Go syntax: int64, []string,
+// *float64. A caller wrote JSON, so the names here are JSON's; a type this server has no
+// word for falls back to the Go name rather than inventing one.
+func goTypeName(t reflect.Type) string {
+	switch t.Kind() {
+	case reflect.String:
+		return "a string"
+	case reflect.Bool:
+		return "a boolean"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "an integer"
+	case reflect.Float32, reflect.Float64:
+		return "a number"
+	case reflect.Slice, reflect.Array:
+		if t.Elem().Kind() == reflect.String {
+			return "an array of strings"
+		}
+		return "an array"
+	case reflect.Map:
+		return "an object"
+	case reflect.Pointer:
+		return goTypeName(t.Elem())
+	}
+	return t.String()
 }
 
 // writeDecodeError answers a body this server could not accept.
@@ -1475,12 +1708,33 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) er
 // large and the request must be made smaller. Reporting all three as 400 would send a
 // client with a compressed or oversized body looking for a syntax error.
 //
-// Each also carries a `code`. This is the writer the paramError comment calls out by name --
-// a client that branches on code rather than message text had nothing to match here, so a
-// malformed body, an unsupported encoding and an oversized one all arrived as an uncoded
+// Two more arrive through here and are answered before those three: a field of the wrong
+// JSON type (invalid_type, with the field in param) and a field whose own decoder refused it
+// (whatever code that decoder chose). Both name a field the three below cannot, and the
+// first used to be flattened into invalid_json, which sent a caller looking for a syntax
+// error in a body that parses.
+//
+// Each case also carries a `code`. This is the writer the paramError comment calls out by
+// name -- a client that branches on code rather than message text had nothing to match here,
+// so a malformed body, an unsupported encoding and an oversized one all arrived as an uncoded
 // error alongside the coded ones the handlers write. The three codes are the ones OpenAI's
 // own API uses for the same conditions where it has them.
 func writeDecodeError(w http.ResponseWriter, err error) {
+	// A body that parsed but carried the wrong type for a field is answered before the
+	// window checks below: it has its own code, invalid_type, and the field to name.
+	var mismatch *typeMismatchError
+	if errors.As(err, &mismatch) {
+		writeTypeMismatch(w, mismatch)
+		return
+	}
+	// A field that refused itself wrote its own param and code. Its failure is about that
+	// field -- a chat content part this server cannot render, say -- so the answer names it
+	// rather than saying the document did not parse.
+	var coded *paramError
+	if errors.As(err, &coded) {
+		writeRequestError(w, http.StatusBadRequest, coded)
+		return
+	}
 	status := http.StatusBadRequest
 	code := "invalid_json"
 	switch {

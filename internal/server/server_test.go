@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -950,6 +951,226 @@ func TestRenderChatTemplate(t *testing.T) {
 	got = srv.renderChat([]chatMessage{{Content: "Hi"}})
 	if !strings.HasPrefix(got, "User: Hi") {
 		t.Errorf("renderChat with no role = %q", got)
+	}
+}
+
+// TestChatAcceptsContentParts covers the array spelling of a chat message's content.
+//
+// OpenAI's schema makes content a union: a string, or an array of parts. The Python SDK
+// sends the array form as soon as a message is built from parts, so a server that decodes
+// only the string form refuses a request the SDK considers ordinary -- measured before this
+// was handled, `content: [{"type": "text", "text": "Hi"}]` answered 400 "invalid JSON: json:
+// cannot unmarshal array into Go struct field chatRequest.messages.0.content of type string".
+//
+// The text of the parts has to reach the prompt, which is what the first case asserts
+// through prompt_tokens: the array form and the string form of the same message have to
+// encode to the same number of tokens, or the parts were dropped rather than concatenated.
+func TestChatAcceptsContentParts(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	plainResp := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages":[{"role":"user","content":"Hello there"}],"max_tokens":1}`)
+	if plainResp.StatusCode != http.StatusOK {
+		t.Fatalf("string form: status = %d, want 200", plainResp.StatusCode)
+	}
+	plain := decodeBody[chatResponse](t, plainResp)
+
+	partsResp := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"Hello "},
+			{"type":"text","text":"there"}]}],"max_tokens":1}`)
+	// Named before the decode: a 400 decoded into chatResponse is a zero value whose
+	// prompt_tokens of 0 looks like a dropped part rather than like a refused request.
+	if partsResp.StatusCode != http.StatusOK {
+		env := decodeBody[errorBody](t, partsResp)
+		t.Fatalf("parts form: status = %d (%s), want 200", partsResp.StatusCode,
+			env.Error.Message)
+	}
+	parts := decodeBody[chatResponse](t, partsResp)
+
+	if got, want := parts.Usage.PromptTokens, plain.Usage.PromptTokens; got != want {
+		t.Errorf("the parts form encoded to %d prompt tokens and the string form to %d, so the "+
+			"parts were not concatenated into the message", got, want)
+	}
+
+	// Joining the parts into one string has to render the same transcript the single string
+	// produces, which is the property the token count above only implies.
+	var decoded chatRequest
+	if err := json.Unmarshal([]byte(`{"messages":[{"role":"user","content":[
+		{"type":"text","text":"Hello "},{"type":"text","text":"there"}]}]}`), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, want := srv.renderChat(decoded.Messages), "User: Hello there\nAssistant:"; got != want {
+		t.Errorf("renderChat = %q, want %q", got, want)
+	}
+
+	// null is an empty body rather than an error, which is what a transcript a client is
+	// replaying carries for a turn it has no text for. It has to reach the renderer as an
+	// empty message, not as a refused request.
+	nullResp := post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages":[{"role":"assistant","content":null},{"role":"user","content":"Hi"}],
+			"max_tokens":1}`)
+	if nullResp.StatusCode != http.StatusOK {
+		env := decodeBody[errorBody](t, nullResp)
+		t.Fatalf("content null: status = %d (%s), want 200", nullResp.StatusCode,
+			env.Error.Message)
+	}
+	var nullDecoded chatRequest
+	if err := json.Unmarshal([]byte(`{"messages":[{"role":"assistant","content":null}]}`),
+		&nullDecoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, want := srv.renderChat(nullDecoded.Messages), "Assistant: \nAssistant:"; got != want {
+		t.Errorf("renderChat of a null content = %q, want %q", got, want)
+	}
+
+	// A part type this server cannot render is refused rather than skipped. Answering the
+	// text of a message that also carried an image would be a reply to a question the caller
+	// did not ask, and silently is the worst way to say that.
+	for _, tc := range []struct {
+		name string
+		body string
+		code string
+	}{
+		{
+			name: "image part",
+			body: `{"messages":[{"role":"user","content":[
+				{"type":"text","text":"What is this?"},
+				{"type":"image_url","image_url":{"url":"https://example.invalid/x.png"}}]}]}`,
+			code: "unsupported_parameter",
+		},
+		{
+			name: "part without a type",
+			body: `{"messages":[{"role":"user","content":[{"text":"Hello"}]}]}`,
+			code: "missing_required_parameter",
+		},
+		{
+			name: "part with a non-string text",
+			body: `{"messages":[{"role":"user","content":[{"type":"text","text":5}]}]}`,
+			code: "invalid_type",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/chat/completions", tc.body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			env := decodeBody[errorBody](t, resp)
+			if env.Error.Code != tc.code {
+				t.Errorf("code = %q, want %q (message %q)", env.Error.Code, tc.code,
+					env.Error.Message)
+			}
+			if env.Error.Param != "messages.content" {
+				t.Errorf("param = %q, want messages.content", env.Error.Param)
+			}
+		})
+	}
+}
+
+// TestTypeMismatchIsNotMalformedJSON covers a field that arrives as the wrong JSON type.
+//
+// The decoder reports this as a json.UnmarshalTypeError carrying the field and the type that
+// arrived, and the server used to flatten it into invalid_json with no param -- the same
+// answer a truncated body gets. Measured before the change: {"max_tokens":"8"} answered 400
+// with code invalid_json and no param, and an SDK that branches on code reads that as "your
+// body did not parse" rather than "max_tokens has to be a number".
+//
+// OpenAI's own code for this condition is invalid_type, and each case below asserts the
+// three things a caller acts on: the status, the code, and the field named in param.
+func TestTypeMismatchIsNotMalformedJSON(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, tc := range []struct {
+		name  string
+		path  string
+		body  string
+		param string
+		want  string // a phrase the message has to carry, naming what arrived
+	}{
+		{
+			name: "max_tokens as a string", path: "/v1/completions",
+			body: `{"prompt":"hi","max_tokens":"8"}`, param: "max_tokens",
+			want: "must be an integer, but it is string",
+		},
+		{
+			name: "temperature as an object", path: "/v1/chat/completions",
+			body:  `{"messages":[{"role":"user","content":"hi"}],"temperature":{"a":1}}`,
+			param: "temperature", want: "must be a number, but it is object",
+		},
+		{
+			name: "messages as a string", path: "/v1/chat/completions",
+			body: `{"messages":"hi"}`, param: "messages", want: "must be an array",
+		},
+		{
+			name: "role as a number", path: "/v1/chat/completions",
+			body: `{"messages":[{"role":5,"content":"hi"}]}`, param: "messages.0.role",
+			want: "must be a string, but it is number",
+		},
+		{
+			// The content field is a union, so its own decoder writes the message; what
+			// this case pins is that the refusal still names the field and the code.
+			name: "content as a number", path: "/v1/chat/completions",
+			body: `{"messages":[{"role":"user","content":42}]}`, param: "messages.content",
+			want: "must be a string or an array of text parts, but it is number",
+		},
+		{
+			// stop is the other union, and the case that showed the rule this test now
+			// pins: a custom unmarshaller is handed the value alone, so the decoder has no
+			// field to report and the generic answer named the whole body as the problem.
+			name: "stop as a number", path: "/v1/completions",
+			body: `{"prompt":"hi","stop":5}`, param: "stop",
+			want: "must be a string or an array of strings, but it is number",
+		},
+		{
+			name: "array element of stop as a number", path: "/v1/completions",
+			body: `{"prompt":"hi","stop":["ok",5]}`, param: "stop",
+			want: "must be a string or an array of strings, but it is number",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), tc.path, tc.body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			env := decodeBody[errorBody](t, resp)
+			if env.Error.Code != "invalid_type" {
+				t.Errorf("code = %q, want invalid_type (message %q)", env.Error.Code,
+					env.Error.Message)
+			}
+			if env.Error.Param != tc.param {
+				t.Errorf("param = %q, want %q", env.Error.Param, tc.param)
+			}
+			if !strings.Contains(env.Error.Message, tc.want) {
+				t.Errorf("message %q does not carry %q", env.Error.Message, tc.want)
+			}
+			// A message naming a Go type reads as an internal error to the caller.
+			if strings.Contains(env.Error.Message, "Go struct") ||
+				strings.Contains(env.Error.Message, "chatRequest") {
+				t.Errorf("message %q names a Go type rather than the JSON field",
+					env.Error.Message)
+			}
+		})
+	}
+}
+
+// TestMalformedJSONStillSaysSo pins the other side of the split above: a body the decoder
+// could not parse at all keeps invalid_json and names no field, because no field was
+// reached. Without this, widening the type-mismatch branch would be free to swallow the
+// syntax failures too.
+func TestMalformedJSONStillSaysSo(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, body := range []string{`{"prompt":`, `not json`, `{"prompt":"x"`} {
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400", body, resp.StatusCode)
+		}
+		env := decodeBody[errorBody](t, resp)
+		if env.Error.Code != "invalid_json" {
+			t.Errorf("%s: code = %q, want invalid_json", body, env.Error.Code)
+		}
+		if env.Error.Param != "" {
+			t.Errorf("%s: param = %q, want empty for a body that did not parse",
+				body, env.Error.Param)
+		}
 	}
 }
 
@@ -3413,6 +3634,67 @@ func TestBlocksNeededMatchesTheCache(t *testing.T) {
 	for _, c := range []struct{ positions, blockSize int }{{0, 16}, {-1, 16}, {10, 0}} {
 		if got := blocksNeeded(c.positions, c.blockSize); got != 0 {
 			t.Errorf("blocksNeeded(%d, %d) = %d, want 0", c.positions, c.blockSize, got)
+		}
+	}
+}
+
+// TestJSONTypeName drops the offending value and keeps the type.
+//
+// The decoder spells the value two ways: with a bare type ("string", "object") and, for a
+// number, with the number after it ("number 1.5") -- measured, and only the second form
+// exercises the cut. Echoing the value back is what the two-word form would do, and a caller
+// who sent a large object does not need it quoted in an error message.
+func TestJSONTypeName(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"string", "string"},
+		{"number", "number"},
+		{"number 1.5", "number"},
+		{"number -1e30", "number"},
+		{"object", "object"},
+		{"", ""},
+	} {
+		if got := jsonTypeName(c.in); got != c.want {
+			t.Errorf("jsonTypeName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestGoTypeNameSpeaksJSON covers every arm of the mapping, including the ones no current
+// request field reaches.
+//
+// A branch here that is wrong is invisible until the field that needs it exists, and the
+// failure would be an error message naming a Go type -- the exact thing this mapping exists
+// to avoid. The default arm is checked too: it has to fall back to the Go name rather than
+// returning an empty string, which would leave a message reading "must be , but it is".
+func TestGoTypeNameSpeaksJSON(t *testing.T) {
+	type named struct{}
+	for _, c := range []struct {
+		in   any
+		want string
+	}{
+		{"", "a string"},
+		{false, "a boolean"},
+		{int64(0), "an integer"},
+		{uint32(0), "an integer"},
+		{1.5, "a number"},
+		{[]string(nil), "an array of strings"},
+		{[]int(nil), "an array"},
+		{[2]string{}, "an array of strings"},
+		{map[string]int(nil), "an object"},
+		{(*float64)(nil), "a number"}, // a pointer follows its element
+		{named{}, ""},                 // no JSON word for a struct; the fallback is Go's name
+	} {
+		got := goTypeName(reflect.TypeOf(c.in))
+		if c.want != "" {
+			if got != c.want {
+				t.Errorf("goTypeName(%T) = %q, want %q", c.in, got, c.want)
+			}
+			continue
+		}
+		// The struct case: the answer is Go's own name rather than an empty string.
+		if got == "" || got != reflect.TypeOf(c.in).String() {
+			t.Errorf("goTypeName(%T) = %q, want the Go type name %q", c.in, got,
+				reflect.TypeOf(c.in).String())
 		}
 	}
 }

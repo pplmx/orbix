@@ -24,6 +24,13 @@ one. Branch on `code`, not on message text -- OpenAI's guidance, and the reason 
 cover the bodies a client hits before any field parses (`invalid_json`, `body_too_large`) as well
 as the ones it understands and refuses (`context_length_exceeded`, `unsupported_parameter`).
 
+`invalid_type` is its own code, with the field in `param`, because the fix differs from a body
+that did not parse: `{"max_tokens": "8"}` has to be edited rather than re-sent, and the answer
+says which field and which type arrived. A chat message's `content` accepts both spellings
+OpenAI defines -- a string, or an array of `{"type": "text", "text": ...}` parts -- and a part of
+any other type, an image for instance, is refused with `unsupported_parameter` on
+`messages.content` rather than silently dropped.
+
 Not every error has one. A refused request answers 503 with `type: service_unavailable_error`
 and no `code`, because there is nothing in the request to correct -- retry, or back off. Read a
 missing `code` as "this answer is about capacity, not about your fields", and branch on `type`

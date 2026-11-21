@@ -3023,3 +3023,46 @@ func TestNestedLoopsAreBounded(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderByteBoundIsReachableAndEnforced covers the second of the two bounds.
+//
+// maxRenderNodes catches a template whose nesting multiplies its work, and
+// TestNestedLoopsAreBounded pins that. maxRenderBytes exists for the other shape: a
+// template that stays well within the node budget and still emits something enormous. The
+// comment on the constant names `tojson` over a large value as the example, and this is
+// that case -- a single `{{ messages | tojson }}` node against a long message list produced
+// more than 16 MiB, so the node count never came into it.
+//
+// Deleting the byte check left every package green, which is why it is worth a test: the
+// bound is reachable, it is the only thing that stops this shape, and nothing proved it ran.
+func TestRenderByteBoundIsReachableAndEnforced(t *testing.T) {
+	// 400 messages of 64 KiB each: tojson over the list is roughly 26 MiB, and the whole
+	// render is one node.
+	const msgSize = 64 << 10
+	content := strings.Repeat("x", msgSize)
+	msgs := make([]Message, 400)
+	for i := range msgs {
+		msgs[i] = Message{Role: "user", Content: content}
+	}
+	if want := len(msgs) * msgSize; want <= maxRenderBytes {
+		t.Fatalf("the fixture produces about %d bytes, not more than the %d bound, so it "+
+			"could not exercise it", want, maxRenderBytes)
+	}
+
+	tpl, err := Parse(`{{ messages | tojson }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := tpl.Render(msgs, Inputs{})
+	if err == nil {
+		t.Fatalf("a render of %d bytes returned no error (bound is %d)", len(out), maxRenderBytes)
+	}
+	if !errors.Is(err, errRenderTooLarge) {
+		t.Errorf("error %v does not carry errRenderTooLarge", err)
+	}
+	// The message has to name the bound, or a template author cannot tell which limit they
+	// hit -- the node budget reports a node count, this one a byte count.
+	if !strings.Contains(err.Error(), "16777216") {
+		t.Errorf("error %q does not state the byte bound", err)
+	}
+}

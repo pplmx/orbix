@@ -139,13 +139,25 @@ for a long-running server, and the reason it is not the default -- a bound is on
 operator asked for it.
 
 What the three do to one queue -- `MaxActive 1`, four requests budgeted 16, 8, 4, 2 in submission
-order, as the round each got its first token:
+order, as the round each got its first token. Three runs each, because the exact numbers are not
+stable to the round: a token that arrives in the same round as the submit returns can be counted
+either side of it.
 
-| Policy     | First-token rounds | What it did                                                          |
-| ---------- | ------------------ | -------------------------------------------------------------------- |
-| `fifo`     | 2, 19, 28, 33      | served in submission order, so each waited its turn                  |
-| `shortest` | 19, 10, 5, 2       | exactly inverted: the 2-token request moved from round 33 to round 2 |
-| `fair`     | 5, 6, 7, 8         | one turn apiece first, then round-robin from there                   |
+| Policy     | First-token rounds                | What it did                                           |
+| ---------- | --------------------------------- | ----------------------------------------------------- |
+| `fifo`     | `3, 20, 28, 34` / `2, 20, 29, 34` | served in submission order                            |
+| `shortest` | `20, 11, 6, 2` / `20, 10, 6, 3`   | inverted: the 2-token request goes from last to first |
+| `fair`     | `6, 7, 9, 9` / `6, 7, 8, 9`       | one turn apiece first, then round-robin               |
+
+The ordering is what the table is for, and it is identical in every run: `shortest` inverts
+`fifo` exactly, and `fair` gives all four a turn by round 9 where `fifo` reaches the fourth at
+round 34. Two entries share a round under `fair` because a round admits more than one sequence
+once each has had a turn.
+
+These were reproduced from the engine directly rather than through `orbix bench --suite`: that
+suite's policy rows submit two requests (one 60-token, one 3-token) and report a first-token
+latency in milliseconds, which answers a different question. The numbers here are rounds, on the
+four-request queue above.
 
 Rounds are the unit the engine schedules in; what an operator waits is wall-clock, and the gap
 there is larger than the round numbers suggest. Measured on Llama 3.2 1B with `--max-active 1`

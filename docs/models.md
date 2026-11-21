@@ -146,16 +146,31 @@ curl -sSL -o /tmp/stories15M-q4_0.gguf \
   https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf
 ```
 
-The four gates take the suite from fifteen skipped tests to none, so a machine holding the
-checkpoints can check every claim the project makes: `go test ./... -v | grep -c '^--- SKIP'`
-reads 15 without a checkpoint and 0 with all four set. Re-measure rather than trusting the
-number -- adding a gated test raises it.
+Every gate taken together leaves no test skipped, so a machine holding the checkpoints can
+check every claim the project makes. `go test ./... -v | grep -c '^--- SKIP'` is the count, and
+it is worth re-measuring rather than trusting these figures -- adding a gated test raises it.
+Measured 2026-11:
+
+| Gates set                                                                   | Skipped |
+| --------------------------------------------------------------------------- | ------- |
+| none                                                                        | 16      |
+| the four original (`MODEL`, `QWEN2_MODEL`, `MIXTRAL_MODEL`, `MODEL_KQUANT`) | 1       |
+| all eight                                                                   | 0       |
+
+The single skip in the middle row is `TestRealWeightMatrixStats`: it was added after the other
+gates, and it needs one of the four 32-weight variables. So the four original checkpoints no
+longer reach zero on their own, which is why the table is here instead of a sentence claiming
+a number that moved.
 
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \
 QWEN2_MODEL=/tmp/qwen2-f32.gguf \
 MIXTRAL_MODEL=/tmp/tinymoe2m.F32.gguf \
 MODEL_KQUANT=/tmp/tinyllama-q2k.gguf \
+MODEL_Q4_1=/tmp/ts-Q4_1.gguf \
+MODEL_Q5_0=/tmp/ts-Q5_0.gguf \
+MODEL_Q5_1=/tmp/ts-Q5_1.gguf \
+MODEL_IQ4_NL=/tmp/ts-IQ4_NL.gguf \
 CGO_ENABLED=0 go test ./...
 ```
 

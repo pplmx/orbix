@@ -56,6 +56,14 @@
 // scale field read from the wrong offset and not a bit-plane off by one. The SHA-256
 // comparison above is what covers the finer errors, which is why both exist.
 //
+// Neither check compares expanded values against another implementation, and that gap was
+// closed once by hand: every non-F32 format available locally was decoded here and compared
+// with the `gguf` package's dequantizer over the first 32 values -- Q4_0, Q4_1, Q5_0, Q5_1,
+// Q5_K, Q6_K, Q8_0 and IQ4_NL. The worst difference in each was between 1.6e-9 and 3.6e-9,
+// which is float32 rounding rather than disagreement. It is recorded rather than automated
+// because the reference is Python and a Go test must not depend on it; a re-run needs the
+// `gguf` package and a few lines of glue.
+//
 // The one format the SHA-256 comparison did not reach is F16: none of the available
 // checkpoints is stored in it. That gap is closed by a different kind of check rather than
 // left open -- internal/f16 verifies all 65536 half-precision patterns against a decoder

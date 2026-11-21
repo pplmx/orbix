@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -103,6 +104,29 @@ func cmdServe(args []string) error {
 			(u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("serve: --otlp-endpoint %q is not an http(s) URL with a host",
 				*otlpEndpoint)
+		}
+	}
+	// The listen address is checked here, with the other flags, for the reason --otlp-endpoint
+	// is: net.Listen runs after engine.New, so a typo in --addr used to cost a full model load
+	// before it was reported. Measured on the 2 GB Qwen2 file, `--addr not-an-addr` spent 3.2
+	// seconds loading before failing.
+	//
+	// Only the syntax is checked, not availability: whether the port is free is a fact that can
+	// change between this check and the listen, and binding early to find out would hold the
+	// socket through the load. A malformed value is a different thing -- it cannot become valid
+	// by waiting.
+	// ResolveTCPAddr alone is not enough: it accepts a service name, so "127.0.0.1:http"
+	// resolves to port 80 and passes, then fails at net.Listen after the load. A port this
+	// server binds is a number, and requiring one is what makes the check cover the whole
+	// flag rather than the part Go's parser happens to reject.
+	if _, err := net.ResolveTCPAddr("tcp", *addr); err != nil {
+		return fmt.Errorf("serve: --addr %q is not a host:port to listen on: %w", *addr, err)
+	}
+	if _, port, err := net.SplitHostPort(*addr); err == nil {
+		if _, perr := strconv.Atoi(port); perr != nil {
+			return fmt.Errorf("serve: --addr %q has a port that is not a number (%q); "+
+				"a service name would be resolved before the listen, which is not what this "+
+				"flag says", *addr, port)
 		}
 	}
 	// A negative backlog is not a smaller backlog: the reporting below treats anything <= 0

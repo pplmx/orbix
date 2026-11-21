@@ -300,6 +300,18 @@ func TestServeRejectsFlagCombinationsThatCannotWork(t *testing.T) {
 			why:  "the exporter is built and every send fails, dropping every span into the counter",
 		},
 		{
+			name: "listen address with no port",
+			args: []string{"--addr", "not-an-addr"},
+			want: "--addr",
+			why:  "net.Listen runs after engine.New, so the typo cost a full model load first",
+		},
+		{
+			name: "listen address with a port that is not a number",
+			args: []string{"--addr", "127.0.0.1:http"},
+			want: "--addr",
+			why:  "the same late failure, and the message has to name the flag rather than only 'address'",
+		},
+		{
 			name: "otlp endpoint with no host",
 			args: []string{"--otlp-endpoint", "http://"},
 			want: "http(s) URL with a host",

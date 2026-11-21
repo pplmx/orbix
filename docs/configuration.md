@@ -156,10 +156,21 @@ and a 60-token request already running, a second request budgeted 4 tokens waite
 | `fifo`     | 5820, 7563, 8365 ms        |
 | `shortest` | 776, 942, 797 ms           |
 
-A median of 7563 ms against 797 ms is 9.5 times, and the ranges do not overlap at all: the
-slowest `shortest` run, 942 ms, is six times faster than the fastest `fifo` run, 5820 ms. The mechanism is the
+Three runs gave 5820-8365 ms against 776-942 ms, so the ranges do not overlap: the slowest
+`shortest` run is still several times faster than the fastest `fifo` one. The mechanism is the
 same as the round table: under `fifo` the short request sits behind the full 60 tokens, while
 `shortest` picks it at the next scheduling decision and finishes it in a handful of rounds.
+
+**The ratio is not a number to plan with, and this is the only place in the page that measures
+wall-clock.** The host's load average sat near 100 throughout -- 128 cores, mostly another
+project's tests -- and later repeats of a *different* shape (six 4-token requests arriving behind
+six 30-token ones) ranged 24-63 seconds for `fifo` against 3.5-6.9 for `shortest`. The two
+policies stayed well separated in every run, which is the finding; the factor between them is
+not, because it moves with whatever else the machine is doing.
+
+The rounds in the table above are the load-independent statement. The timings are here to show
+that a round is not a fixed amount of time, and that a queue reordered by remaining work is felt
+in seconds rather than in scheduling bookkeeping.
 
 The two cache layouts differ in what they reserve. A contiguous cache reserves the whole context
 for every accepted request on arrival: `context x KV width x layers`, times the active and queued

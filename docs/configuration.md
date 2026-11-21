@@ -276,6 +276,27 @@ figure further up is on top of that, not instead of it. The measured 5.3 GiB pea
 model is those weights plus however many KV pages a single short request happened to touch --
 the reservation is virtual, so a longer prompt makes the same server larger.
 
+How virtual is worth a number, because the banner's arithmetic is alarming by design. On Llama
+3.2 1B with the default slots it prints:
+
+```text
+kv cache:   contiguous, about 8.0 GiB per request, 576.0 GiB for 8 active + 64 queued
+```
+
+Measured on that server: resident memory was 5355 MiB with nothing in flight and 5445 MiB after
+eight concurrent requests finished -- a 90 MiB delta against a 576 GiB figure, because Linux
+commits a page when it is written and a four-token reply touches four positions of a 128k
+window. The figure is what the address space would hold if every accepted request ran to the end
+of its context at once; it is the right thing to size `--max-active` by and the wrong thing to
+compare against `free`.
+
+`--blocks` does not change that. The pool is sized ahead but committed lazily too: a server
+reporting `paged, 4096 blocks x 16 positions, 4.0 GiB shared` sat at 5422 MiB with nothing in
+flight and 5458 MiB after a 200-token request -- 36 MiB against a 4 GiB pool, because only the
+blocks a sequence fills are ever written. What `--blocks` buys is a bound: the process cannot
+exceed that pool however many requests arrive, where a contiguous cache reserves a whole context
+per accepted request and the sum is the banner's figure.
+
 Keeping the model in its quantized form and decoding per matmul would remove the expansion at
 the cost of speed, since each weight would be decoded once per use rather than once per load.
 That trade is not taken here: a decoder in the inner loop is a different engine, and this one

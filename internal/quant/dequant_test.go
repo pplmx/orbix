@@ -259,9 +259,21 @@ func BenchmarkDecodeQ8_0(b *testing.B) {
 // BenchmarkDecodeKQuants measures the formats real checkpoints actually ship.
 //
 // Q4_0 and Q8_0 above were the only decoders timed, and they are the two a modern file is
-// least likely to contain: the K-quants are what llama.cpp's default -q presets produce, so
-// they are on the hot path of every prefill and decode in practice. Nothing recorded what
-// they cost.
+// least likely to contain: the K-quants are what llama.cpp's default -q presets produce.
+// Nothing recorded what they cost.
+//
+// What that cost buys is model load, not per-token speed. LoadWeights widens every tensor
+// once into plain float32 slices, so the forward pass never calls Decode again. The rates
+// below therefore add up to load time, and the arithmetic checks out on a real file:
+// tinyllama-q2k is 53 MiB of Q2_K, 354 MiB of Q3_K and 51 MiB of Q6_K, which at these rates
+// is 0.24 + 2.21 + 0.12 = 2.57 s of decoding, against a measured 3.5 s load that also reads
+// the file and builds the F32 tensors. Q3_K alone is 86% of the decode time there.
+//
+// Generation speed is a different measurement and does not follow from this one. The same
+// tinyllama-q2k runs at 10.5 tok/s while the 2 GB all-F32 qwen2 file runs at 18.1, because
+// TinyLlama is 22 layers of 2048 hidden against Qwen2.5-0.5B's 24 of 896: an F32 file with
+// a smaller model is faster, and no decoder is involved. Quoting the table below as a decode
+// cost would be right; quoting it as a generation cost would not.
 //
 // The blocks are zero-filled, like the two benchmarks above. That is exact for four of the
 // five: Q2_K, Q3_K, Q4_K and Q6_K contain no `if` at all, so every bit pattern does the same

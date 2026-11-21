@@ -72,6 +72,23 @@ blocks, so a block the context can never fill is never published and `--prefix-c
 nothing. `serve` and `bench` refuse it when `--prefix-cache` is given, and `chat` refuses it
 always, because chat enables reuse by default rather than on request.
 
+The same rule bites at the other end, and it is the one that surprises people: **a prompt shorter
+than one block is never reused**, however many times it is sent. Measured with `--block-size 16`,
+each prompt sent twice in a row, reading `orbix_prefix_positions_reused_total` before and after:
+
+| Prompt (words) | Reused positions added by the two requests |
+| -------------- | ------------------------------------------ |
+| 8              | 0                                          |
+| 20             | 16                                         |
+| 32             | 48                                         |
+| 48             | 64                                         |
+| 64             | 64                                         |
+
+Nothing is published until a whole block of the prompt has been consumed, so a short system
+prompt costs a full prefill on every turn. `orbix_prefix_positions_reused_total` staying at 0 is
+the symptom, and a smaller `--block-size` is the fix -- not a larger one, which raises the
+threshold.
+
 With reuse off the combination is accepted, and deliberately so: a block larger than the context
 is then just a pool with one block in practice, which serves text correctly. Measured on a
 64-position fixture with `--blocks 8 --block-size 128`: `serve` and `bench` start, while the same

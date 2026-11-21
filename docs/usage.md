@@ -98,7 +98,7 @@ once, which for a token stream is the same as not streaming. nginx reads the hea
 buffering off for that response only; every other endpoint keeps the buffering that a proxy
 default is actually for. Proxies that do not understand the header ignore it.
 
-Two things remain the deployment's job, because no application header can express them:
+Three things remain the deployment's job, because no application header can express them:
 
 - **Raise `proxy_read_timeout`.** nginx defaults to 60 seconds bounding the gap between reads,
   which a long model load or a stalled generation can exceed.
@@ -109,6 +109,24 @@ Two things remain the deployment's job, because no application header can expres
   which every SSE client does by default -- not "you have two seconds".
 - **Use HTTP/1.1 upstream.** nginx defaults to 1.1 from 1.29.7; before that it is 1.0, where
   ending a stream means closing the connection.
+
+A shutdown is bounded too, and this one is visible to every streaming client. `SIGTERM` (or
+`SIGINT`) stops accepting new requests, lets in-flight responses finish, and only then stops
+the pump -- so an ordinary stream completes normally, `[DONE]` included. The drain waits at
+most `shutdownGrace`, which is five seconds. A response still running when it expires is cut:
+the stream ends without `[DONE]` and without an error chunk, and the server logs `shutdown: a
+response was still in flight when the 5s grace expired; it was cut` to stdout.
+
+Measured two ways. On Llama 3.2 1B at `--max-tokens 500`, `SIGTERM` two seconds in waited the
+full 5606 ms, delivered 75 chunks, and closed the connection with no `[DONE]`. On stories15M
+with a stream that finishes in about 20 ms, the same signal exited in 21 ms with all 125 chunks
+and their `[DONE]` intact -- which is the drain doing its job rather than the cut.
+
+A client cannot distinguish that cut from a dropped connection, so a deployer who drains a pod
+should treat a stream that ends without `[DONE]` as incomplete rather than as finished. The
+grace is a constant rather than a flag: it is short enough that a rolling restart is quick and
+long enough that ordinary replies finish, and an operator who needs a different value needs a
+different policy than "drain, then stop".
 
 `X-Accel-Buffering` is nginx-specific and consumed rather than forwarded (it is in the default
 hidden-header set), so a two-tier nginx chain needs `proxy_pass_header X-Accel-Buffering` on the

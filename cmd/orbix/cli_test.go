@@ -1062,7 +1062,7 @@ func TestRunPromptIsEveryRemainingWord(t *testing.T) {
 		if err := fs.Parse(c.args); err != nil {
 			t.Fatalf("Parse(%v): %v", c.args, err)
 		}
-		got, err := promptFromArgs(fs)
+		got, err := promptFromArgs(fs, c.args)
 		if err != nil {
 			t.Fatalf("promptFromArgs(%v): %v", c.args, err)
 		}
@@ -1072,9 +1072,80 @@ func TestRunPromptIsEveryRemainingWord(t *testing.T) {
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	if _, err := promptFromArgs(fs); err == nil {
+	if _, err := promptFromArgs(fs, nil); err == nil {
 		t.Error("promptFromArgs accepted no arguments")
 	}
+}
+
+// TestRunDashDashAllowsADashLeadingPrompt covers the one thing "--" is for.
+//
+// `orbix run -- "-5 degrees outside"` was refused with "flags must come before the prompt",
+// so a prompt beginning with a dash could not be passed at all. flag.Parse consumes the
+// separator and hands back what follows, which leaves fs.Args() looking identical to the
+// case where no separator was used -- so the original argument list is what says which
+// happened, and promptFromArgs now takes it.
+//
+// The second half pins that the check it replaced still works: without a separator, a flag
+// after a prompt word is still an error rather than a prompt word.
+func TestRunDashDashAllowsADashLeadingPrompt(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"dash-leading prompt after --", []string{"--", "-5 degrees outside"}, "-5 degrees outside"},
+		{"-- between a flag and the prompt", []string{"-n", "4", "--", "-dash"}, "-dash"},
+		{"-- with a normal prompt", []string{"--", "hello there"}, "hello there"},
+		{"words after -- keep their dashes", []string{"--", "a", "-b"}, "a -b"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("run", flag.ContinueOnError)
+			// One real flag, so the case that puts "--" after a flag parses the way the
+			// command's own FlagSet would. Without it, Parse rejects the flag itself and the
+			// separator never reaches promptFromArgs -- which is a test that fails for a
+			// reason having nothing to do with what it claims to check.
+			n := fs.Int("n", 0, "a flag before the separator")
+			if err := fs.Parse(c.args); err != nil {
+				t.Fatalf("Parse(%v): %v", c.args, err)
+			}
+			if strings.Contains(c.name, "between a flag") && *n != 4 {
+				t.Fatalf("-n parsed as %d, want 4: the flag before -- was not read", *n)
+			}
+			got, err := promptFromArgs(fs, c.args)
+			if err != nil {
+				t.Fatalf("promptFromArgs(%v): %v", c.args, err)
+			}
+			if got != c.want {
+				t.Errorf("promptFromArgs(%v) = %q, want %q", c.args, got, c.want)
+			}
+		})
+	}
+
+	t.Run("a flag after a prompt word is still refused", func(t *testing.T) {
+		args := []string{"hello", "--max-tokens"}
+		fs := flag.NewFlagSet("run", flag.ContinueOnError)
+		if err := fs.Parse(args); err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		_, err := promptFromArgs(fs, args)
+		if err == nil {
+			t.Fatal("a flag after a prompt word was accepted")
+		}
+		if !strings.Contains(err.Error(), "--max-tokens") {
+			t.Errorf("error %q does not name the misplaced flag", err)
+		}
+	})
+
+	t.Run("a lone -- is a missing prompt", func(t *testing.T) {
+		fs := flag.NewFlagSet("run", flag.ContinueOnError)
+		if err := fs.Parse([]string{"--"}); err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if _, err := promptFromArgs(fs, []string{"--"}); err == nil {
+			t.Error("a lone -- was accepted as an empty prompt")
+		}
+	})
 }
 
 // TestFormatValueKeepsUTF8Whole covers the metadata table's truncation.

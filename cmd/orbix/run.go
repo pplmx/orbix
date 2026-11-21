@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ func cmdRun(args []string) error {
 	if err := resolveModel(fs, model); err != nil {
 		return err
 	}
-	prompt, err := promptFromArgs(fs)
+	prompt, err := promptFromArgs(fs, args)
 	if err != nil {
 		return err
 	}
@@ -198,17 +199,43 @@ func cmdRun(args []string) error {
 // bug: with a prompt past the flags, `orbix run Once upon a time` prefilled the single token
 // "Once" (2 tokens including BOS) and threw the rest away. Joining a single quoted word
 // changes nothing, so the documented usage keeps working.
-func promptFromArgs(fs *flag.FlagSet) (string, error) {
+//
+// args is the untruncated argument list, because fs.Args() cannot answer the question that
+// matters here: whether the caller used "--". flag.Parse consumes the separator and hands
+// back what follows it, so a prompt of "-5 degrees outside" arrives as an ordinary
+// argument -- and was then refused, which made "--" useless for the one thing it exists for.
+// Measured: `orbix run --model m -- "-5 degrees outside"` reported that flags must come
+// before the prompt. With the separator present, no word is treated as a flag.
+func promptFromArgs(fs *flag.FlagSet, args []string) (string, error) {
 	words := fs.Args()
 	if len(words) == 0 {
 		return "", fmt.Errorf("run: missing prompt")
 	}
-	for _, w := range words {
+	// Whether flag.Parse already consumed the separator changes what fs.Args() means.
+	// If "--" is still in it, Parse stopped earlier, at a non-flag word, so everything after
+	// the separator is a prompt word and everything before it must not be a flag.
+	// If "--" is gone from fs.Args() but present in args, Parse consumed it after reading the
+	// flags and all remaining words are prompt operands.
+	// If there is no separator at all, every word is checked for a misplaced flag.
+	at := slices.Index(words, "--")
+	check := words
+	switch {
+	case at >= 0:
+		check = words[:at]
+		words = slices.Concat(words[:at], words[at+1:])
+	case slices.Contains(args, "--"):
+		check = nil
+	}
+	for _, w := range check {
 		// Only a leading dash is treated as a flag: a prompt may contain "-" anywhere else,
 		// and "the word starts a flag" is exactly what flag.Parse would have decided too.
 		if strings.HasPrefix(w, "-") {
 			return "", fmt.Errorf("run: flags must come before the prompt, got %q after it", w)
 		}
+	}
+	// A lone "--" leaves no words, which is the same as typing nothing.
+	if len(words) == 0 {
+		return "", fmt.Errorf("run: missing prompt")
 	}
 	return strings.Join(words, " "), nil
 }

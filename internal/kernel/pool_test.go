@@ -418,23 +418,30 @@ func TestRunnerMatMulTransposedIsExactUnderBothSplits(t *testing.T) {
 // which is where a decode step spends most of its time.
 //
 // Read the batch=1 row with care, because it disagrees with the others and it is the one a
-// reader is most likely to quote. There the batched form is slower, and that is not an
-// argument against the batched path. Both sides are parallel: MatVec splits over rows and
-// MatMulTransposed with m=1 splits over columns, so the row compares two parallel spellings
-// of one problem, not batched against serial. What it shows is that matVecRows has the
-// tighter inner loop when there is only one row to reuse.
+// reader is most likely to quote. There the batched form comes out slower. That is not an
+// argument against the batched path: both sides are parallel -- MatVec splits over rows and
+// MatMulTransposed with m=1 splits over columns -- so the row compares two parallel spellings
+// of one problem, not batched against serial.
 //
-// The size of that gap is not worth writing down: three runs of this benchmark put it at
-// 1.33x, 1.24x and 1.29x depending on load, and a direct probe over the same shape -- the
-// same product, timed in a test rather than a benchmark -- measured 1.09x. The direction is
-// stable, the number is not, which is why this paragraph states no nanoseconds.
+// How large that gap is depends entirely on how it is measured, which is the trap here.
+// Repeated runs of this benchmark have reported 1.33x, 1.24x and 1.29x. Timing the same six
+// calls with testing.Benchmark instead -- same shape, same weights, one destination buffer
+// rather than a fresh row per sub-benchmark -- gave 428,259 against 419,361 ns and then
+// 429,854 against 430,216 ns, where the second pair has matvec slower than the first pair's
+// transposed. At that resolution the two are indistinguishable and the "gap" is whatever
+// ordering the sub-benchmarks happened to run in.
 //
-// The crossover is what the benchmark is for: from batch=4 upward the batched form wins by
-// roughly 1.5x and the margin widens with B, so a decode round with two or more sequences is
-// better off batched. Engine.decode has no branch on batch size and always takes the batched
-// path, including for the single active sequence that makes it n=1; the cost of doing so is
-// this row, and the benefit is that the vocabulary weights are read through one loop shape
-// instead of two.
+// The honest reading is that m=1 costs nothing worth branching on, and the batched path is
+// kept for every batch size rather than special-casing n=1: a branch there would buy a
+// measurement artifact and cost a second implementation of the projection.
+//
+// The crossover is what the benchmark is for, and unlike the batch=1 row it survives a change
+// of measurement. Four sequences against the vocabulary projection, timed both ways with
+// testing.Benchmark: 998,121 ns batched against 1,748,048 per call, 1.75x. The margin widens
+// with B, so a decode round with two or more sequences is better off batched. Engine.decode
+// has no branch on batch size and always takes the batched path, including for the single
+// active sequence that makes it n=1; that costs nothing measurable, and it means the
+// vocabulary weights are read through one loop shape instead of two.
 func BenchmarkBatchAmortizes(b *testing.B) {
 	runner := NewRunner(runtime.GOMAXPROCS(0))
 	const vocab, hidden = 32000, 288

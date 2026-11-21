@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/kernel"
 )
 
 // These tests check that restructuring the projections does not change the numbers, and
@@ -193,6 +195,59 @@ func TestPrefillGrowsScratch(t *testing.T) {
 		if v != v {
 			t.Fatalf("logit[%d] is NaN", i)
 		}
+	}
+}
+
+// failingSpansCache wraps a working cache and refuses spans past a position count, so a
+// prefill reaches attentionBatch's error branch from every worker at once.
+//
+// It exists because that branch is otherwise unreachable in a test: Prefill validates that
+// the batch fits the cache's Cap, and the store loop allocates a block for every position
+// before the read loop runs, so a real Cache cannot make spans fail there. Cache is an
+// interface, though, and the branch has to be correct for any implementation of it.
+type failingSpansCache struct {
+	Cache
+	refuseFrom int
+	// err is what spans returns; tests assert on it rather than on a message.
+	err error
+}
+
+func (f *failingSpansCache) spans(layer, kv, n int) ([]span, []span, error) {
+	if n >= f.refuseFrom {
+		return nil, nil, f.err
+	}
+	return f.Cache.spans(layer, kv, n)
+}
+
+// TestPrefillReportsOneErrorFromParallelWorkers covers the error channel out of
+// attentionBatch's parallel read loop.
+//
+// Several workers can fail in the same round, and they used to assign their error to a
+// shared variable with no synchronisation. Run under -race this test reports that as a data
+// race; without the race detector it still pins that the error the caller sees is one of
+// the failures rather than a nil.
+func TestPrefillReportsOneErrorFromParallelWorkers(t *testing.T) {
+	c := defaultTiny()
+	path := buildTinyWeights(t, c)
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	base, err := NewKVCache(cfg, c.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refusal := fmt.Errorf("spans refused")
+	// Refusing from position 2 on leaves several positions in the batch to fail, and the
+	// runner is given enough workers that they run at once.
+	cache := &failingSpansCache{Cache: base, refuseFrom: 2, err: refusal}
+
+	m.run = kernel.NewRunner(8)
+	tokens := []int32{0, 1, 2, 3, 4, 5, 6, 7}
+	if _, err := m.Prefill(cache, tokens, 0); !errors.Is(err, refusal) {
+		t.Fatalf("Prefill error = %v, want it to carry the refusal", err)
 	}
 }
 

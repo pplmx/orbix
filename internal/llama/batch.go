@@ -3,6 +3,7 @@ package llama
 import (
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/pplmx/orbix/internal/kernel"
 )
@@ -370,7 +371,14 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	for i := range scorers {
 		scorers[i] = make([]float32, cfg.ContextLen)
 	}
-	var attErr error
+	// attErr is written by whichever worker fails first and read after the group joins, so
+	// the write needs a lock: several workers can fail at once, and an unsynchronised shared
+	// error is a data race the detector reports rather than a value anyone reads wrong. The
+	// cost is a mutex taken only on the failure path -- the success path never touches it.
+	var (
+		attMu  sync.Mutex
+		attErr error
+	)
 	m.run.Parallel(n, func(i, slot int) {
 		sc := scorers[slot]
 		pos := startPos + i
@@ -379,7 +387,9 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 			kv := h / group
 			keys, values, err := cache.spans(l, kv, m2)
 			if err != nil {
+				attMu.Lock()
 				attErr = err
+				attMu.Unlock()
 				return
 			}
 			if cfg.WindowLen > 0 {
@@ -391,7 +401,9 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 			qh := b.q[qOff : qOff+cfg.HeadDim]
 			out := b.attn[i*qdim+h*cfg.HeadDim : i*qdim+(h+1)*cfg.HeadDim]
 			if err := attend(qh, keys, values, nWin, sc, out, scale); err != nil {
+				attMu.Lock()
 				attErr = err
+				attMu.Unlock()
 				return
 			}
 		}

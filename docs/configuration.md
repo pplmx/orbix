@@ -29,9 +29,15 @@ is then just a pool with one block in practice, which serves text correctly. Mea
 invocation with `--prefix-cache` answers "use --block-size 64 or less".
 
 `--prefix-cache` holds blocks, not just references to them. Every block the index remembers is
-retained until an entry is evicted, and eviction happens when the index reaches its own bound of
-1024 entries -- not when the pool runs short. A pool smaller than that bound therefore fills with
-remembered prefixes long before the index starts evicting.
+retained until its entry is evicted, and there are two eviction triggers, not one:
+
+- when the index reaches its own bound of 1024 entries, it gives up the end of a chain;
+- when the pool runs out of free blocks, `BlockPool.acquire` evicts remembered prefixes before
+  reporting exhaustion, because a cached prefix is a speculation about the future while an
+  allocation is not.
+
+The second is what produces the floor measured below: a pool smaller than the index's bound
+fills with remembered prefixes, and then every new allocation trades one of them away.
 
 Measured on a 48-block pool with distinct prompts: 46 blocks free at the start, 26 after 100
 requests, and **1 after 200, where it stays**. Adding the pool's whole size back as `--blocks`
@@ -40,9 +46,10 @@ it -- shares are only remembered once a block is full.
 
 The practical reading: `--blocks` for a `--prefix-cache` deployment is the working set for
 in-flight requests *plus* whatever the index retains, so sizing it for concurrency alone leaves
-the floor near a handful of blocks. Requests still complete at that floor because each needs only
-a few, which is why the failure it produces is a 400 on an unusually long prompt rather than a
-crash.
+the floor near a handful of blocks. Requests still complete at that floor because eviction frees
+what they need -- measured, a 202-position prompt with a 32-token budget still answered `200`
+against a pool showing one free block -- so the failure is exhaustion on a request larger than
+the pool can ever hold, which is refused with a 400 naming both counts.
 
 `--max-tokens` accepts 0 only on `run`, where "prefill and print nothing" is a result. The
 server cannot express a zero-token request (`max_tokens` is an integer, so 0 is indistinguishable

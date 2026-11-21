@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -906,5 +907,86 @@ func TestPoolAccountingSurvivesALongRun(t *testing.T) {
 			t.Fatalf("cycle %d: the index holds %d entries, past its cap of %d",
 				i, got, maxPrefixEntries)
 		}
+	}
+}
+
+// TestAcquireEvictsARememberedPrefixBeforeRefusing covers the eviction that keeps a
+// prefix-cache deployment from deadlocking itself.
+//
+// The index retains a reference on every block it remembers, so without giving those up a
+// pool fills with remembered prefixes and then reports exhaustion for a request it could
+// have served. acquire therefore evicts remembered entries while the free list is empty,
+// and only reports ErrPoolExhausted once there is nothing speculative left.
+//
+// docs/configuration.md described the opposite -- eviction "when the index reaches its own
+// bound of 1024 entries -- not when the pool runs short" -- and the measured floor of one
+// free block on a 48-block pool is what that rule would produce only by deadlock. The
+// behaviour asserted here is the one the code has.
+func TestAcquireEvictsARememberedPrefixBeforeRefusing(t *testing.T) {
+	cfg := testConfig()
+	// Enough blocks for one sequence's positions and nothing spare, so the second
+	// allocation must come from an evicted entry or not at all.
+	const block, blocks = 2, 2
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: block, Blocks: blocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := pool.EnablePrefixCache()
+	dim := cfg.kvDim()
+	k := make([]float32, dim)
+	v := make([]float32, dim)
+
+	donor := pool.New()
+	tokens := []int32{1, 2}
+	for pos := range len(tokens) {
+		for l := range cfg.Layers {
+			if _, _, err := donor.appendKV(l, k, v, pos); err != nil {
+				t.Fatalf("appendKV(%d): %v", pos, err)
+			}
+		}
+		donor.setLen(pos + 1)
+		if err := donor.rememberFullBlock(tokens, pos); err != nil {
+			t.Fatalf("rememberFullBlock(%d): %v", pos, err)
+		}
+	}
+	if idx.Len() == 0 {
+		t.Fatal("the index remembered nothing, so this test cannot observe eviction")
+	}
+	// Release the sequence's own holds, so the index is the only thing keeping the blocks
+	// alive. A block with a live holder cannot be reclaimed by eviction -- release drops the
+	// count to 1 and it stays out of the free list -- which is the point of the reference
+	// count and not something this test is about.
+	if err := donor.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	// Drain whatever is still free: the index retains a reference on blocks the sequence
+	// already holds, so remembering does not consume a block on its own.
+	for pool.Free() > 0 {
+		if _, err := pool.acquire(); err != nil {
+			t.Fatalf("draining the pool: %v", err)
+		}
+	}
+	if free := pool.Free(); free != 0 {
+		t.Fatalf("Free() = %d, want 0: the pool has to be empty for acquire to evict", free)
+	}
+	remembered := idx.Len()
+
+	// One more allocation than the pool can hold: it must succeed by giving up a
+	// remembered prefix rather than returning ErrPoolExhausted.
+	if _, err := pool.acquire(); err != nil {
+		t.Fatalf("acquire reported %v with %d remembered prefixes to give up", err, remembered)
+	}
+	if got := idx.Len(); got >= remembered {
+		t.Errorf("the index still holds %d entries, want fewer than %d: acquire did not evict",
+			got, remembered)
+	}
+
+	// And with nothing remembered left, exhaustion is still reported rather than the pool
+	// handing out a block it does not have.
+	for idx.Len() > 0 {
+		idx.evictOne()
+	}
+	if _, err := pool.acquire(); !errors.Is(err, ErrPoolExhausted) {
+		t.Errorf("acquire on an empty pool with an empty index = %v, want ErrPoolExhausted", err)
 	}
 }

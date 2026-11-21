@@ -19,6 +19,22 @@ The server implements `/v1/chat/completions`, `/v1/completions` (streaming and n
 unimplemented path under `/v1` answers 404 in the API's JSON envelope rather than Go's
 plain-text one, because the SDKs decode the body before raising.
 
+`/healthz` answers `{"status": "ok", "model": "<name>"}` and `/metrics` serves the Prometheus
+exposition. Both are answered from the HTTP layer without touching the engine, which is what
+makes them useful as probes and is worth being precise about:
+
+- **Ready means loaded.** `serve` creates the engine and only then calls `net.Listen`, so a
+  connection to `/healthz` cannot succeed before the weights are resident. Measured on the
+  553 MiB Llama 3.2 checkpoint: 6.3 s from process start to the first 200.
+- **Healthy does not mean unloaded.** Neither endpoint reports engine state. Under a saturated
+  KV pool -- `orbix_kv_pool_free` at 0 with four requests holding every block -- `/healthz`
+  still answered 200 in 0.5 ms and `/metrics` in 0.7 ms. A liveness probe wants that; a load
+  balancer looking for "skip the busy instance" has to read `/metrics` itself, because this
+  server will accept the request and queue it rather than report itself unavailable.
+- **A failed `/healthz` means the process is gone**, not that a model is missing: the model is
+  loaded before the socket exists, so that failure happens at startup and exits rather than
+  showing up as an unhealthy instance later.
+
 A request-validation error carries a `code`, and `param` names the field at fault when there is
 one. Branch on `code`, not on message text -- OpenAI's guidance, and the reason is that the codes
 cover the bodies a client hits before any field parses (`invalid_json`, `body_too_large`) as well

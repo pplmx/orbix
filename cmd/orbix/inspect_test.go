@@ -544,6 +544,45 @@ func TestTruncateForDisplayKeepsUTF8Valid(t *testing.T) {
 	}
 }
 
+// TestTruncateForDisplayHandlesBudgetsUnderTheEllipsis covers the widths the test above never
+// used: every one of its cases passes a budget around 60, which is what the three call sites
+// use today.
+//
+// That made a panic invisible. `keep := max - 3` goes negative when max is under the
+// ellipsis's own length, and s[:keep] then fails with "slice bounds out of range [:-1]" --
+// measured at max 2, 1 and 0. No caller can reach it now, but the function's contract is
+// "shorten s to max bytes", and a helper that panics for part of its stated domain is a trap
+// for whoever raises or lowers a column width next.
+//
+// Two behaviours are pinned rather than one, because they differ and both are deliberate: a
+// budget between 1 and 3 returns the ellipsis, which is wider than asked and is the only way
+// to say "this was cut"; a budget of 0 returns nothing, because a zero-width column has no
+// room for the marker either.
+func TestTruncateForDisplayHandlesBudgetsUnderTheEllipsis(t *testing.T) {
+	const long = "abcdef"
+	for _, c := range []struct {
+		max  int
+		want string
+	}{
+		{5, "ab..."},
+		{4, "a..."},
+		{3, "..."},
+		{2, "..."},
+		{1, "..."},
+		{0, ""},
+		{-1, ""},
+	} {
+		got := truncateForDisplay(long, c.max)
+		if got != c.want {
+			t.Errorf("truncateForDisplay(%q, %d) = %q, want %q", long, c.max, got, c.want)
+		}
+	}
+	// A multi-byte input at a sub-ellipsis budget must not panic before it reaches the guard.
+	if got := truncateForDisplay("中文字符", 1); got != "..." {
+		t.Errorf("truncateForDisplay(CJK, 1) = %q, want \"...\"", got)
+	}
+}
+
 // TestInspectTruncatesLongTensorNamesOnce covers the table the helper was extended for.
 //
 // The assertion is about the rendered row, not about the helper: the point of the change is

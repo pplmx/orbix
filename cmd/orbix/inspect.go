@@ -396,14 +396,27 @@ const maxValueWidth = 60
 // 61-byte name whose first character is ASCII produced a 60-byte result that utf8.ValidString
 // rejected. The budget includes the ellipsis, so the result stays inside the width callers
 // space their columns for.
+//
+// A budget under the ellipsis's own length returns the ellipsis alone, or nothing for a
+// non-positive budget. Both are wider than the budget asks for and both are honest: there is
+// no shorter way to say "this was cut", and the alternative is what the first version of this
+// did -- `keep := max - 3` went negative and s[:keep] panicked with "slice bounds out of range
+// [:-1]". No caller passes a width that small today (all three use maxValueWidth), which is
+// exactly why the guard is here rather than left to the call sites that exist now.
 func truncateForDisplay(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
+	if max <= 0 {
+		return ""
+	}
+	if max <= len("...") {
+		return "..."
+	}
 	// Keep max-3 bytes plus the ellipsis, retreating to the start of the last rune that would
 	// otherwise be split. utf8.RuneStart walks back over continuation bytes, whose top two
 	// bits are 10.
-	keep := max - 3
+	keep := max - len("...")
 	for keep > 0 && !utf8.RuneStart(s[keep]) {
 		keep--
 	}

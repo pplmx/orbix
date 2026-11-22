@@ -89,11 +89,18 @@
 // carries "usage": null. The counts equal what the non-streaming body reports.
 //
 // A sampling value the API does not define is refused with invalid_value rather than
-// interpreted, and the rule is the same for each: zero is the only distinguishable "unset",
-// so a negative number is a request nobody meant. temperature, top_p, max_tokens and top_k
-// all follow it, and the CLI's --top-k compares the same way. top_k was the exception until
-// its "<= 0" arm swallowed a negative and substituted the server's default -- measured,
-// top_k: -5 generated at 200 with a cutoff the caller neither asked for nor was told about.
+// interpreted: a negative temperature, top_p, max_tokens or top_k is a request nobody meant,
+// and each is answered by naming the value instead of substituting the server's default.
+// top_k was the exception until its "<= 0" arm swallowed a negative -- measured, top_k: -5
+// generated at 200 with a cutoff the caller neither asked for nor was told about.
+//
+// Zero is not in that set, but it does not mean the same thing everywhere, which is why the
+// fields are declared with the types they are. max_tokens and top_k are plain ints, so zero is
+// the only distinguishable "not sent" and takes the server's default. temperature uses zero
+// for greedy, which is itself a meaningful request. top_p is a pointer precisely so an omitted
+// value and an explicit 0 differ: an omitted one takes the server default, and an explicit 0
+// means "no nucleus", the same thing the CLI's --top-p documents and the same distribution the
+// sampler produces at 1.
 //
 // A stop string is matched on decoded text, so a multi-token string truncates correctly; what
 // it does not do is stop generation sooner. The sequence runs to its budget unread while the

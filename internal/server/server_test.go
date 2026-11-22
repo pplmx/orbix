@@ -2037,9 +2037,15 @@ func TestTopPIsHonoured(t *testing.T) {
 
 // TestTopPRejectsOutOfRange covers the validation.
 //
-// Both ends are refused rather than clamped. Zero and one mean different things to different
-// callers -- "no limit" or "only the best token" -- so guessing would change a caller's output
-// silently, which is the failure mode this whole area is about.
+// The accepted range is [0, 1] and what is refused is a value with no reading at all. Zero is
+// accepted because it is the documented "disabled" value on the CLI's --top-p and
+// llama.Temperature treats it as no nucleus, and one is accepted because keeping every
+// candidate is what happens without the limit. Clamping -0.1 to 0 would turn a typo into "off"
+// without saying so, which is why the lower bound is a refusal rather than a floor.
+//
+// The accepted endpoints are asserted too, and that half is the one this test used to lack: a
+// comment in server.go claimed the range was (0, 1] while the check was "< 0 || > 1", and
+// nothing here disagreed with the comment, so the two drifted apart unnoticed.
 func TestTopPRejectsOutOfRange(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()
@@ -2051,6 +2057,19 @@ func TestTopPRejectsOutOfRange(t *testing.T) {
 			t.Errorf("top_p=%s: status = %d, want 400", p, resp.StatusCode)
 		}
 		_ = resp.Body.Close()
+	}
+	// Both accepted endpoints, since "0 disables it" is the claim a reader acts on.
+	for _, p := range []string{"0", "1"} {
+		t.Run("top_p="+p+" is accepted", func(t *testing.T) {
+			body := fmt.Sprintf(`{"model": %q, "prompt": "hi", "max_tokens": 2, "temperature": 1, "top_p": %s}`,
+				srv.cfg.ModelName, p)
+			resp := post(t, h, "/v1/completions", body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				out := decodeBody[errorBody](t, resp)
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+			}
+		})
 	}
 }
 

@@ -1568,8 +1568,15 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (ll
 		topK = s.cfg.TopK
 	}
 	// TopP defaults to the server's own value when the request omits it. A value outside
-	// (0, 1] is refused rather than clamped: 0 and 1 both mean "no limit" to some callers
-	// and "only the best token" to others, and guessing would change the output silently.
+	// [0, 1] is refused rather than clamped. Zero is accepted and means "no nucleus": it is
+	// the documented "disabled" value on the CLI's --top-p, and llama.Temperature treats a
+	// value at or below zero the same way as one at or above 1 -- measured, top_p: 0 and
+	// top_p: 1 returned identical text for the same seed. What is refused is a value with no
+	// reading at all, since clamping -0.1 to 0 would let a typo through as "off".
+	//
+	// This comment said "(0, 1]" and called 0 one of the ambiguous values, which stopped
+	// being true when the lower bound was widened: the check below is "< 0 || > 1", and a
+	// comment naming a different range than the code is how a reader learns the wrong rule.
 	p := s.cfg.TopP
 	if topP != nil {
 		p = *topP

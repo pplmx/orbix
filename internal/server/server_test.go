@@ -2467,6 +2467,12 @@ func TestSamplerErrorsNameTheField(t *testing.T) {
 		// would not pass either.
 		{"top_p below zero", `{"prompt": "Once upon a time", "max_tokens": 1, "top_p": -0.5}`,
 			"top_p"},
+		// top_k was the one sampling knob that took a negative value silently: the "<= 0"
+		// arm meant "unset", so top_k: -5 ran with the server default and nothing said so.
+		// The CLI's --top-k refuses it, and so do max_tokens and top_p above, which made
+		// this the only place a caller's value was replaced by a different one.
+		{"negative top_k", `{"prompt": "Once upon a time", "max_tokens": 1, "top_k": -5}`,
+			"top_k"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -88,6 +88,13 @@
 // whose usage holds the whole request's counts, and every ordinary chunk in the same stream
 // carries "usage": null. The counts equal what the non-streaming body reports.
 //
+// A sampling value the API does not define is refused with invalid_value rather than
+// interpreted, and the rule is the same for each: zero is the only distinguishable "unset",
+// so a negative number is a request nobody meant. temperature, top_p, max_tokens and top_k
+// all follow it, and the CLI's --top-k compares the same way. top_k was the exception until
+// its "<= 0" arm swallowed a negative and substituted the server's default -- measured,
+// top_k: -5 generated at 200 with a cutoff the caller neither asked for nor was told about.
+//
 // A stop string is matched on decoded text, so a multi-token string truncates correctly; what
 // it does not do is stop generation sooner. The sequence runs to its budget unread while the
 // response is already cut. A stop that encodes to one token ("\n", "###") is handed to the

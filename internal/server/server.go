@@ -1549,12 +1549,23 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (ll
 	if temp != nil {
 		t = *temp
 	}
-	if topK <= 0 {
-		topK = s.cfg.TopK
-	}
 	if t < 0 {
 		return nil, newParamError("temperature", "invalid_value",
 			"temperature must not be negative, got %v", t)
+	}
+	// A negative top_k is refused rather than treated as "unset". The field is a plain int,
+	// so zero is the only distinguishable "not sent", and the code below reaches it with
+	// "<= 0" -- which meant top_k: -5 silently became the server's default and the request
+	// ran with a cutoff the caller did not ask for and was not told about. The CLI's --top-k
+	// already refuses it for the same reason (see cmd/orbix's run and chat), and max_tokens
+	// and top_p above are refused here, so this was the one sampling knob that quietly
+	// substituted a value.
+	if topK < 0 {
+		return nil, newParamError("top_k", "invalid_value",
+			"top_k must not be negative, got %d", topK)
+	}
+	if topK == 0 {
+		topK = s.cfg.TopK
 	}
 	// TopP defaults to the server's own value when the request omits it. A value outside
 	// (0, 1] is refused rather than clamped: 0 and 1 both mean "no limit" to some callers

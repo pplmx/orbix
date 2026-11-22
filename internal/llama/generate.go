@@ -63,9 +63,13 @@ func (Greedy) Next(logits []float32) int32 {
 type Temperature struct {
 	Temp float32
 	TopK int
-	// TopP is the nucleus threshold in (0, 1]. Zero or negative disables it, and so
-	// does a value at or above 1, because keeping every candidate is what happens
-	// without the limit.
+	// TopP is the nucleus threshold. The nucleus is computed when it is strictly between 0
+	// and 1; zero and negative disable it, and so does a value at or above 1, because
+	// keeping every candidate is what happens without the limit. Both ends are therefore
+	// valid settings rather than only the open interval, which is what the callers document
+	// -- the CLI's --top-p calls 0 the value that disables the cutoff, and the server
+	// accepts the whole of [0, 1]. TestTopPOffWhenDisabled pins that 0, -1, 1 and 2 all
+	// leave the distribution alone.
 	TopP float32
 	// NextFloat returns a value in [0, 1). It is a field rather than a call to
 	// math/rand so a seed and a test can control it without global state.

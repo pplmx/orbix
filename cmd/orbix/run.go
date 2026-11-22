@@ -55,9 +55,12 @@ func cmdRun(args []string) error {
 	if *topK < 0 {
 		return fmt.Errorf("run: --top-k must not be negative (0 disables it)")
 	}
-	// A probability outside (0, 1] is refused rather than clamped, for the same reason as
-	// --top-k: 0 and 1 both read as "no limit" to some callers and "only the best token" to
-	// others, so interpreting either would change the output without saying so.
+	// A probability outside [0, 1] is refused rather than clamped, for the same reason as
+	// --top-k. Zero and one both mean "no limit" to the sampler, and the flag documents 0 as
+	// the value that disables the cutoff, so accepting them is the point rather than a
+	// guess. What is refused is a value with no reading at all: clamping -0.1 up to 0 would
+	// silently turn a typo into "off", and lowering 1.5 would apply a cutoff the caller did
+	// not ask for.
 	if math.IsNaN(*topP) || *topP < 0 || *topP > 1 {
 		return fmt.Errorf("run: --top-p must be between 0 and 1 (0 disables it)")
 	}

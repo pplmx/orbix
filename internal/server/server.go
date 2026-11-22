@@ -677,48 +677,116 @@ func (s *Server) handleUnimplemented(w http.ResponseWriter, r *http.Request) {
 // sampling, with the reason this server cannot honour it.
 type shapeField struct {
 	name string
-	// asked reports whether the decoded request set this field. It takes the request by
-	// pointer through any because the two endpoints have different structs and the field
-	// names do not line up exactly (chat has top_logprobs, completions has best_of and
-	// suffix), so a shared name list would have to say which endpoint each belongs to.
+	// asked reports whether the request asks for a response shape this server does not
+	// produce. It is deliberately not "was the field sent": a field that was sent with the
+	// value the response already carries is a request this server can serve.
+	//
+	// Sending such a value is not hypothetical. The official SDKs serialise a keyword
+	// argument the caller passed even when it equals the API's default, so
+	// completions.create(n=1) puts "n": 1 on the wire. Refusing that told a caller
+	// "n>1 needs several sequences" about n=1, and the request was one this server answers
+	// correctly.
+	//
+	// It takes the request by pointer through any because the two endpoints have different
+	// structs and the field names do not line up exactly (chat has top_logprobs,
+	// completions has best_of and suffix), so a shared name list would have to say which
+	// endpoint each belongs to.
 	asked func(any) bool
-	why   string
+	// why is what a refusal says instead of the value. It has to be true of every value
+	// asked accepts, which is why the ranges are narrowed in asked rather than here.
+	why string
+	// invalid reports a value the API does not define at all, and the message to answer
+	// with. It runs before asked so a negative count is reported as the malformed number it
+	// is rather than as an unimplemented feature -- "n>1 needs several sequences" is a lie
+	// about n=-1, and a caller who reads it changes the wrong thing.
+	invalid func(any) (string, bool)
+}
+
+// negativeCount is the invalid check shared by the count-valued shape fields.
+func negativeCount(name string, v int) (string, bool) {
+	if v < 0 {
+		return fmt.Sprintf("%s must not be negative, got %d", name, v), true
+	}
+	return "", false
 }
 
 // chatShapeFields are the response-shape fields the chat endpoint refuses.
 var chatShapeFields = []shapeField{
-	{"n", func(v any) bool { return v.(*chatRequest).N != 0 },
-		"n>1 needs several sequences per request, and this server generates one"},
-	{"logprobs", func(v any) bool { return v.(*chatRequest).Logprobs != nil },
-		"token log-probabilities are not computed or returned"},
-	{"top_logprobs", func(v any) bool { return v.(*chatRequest).TopLogprobs != nil },
-		"alternative-token log-probabilities are not computed or returned"},
-	{"echo", func(v any) bool { return v.(*chatRequest).Echo != nil },
-		"the response never includes the prompt, and a silent omission is worse than a refusal"},
-	{"max_completion_tokens", func(v any) bool { return v.(*chatRequest).MaxCompletionTokens != nil },
-		"this server reads max_tokens; sending only the newer name would silently generate " +
+	{name: "n",
+		asked:   func(v any) bool { return v.(*chatRequest).N > 1 },
+		why:     "n>1 needs several sequences per request, and this server generates one",
+		invalid: func(v any) (string, bool) { return negativeCount("n", v.(*chatRequest).N) }},
+	{name: "logprobs",
+		asked: func(v any) bool {
+			p := v.(*chatRequest).Logprobs
+			return p != nil && *p
+		},
+		why: "token log-probabilities are not computed or returned"},
+	{name: "top_logprobs",
+		asked: func(v any) bool {
+			p := v.(*chatRequest).TopLogprobs
+			return p != nil && *p > 0
+		},
+		why: "alternative-token log-probabilities are not computed or returned",
+		invalid: func(v any) (string, bool) {
+			return negativeCount("top_logprobs", derefInt(v.(*chatRequest).TopLogprobs))
+		}},
+	{name: "echo",
+		asked: func(v any) bool {
+			p := v.(*chatRequest).Echo
+			return p != nil && *p
+		},
+		why: "the response never includes the prompt, and a silent omission is worse than a refusal"},
+	{name: "max_completion_tokens",
+		asked: func(v any) bool { return v.(*chatRequest).MaxCompletionTokens != nil },
+		why: "this server reads max_tokens; sending only the newer name would silently generate " +
 			"the default length instead of the one asked for"},
 }
 
 // completionShapeFields are the response-shape fields the completions endpoint refuses.
 var completionShapeFields = []shapeField{
-	{"n", func(v any) bool { return v.(*completionRequest).N != 0 },
-		"n>1 needs several sequences per request, and this server generates one"},
-	{"logprobs", func(v any) bool { return v.(*completionRequest).Logprobs != nil },
-		"token log-probabilities are not computed or returned"},
-	{"echo", func(v any) bool { return v.(*completionRequest).Echo != nil },
-		"the response never includes the prompt, and a silent omission is worse than a refusal"},
-	{"suffix", func(v any) bool { return v.(*completionRequest).Suffix != nil },
-		"suffix generation is not implemented, so the reply would silently lack it"},
-	{"best_of", func(v any) bool { return v.(*completionRequest).BestOf != 0 },
-		"best_of needs several candidates per request, and this server samples one"},
-	{"max_completion_tokens", func(v any) bool { return v.(*completionRequest).MaxCompletionTokens != nil },
-		"this server reads max_tokens; sending only the newer name would silently generate " +
+	{name: "n",
+		asked:   func(v any) bool { return v.(*completionRequest).N > 1 },
+		why:     "n>1 needs several sequences per request, and this server generates one",
+		invalid: func(v any) (string, bool) { return negativeCount("n", v.(*completionRequest).N) }},
+	{name: "logprobs",
+		// Unlike the chat endpoint's logprobs, which is a bool, this one is a count: any
+		// value at all asks for the sampled token's log-probability in the body, which the
+		// response never carries.
+		asked: func(v any) bool { return v.(*completionRequest).Logprobs != nil },
+		why:   "token log-probabilities are not computed or returned"},
+	{name: "echo",
+		asked: func(v any) bool {
+			p := v.(*completionRequest).Echo
+			return p != nil && *p
+		},
+		why: "the response never includes the prompt, and a silent omission is worse than a refusal"},
+	{name: "suffix",
+		asked: func(v any) bool {
+			p := v.(*completionRequest).Suffix
+			return p != nil && *p != ""
+		},
+		why: "suffix generation is not implemented, so the reply would silently lack it"},
+	{name: "best_of",
+		asked:   func(v any) bool { return v.(*completionRequest).BestOf > 1 },
+		why:     "best_of needs several candidates per request, and this server samples one",
+		invalid: func(v any) (string, bool) { return negativeCount("best_of", v.(*completionRequest).BestOf) }},
+	{name: "max_completion_tokens",
+		asked: func(v any) bool { return v.(*completionRequest).MaxCompletionTokens != nil },
+		why: "this server reads max_tokens; sending only the newer name would silently generate " +
 			"the default length instead of the one asked for"},
 }
 
-// rejectShapeFields writes a 400 naming every response-shape field the request asked for,
-// and reports whether it wrote one.
+// derefInt reads an optional count as a number, treating absent as zero.
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// rejectShapeFields writes a 400 for a response-shape request field this server cannot
+// honour, and reports whether it wrote one.
 //
 // These are refused rather than ignored, which is the opposite of how this server treats an
 // unknown field like logit_bias, and the difference is what the client does with the answer.
@@ -729,10 +797,30 @@ var completionShapeFields = []shapeField{
 // in the caller's code, far from the request that caused it, and the 400 here is the same
 // fact said at the call site.
 //
+// The line runs through the value, not the field name. n=3 asks for three choices and gets
+// one; n=1 asks for the one choice the response has, so it is served. Narrowing this to the
+// values a client can actually read a difference from is what keeps the refusal from costing
+// a request it should have answered: measured through the OpenAI Python SDK, n=1, best_of=1,
+// echo=false and logprobs=false were all refused with "this server does not implement ..."
+// before, and each is a keyword the SDK passes through verbatim when the caller sets it.
+//
 // Every field is named rather than the first: a caller fixing these should not need one
 // round trip per field. That is the rule cmd/orbix's bench follows for the flags --suite
 // measures over, and the reason is the same -- one request, one complete list of what to fix.
 func (s *Server) rejectShapeFields(w http.ResponseWriter, fields []shapeField, req any) bool {
+	// A malformed value is reported before an unimplemented one. The two ask different
+	// things of the caller: a negative count has to be changed whatever the server supports,
+	// while an unimplemented field has to be dropped.
+	for _, f := range fields {
+		if f.invalid == nil {
+			continue
+		}
+		if msg, bad := f.invalid(req); bad {
+			writeRequestError(w, http.StatusBadRequest,
+				newParamError(f.name, "invalid_value", "%s", msg))
+			return true
+		}
+	}
 	var names, whys []string
 	for _, f := range fields {
 		if f.asked(req) {

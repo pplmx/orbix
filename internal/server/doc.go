@@ -70,6 +70,18 @@
 // max_tokens rather than accompanying it, so a migrated client sends only the newer name and
 // would otherwise get the default length with nothing saying so.
 //
+// What decides a refusal is the value, not the field's presence. A field sent with the value
+// the response already carries is a request this server serves: n: 1, best_of: 1, echo: false,
+// logprobs: false, top_logprobs: 0 and suffix: "" all answer 200. The official SDKs serialise
+// a keyword argument the caller passed even when it equals the API default, so
+// completions.create(n=1) sends "n": 1 -- and refusing on presence answered it with
+// "n>1 needs several sequences", which is a sentence about a different request.
+//
+// A value the API does not define is malformed rather than unimplemented: n: -1 answers 400
+// invalid_value naming the number. The distinction is whose decision it is. A negative count
+// has to change whatever this server implements, while a unimplemented field has to be dropped,
+// and naming the wrong one sends the caller to edit the wrong part of the request.
+//
 // stream_options.include_usage is honoured rather than ignored, because it is the only way a
 // streaming caller learns what it spent: without it a streamed response reports no usage at
 // all. With it, one extra chunk arrives before [DONE] whose choices is an empty array and

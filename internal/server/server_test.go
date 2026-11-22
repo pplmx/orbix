@@ -2752,6 +2752,128 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 	}
 }
 
+// TestShapeFieldsAreRefusedByValueNotPresence covers the other half of the refusal rule.
+//
+// The rule itself is right: a field that describes the response shape has to be refused,
+// because a client that sent n=3 reads choices[2] and a silently shorter answer fails in the
+// caller's code. What was wrong was the test for it, which was "was the field sent". The
+// question is "does the value ask for something the response does not have", and the two
+// differ for every field whose zero value is a shape this server already produces.
+//
+// That difference is not academic: the official OpenAI SDKs serialise a keyword argument the
+// caller passed even when it equals the API default, so completions.create(n=1, best_of=1,
+// echo=False) puts all three on the wire. Measured against the running server, each was
+// refused with "this server does not implement n; n>1 needs several sequences per request"
+// -- a sentence about n=3, sent in answer to n=1, for a request the server serves correctly.
+//
+// The counterpart is that a malformed value is now named as such. n=-1 is not an
+// unimplemented feature, it is a number the API does not define, and answering it with the
+// n>1 text sends the caller to change the wrong thing.
+func TestShapeFieldsAreRefusedByValueNotPresence(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// The value the response already carries, sent explicitly: all of these are 200.
+	served := []struct{ name, path, body string }{
+		{"n=1 on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "n": 1}`},
+		{"n=1 on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "n": 1}`},
+		{"best_of=1 on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "best_of": 1}`},
+		{"echo=false on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "echo": false}`},
+		{"echo=false on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": false}`},
+		{"logprobs=false on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": false}`},
+		{"top_logprobs=0 on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": 0}`},
+		{"suffix empty on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "suffix": ""}`},
+	}
+	for _, c := range served {
+		t.Run(c.name+" is served", func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				body := decodeBody[errorBody](t, resp)
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body.Error.Message)
+			}
+		})
+	}
+
+	// The one value past the default still asks for a shape the server does not produce.
+	stillRefused := []struct{ name, path, body, field string }{
+		{"n=2 on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "n": 2}`, "n"},
+		{"n=2 on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "n": 2}`, "n"},
+		{"best_of=2 on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of"},
+		{"echo=true on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "echo": true}`, "echo"},
+		{"echo=true on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": true}`, "echo"},
+		{"logprobs=true on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": true}`, "logprobs"},
+		{"top_logprobs=1 on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": 1}`, "top_logprobs"},
+		{"suffix on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix"},
+	}
+	for _, c := range stillRefused {
+		t.Run(c.name+" is refused", func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			body := decodeBody[errorBody](t, resp)
+			if body.Error.Param != c.field {
+				t.Errorf("param = %q, want %q", body.Error.Param, c.field)
+			}
+			if body.Error.Code != "unsupported_parameter" {
+				t.Errorf("code = %q, want unsupported_parameter", body.Error.Code)
+			}
+		})
+	}
+
+	// A negative count is a malformed value, not an unimplemented feature: the answer has to
+	// say the number is wrong so the caller changes it, rather than describe what n=3 would
+	// need. The parameter name and the code are what a client branches on.
+	malformed := []struct{ name, path, body, field string }{
+		{"n=-1 on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "n": -1}`, "n"},
+		{"n=-1 on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "n": -1}`, "n"},
+		{"best_of=-1 on completions", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "best_of": -1}`, "best_of"},
+		{"top_logprobs=-1 on chat", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": -1}`, "top_logprobs"},
+	}
+	for _, c := range malformed {
+		t.Run(c.name+" is invalid_value", func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			body := decodeBody[errorBody](t, resp)
+			if body.Error.Param != c.field {
+				t.Errorf("param = %q, want %q", body.Error.Param, c.field)
+			}
+			if body.Error.Code != "invalid_value" {
+				t.Errorf("code = %q, want invalid_value", body.Error.Code)
+			}
+			// The message names the number that arrived, so the caller sees what to change
+			// rather than having to infer it from the field name.
+			if !strings.Contains(body.Error.Message, "-1") {
+				t.Errorf("message %q does not name the value that was sent", body.Error.Message)
+			}
+		})
+	}
+}
+
 // TestValidationErrorsNameTheField covers error.param on the two required-field checks.
 //
 // OpenAI's error object documents `param` as the field at fault for a request-validation

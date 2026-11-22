@@ -65,6 +65,21 @@ member and is ignored, so `suffix` sent to chat is silently dropped rather than 
 `max_completion_tokens` is refused on both, for a sharper reason: it replaces `max_tokens` rather
 than accompanying it, so a migrated client would silently get the default length.
 
+The refusal turns on the **value**, not on the field being present. A field that was sent with
+the value the response already carries asks for nothing this server would not have done anyway,
+so it is served: `n: 1`, `best_of: 1`, `echo: false`, `logprobs: false`, `top_logprobs: 0` and
+`suffix: ""` all answer 200. That matters because the official SDKs serialise a keyword argument
+the caller passed even when it equals the API default -- `completions.create(n=1)` puts `"n": 1`
+on the wire. Refusing on presence told such a caller `n>1 needs several sequences` about `n=1`,
+for a request it serves correctly; measured through the OpenAI Python SDK, four such calls went
+from 400 to 200.
+
+A value the API does not define is reported as malformed rather than unimplemented: `n: -1` is
+400 `invalid_value` naming the number, not `unsupported_parameter` describing `n: 3`. The two ask
+different things of the caller. A negative count has to change whatever the server supports,
+while an unimplemented field has to be dropped, and saying the wrong one sends them to edit the
+wrong part of the request.
+
 `stream_options.include_usage` is honoured: it is the only way a streaming caller learns what it
 spent. The extra chunk carries the counts before `[DONE]` and matches the non-streaming body.
 

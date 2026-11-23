@@ -279,10 +279,10 @@ check every claim the project makes. `go test ./... -v | grep -c '^--- SKIP'` is
 it is worth re-measuring rather than trusting these figures -- adding a gated test raises it.
 Measured 2026-11:
 
-| Gates set     | Skipped |
-| ------------- | ------- |
-| none          | 24      |
-| all thirteen  | 0       |
+| Gates set    | Skipped |
+| ------------ | ------- |
+| none         | 25      |
+| all fourteen | 0       |
 
 Both figures re-measured 2026-11 with `go test -v ./...`. The table names two rows rather than a
 ladder because the middle rungs stop meaning anything once the gates outnumber the checkpoints: a
@@ -290,8 +290,9 @@ row for "the four original" said something when four was most of them and says n
 number under it moves whenever a gated test is added. What a reader needs is where the count starts
 and that it reaches zero.
 
-There are thirteen gates: nine named directly at the call site and four that
-`internal/quant/formats_real_test.go` looks up from a table.
+There are fourteen gates: nine named directly at the call site, four that
+`internal/quant/formats_real_test.go` looks up from a table, and one added with the FIM prompt check
+that is easy to miss because nothing else reads it.
 
 | Variable        | Checkpoint                   | Covers                        |
 | --------------- | ---------------------------- | ----------------------------- |
@@ -308,16 +309,23 @@ There are thirteen gates: nine named directly at the call site and four that
 | `MODEL_Q5_0`    | a Q5_0 file                  | `Q5_0` decode                 |
 | `MODEL_Q5_1`    | a Q5_1 file                  | `Q5_1` decode                 |
 | `MODEL_IQ4_NL`  | an IQ4_NL file               | `IQ4_NL` decode               |
+| `CODER_MODEL`   | `Qwen2.5-Coder-0.5B` GGUF    | FIM prompt token ids          |
 
 The four quantization ones are easy to miss when auditing this list: they are not `os.Getenv("...")`
 at the call site but rows in a table that `TestRealWeightMatrixStats` walks, so a search for
 `Getenv("` finds nine gates and the four rows are invisible. Measured both ways -- 24 skipped with no
-variables, 0 with all thirteen.
+variables, 0 with all fourteen.
 
 That search is worth trusting only after measuring, because the two answers look equally plausible.
 Setting the nine that `Getenv("` finds leaves exactly one skip, `TestRealWeightMatrixStats`, which is
-the one test the four table rows feed. So nine gates do not reach zero and thirteen do, and the count
+the one test the four table rows feed. So nine gates do not reach zero and fourteen do, and the count
 in the table above is the one that was measured rather than derived from a grep.
+
+That paragraph has now been wrong once in each direction, which is worth saying because it is the
+whole point of keeping the count. It first said ten, then sixteen, then thirteen; each figure was
+believed until someone ran the command. The last correction added a gate twelve hours after the table
+was written: `CODER_MODEL`, for the FIM prompt check, which the count did not know about because it
+was added in the same round as the paragraph that enumerated the others.
 
 `MISTRAL_MODEL` covers the format revision rather than an architecture: the first real Mistral
 checkpoint reached this project was GGUF **version 2**, and the file declares `llama` with no sliding
@@ -326,7 +334,13 @@ window. It is the test that would have caught the refusal of every version 2 fil
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \
 QWEN2_MODEL=/tmp/qwen2-f32.gguf \
+QWEN3_MODEL=/tmp/qwen3.gguf \
+MISTRAL_MODEL=/tmp/mistral.gguf \
+GEMMA_MODEL=/tmp/gemma-2b.gguf \
+GEMMA2_MODEL=/tmp/gemma2.gguf \
+GEMMA3_MODEL=/tmp/gemma3-q8.gguf \
 MIXTRAL_MODEL=/tmp/tinymoe2m.F32.gguf \
+CODER_MODEL=/tmp/qwen-coder.gguf \
 MODEL_KQUANT=/tmp/tinyllama-q2k.gguf \
 MODEL_Q4_1=/tmp/ts-Q4_1.gguf \
 MODEL_Q5_0=/tmp/ts-Q5_0.gguf \
@@ -334,6 +348,10 @@ MODEL_Q5_1=/tmp/ts-Q5_1.gguf \
 MODEL_IQ4_NL=/tmp/ts-IQ4_NL.gguf \
 CGO_ENABLED=0 go test ./...
 ```
+
+This block used to set eight variables while the table above listed fourteen, so a reader who ran it
+got a skip and no explanation. The count in the table is what `go test -v ./... | grep -c '^--- SKIP'`
+reports with every one of these set, and it has been re-measured after each gate was added.
 
 `MODEL_KQUANT` is the one path that must not be reused casually. Its test skips when the file
 holds no K-quant tensor, so pointing it at an F32 or Q4_0 file reports a skip rather than a

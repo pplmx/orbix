@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -944,5 +945,42 @@ func TestPoolCapacityWarningNamesTheStatusTheServerSends(t *testing.T) {
 	got := strconv.Itoa(resp.StatusCode)
 	if !strings.Contains(warning, got) {
 		t.Errorf("the server answered %d but the warning says:\n%s", resp.StatusCode, warning)
+	}
+}
+
+// TestHTTPServerBaseContextIsTheCallers covers the one thing newHTTPServerWithRequests does.
+//
+// net/http derives each request's context from a background context unless BaseContext is set, so
+// without this a request in flight during shutdown cannot be told to stop: the handler sees a live
+// context, keeps generating, and the grace period expires with the connection closed underneath it.
+// The comment above the function records what that looks like from the client -- curl exit 52,
+// "empty reply from server", for every request in flight, where the same requests answered 200 once
+// the base context was cancellable.
+//
+// The assertion is identity, not behaviour: the server has to carry the exact context it was given,
+// because a copy or a derived context would be a different cancellation signal and the handler
+// would be watching the wrong one. Cancelling through the original has to be visible through
+// srv.BaseContext's result.
+func TestHTTPServerBaseContextIsTheCallers(t *testing.T) {
+	base, cancel := context.WithCancel(context.Background())
+	srv := newHTTPServerWithRequests(http.NotFoundHandler(), time.Minute, time.Second, base)
+
+	if srv.BaseContext == nil {
+		t.Fatal("BaseContext is nil, so every request would get a background context and a" +
+			" shutdown could not cancel anything")
+	}
+	got := srv.BaseContext(nil)
+	if got != base {
+		t.Error("BaseContext returned a different context than the caller's; cancelling the" +
+			" caller's context would not reach the handlers")
+	}
+
+	// The point of carrying it: cancelling the caller's context has to reach the one the server
+	// hands out.
+	cancel()
+	select {
+	case <-got.Done():
+	default:
+		t.Error("the caller's cancellation is not visible through the server's base context")
 	}
 }

@@ -317,9 +317,13 @@ func (s *Server) Shutdown() {
 // refused instead. There are two kinds of unsupported field and they differ in what a
 // client does when the server pretends not to see one:
 //
-//   - A field that only tunes sampling (presence_penalty) leaves the response a client can still
-//     read: it is the wrong text, but choices[0].text is where it expected it. Ignoring it costs
-//     quality and keeps working.
+//   - A field that only tunes sampling leaves the response a client can still read: it is the
+//     wrong text, but choices[0].text is where it expected it. Ignoring it costs quality and keeps
+//     working. `presence_penalty` and `frequency_penalty` were in this list and are now honoured:
+//     they still do not change the response's shape, but a caller who sets one is asking for
+//     different text rather than expressing a tolerance, and the two fields measured identical
+//     output with and without them. What remains in the list is `response_format`, which describes
+//     a constraint this server cannot check after the fact.
 //
 // `logit_bias` used to be in that second list and does not belong there. OpenAI documents -100
 // and 100 as "a ban or exclusive selection", so a client that bans a token is relying on it not
@@ -343,6 +347,11 @@ type chatRequest struct {
 	// ignored for that reason: a client that bans a token is relying on it not appearing, and
 	// silence would break that reliance without saying so.
 	LogitBias map[string]float64 `json:"logit_bias"`
+	// PresencePenalty and FrequencyPenalty discourage repetition over the tokens already seen.
+	// Honoured for the same reason: they change what the text says, and ignoring them produces
+	// a plausible answer to a request the caller did not make.
+	PresencePenalty  *float64 `json:"presence_penalty"`
+	FrequencyPenalty *float64 `json:"frequency_penalty"`
 
 	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens, and it is honoured rather
 	// than refused: max_tokens is deprecated in favour of it, so a migrated client sends only
@@ -510,6 +519,11 @@ type completionRequest struct {
 	// LogitBias is honoured: it is a constraint rather than a preference. See the note on
 	// chatRequest for why that distinction decides between honouring and ignoring a field.
 	LogitBias map[string]float64 `json:"logit_bias"`
+	// PresencePenalty and FrequencyPenalty are honoured for the same reason logit_bias is: a
+	// caller who sets them is asking for different text, and the request is the only place the
+	// setting can come from. See the class comment.
+	PresencePenalty  *float64 `json:"presence_penalty"`
+	FrequencyPenalty *float64 `json:"frequency_penalty"`
 
 	// MaxCompletionTokens is honoured here even though OpenAI defines it only for chat: the
 	// official SDK's completions parameters do not include it, so no SDK client can send it,
@@ -917,9 +931,21 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, http.StatusBadRequest, err)
 		return
 	}
+	presence, err := checkPenalty(req.PresencePenalty, "presence_penalty")
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+	frequency, err := checkPenalty(req.FrequencyPenalty, "frequency_penalty")
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
 	s.generate(w, r, generateParams{
 		prompt:              prompt,
 		logitBias:           bias,
+		presencePenalty:     presence,
+		frequencyPenalty:    frequency,
 		maxTokens:           derefInt(req.MaxTokens),
 		maxTokensGiven:      req.MaxTokens != nil,
 		priority:            req.Priority,
@@ -1075,9 +1101,21 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, http.StatusBadRequest, err)
 		return
 	}
+	presence, err := checkPenalty(req.PresencePenalty, "presence_penalty")
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+	frequency, err := checkPenalty(req.FrequencyPenalty, "frequency_penalty")
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
 	s.generate(w, r, generateParams{
 		prompt:              req.Prompt,
 		logitBias:           bias,
+		presencePenalty:     presence,
+		frequencyPenalty:    frequency,
 		maxTokens:           derefInt(req.MaxTokens),
 		maxTokensGiven:      req.MaxTokens != nil,
 		priority:            req.Priority,
@@ -1204,6 +1242,11 @@ type generateParams struct {
 	// logitBias shifts named tokens' logits before sampling. It reaches the greedy path too,
 	// which is the difference between a ban and a suggestion.
 	logitBias []llama.TokenBias
+	// presencePenalty and frequencyPenalty discourage tokens already seen. They reach the
+	// engine rather than a sampler because they need the generated run, which a sampler does not
+	// receive.
+	presencePenalty  float32
+	frequencyPenalty float32
 	// maxTokensGiven reports that max_tokens was sent, which matters because zero is a budget
 	// of zero rather than "unset". The field is a pointer on the wire so the two are
 	// distinguishable; this carries that distinction into generate, where the budget is
@@ -1473,22 +1516,24 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	chans := make([]<-chan engine.Event, 0, choices)
 	for i, sm := range samplers {
 		ch, err := s.eng.Submit(engine.Request{
-			Prompt:        promptTokens,
-			ChoiceIndex:   i,
-			ChoiceCount:   len(samplers),
-			MaxTokens:     maxTokens,
-			Priority:      p.priority,
-			Stop:          stopIDs,
-			Sampler:       sm,
-			Logprobs:      wantLogprobs,
-			TopLogprobs:   p.topLogprobs,
-			Temperature:   effectiveTemp,
-			Cancel:        r.Context().Done(),
-			Trace:         s.cfg.Trace,
-			Operation:     op,
-			ResponseID:    id,
-			Stream:        p.stream,
-			ResponseModel: s.cfg.ModelName,
+			Prompt:           promptTokens,
+			ChoiceIndex:      i,
+			ChoiceCount:      len(samplers),
+			MaxTokens:        maxTokens,
+			Priority:         p.priority,
+			Stop:             stopIDs,
+			Sampler:          sm,
+			PresencePenalty:  p.presencePenalty,
+			FrequencyPenalty: p.frequencyPenalty,
+			Logprobs:         wantLogprobs,
+			TopLogprobs:      p.topLogprobs,
+			Temperature:      effectiveTemp,
+			Cancel:           r.Context().Done(),
+			Trace:            s.cfg.Trace,
+			Operation:        op,
+			ResponseID:       id,
+			Stream:           p.stream,
+			ResponseModel:    s.cfg.ModelName,
 		})
 		if err != nil {
 			// A later choice failing leaves the earlier ones running, and the engine abandons
@@ -2931,4 +2976,21 @@ func logitBias(raw map[string]float64, vocab int) ([]llama.TokenBias, error) {
 	// float addition is involved, and matters more for reproducing a report.
 	slices.SortFunc(out, func(a, b llama.TokenBias) int { return int(a.ID) - int(b.ID) })
 	return out, nil
+}
+
+// checkPenalty validates one of OpenAI's repetition penalties.
+//
+// The documented range is [-2, 2] and both ends are legal: a positive value discourages a token
+// that has already appeared, a negative one encourages it. A value outside the range is refused
+// rather than clamped, because clamping -3 to -2 would answer a request the caller did not make
+// with text that looks like it honoured the one they did.
+func checkPenalty(v *float64, name string) (float32, error) {
+	if v == nil {
+		return 0, nil
+	}
+	if math.IsNaN(*v) || *v < -2 || *v > 2 {
+		return 0, newParamError(name, "invalid_value",
+			"%s is between -2 and 2, so %v is outside it", name, *v)
+	}
+	return float32(*v), nil
 }

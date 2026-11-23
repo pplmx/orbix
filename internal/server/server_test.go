@@ -8025,3 +8025,39 @@ func TestLogitBiasBansAToken(t *testing.T) {
 		}
 	}
 }
+
+// TestPenaltyRangeIsEnforced covers the validation the two repetition fields share.
+//
+// Both are documented as [-2, 2] and both ends are legal: a positive value discourages a token
+// that has appeared, a negative one encourages it. A value outside that range is refused rather
+// than clamped, because clamping -3 to -2 answers a request the caller did not make while looking
+// like it honoured the one they did. NaN is refused for the same reason it is refused on
+// temperature: it compares false against every bound and would reach the arithmetic.
+func TestPenaltyRangeIsEnforced(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	for _, field := range []string{"presence_penalty", "frequency_penalty"} {
+		// The documented ends are served.
+		for _, v := range []string{"-2", "0", "2"} {
+			body := fmt.Sprintf(`{"prompt": "hi", "%s": %s}`, field, v)
+			if resp := post(t, h, "/v1/completions", body); resp.StatusCode != 200 {
+				e := decodeBody[errorBody](t, resp)
+				t.Errorf("%s=%s answered %d: %s", field, v, resp.StatusCode, e.Error.Message)
+			}
+		}
+		// Outside them is refused, and the message names the field.
+		for _, v := range []string{"-2.1", "2.1", "100", "-100"} {
+			body := fmt.Sprintf(`{"prompt": "hi", "%s": %s}`, field, v)
+			resp := post(t, h, "/v1/completions", body)
+			e := decodeBody[errorBody](t, resp)
+			if resp.StatusCode != 400 || e.Error.Param != field {
+				t.Errorf("%s=%s answered %d %q, want a 400 naming %s", field, v, resp.StatusCode,
+					e.Error.Param, field)
+			}
+			if !strings.Contains(e.Error.Message, "-2 and 2") {
+				t.Errorf("%s=%s: message %q does not state the range", field, v, e.Error.Message)
+			}
+		}
+	}
+}

@@ -81,6 +81,16 @@ type Request struct {
 	Stop []int32
 	// Sampler picks each next token. Nil means greedy.
 	Sampler llama.Sampler
+	// PresencePenalty and FrequencyPenalty are OpenAI's repetition controls, in [-2, 2].
+	// Positive values discourage tokens that have already appeared: presence adds a flat
+	// penalty per distinct token seen, frequency adds one proportionally to how often.
+	//
+	// They are applied by the engine rather than by the sampler because they need the
+	// generated tokens, which Sampler.Next does not receive. A sampler that silently ignored
+	// them would be indistinguishable from one that honoured them until the output repeated
+	// itself, which is exactly when a caller sets them.
+	PresencePenalty  float32
+	FrequencyPenalty float32
 	// Operation names the GenAI operation for the trace span: "chat" for a chat
 	// completion, "text_completion" for the legacy completions endpoint. Empty means
 	// "chat". It is separate from the prompt because the two endpoints differ only in how
@@ -682,6 +692,10 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 		return 0, false
 	}
 
+	// The repetition penalties are applied here rather than inside the sampler because they need
+	// the tokens already generated, and Sampler.Next sees only a row of logits. It is the same
+	// reason logit_bias is a wrapper and these are not.
+	applyPenalties(s.logits, &s.req, s.out)
 	tok := s.sampler.Next(s.logits)
 	if tok == eos || contains(s.req.Stop, tok) {
 		e.finish(s, Event{Done: true, FinishReason: "stop"})
@@ -1009,5 +1023,50 @@ func sortByID(seqs []*sequence) {
 		for j := i; j > 0 && seqs[j].id < seqs[j-1].id; j-- {
 			seqs[j], seqs[j-1] = seqs[j-1], seqs[j]
 		}
+	}
+}
+
+// applyPenalties applies OpenAI's presence and frequency penalties to a logits row in place.
+//
+// Presence subtracts a flat amount from every token that has already appeared; frequency subtracts
+// an amount proportional to how many times it appeared. Both count the prompt as well as the
+// generated tokens, which is what makes a request that repeats a word already in the prompt push
+// away from it.
+//
+// The signs are OpenAI's: a positive value discourages repetition. Negative values encourage it,
+// and are legal -- the documented range is [-2, 2] at both ends.
+//
+// Counting is done per call rather than incrementally. The alternative is a map on the sequence
+// that every sample updates, which is faster and one more piece of state to keep right across a
+// cancel and a resume; a row of 32k logits is already being walked by the sampler, and this adds
+// one pass over the generated run, which is bounded by the token budget.
+func applyPenalties(logits []float32, req *Request, out []int32) {
+	if req.PresencePenalty == 0 && req.FrequencyPenalty == 0 {
+		return
+	}
+	// The counts of generated tokens, then the prompt's, because every prompt token is seen once.
+	// A token counts once per occurrence for the frequency penalty and once in total for the
+	// presence penalty.
+	seen := make(map[int32]int32, len(out)+16)
+	for _, tok := range req.Prompt {
+		seen[tok] = 1
+	}
+	for _, tok := range out {
+		seen[tok]++
+	}
+	for tok, n := range seen {
+		if tok < 0 || int(tok) >= len(logits) {
+			continue
+		}
+		var penalty float32
+		if req.PresencePenalty != 0 {
+			penalty += req.PresencePenalty
+		}
+		if req.FrequencyPenalty != 0 {
+			// n is occurrences including the prompt's single one, and the frequency penalty
+			// scales with that count rather than with the count after the first.
+			penalty += req.FrequencyPenalty * float32(n)
+		}
+		logits[tok] -= penalty
 	}
 }

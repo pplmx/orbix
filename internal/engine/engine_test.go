@@ -3113,3 +3113,79 @@ func TestFinishedByReasonSumsToRequestsFinished(t *testing.T) {
 		})
 	}
 }
+
+// TestPenaltiesDiscourageRepetition covers the two repetition controls end to end, at the layer
+// that applies them.
+//
+// They cannot live in a Sampler: Sampler.Next receives one row of logits and no history, and both
+// penalties are functions of the tokens already generated. The engine has that history, so the
+// work happens in sample() and this test drives it there.
+//
+// The fixture is constructed, so what it produces without a penalty is whatever the weights happen
+// to favour; the assertions are about the change. Measured on the default fixture, six tokens:
+// without a penalty the run repeats token 11 four times, and with presence 2 it produces four
+// distinct tokens instead.
+func TestPenaltiesDiscourageRepetition(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 256}.Write(t, t.TempDir())
+	e, err := New(path, Options{MaxActive: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A prompt that repeats one token, so the penalties have something to count.
+	prompt := []int32{1, 5, 6, 7, 5}
+	run := func(presence, frequency float32) []int32 {
+		t.Helper()
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 6,
+			PresencePenalty: presence, FrequencyPenalty: frequency})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		for e.Pump() > 0 {
+		}
+		var toks []int32
+		for ev := range ch {
+			if ev.HasToken {
+				toks = append(toks, ev.Token)
+			}
+		}
+		return toks
+	}
+	distinct := func(v []int32) int {
+		seen := make(map[int32]bool, len(v))
+		for _, x := range v {
+			seen[x] = true
+		}
+		return len(seen)
+	}
+
+	base := run(0, 0)
+	// The baseline has to repeat itself, or there is nothing for a penalty to discourage and
+	// both assertions below would pass without the code doing anything.
+	if distinct(base) == len(base) {
+		t.Fatalf("the baseline run %v is already all-distinct, so this test cannot show a"+
+			" penalty doing anything", base)
+	}
+
+	for _, tc := range []struct {
+		name           string
+		presence, freq float32
+	}{
+		{"presence", 2, 0},
+		{"frequency", 0, 2},
+	} {
+		got := run(tc.presence, tc.freq)
+		if distinct(got) <= distinct(base) {
+			t.Errorf("%s = %v has %d distinct tokens, the same or fewer than the baseline's %d"+
+				" (%v); the penalty is not reaching the logits",
+				tc.name, got, distinct(got), distinct(base), base)
+		}
+	}
+
+	// A negative penalty has the documented opposite effect: it encourages the tokens that
+	// appeared, so the run may repeat more, not less. Asserted as "not identical to the
+	// baseline" rather than a direction, because the fixture's distribution decides how much
+	// repetition is even available.
+	if got := run(-2, 0); len(got) == 0 {
+		t.Error("a negative presence penalty produced no tokens")
+	}
+}

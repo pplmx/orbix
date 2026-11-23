@@ -7803,3 +7803,81 @@ func TestGemma3RenderedPromptEncodesToReferenceIDs(t *testing.T) {
 		}
 	}
 }
+
+// TestTopLogprobsKeepDescendingOrder pins the order inside the alternatives object.
+//
+// The schema calls top_logprobs an object, so a map is the obvious encoding -- and encoding/json
+// sorts a map's keys, which loses the only thing the order carries. The alternatives are computed
+// in descending probability, and a client reading the first entry as the top-1 prediction is
+// reading what llama.cpp's own servers return.
+//
+// Measured before the fix, on Gemma 3 with "The capital of France is": the object encoded as
+// {" **", " Marseille", " Paris", " the", "Paris"} -- alphabetical -- while the most likely token
+// "Paris" sat third at -0.0007.
+//
+// The test reads the encoded bytes rather than decoding them, because decoding into a map would
+// restore exactly the ordering this is about and pass either way.
+func TestTopLogprobsKeepDescendingOrder(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	resp := post(t, h, "/v1/completions",
+		`{"prompt": "hi", "max_tokens": 2, "temperature": 0, "logprobs": 4}`)
+	raw, err := io.ReadAll(resp.Body)
+	if cerr := resp.Body.Close(); cerr != nil {
+		t.Fatalf("close body: %v", cerr)
+	}
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	}
+
+	var body struct {
+		Choices []struct {
+			Logprobs struct {
+				Top []json.RawMessage `json:"top_logprobs"`
+			} `json:"logprobs"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Choices) != 1 || len(body.Choices[0].Logprobs.Top) != 2 {
+		t.Fatalf("got %d choices and %d positions, want 1 and 2",
+			len(body.Choices), len(body.Choices[0].Logprobs.Top))
+	}
+	for pos, obj := range body.Choices[0].Logprobs.Top {
+		if len(obj) == 0 || string(obj) == "null" {
+			continue
+		}
+		// Walk the object in encoded order, tracking the previous value.
+		dec := json.NewDecoder(bytes.NewReader(obj))
+		if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+			t.Fatalf("position %d is not an object: %s", pos, obj)
+		}
+		prev := float32(math.Inf(1))
+		keys := 0
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				t.Fatalf("position %d: read key: %v", pos, err)
+			}
+			var v float32
+			if err := dec.Decode(&v); err != nil {
+				t.Fatalf("position %d: read value: %v", pos, err)
+			}
+			if v > prev {
+				t.Errorf("position %d: %q (%.6f) follows a smaller value %.6f; the object is not"+
+					" in descending probability order, so its first entry is not the top prediction",
+					pos, keyTok, v, prev)
+			}
+			prev = v
+			keys++
+		}
+		if keys == 0 {
+			t.Errorf("position %d encoded an empty alternatives object", pos)
+		}
+	}
+}

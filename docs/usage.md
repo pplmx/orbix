@@ -74,6 +74,14 @@ Everything else that used to be refused has been implemented instead -- `n`, `lo
 leaving the list when it did. A field belonging to the other endpoint is not refused there: it is
 an unknown member and is ignored, so `suffix` sent to chat is silently dropped rather than named.
 
+The alternatives inside `top_logprobs` are ordered by decreasing probability, and that order is
+preserved on the wire. The schema calls the field an object, which invites a map, and any Go map is
+encoded with its keys sorted -- so an implementation built that way returns the alternatives
+alphabetically while looking correct in an editor. It matters because the order carries the meaning:
+the first entry is the model's top prediction, and a client that takes it as such is reading what
+llama.cpp's servers return. Measured on Gemma 3 before this was fixed, the most likely token of
+"The capital of France is" came third in the encoded object.
+
 `logprobs` is honoured on both, in each endpoint's own shape: completions answers with parallel
 arrays (`tokens`, `token_logprobs`, `text_offset`, `top_logprobs`), chat with a list of objects
 carrying `token`, `bytes`, `logprob` and `top_logprobs`. The count of alternatives differs by

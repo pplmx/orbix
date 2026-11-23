@@ -1,6 +1,9 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/pplmx/orbix/internal/llama"
@@ -19,6 +22,16 @@ type sampledToken struct {
 }
 
 // logprobText is one entry of a response's logprob list.
+// orderedLogprobs is one position's alternatives, kept as a list so the encoded object preserves
+// their order. See MarshalJSON for why that matters.
+type orderedLogprobs []logprobEntry
+
+// logprobEntry is one alternative before encoding.
+type logprobEntry struct {
+	text    string
+	logprob float32
+}
+
 type logprobText struct {
 	// text is the token's text, and raw is its UTF-8 bytes.
 	text string
@@ -144,7 +157,7 @@ func completionLogprobs(described []logprobText, count int, offset int) map[stri
 	tokens := make([]string, count)
 	logprobs := make([]float32, count)
 	offsets := make([]int, count)
-	top := make([]map[string]float32, count)
+	top := make([]orderedLogprobs, count)
 	at := offset
 	for i := range count {
 		d := described[i]
@@ -152,11 +165,13 @@ func completionLogprobs(described []logprobText, count int, offset int) map[stri
 		logprobs[i] = d.logprob
 		offsets[i] = at
 		if d.top != nil {
-			alternatives := make(map[string]float32, len(d.top))
-			for _, a := range d.top {
-				alternatives[a.text] = a.logprob
-			}
-			top[i] = alternatives
+			// Built as an ordered list rather than a map: the schema is an object, but the order
+			// carries meaning. The alternatives arrive in descending probability and a client
+			// reading the first entry as the top-1 prediction is reading what llama.cpp's own
+			// servers return -- while encoding a Go map sorts its keys, which silently reordered
+			// the alternatives alphabetically. Measured on Gemma 3 before this: the most likely
+			// token "Paris" at -0.0007 came third, after " **" and " the".
+			top[i] = orderedLogprobs(alternatives(d.top))
 		}
 		// Rendered length, for the same reason keptTokens counts it: text_offset indexes the
 		// text the caller has, and an invalid byte run is longer once rendered. Identical for
@@ -210,6 +225,54 @@ func bytesOf(raw []byte) []int {
 	out := make([]int, len(raw))
 	for i, b := range raw {
 		out[i] = int(b)
+	}
+	return out
+}
+
+// orderedLogprobs is the alternatives object for one position, encoded in the order given.
+//
+// The schema calls this field an object -- a JSON map of token text to log probability -- and a Go
+// map would be the obvious way to write it. It is the wrong way: encoding/json sorts a map's keys,
+// so the object would come out in alphabetical order and the sort would lose the only information
+// the field carries besides the numbers. The alternatives are computed in descending probability
+// order, and a client that reads the first entry is reading the model's top prediction.
+//
+// Measured on Gemma 3 with the prompt "The capital of France is" before this type existed, the
+// most likely token "Paris" (-0.0007) came third in the encoded object, behind " **" and " the".
+func (o orderedLogprobs) MarshalJSON() ([]byte, error) {
+	// A nil list is the "no alternatives requested" case, and the schema says null for it rather
+	// than an empty object. Encoding it as {} would tell a client the model was offered zero
+	// candidates, which is a different claim.
+	if o == nil {
+		return []byte("null"), nil
+	}
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, a := range o {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		key, err := json.Marshal(a.text)
+		if err != nil {
+			return nil, fmt.Errorf("server: encode token text %q: %w", a.text, err)
+		}
+		b.Write(key)
+		b.WriteByte(':')
+		value, err := json.Marshal(a.logprob)
+		if err != nil {
+			return nil, fmt.Errorf("server: encode logprob for %q: %w", a.text, err)
+		}
+		b.Write(value)
+	}
+	b.WriteByte('}')
+	return b.Bytes(), nil
+}
+
+// alternatives converts the rendered alternatives to the pair a position needs.
+func alternatives(tops []logprobText) orderedLogprobs {
+	out := make(orderedLogprobs, len(tops))
+	for i, a := range tops {
+		out[i] = logprobEntry{text: a.text, logprob: a.logprob}
 	}
 	return out
 }

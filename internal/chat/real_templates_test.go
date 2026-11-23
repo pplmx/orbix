@@ -276,3 +276,57 @@ func TestLlama32ToolMessageContentIsNotQuoted(t *testing.T) {
 		t.Errorf("the tool branch was not taken; got:\n%s", got)
 	}
 }
+
+// TestGemma2Template covers Gemma 2's own template, which is the reason
+// the modulo operator exists.
+//
+// The alternation guard is "(message['role'] == 'user') != (loop.index0 % 2 == 0)", so without
+// '%' the whole template fails to compile and the server falls back to a neutral transcript --
+// visible as a startup warning, but for an instruct model it means the turns are wrapped in
+// markers the checkpoint was not trained on.
+func TestGemma2Template(t *testing.T) {
+	// The checkpoint's template ends with "{% endif %}" and no newline. The file has one because
+	// the repository's whitespace hooks require every text file to end with a newline, and here
+	// that byte is not cosmetic: it sits outside every tag, so it would render as output. Trimming
+	// exactly one keeps the asset otherwise byte-identical to the model's own template.
+	tmpl := strings.TrimSuffix(loadTestTemplate(t, "gemma2-it.jinja"), "\n")
+	parsed, err := Parse(tmpl)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// A well-formed alternating conversation renders the turn markers the checkpoint expects.
+	got, err := parsed.Render(
+		[]Message{
+			{Role: "user", Content: "What is the capital of France?"},
+			{Role: "assistant", Content: "Paris."},
+			{Role: "user", Content: "And of Italy?"},
+		},
+		Inputs{BOSToken: "<bos>", AddGenerationPrompt: true})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "<bos><start_of_turn>user\nWhat is the capital of France?<end_of_turn>\n" +
+		"<start_of_turn>model\nParis.<end_of_turn>\n" +
+		"<start_of_turn>user\nAnd of Italy?<end_of_turn>\n" +
+		"<start_of_turn>model\n"
+	if got != want {
+		t.Errorf("Render =\n%q\nwant\n%q", got, want)
+	}
+
+	// A conversation that does not alternate reaches the template's own raise_exception, which
+	// is what proves the modulo comparison actually compared: with '%' reading as something
+	// else the guard would pass everything and this would render instead of failing.
+	_, err = parsed.Render(
+		[]Message{
+			{Role: "user", Content: "one"},
+			{Role: "user", Content: "two"},
+		},
+		Inputs{BOSToken: "<bos>", AddGenerationPrompt: true})
+	if err == nil {
+		t.Fatal("two user turns in a row rendered; the alternation guard did not fire")
+	}
+	if !strings.Contains(err.Error(), "raise_exception") {
+		t.Errorf("error = %v, want it to name the template's raise_exception", err)
+	}
+}

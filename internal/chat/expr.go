@@ -210,7 +210,7 @@ func lexExpr(src string) ([]token, error) {
 			toks = append(toks, token{text: string(c)})
 			i++
 		case c == '|' || c == '(' || c == ')' || c == '[' || c == ']' ||
-			c == '+' || c == '-' || c == '.' || c == ',' || c == ':':
+			c == '+' || c == '-' || c == '%' || c == '.' || c == ',' || c == ':':
 			toks = append(toks, token{text: string(c)})
 			i++
 		default:
@@ -444,16 +444,37 @@ func (p *exprParser) parseConcat() (expr, error) {
 
 // parseArith handles - between operands.
 func (p *exprParser) parseArith() (expr, error) {
-	left, err := p.parsePostfix()
+	left, err := p.parseMul()
 	if err != nil {
 		return nil, err
 	}
 	for p.accept("-") {
-		right, err := p.parsePostfix()
+		right, err := p.parseMul()
 		if err != nil {
 			return nil, err
 		}
 		left = arithExpr{op: "-", left: left, right: right}
+	}
+	return left, nil
+}
+
+// parseMul handles '%', which binds tighter than '-' as it does in Jinja.
+//
+// The level exists for one operator because one template needed it: Gemma's alternation check
+// is "loop.index0 % 2 == 0". "*", "/" and "//" sit at the same precedence in Jinja and are not
+// implemented, because no template this package renders uses them -- adding an operator is not
+// free, since each one is another way for a template to compile and then mean something else.
+func (p *exprParser) parseMul() (expr, error) {
+	left, err := p.parsePostfix()
+	if err != nil {
+		return nil, err
+	}
+	for p.accept("%") {
+		right, err := p.parsePostfix()
+		if err != nil {
+			return nil, err
+		}
+		left = arithExpr{op: "%", left: left, right: right}
 	}
 	return left, nil
 }

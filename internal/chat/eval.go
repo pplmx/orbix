@@ -467,6 +467,20 @@ func evalExpr(e expr, sc *scope) (value, error) {
 				return value{}, fmt.Errorf("chat: arithmetic overflow: %d - %d", a, b)
 			}
 			return strValue(strconv.Itoa(a - b)), nil
+		case "%":
+			// Modulo by zero is an error rather than a panic or a zero, and the sign follows
+			// Go's truncating division, which is what Jinja (and Python's %) do not do for
+			// negative operands. Templates only use this for parity tests on non-negative loop
+			// indices, so the difference is unreachable from the ones this package renders;
+			// the error below is what keeps it from becoming reachable by accident.
+			if b == 0 {
+				return value{}, fmt.Errorf("chat: modulo by zero")
+			}
+			if a < 0 || b < 0 {
+				return value{}, fmt.Errorf("chat: modulo of a negative operand (%d %% %d) is not "+
+					"supported; Jinja's result differs from Go's for those operands", a, b)
+			}
+			return strValue(strconv.Itoa(a % b)), nil
 		default:
 			return value{}, fmt.Errorf("chat: unsupported arithmetic operator %q", t.op)
 		}

@@ -3066,3 +3066,58 @@ func TestRenderByteBoundIsReachableAndEnforced(t *testing.T) {
 		t.Errorf("error %q does not state the byte bound", err)
 	}
 }
+
+// TestRenderModulo covers '%', which exists for Gemma's alternation guard.
+//
+// The parity test is the shape the template uses, so it is the one asserted first. The
+// precedence case matters separately: '%' has to bind tighter than '-' or binary search from the
+// left would turn "4 - 1 % 2" into "(4 - 1) % 2" -- 1 rather than 3.
+func TestRenderModulo(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{{ 4 % 2 }}`, "0"},
+		{`{{ 5 % 2 }}`, "1"},
+		{`{{ 0 % 3 }}`, "0"},
+		{`{{ 7 % 7 }}`, "0"},
+		// Tighter than '-': 1 % 2 is 1, so 4 - 1 is 3. The other grouping gives 1.
+		{`{{ 4 - 1 % 2 }}`, "3"},
+		// Looser than a function call and an index: both bind first.
+		{`{{ (3 + 1) % 3 }}`, "1"},
+		// The form the Gemma template uses, over the loop counter.
+		{`{% for m in messages %}{{ loop.index0 % 2 }}{% endfor %}`, "010"},
+	}
+	for _, tc := range cases {
+		msgs := []Message{{Role: "user", Content: "a"}, {Role: "assistant", Content: "b"}, {Role: "user", Content: "c"}}
+		if got := render(t, tc.src, msgs, Inputs{}); got != tc.want {
+			t.Errorf("%q = %q, want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestRenderModuloRejects covers the operands '%' will not take.
+//
+// Both refusals are deliberate rather than incidental. Dividing by zero has no answer, and a
+// negative operand has two: Go's truncating division gives -1 for "-1 % 2", while Jinja gives 1
+// as Python does. Answering with either would be a silent difference from the template's meaning,
+// so the case is named as unsupported instead.
+func TestRenderModuloRejects(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{{ 1 % 0 }}`, "modulo by zero"},
+		{`{{ -1 % 2 }}`, "negative operand"},
+		{`{{ 1 % 'a' }}`, "non-numeric"},
+	}
+	for _, tc := range cases {
+		parsed, err := Parse(tc.src)
+		if err != nil {
+			t.Errorf("%q: Parse: %v", tc.src, err)
+			continue
+		}
+		_, err = parsed.Render(nil, Inputs{})
+		if err == nil {
+			t.Errorf("%q rendered, want an error mentioning %q", tc.src, tc.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: error = %v, want it to mention %q", tc.src, err, tc.want)
+		}
+	}
+}

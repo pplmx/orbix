@@ -984,3 +984,60 @@ func TestHTTPServerBaseContextIsTheCallers(t *testing.T) {
 		t.Error("the caller's cancellation is not visible through the server's base context")
 	}
 }
+
+// TestAccessLogger covers the three spellings --log-format accepts and the refusal of anything else.
+//
+// These were unreachable before: the switch lived inside cmdServe, whose body blocks on a listener
+// and starts a pump, so no test entered it. A typo in one of the three names would have been found
+// by whoever ran the server, and the two facts that matter -- that "off" yields nil rather than a
+// discard handler, and that the refusal names the accepted set -- were read rather than checked.
+//
+// nil for "off" is not incidental. The server treats a nil Logger as silent and installs its own
+// default otherwise, so returning a no-op logger here would still work while a nil-check on the
+// other side would stop protecting anything.
+func TestAccessLogger(t *testing.T) {
+	for _, name := range []string{"text", "json"} {
+		t.Run(name, func(t *testing.T) {
+			lg, err := accessLogger(name)
+			if err != nil {
+				t.Fatalf("accessLogger(%q): %v", name, err)
+			}
+			if lg == nil {
+				t.Fatalf("accessLogger(%q) returned nil; only \"off\" may", name)
+			}
+		})
+	}
+
+	t.Run("off", func(t *testing.T) {
+		lg, err := accessLogger("off")
+		if err != nil {
+			t.Fatalf("accessLogger(\"off\"): %v", err)
+		}
+		if lg != nil {
+			t.Error("accessLogger(\"off\") returned a logger; the server reads nil as silent")
+		}
+	})
+
+	// The default arm has to name every accepted spelling, or the message sends a reader to a
+	// value the switch also rejects.
+	for _, bad := range []string{"", "yaml", "TEXT", "off "} {
+		t.Run("refuses "+strconv.Quote(bad), func(t *testing.T) {
+			lg, err := accessLogger(bad)
+			if err == nil {
+				t.Fatalf("accessLogger(%q) was accepted", bad)
+			}
+			if lg != nil {
+				t.Errorf("accessLogger(%q) returned a logger alongside an error", bad)
+			}
+			for _, good := range []string{"text", "json", "off"} {
+				if !strings.Contains(err.Error(), good) {
+					t.Errorf("the error for %q does not name %q, so a reader cannot tell what is"+
+						" accepted: %v", bad, good, err)
+				}
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(bad)) {
+				t.Errorf("the error for %q does not quote the value it refused: %v", bad, err)
+			}
+		})
+	}
+}

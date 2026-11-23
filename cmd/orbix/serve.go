@@ -74,6 +74,26 @@ func newHTTPServerWithRequests(h http.Handler, idle, readHeader time.Duration,
 	return srv
 }
 
+// accessLogger builds the request log for a --log-format value.
+//
+// Extracted from cmdServe so the three accepted spellings and the refusal are reachable without
+// starting a server: cmdServe's body is a twenty-step setup that blocks on a listener, and none of
+// it ran under any test, so a --log-format typo would have been caught by the operator rather than
+// by the suite. Returning nil for "off" is the contract the server relies on -- it treats a nil
+// Logger as silent rather than installing a discard handler.
+func accessLogger(format string) (*slog.Logger, error) {
+	switch format {
+	case "off":
+		return nil, nil
+	case "text":
+		return slog.New(slog.NewTextHandler(os.Stderr, nil)), nil
+	case "json":
+		return slog.New(slog.NewJSONHandler(os.Stderr, nil)), nil
+	default:
+		return nil, fmt.Errorf("serve: --log-format must be %s, not %q", logFormatChoices, format)
+	}
+}
+
 // The log format is a switch whose default arm is an error, so the flag's initial value has to
 // be one of the accepted spellings. Both are named here rather than at the two sites, so the
 // help text, the default, and the error cannot drift apart.
@@ -286,15 +306,9 @@ func cmdServe(args []string) error {
 	// The access log is opt-in at the format level but on by default in text: a server
 	// that says nothing about the requests it served makes a failure indistinguishable
 	// from a request that never arrived.
-	var accessLog *slog.Logger
-	switch *logFormat {
-	case "off":
-	case "text":
-		accessLog = slog.New(slog.NewTextHandler(os.Stderr, nil))
-	case "json":
-		accessLog = slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	default:
-		return fmt.Errorf("serve: --log-format must be %s, not %q", logFormatChoices, *logFormat)
+	accessLog, err := accessLogger(*logFormat)
+	if err != nil {
+		return err
 	}
 
 	srv, err := server.New(eng, tok, server.Config{

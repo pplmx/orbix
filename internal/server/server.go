@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -712,14 +713,6 @@ type shapeField struct {
 	invalid func(any) (string, bool)
 }
 
-// negativeCount is the invalid check shared by the count-valued shape fields.
-func negativeCount(name string, v int) (string, bool) {
-	if v < 0 {
-		return fmt.Sprintf("%s must not be negative, got %d", name, v), true
-	}
-	return "", false
-}
-
 // chatShapeFields are the response-shape fields the chat endpoint refuses.
 var chatShapeFields = []shapeField{
 	// n is validated here rather than refused: the server generates several choices now, so
@@ -753,15 +746,12 @@ var completionShapeFields = []shapeField{
 			return p != nil && *p != ""
 		},
 		why: "suffix generation is not implemented, so the reply would silently lack it"},
-	{name: "best_of",
-		asked: func(v any) bool { return v.(*completionRequest).BestOf > 1 },
-		// best_of is not "several candidates" any more -- n covers that. What it still needs is
-		// a ranking: OpenAI returns the candidate with the highest log probability, and token
-		// log-probabilities are not computed here, so any choice among the candidates would be
-		// a different sample under a name that promises the best one.
-		why: "best_of returns the candidate with the highest log probability, and token " +
-			"log-probabilities are not computed here; use n to receive every sample",
-		invalid: func(v any) (string, bool) { return negativeCount("best_of", v.(*completionRequest).BestOf) }},
+	// best_of is honoured now. Its range, including the rule that it must exceed n, is checked
+	// here because this is the one place both numbers are available; see checkBestOf.
+	{name: "best_of", invalid: func(v any) (string, bool) {
+		r := v.(*completionRequest)
+		return checkBestOf(r.BestOf, r.N)
+	}},
 }
 
 // The two endpoints cap log probabilities differently in OpenAI's schema: chat documents
@@ -961,6 +951,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		// feature on and its value is how many alternatives to describe.
 		logprobs:     req.Logprobs != nil,
 		topLogprobs:  derefInt(req.Logprobs),
+		bestOf:       req.BestOf,
 		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
@@ -1040,6 +1031,9 @@ type generateParams struct {
 	// topLogprobs is how many alternatives to describe at each position. Zero means the
 	// chosen token only.
 	topLogprobs int
+	// bestOf is the completions endpoint's candidate count: generate this many and return the
+	// choiceCount best. Zero or one means no selection, which is the default.
+	bestOf int
 }
 
 // choiceCount is how many completions the request asks for, with the omitted field reading
@@ -1130,7 +1124,31 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		maxTokens = room
 	}
 	choices := p.choiceCount()
-	samplers, effectiveTemp, err := s.samplers(p.temperature, p.topK, p.topP, p.seed, choices)
+	// best_of asks for more sequences than it returns, and ranking them needs each token's log
+	// probability, so the engine is asked for them whenever selection is on even if the caller
+	// did not request them. They are only put in the response when the caller did.
+	//
+	// Selection needs the candidates to differ, so each one gets its own sampler exactly as it
+	// would if the caller had asked for n of them.
+	if p.bestOf > 1 {
+		if p.stream {
+			// OpenAI documents best_of as "results cannot be streamed", and that is structural
+			// rather than a limitation of this server: the candidates are only comparable once
+			// they have all finished, so there is nothing to stream until the choice is made.
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				"best_of", "unsupported_parameter",
+				"best_of cannot be combined with stream=true: the candidates are ranked after "+
+					"they finish, so there is no result to stream until the choice is made. "+
+					"Drop best_of to receive one of them streamed, or set stream=false"))
+			return
+		}
+	}
+	candidates := choices
+	if p.bestOf > 1 {
+		candidates = p.bestOf
+	}
+	wantLogprobs := p.logprobs || p.bestOf > 1
+	samplers, effectiveTemp, err := s.samplers(p.temperature, p.topK, p.topP, p.seed, candidates)
 	if err != nil {
 		// The sampler's errors are all about one request field, so they carry it rather
 		// than making the client infer which of temperature and top_p was wrong.
@@ -1164,7 +1182,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	// the caller was told to shorten a prompt whose real problem was the temperature. A
 	// refusal that names the wrong field costs more than the retry loop it was added to stop.
 	if st := s.eng.Stats(); st.PoolBlocks > 0 {
-		if need, have := blocksNeeded(len(promptTokens)+maxTokens, st.PoolBlockSize)*choices,
+		if need, have := blocksNeeded(len(promptTokens)+maxTokens, st.PoolBlockSize)*candidates,
 			st.PoolBlocks; need > have {
 			// param names whichever side accounts for more of the request, because the check
 			// compares prompt+budget and either can be what makes it unservable. Naming the
@@ -1185,9 +1203,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			// the arithmetic in the message accounts for the total it is quoting.
 			positions := len(promptTokens) + maxTokens
 			detail := fmt.Sprintf("%d positions for the prompt and budget", positions)
-			if choices > 1 {
-				detail = fmt.Sprintf("%d positions for the prompt and budget, times %d choices "+
-					"at %d blocks each", positions, choices,
+			if candidates > 1 {
+				detail = fmt.Sprintf("%d positions for the prompt and budget, times %d "+
+					"sequences at %d blocks each", positions, candidates,
 					blocksNeeded(positions, st.PoolBlockSize))
 			}
 			writeRequestError(w, http.StatusBadRequest, newParamError(
@@ -1235,7 +1253,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			Priority:      p.priority,
 			Stop:          stopIDs,
 			Sampler:       sm,
-			Logprobs:      p.logprobs,
+			Logprobs:      wantLogprobs,
 			TopLogprobs:   p.topLogprobs,
 			Temperature:   effectiveTemp,
 			Cancel:        r.Context().Done(),
@@ -1278,6 +1296,42 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	s.blockingResponse(w, r, chans, id, created, p, promptTokens)
 }
 
+// choiceResult is one sequence's collected output, shared between the drain goroutines and
+// the code that assembles the response.
+//
+// Each element is written by exactly one goroutine -- the one draining that sequence's channel
+// -- and read by this goroutine only after all of them have finished, which is why no lock is
+// needed for a slice shared this way.
+type choiceResult struct {
+	out     []int32
+	samples []sampledToken
+	reason  string
+	closed  bool
+	failure error
+}
+
+// score is the candidate's mean log probability over the tokens it generated.
+//
+// The mean rather than the sum, because a sum always favours the shortest completion: every
+// term is negative, so a five-token answer scores higher than a hundred-token one that was
+// equally unsurprising. OpenAI documents best_of as comparing "log probability per token",
+// which is the same correction.
+//
+// A candidate that generated nothing scores -Inf, so it never wins: it has no per-token figure
+// to compare, and ranking it first on an empty sum would return an empty completion as "best".
+func (c *choiceResult) score() float64 {
+	if len(c.samples) == 0 || len(c.samples) != len(c.out) {
+		// The length check matters: samples is only filled when log probabilities were
+		// requested, and a caller reaching here without them has no basis to rank on.
+		return math.Inf(-1)
+	}
+	var sum float64
+	for _, s := range c.samples {
+		sum += float64(s.logprob)
+	}
+	return sum / float64(len(c.samples))
+}
+
 // blockingResponse collects the whole output and writes one JSON body.
 //
 // chans holds one event channel per requested choice, in choice order, so the response's
@@ -1289,14 +1343,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans []<-chan engine.Event, id string, created int64, p generateParams, promptTokens []int32) {
 	// One result per channel, each written by exactly one goroutine, so the slice is shared
 	// between them without a lock: different elements are different memory.
-	type collected struct {
-		out     []int32
-		samples []sampledToken
-		reason  string
-		closed  bool
-		failure error
-	}
-	results := make([]collected, len(chans))
+	results := make([]choiceResult, len(chans))
 	var wg sync.WaitGroup
 	for i, ch := range chans {
 		c := &results[i]
@@ -1365,13 +1412,32 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 		}
 	}
 
-	// Chooses each choice's text and finish reason, and the totals across them. OpenAI's
-	// usage counts completion_tokens across every choice and prompt_tokens once, because the
-	// prompt was prefilled once per sequence but is the same text.
-	choices := make([]map[string]any, len(results))
+	// Which of the collected sequences the response returns. Normally all of them, in order;
+	// with best_of, the top n by mean log probability.
+	selected := make([]int, len(results))
+	for i := range selected {
+		selected[i] = i
+	}
+	if p.bestOf > 1 {
+		selected = rankCandidates(results, p.choiceCount())
+	}
+
+	// completion_tokens counts every sequence generated, discarded candidates included.
+	// OpenAI's own description of best_of warns that it "can quickly consume your token
+	// quota", which says the candidates are generated and charged whether or not they are
+	// returned; reporting only the returned ones would understate the work by best_of/n and
+	// flatter exactly the number a caller budgets from.
 	generated := 0
 	for i := range results {
-		c := &results[i]
+		generated += len(results[i].out)
+	}
+
+	// Chooses each returned choice's text and finish reason. OpenAI's usage counts
+	// completion_tokens across every choice and prompt_tokens once, because the prompt was
+	// prefilled once per sequence but is the same text.
+	choices := make([]map[string]any, len(selected))
+	for out, idx := range selected {
+		c := &results[idx]
 		text := s.tok.DecodeCompletion(c.out)
 		// A stop string is text, and generation halts where it would appear. OpenAI's API
 		// takes strings, and a string need not be one token: " Paris" encodes as a space
@@ -1421,18 +1487,20 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 		if p.echo && !p.chat {
 			text = p.prompt + text
 		}
-		generated += len(c.out)
+		// The index is the position in the response, not the candidate's original slot: a
+		// caller reads choices[0] as the best one, and leaving a discarded candidate's number
+		// there would name an index that no longer exists.
 		if p.chat {
-			choices[i] = map[string]any{
-				"index":         i,
+			choices[out] = map[string]any{
+				"index":         out,
 				"message":       map[string]string{"role": "assistant", "content": text},
 				"finish_reason": finishReasonFor(reason),
 				"logprobs":      logprobs,
 			}
 			continue
 		}
-		choices[i] = map[string]any{
-			"index":         i,
+		choices[out] = map[string]any{
+			"index":         out,
 			"text":          text,
 			"finish_reason": finishReasonFor(reason),
 			"logprobs":      logprobs,

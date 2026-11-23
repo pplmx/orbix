@@ -59,7 +59,7 @@ Fields describing the *response* are refused with a 400 naming every one, since 
 sent `n: 3` indexes `choices[2]`.
 
 The refused set is not the same on the two endpoints, because their schemas differ. Chat refuses
-`echo`; completions refuses `suffix` and `best_of`. A field belonging to the other endpoint is not
+`echo`; completions refuses `suffix`. A field belonging to the other endpoint is not
 refused there -- it is an unknown member and is ignored, so `suffix` sent to chat is silently
 dropped rather than named. Chat's `echo` is in the refused set because OpenAI's chat schema has no
 such field, so there it is a field the caller sent that the endpoint cannot use.
@@ -78,6 +78,16 @@ matters: describing the truncated set would report a logprob of 0 whenever `top_
 says "the model was certain" about a position where the request merely narrowed the choice. A
 greedy request (`temperature: 0`) reports the distribution at temperature 1, since there is no
 divisor to apply.
+
+`best_of` on completions generates that many candidates and returns the best. "Best" is the
+highest mean log probability per token -- the mean rather than the sum, because every term is
+negative and a sum always prefers the shortest completion. With `n`, `best_of` is the candidate
+count and `n` is how many to return, in ranked order with `index` counting from 0; a `best_of`
+that is not greater than `n` is refused rather than ignored, since it asks for no selection at
+all. `stream: true` is refused for the same reason OpenAI documents: the candidates can only be
+compared once they have finished, so there is nothing to stream until the choice is made. The
+`usage` figures count every candidate generated, not only the returned ones, because the work
+was done either way and OpenAI's own description warns that `best_of` consumes quota.
 
 A token whose bytes are not valid UTF-8 on their own -- one half of a character, in a byte-level
 vocabulary -- is described by its bytes, which is why chat's schema has that field: `bytes` is
@@ -126,14 +136,18 @@ non-streaming body does. Measured through the OpenAI Python SDK with `n=2, max_t
 interleaved texts, two `finish_reason: "length"` chunks, one `[DONE]`, and
 `completion_tokens: 12`, `prompt_tokens: 4`.
 
-The refusal turns on the **value**, not on the field being present. A field that was sent with
-the value the response already carries asks for nothing this server would not have done anyway,
-so it is served: `best_of: 1` and `suffix: ""` answer 200, and `logprobs: false` asks for no
-log probabilities, which is what the response does. That matters because the official SDKs serialise a keyword argument
-the caller passed even when it equals the API default -- `completions.create(best_of=1)` puts
-`"best_of": 1` on the wire. Refusing on presence told such a caller `best_of needs several
-candidates` about `best_of: 1`, for a request it serves correctly; measured through the OpenAI
-Python SDK, four such calls went from 400 to 200.
+The refusal turns on the **value**, not on the field being present. A field sent with the value
+the response already carries asks for nothing this server would not have done anyway, so it is
+served: `suffix: ""` answers 200, and `logprobs: false` asks for no log probabilities, which is
+what the response does. That matters because the official SDKs serialise a keyword argument the
+caller passed even when it equals the API default, so `completions.create(suffix="")` puts
+`"suffix": ""` on the wire. Refusing on presence told such a caller about a request it serves
+correctly; measured through the OpenAI Python SDK, four such calls went from 400 to 200.
+
+Most of what used to illustrate this rule is now implemented rather than refused -- `n`,
+`logprobs`, `top_logprobs`, `echo`, `max_completion_tokens` and `best_of` all work, and each
+left this list when it did. `suffix` is the one field still refused on completions, and chat's
+`echo` the one on chat.
 
 A value the API does not define is reported as malformed rather than unimplemented: `n: -1` is
 400 `invalid_value` naming the number, not `unsupported_parameter` describing `n: 3`. The two ask

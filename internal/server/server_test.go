@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -3597,6 +3598,292 @@ func eachSSEChunk(body io.ReadCloser, fn func([]byte)) error {
 	return sc.Err()
 }
 
+// TestBestOfReturnsTheBestCandidates covers the one field that changes which samples come back
+// rather than how they are sampled.
+//
+// OpenAI documents best_of as generating that many completions server-side and returning the
+// one with the highest log probability per token; with n it is the candidate count and n is how
+// many to return. The test computes the ranking independently -- one request for all
+// best_of candidates with logprobs, their mean log probability worked out here -- and then asks
+// for the same request with best_of set. That is what makes it a check of the selection rather
+// than of the reply's shape: an implementation that returned the first candidate, or the last,
+// would pass a "one choice came back" assertion and fail this one.
+func TestBestOfReturnsTheBestCandidates(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	const candidates, maxTokens = 4, 5
+	// query asks for `n` choices with their log probabilities and returns the texts plus the
+	// mean log probability of each, in response order.
+	query := func(t *testing.T, extra string) ([]string, []float64) {
+		t.Helper()
+		body := fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d, `+
+			`"temperature": 1.3, "seed": 17, "logprobs": 0%s}`, maxTokens, extra)
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		if resp.StatusCode != 200 {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []struct {
+				Text     string `json:"text"`
+				Logprobs *struct {
+					Logprobs []float32 `json:"token_logprobs"`
+				} `json:"logprobs"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		texts := make([]string, len(got.Choices))
+		means := make([]float64, len(got.Choices))
+		for i, c := range got.Choices {
+			texts[i] = c.Text
+			if c.Logprobs == nil || len(c.Logprobs.Logprobs) == 0 {
+				t.Fatalf("choice %d has no log probabilities, so nothing can be ranked", i)
+			}
+			var sum float64
+			for _, lp := range c.Logprobs.Logprobs {
+				sum += float64(lp)
+			}
+			means[i] = sum / float64(len(c.Logprobs.Logprobs))
+		}
+		return texts, means
+	}
+
+	texts, means := query(t, fmt.Sprintf(`, "n": %d`, candidates))
+	if len(texts) != candidates {
+		t.Fatalf("got %d candidates, want %d", len(texts), candidates)
+	}
+	// The best by mean log probability, computed here rather than taken from the server.
+	best := 0
+	for i := range means {
+		if means[i] > means[best] {
+			best = i
+		}
+	}
+
+	t.Run("one choice is the best candidate", func(t *testing.T) {
+		got, _ := query(t, fmt.Sprintf(`, "best_of": %d`, candidates))
+		if len(got) != 1 {
+			t.Fatalf("got %d choices, want 1", len(got))
+		}
+		if got[0] != texts[best] {
+			t.Errorf("best_of returned %q; the highest mean log probability (%.4f) was %q",
+				got[0], means[best], texts[best])
+		}
+	})
+
+	t.Run("several choices are the best ones in order", func(t *testing.T) {
+		order := make([]int, len(means))
+		for i := range order {
+			order[i] = i
+		}
+		slices.SortStableFunc(order, func(a, b int) int {
+			switch {
+			case means[a] > means[b]:
+				return -1
+			case means[a] < means[b]:
+				return 1
+			}
+			return a - b
+		})
+		want := []string{texts[order[0]], texts[order[1]]}
+
+		resp := post(t, srv.Handler(), "/v1/completions",
+			fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d, "temperature": 1.3, `+
+				`"seed": 17, "best_of": %d, "n": 2}`, maxTokens, candidates))
+		if resp.StatusCode != 200 {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []struct {
+				Index int    `json:"index"`
+				Text  string `json:"text"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if len(got.Choices) != 2 {
+			t.Fatalf("got %d choices, want 2", len(got.Choices))
+		}
+		for i, c := range got.Choices {
+			if c.Text != want[i] {
+				t.Errorf("choices[%d] = %q, want %q (the %d-th best)", i, c.Text, want[i], i+1)
+			}
+			// The index is the position in the response, not the candidate's original slot:
+			// a discarded candidate's number there would name an index the caller cannot use.
+			if c.Index != i {
+				t.Errorf("choices[%d].index = %d, want %d", i, c.Index, i)
+			}
+		}
+	})
+
+	t.Run("usage counts every candidate generated", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d, "temperature": 1.3, `+
+				`"seed": 17, "best_of": %d}`, maxTokens, candidates))
+		defer func() { _ = resp.Body.Close() }()
+		var got struct {
+			Usage struct {
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// Every candidate generated its full budget, and all of them were work the server did.
+		// Reporting only the returned choice would understate it by a factor of best_of.
+		if want := candidates * maxTokens; got.Usage.CompletionTokens != want {
+			t.Errorf("completion_tokens = %d, want %d (%d candidates x %d tokens)",
+				got.Usage.CompletionTokens, want, candidates, maxTokens)
+		}
+	})
+}
+
+// TestCandidateScoreIsPerToken pins the ranking metric, which the end-to-end test cannot see.
+//
+// Every candidate of a request shares one budget, so their lengths are equal and a sum happens
+// to rank them the same way an average does -- the mean would be untested, and a change to a
+// sum would pass every assertion above. The two disagree exactly when lengths differ, so this
+// builds that case directly: a short confident candidate against a longer slightly-less
+// confident one, where the sum prefers the short and the average prefers the long.
+//
+// OpenAI documents best_of as comparing "log probability per token", and the average is also
+// the answer that has no length bias: every term is negative, so a sum always prefers the
+// shortest completion.
+func TestCandidateScoreIsPerToken(t *testing.T) {
+	short := choiceResult{
+		out:     []int32{1, 2},
+		samples: []sampledToken{{logprob: -1}, {logprob: -1}},
+	}
+	long := choiceResult{
+		out: []int32{1, 2, 3, 4},
+		samples: []sampledToken{
+			{logprob: -0.6}, {logprob: -0.6}, {logprob: -0.6}, {logprob: -0.6},
+		},
+	}
+	// Compared with a tolerance: the samples hold float32 probabilities, so an average of four
+	// of them is not exactly the decimal it was written as.
+	near := func(got, want float64) bool { return math.Abs(got-want) < 1e-6 }
+	if got := short.score(); !near(got, -1) {
+		t.Errorf("two tokens at -1 each scored %v, want -1", got)
+	}
+	if got := long.score(); !near(got, -0.6) {
+		t.Errorf("four tokens at -0.6 each scored %v, want -0.6", got)
+	}
+	// The sum would put short (-2) ahead of long (-2.4); the average puts long ahead.
+	if got := rankCandidates([]choiceResult{short, long}, 2); got[0] != 1 {
+		t.Errorf("ranked %v first; the longer, less surprising candidate should win on a"+
+			" per-token score", got[0])
+	}
+
+	// A candidate that generated nothing has no per-token figure and must never win: ranking it
+	// first on an empty sum would return an empty completion as the best one.
+	empty := choiceResult{reason: "stop"}
+	if got := rankCandidates([]choiceResult{empty, short}, 2); got[0] != 1 {
+		t.Errorf("ranked the empty candidate first: %v", got)
+	}
+
+	// No log probabilities means no basis to rank, so every candidate ties and the order falls
+	// back to the collection order. Returning a different order would make the response depend
+	// on something the caller cannot see.
+	unscored := []choiceResult{{out: []int32{1}}, {out: []int32{2}}, {out: []int32{3}}}
+	if got := rankCandidates(unscored, 3); fmt.Sprint(got) != "[0 1 2]" {
+		t.Errorf("unscored candidates ranked %v, want their collection order", got)
+	}
+}
+
+// TestBestOfIsValidated covers the three ways best_of is refused.
+//
+// The relationship rule is the one worth stating: OpenAI documents best_of as the candidate
+// count and n as how many to return, so best_of <= n asks for no selection. Returning n
+// completions anyway would be the silent reading this package keeps refusing to make, since
+// the field was sent and did nothing.
+//
+// A count of one is exempt from that rule because it is what an SDK sends for "no selection",
+// and because best_of: 1 with n: 1 is a request this server answers exactly as asked.
+func TestBestOfIsValidated(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	t.Run("best_of at or below n", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2, "best_of": 2, "n": 2}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != 400 {
+			t.Fatalf("status = %d, want 400: best_of=2 with n=2 selects nothing", resp.StatusCode)
+		}
+		body := decodeBody[errorBody](t, resp)
+		if body.Error.Code != "invalid_value" || body.Error.Param != "best_of" {
+			t.Errorf("code/param = %q/%q, want invalid_value/best_of", body.Error.Code, body.Error.Param)
+		}
+		// Both numbers, so the caller sees which one to change.
+		for _, want := range []string{"greater than n", "2"} {
+			if !strings.Contains(body.Error.Message, want) {
+				t.Errorf("message %q does not mention %q", body.Error.Message, want)
+			}
+		}
+	})
+
+	t.Run("best_of one with one choice is served", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2, "best_of": 1}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != 200 {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+		}
+	})
+
+	t.Run("negative and over-cap", func(t *testing.T) {
+		for _, c := range []struct{ body, expect string }{
+			{`"best_of": -1`, "-1"},
+			{fmt.Sprintf(`"best_of": %d, "n": 1`, maxBestOf+1), fmt.Sprintf("at most %d", maxBestOf)},
+		} {
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "hi", "max_tokens": 2, `+c.body+`}`)
+			body := decodeBody[errorBody](t, resp)
+			_ = resp.Body.Close()
+			if resp.StatusCode != 400 {
+				t.Errorf("%s: status = %d, want 400", c.body, resp.StatusCode)
+				continue
+			}
+			if body.Error.Code != "invalid_value" || body.Error.Param != "best_of" {
+				t.Errorf("%s: code/param = %q/%q", c.body, body.Error.Code, body.Error.Param)
+			}
+			if !strings.Contains(body.Error.Message, c.expect) {
+				t.Errorf("%s: message %q does not mention %q", c.body, body.Error.Message, c.expect)
+			}
+		}
+	})
+
+	t.Run("stream is refused with the way out", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2, "best_of": 4, "stream": true}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != 400 {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := decodeBody[errorBody](t, resp)
+		if body.Error.Code != "unsupported_parameter" || body.Error.Param != "best_of" {
+			t.Errorf("code/param = %q/%q, want unsupported_parameter/best_of",
+				body.Error.Code, body.Error.Param)
+		}
+		// OpenAI's own words for why, and both ways out named, so a caller is not left
+		// guessing which field to drop.
+		if !strings.Contains(body.Error.Message, "stream=false") {
+			t.Errorf("message %q does not name stream=false as the way to keep best_of",
+				body.Error.Message)
+		}
+	})
+}
+
 // TestMaxCompletionTokensIsHonoured covers OpenAI's newer name for the token budget.
 //
 // max_tokens is deprecated in favour of max_completion_tokens, so a client migrated to the
@@ -3833,8 +4120,6 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 	}{
 		{"suffix on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix", nil},
-		{"best_of on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of", nil},
 		// logprobs and top_logprobs are honoured now, on both endpoints; see
 		// TestLogprobsOnBothEndpoints. Only suffix, best_of and chat's echo are still refused
 		// as response shapes.
@@ -3976,10 +4261,9 @@ func TestShapeFieldsAreRefusedByValueNotPresence(t *testing.T) {
 		})
 	}
 
-	// The values past the default still ask for a shape the server does not produce.
+	// The values past the default still ask for a shape the server does not produce. best_of
+	// left this list when it was implemented; see TestBestOfReturnsTheBestCandidates.
 	stillRefused := []struct{ name, path, body, field string }{
-		{"best_of=2 on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of"},
 		{"echo=true on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": true}`, "echo"},
 		{"suffix on completions", "/v1/completions",

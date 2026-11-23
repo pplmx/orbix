@@ -62,11 +62,12 @@
 // what was asked for, but it is the shape the client reads. A field that describes the
 // response is refused with a 400 naming it. The examples that used to illustrate this -- n: 3
 // and choices[2], then logprobs and choice.logprobs -- are both honoured now, which is the
-// point of the rule rather than an exception to it: what remains refused is suffix and
-// best_of, and a client reading either of those would fail far from the request that caused it.
+// point of the rule rather than an exception to it: the sample-picking fields kept getting
+// implemented, and suffix is what remains, where a client reading text with an insertion would
+// fail far from the request that caused it.
 //
 // The refused set differs per endpoint, because the two schemas do: chat refuses echo, while
-// completions refuses suffix and best_of. Chat's echo is there because the chat schema has no
+// completions refuses suffix. Chat's echo is there because the chat schema has no
 // such field -- on completions the same name is defined and is honoured, returning the prompt
 // ahead of the generated text.
 //
@@ -74,6 +75,14 @@
 // list of per-token objects with bytes on chat. The counts are capped per endpoint because
 // OpenAI documents different maxima (5 and 20) and a caller that asked for more and got fewer
 // has been silently given a different answer.
+//
+// best_of generates that many candidates and returns the best choiceCount of them, ranked by
+// mean log probability per token: the mean rather than the sum, because every term is negative
+// so a sum always prefers the shortest completion. Selecting therefore needs log probabilities
+// even when the caller did not ask for them, which is why the engine is asked for them whenever
+// best_of is set and the response only carries them when the caller did. stream=true is refused
+// because the candidates are comparable only once they have finished, and usage counts every
+// candidate generated rather than only the returned ones.
 //
 // The numbers come from a log-softmax over the whole vocabulary at the request's temperature,
 // not from the truncated set top_k or top_p leaves behind. That is the difference between
@@ -119,7 +128,7 @@
 //
 // What decides the remaining refusals is the value, not the field's presence. A field sent
 // with the value the response already carries is a request this server serves: best_of: 1,
-// suffix: "" answers 200. The official
+// suffix: "" answers 200, and logprobs: false asks for what the response does. The official
 // SDKs serialise a keyword argument the caller passed even when it equals the API default, so
 // completions.create(best_of=1) sends "best_of": 1 -- and refusing on presence answered it
 // with "best_of needs several candidates", which is a sentence about a different request.

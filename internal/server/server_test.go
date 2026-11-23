@@ -3598,6 +3598,174 @@ func eachSSEChunk(body io.ReadCloser, fn func([]byte)) error {
 	return sc.Err()
 }
 
+// TestSuffixWithoutMarkersIsRefused is the case most checkpoints hit: a model with no
+// fill-in-the-middle markers cannot answer an insertion, and the refusal has to say that the
+// model is the reason rather than that the server lacks the feature.
+//
+// The distinction matters to whoever gets the error. "Not implemented" sends them to another
+// server; "this checkpoint declares no markers" sends them to a code-tuned checkpoint, which is
+// the only thing that would work. Generating from the prefix alone would be worse than either:
+// the reply would be a plausible continuation that silently ignored half the request.
+func TestSuffixWithoutMarkersIsRefused(t *testing.T) {
+	// The default fixture's vocabulary has no FIM markers, which is the Llama case.
+	srv, _ := newTestServer(t)
+
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "func add(a, b int) int {", "suffix": "return a + b\n}", "max_tokens": 4}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	body := decodeBody[errorBody](t, resp)
+	if body.Error.Param != "suffix" || body.Error.Code != "unsupported_parameter" {
+		t.Errorf("param/code = %q/%q, want suffix/unsupported_parameter",
+			body.Error.Param, body.Error.Code)
+	}
+	// The message has to name the model as the cause and the markers as what is missing, or a
+	// caller cannot tell this apart from a server that has not implemented the field.
+	for _, want := range []string{"fill-in-the-middle", "model declares none", "without suffix"} {
+		if !strings.Contains(body.Error.Message, want) {
+			t.Errorf("message %q does not mention %q", body.Error.Message, want)
+		}
+	}
+}
+
+// TestFIMPromptAssembly pins the order the parts are joined in, which is the whole of the
+// feature: a fill-in-the-middle prompt is prefix marker, the text before, suffix marker, the
+// text after, middle marker, and any other arrangement is a different question to the model.
+//
+// The assertions are on the ids rather than on a rendered string because that is what the
+// engine receives, and because the caller's text must stay text: encoding the parts and joining
+// them around the markers is what keeps a literal "<|fim_middle|>" typed into the prefix from
+// becoming the marker that opens the insertion.
+func TestFIMPromptAssembly(t *testing.T) {
+	vocab := []string{
+		"<unk>", "<s>", "</s>", "a", "b", "c",
+		"<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>",
+	}
+	srv, tok := newTestServerModel(t, gguftest.Model{Vocab: vocab, NoEOS: true, ContextLen: 256})
+
+	fim, ok := tok.FIMTokens()
+	if !ok {
+		t.Fatal("the fixture's markers were not detected")
+	}
+	const before, after = "a b", "c"
+	got := srv.fimPrompt(before, after, fim)
+
+	prefixIDs := tok.Encode(before, false)
+	suffixIDs := tok.Encode(after, false)
+	want := make([]int32, 0, len(prefixIDs)+len(suffixIDs)+3)
+	want = append(want, fim.Prefix)
+	want = append(want, prefixIDs...)
+	want = append(want, fim.Suffix)
+	want = append(want, suffixIDs...)
+	want = append(want, fim.Middle)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("assembled %v, want %v", got, want)
+	}
+
+	// The structure, stated independently of the encoder: the first id is the prefix marker,
+	// the last is the middle marker, and the suffix marker sits exactly after the prefix text.
+	if len(got) < 3 {
+		t.Fatalf("assembled only %d ids", len(got))
+	}
+	if got[0] != fim.Prefix || got[len(got)-1] != fim.Middle {
+		t.Errorf("the prompt does not start with the prefix marker and end with the middle one: %v", got)
+	}
+	if got[1+len(prefixIDs)] != fim.Suffix {
+		t.Errorf("the suffix marker is at %d, want it at %d",
+			got[1+len(prefixIDs)], 1+len(prefixIDs))
+	}
+	// No BOS: the markers are the structure, and a checkpoint trained for this sees the prefix
+	// marker at the start of the sequence.
+	cfg := srv.eng.Model().Config()
+	if cfg.BOSID >= 0 && got[0] == int32(cfg.BOSID) {
+		t.Error("the prompt starts with BOS; the prefix marker belongs there")
+	}
+}
+
+// TestSuffixIsHonouredEndToEnd covers the request path for a checkpoint that can do it.
+//
+// The markers are control tokens, so they are absent from the decoded text whether or not the
+// model emits them -- but the reply must also be free of them as *text*, which is what the
+// assertion checks: a marker that reached the response would be the model closing its
+// insertion, and the response is supposed to stop before that.
+func TestSuffixIsHonouredEndToEnd(t *testing.T) {
+	vocab := []string{
+		"<unk>", "<s>", "</s>", "a", "b", "c", "d", "e",
+		"<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+	}
+	srv, _ := newTestServerModel(t, gguftest.Model{Vocab: vocab, NoEOS: true, ContextLen: 256})
+
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "a", "suffix": "c", "max_tokens": 4}`)
+	if resp.StatusCode != http.StatusOK {
+		out := decodeBody[errorBody](t, resp)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+	}
+	var got struct {
+		Choices []struct {
+			Text string `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		_ = resp.Body.Close()
+		t.Fatalf("decode: %v", err)
+	}
+	_ = resp.Body.Close()
+	if len(got.Choices) != 1 {
+		t.Fatalf("got %d choices, want 1", len(got.Choices))
+	}
+	for _, marker := range []string{"<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"} {
+		if strings.Contains(got.Choices[0].Text, marker) {
+			t.Errorf("the response contains the marker %q: %q", marker, got.Choices[0].Text)
+		}
+	}
+}
+
+// TestSuffixAndEchoAreRefusedTogether records the one combination this server will not guess at.
+//
+// With an insertion the prompt is only the text before the insertion point, so echo would
+// return half of what the caller sent under a name that promises the prompt. Neither reading is
+// wrong enough to pick silently.
+func TestSuffixAndEchoAreRefusedTogether(t *testing.T) {
+	vocab := []string{
+		"<unk>", "<s>", "</s>", "a", "b",
+		"<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+	}
+	srv, _ := newTestServerModel(t, gguftest.Model{Vocab: vocab, NoEOS: true, ContextLen: 256})
+
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "a", "suffix": "b", "max_tokens": 2, "echo": true}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	body := decodeBody[errorBody](t, resp)
+	if body.Error.Param != "suffix" || body.Error.Code != "unsupported_parameter" {
+		t.Errorf("param/code = %q/%q, want suffix/unsupported_parameter",
+			body.Error.Param, body.Error.Code)
+	}
+	if !strings.Contains(body.Error.Message, "echo") {
+		t.Errorf("message %q does not name the field it conflicts with", body.Error.Message)
+	}
+}
+
+// TestEmptySuffixMeansNoInsertion keeps the field's zero value inert.
+//
+// An SDK that always sends the field sends an empty string when the caller has not asked for an
+// insertion, and refusing that would fail a request this server answers exactly as asked.
+func TestEmptySuffixMeansNoInsertion(t *testing.T) {
+	srv, _ := newTestServer(t)
+	resp := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "hi", "suffix": "", "max_tokens": 2}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		out := decodeBody[errorBody](t, resp)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+	}
+}
+
 // TestBestOfReturnsTheBestCandidates covers the one field that changes which samples come back
 // rather than how they are sampled.
 //
@@ -4109,8 +4277,10 @@ func TestEchoReturnsThePrompt(t *testing.T) {
 func TestResponseShapeFieldsAreRefused(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	// Each case names the field the error must carry. The last sends three at once: a caller
-	// fixing these should not need one round trip per field.
+	// The machinery that refuses on value is still here, and chat's echo is the one field left
+	// that goes through it. Everything else this test used to cover has been implemented --
+	// n, logprobs, top_logprobs, echo on completions, max_completion_tokens, best_of -- which
+	// is why the list is short enough to state.
 	tooLoud := []struct {
 		name  string
 		path  string
@@ -4118,21 +4288,12 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		field string
 		all   []string
 	}{
-		{"suffix on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix", nil},
-		// logprobs and top_logprobs are honoured now, on both endpoints; see
-		// TestLogprobsOnBothEndpoints. Only suffix, best_of and chat's echo are still refused
-		// as response shapes.
-		// echo is still refused on chat, which is the only place it is left: OpenAI's chat
-		// schema has no such field, so there the refusal describes a field the caller sent
-		// that the endpoint has no use for. On completions it is honoured -- see
-		// TestEchoReturnsThePrompt.
+		// echo is refused on chat because OpenAI's chat schema has no such field, so there it
+		// describes a field the caller sent that the endpoint cannot use. On completions the
+		// same name is defined and honoured -- see TestEchoReturnsThePrompt.
 		{"echo on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": true}`,
 			"echo", nil},
-		// max_completion_tokens and echo moved to the served set when they were implemented;
-		// two fields are still enough to check that one refusal names both.
-
 	}
 	for _, c := range tooLoud {
 		t.Run(c.name, func(t *testing.T) {
@@ -5050,14 +5211,9 @@ func TestStreamingClientGoneReleasesTheSequence(t *testing.T) {
 // caller reads that to pick an alternative. Asserting on the fixed "does not implement" prefix
 // instead left the reasons untested.
 func whyPhrase(field string) string {
-	return map[string]string{
-		"n":            "several sequences",
-		"logprobs":     "log-probabilities",
-		"top_logprobs": "alternative-token",
-		"echo":         "never includes the prompt",
-		"suffix":       "suffix generation is not implemented",
-		"best_of":      "highest log probability",
-	}[field]
+	// One entry, because one field is left in the refusal tables. The map stays a map so that
+	// adding a field means adding a reason rather than threading an argument through.
+	return map[string]string{"echo": "never includes the prompt"}[field]
 }
 
 // TestIdlePollShiftValue pins the backoff ceiling, which nothing else observes.
@@ -5818,10 +5974,14 @@ func TestValidationOrderIsFixed(t *testing.T) {
 			`{"model": "nope", "prompt": "hi", "top_p": 5}`, http.StatusNotFound, "model"},
 		// Shape fields before the required-field check: the response would be the wrong
 		// shape regardless of what the prompt holds.
-		{"shape field beats a missing prompt", "/v1/completions",
-			`{"prompt": "  ", "suffix": "END"}`, http.StatusBadRequest, "suffix"},
+		// A shape field still beats a required one on chat, which is the endpoint that has a
+		// shape field left. On completions there is none, and suffix is deliberately checked
+		// after the required prompt: with no prompt there is nothing to insert into, so the
+		// missing field is the one to report.
 		{"shape field beats a chat with no messages", "/v1/chat/completions",
 			`{"echo": true}`, http.StatusBadRequest, "echo"},
+		{"missing prompt beats suffix", "/v1/completions",
+			`{"prompt": "  ", "suffix": "END"}`, http.StatusBadRequest, "prompt"},
 		// Required fields before value ranges.
 		{"missing prompt beats a bad max_tokens", "/v1/completions",
 			`{"prompt": "", "max_tokens": -5}`, http.StatusBadRequest, "prompt"},

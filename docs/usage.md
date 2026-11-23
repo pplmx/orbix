@@ -58,11 +58,13 @@ Unsupported fields split by what a client does with the answer. Sampling knobs -
 Fields describing the *response* are refused with a 400 naming every one, since a client that
 sent `n: 3` indexes `choices[2]`.
 
-The refused set is not the same on the two endpoints, because their schemas differ. Chat refuses
-`echo`; completions refuses `suffix`. A field belonging to the other endpoint is not
-refused there -- it is an unknown member and is ignored, so `suffix` sent to chat is silently
-dropped rather than named. Chat's `echo` is in the refused set because OpenAI's chat schema has no
-such field, so there it is a field the caller sent that the endpoint cannot use.
+Only one field is still refused this way, and only on one endpoint: chat's `echo`, which OpenAI's
+chat schema does not define, so there it describes a field the caller sent that the endpoint
+cannot use. Everything else that used to be refused has been implemented instead -- `n`,
+`logprobs`, `top_logprobs`, `echo` on completions, `max_completion_tokens`, `best_of` and
+`suffix` -- each leaving the list when it did. A field belonging to the other endpoint is not
+refused there: it is an unknown member and is ignored, so `suffix` sent to chat is silently
+dropped rather than named.
 
 `logprobs` is honoured on both, in each endpoint's own shape: completions answers with parallel
 arrays (`tokens`, `token_logprobs`, `text_offset`, `top_logprobs`), chat with a list of objects
@@ -88,6 +90,34 @@ all. `stream: true` is refused for the same reason OpenAI documents: the candida
 compared once they have finished, so there is nothing to stream until the choice is made. The
 `usage` figures count every candidate generated, not only the returned ones, because the work
 was done either way and OpenAI's own description warns that `best_of` consumes quota.
+
+`suffix` on completions turns the request into an insertion: `prompt` is the text before the
+insertion point and `suffix` the text after, and the reply is what belongs between them. That
+needs a checkpoint trained for it, so the server looks for the marker names a family uses --
+`<|fim_prefix|>` / `<|fim_suffix|>` / `<|fim_middle|>` for Qwen and CodeGemma, the same names
+without the pipes for StarCoder, and `<PRE>` / `<SUF>` / `<MID>` for CodeLlama -- and refuses with
+`unsupported_parameter` if the served model declares none of them, naming the sets it looked for
+so an operator can see what the checkpoint would have needed. Generating from the prefix alone
+would be worse than the refusal: it is a plausible continuation that silently ignores half of what
+the caller sent.
+
+Declaring the markers is necessary but not sufficient. A vocabulary comes from the tokenizer a
+checkpoint was converted with, so an instruct model can carry a code model's markers without
+having been trained to use them -- measured on Qwen2.5-0.5B-Instruct, which declares all three,
+answers an assembled fill-in-the-middle prompt by repeating the suffix rather than filling it.
+Nothing in a GGUF file distinguishes the two cases, so the server trusts what the file says.
+
+The insertion ends at the marker the model emits to close it, and which one that is belongs to
+the checkpoint: the three framing markers join the stop set, and so does any dedicated closing
+marker the vocabulary declares -- `<|fim_pad|>` and `<|endoftext|>` for Qwen, `<fim_pad>` for
+StarCoder, `<EOT>` for CodeLlama. Leaving those out is not a detail: measured on
+Qwen2.5-Coder-0.5B with only the framing markers, a prefix ending in an indented `return` with
+a one-newline suffix produced `x * x` and then carried on writing a whole `main()` function,
+because nothing told it the insertion was over. With the closing markers in the list the same
+request stops at the end of the expression. A checkpoint that emits neither will run to
+`max_tokens`, so `stop` is still worth setting on an unfamiliar model. `suffix` with an empty string is not an insertion and is served normally, and `suffix` with
+`echo` is refused: with an insertion the prompt is only the text before the insertion point, so
+echo would return part of what was sent.
 
 A token whose bytes are not valid UTF-8 on their own -- one half of a character, in a byte-level
 vocabulary -- is described by its bytes, which is why chat's schema has that field: `bytes` is

@@ -29,6 +29,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -740,12 +741,6 @@ var completionShapeFields = []shapeField{
 	{name: "logprobs", invalid: func(v any) (string, bool) {
 		return checkLogprobs(v.(*completionRequest).Logprobs, maxCompletionLogprobs, "logprobs")
 	}},
-	{name: "suffix",
-		asked: func(v any) bool {
-			p := v.(*completionRequest).Suffix
-			return p != nil && *p != ""
-		},
-		why: "suffix generation is not implemented, so the reply would silently lack it"},
 	// best_of is honoured now. Its range, including the rule that it must exceed n, is checked
 	// here because this is the one place both numbers are available; see checkBestOf.
 	{name: "best_of", invalid: func(v any) (string, bool) {
@@ -934,6 +929,36 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		writeErrorParam(w, http.StatusBadRequest, "prompt is required", "prompt", "missing_required_parameter")
 		return
 	}
+	// suffix turns the request from a continuation into an insertion: the prompt is the text
+	// before the insertion point and suffix is the text after it. That needs a checkpoint
+	// trained for it, recognised by its marker names, so the refusal here is about the model
+	// rather than about this server -- the same request works against a code-tuned checkpoint.
+	var fim *tokenize.FIM
+	if req.Suffix != nil && *req.Suffix != "" {
+		markers, ok := s.tok.FIMTokens()
+		if !ok {
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				"suffix", "unsupported_parameter",
+				"suffix needs a fill-in-the-middle checkpoint, and this model declares none of "+
+					"the marker sets this server knows (%s); generating anyway would answer from the "+
+					"prefix alone and silently ignore the suffix. Send the request without suffix, "+
+					"or serve a code-tuned checkpoint",
+				fimMarkerHint()))
+			return
+		}
+		// echo returns the prompt, and with an insertion the "prompt" the caller wrote is only
+		// the part before the insertion point. Echoing that would return half of what they
+		// sent under a name that promises the prompt, so the pair is refused rather than
+		// guessed at.
+		if req.Echo != nil && *req.Echo {
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				"suffix", "unsupported_parameter",
+				"suffix and echo cannot be combined: with an insertion the prompt is only the "+
+					"text before the insertion point, so echo would return part of what was sent"))
+			return
+		}
+		fim = &markers
+	}
 	s.generate(w, r, generateParams{
 		prompt:              req.Prompt,
 		maxTokens:           req.MaxTokens,
@@ -947,6 +972,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		choices:             req.N,
 		maxCompletionTokens: req.MaxCompletionTokens,
 		echo:                req.Echo != nil && *req.Echo,
+		suffix:              suffixOf(req.Suffix),
+		fim:                 fim,
 		// On this endpoint logprobs is a count rather than a switch: its presence turns the
 		// feature on and its value is how many alternatives to describe.
 		logprobs:     req.Logprobs != nil,
@@ -995,6 +1022,45 @@ func (s *Server) renderChat(msgs []chatMessage) string {
 	return prompt
 }
 
+// suffixOf reads an optional suffix as a string, treating absent as empty.
+func suffixOf(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// fimMarkerHint names the marker sets a checkpoint could declare, so a refusal can tell an
+// operator what the served model is missing instead of only that something is missing.
+func fimMarkerHint() string {
+	sets := tokenize.FIMMarkerNames()
+	out := make([]string, len(sets))
+	for i, set := range sets {
+		out[i] = set[0] + " and " + set[2]
+	}
+	return strings.Join(out, "; ")
+}
+
+// fimPrompt assembles a fill-in-the-middle prompt from its parts.
+//
+// The parts are encoded separately and joined around the marker ids rather than concatenated
+// into one string and encoded, for two reasons. The markers are vocabulary entries, so they
+// have to be their own ids instead of pieces the encoder might split; and the caller's text has
+// to stay text, so a literal "<|fim_middle|>" typed into the prefix is encoded as characters
+// rather than becoming the marker that opens the insertion.
+//
+// No BOS is added. The markers are the structure here, and a checkpoint trained for this sees
+// the prefix marker at the start of the sequence.
+func (s *Server) fimPrompt(prefix, suffix string, fim tokenize.FIM) []int32 {
+	out := make([]int32, 0, len(prefix)/4+len(suffix)/4+3)
+	out = append(out, fim.Prefix)
+	out = append(out, s.tok.Encode(prefix, false)...)
+	out = append(out, fim.Suffix)
+	out = append(out, s.tok.Encode(suffix, false)...)
+	out = append(out, fim.Middle)
+	return out
+}
+
 // generateParams is what both endpoints share once their JSON is decoded.
 type generateParams struct {
 	prompt      string
@@ -1034,6 +1100,11 @@ type generateParams struct {
 	// bestOf is the completions endpoint's candidate count: generate this many and return the
 	// choiceCount best. Zero or one means no selection, which is the default.
 	bestOf int
+	// suffix, with fim, asks for an insertion rather than a continuation: the prompt is the
+	// text before the insertion point and suffix is the text after it. fim is non-nil only
+	// when the checkpoint declares markers for it, which the handler checks.
+	suffix string
+	fim    *tokenize.FIM
 }
 
 // choiceCount is how many completions the request asks for, with the omitted field reading
@@ -1098,9 +1169,22 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	// prompt is text the caller wrote, so a literal "<|im_start|>" there stays text.
 	// The same distinction the CLI's chat command makes, for the same reason.
 	var promptTokens []int32
-	if p.chat {
+	// fimStopIDs are the marker ids the engine stops on, kept separate from p.stop because the
+	// markers are control tokens: their text encodes to a run of characters rather than to the
+	// one token, so stopTokenIDs cannot find them.
+	var fimStopIDs []int32
+	switch {
+	case p.fim != nil:
+		promptTokens = s.fimPrompt(p.prompt, p.suffix, *p.fim)
+		// The generated middle ends at a marker the checkpoint emits, and which one is the
+		// model's business rather than ours. Measured on Qwen2.5-Coder without the closing
+		// markers: the correct expression came first and the reply then carried on writing the
+		// caller's own following lines, because nothing told it to stop.
+		p.stop = append(slices.Clone(p.stop), p.fim.StopStrings()...)
+		fimStopIDs = p.fim.StopIDs()
+	case p.chat:
 		promptTokens = s.tok.EncodeWithSpecials(p.prompt, cfg.BOSID >= 0)
-	} else {
+	default:
 		promptTokens = s.tok.Encode(p.prompt, cfg.BOSID >= 0)
 	}
 	if len(promptTokens) == 0 {
@@ -1219,7 +1303,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		}
 	}
 
-	stopIDs := s.stopTokenIDs(p.stop)
+	stopIDs := append(s.stopTokenIDs(p.stop), fimStopIDs...)
 	// OpenAI prefixes a completion id with "cmpl-" and a chat completion with "chatcmpl-".
 	// The prefix is cosmetic to a parser but visible to anyone reading a log, and the wrong
 	// one makes a completion look like a chat response.

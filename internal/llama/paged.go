@@ -419,7 +419,7 @@ func (c *PagedKVCache) rememberFullBlock(tokens []int32, pos int) error {
 	// hash: the index keys a block by its chain, so that the same tokens at two offsets are
 	// two entries. Walking the blocks already published for this prompt rebuilds the same
 	// chain Match will walk.
-	parent := chainRoot(pool.index, c.block, tokens, idx-1)
+	parent := chainRoot(c.block, tokens, idx-1)
 	// Remember takes the index's own reference. This cache already holds its
 	// reference from the allocation, so the block now has two holders and stays
 	// alive after the sequence finishes -- which is the whole point.
@@ -428,7 +428,11 @@ func (c *PagedKVCache) rememberFullBlock(tokens []int32, pos int) error {
 
 // chainRoot returns the key the block at position end belongs under, given the chain that precedes
 // it. It folds every block up to end, so the result identifies a position rather than a token run.
-func chainRoot(idx *PrefixIndex, block int, tokens []int32, end int) uint64 {
+//
+// It took the index as its first parameter until a round that noticed the parameter was never read;
+// the function needs the block size and the tokens, not the index, and a parameter nothing reads is
+// a claim about a dependency that does not exist.
+func chainRoot(block int, tokens []int32, end int) uint64 {
 	var parent uint64
 	for i := range end {
 		start := i * block

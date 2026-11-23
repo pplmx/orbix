@@ -1419,9 +1419,11 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	// makes n choices cost a batch rather than n requests: the engine advances every active
 	// sequence in the same rounds.
 	chans := make([]<-chan engine.Event, 0, choices)
-	for _, sm := range samplers {
+	for i, sm := range samplers {
 		ch, err := s.eng.Submit(engine.Request{
 			Prompt:        promptTokens,
+			ChoiceIndex:   i,
+			ChoiceCount:   len(samplers),
 			MaxTokens:     maxTokens,
 			Priority:      p.priority,
 			Stop:          stopIDs,

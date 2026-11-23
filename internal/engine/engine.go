@@ -106,6 +106,13 @@ type Request struct {
 	// generate its whole token budget into a channel nobody reads.
 	Cancel <-chan struct{}
 
+	// ChoiceIndex and ChoiceCount say which of a request's several sequences this one is. The
+	// server submits one sequence per choice, and each gets its own span, so without an index a
+	// trace reader sees n spans that differ only by span id. ChoiceCount is 0 when the request
+	// had a single sequence, which is the common case and needs no index.
+	ChoiceIndex int
+	ChoiceCount int
+
 	// Trace, when non-nil, records one span for this request, carrying orbix.queue_ms,
 	// orbix.prefill_ms and orbix.decode_ms so a slow answer can be attributed to the wait for
 	// a slot, the prompt pass, or generation rather than
@@ -459,6 +466,13 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 		}
 		if req.Stream {
 			attrs = append(attrs, otel.BoolAttr("gen_ai.request.stream", true))
+		}
+		// Only when there is a choice to make. A single-sequence request would otherwise carry
+		// an index of 0 that says nothing, and every span in the common case would have it.
+		if req.ChoiceCount > 1 {
+			attrs = append(attrs,
+				otel.IntAttr("orbix.choice_index", int64(req.ChoiceIndex)),
+				otel.IntAttr("orbix.choice_count", int64(req.ChoiceCount)))
 		}
 		// The span name is the operation name, which is what the convention says to use.
 		if span, ok := tracer.StartTrace(op, 2, attrs...); ok {

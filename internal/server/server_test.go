@@ -26,6 +26,8 @@ import (
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/tokenize"
+
+	"github.com/pplmx/orbix/internal/otel"
 )
 
 // These tests need a real model: the properties under test are the HTTP and SSE
@@ -4465,6 +4467,168 @@ func TestChatServesTheEmptyFormsOfTheToolFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTracingEmitsOneSpanPerChoice checks what actually arrives at the collector for a request with
+// several choices, and keeps the trace and the response body in agreement.
+//
+// The engine submits one sequence per choice, so a request with n=3 produces three spans, not one.
+// The documentation said "one span per request" until this test was written, and the three spans
+// were indistinguishable: they share the response id, so a trace reader could count them but not
+// tell which choice each described. orbix.choice_index is what makes them addressable.
+//
+// The token arithmetic is the other half. usage.completion_tokens counts every sequence the server
+// generated, and the spans are per sequence, so the two views agree only if the sum over spans
+// equals the usage figure. A single span for the whole request would hide which choice was long.
+func TestTracingEmitsOneSpanPerChoice(t *testing.T) {
+	type captured struct{ body []byte }
+	got := make(chan captured, 4)
+	srvTrace := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case got <- captured{body: body}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srvTrace.Close()
+
+	exp, err := otel.NewExporter(otel.ExporterOptions{Endpoint: srvTrace.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	srv, _ := newTestServerConfig(t,
+		gguftest.Model{NoEOS: true, ContextLen: 256}, Config{Trace: exp})
+
+	// One request with three choices: three sequences, three spans.
+	const maxTokens = 4
+	resp := post(t, srv.Handler(), "/v1/completions",
+		fmt.Sprintf(`{"prompt": "Once", "max_tokens": %d, "n": 3, "temperature": 1.2, "seed": 7}`,
+			maxTokens))
+	var body struct {
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		_ = resp.Body.Close()
+		t.Fatalf("decode: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// A single-choice request, which must carry no index at all.
+	resp2 := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": "Once", "max_tokens": 2}`)
+	_ = resp2.Body.Close()
+
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	var payload []byte
+	select {
+	case c := <-got:
+		payload = c.body
+	case <-time.After(5 * time.Second):
+		t.Fatal("the collector received no trace")
+	}
+
+	spans := traceSpans(t, payload)
+	var multi, single []traceSpan
+	for _, sp := range spans {
+		if sp.hasIndex {
+			multi = append(multi, sp)
+		} else {
+			single = append(single, sp)
+		}
+	}
+	if len(multi) != 3 {
+		t.Fatalf("got %d spans carrying a choice index, want 3", len(multi))
+	}
+	seen := map[int64]bool{}
+	var sum int64
+	for _, sp := range multi {
+		seen[sp.index] = true
+		sum += sp.outputTokens
+		if sp.count != 3 {
+			t.Errorf("choice %d reports a count of %d, want 3", sp.index, sp.count)
+		}
+	}
+	for i := range int64(3) {
+		if !seen[i] {
+			t.Errorf("no span carries choice_index %d", i)
+		}
+	}
+	if want := int64(body.Usage.CompletionTokens); sum != want {
+		t.Errorf("the spans account for %d generated tokens, usage says %d", sum, want)
+	}
+	if want := int64(3 * maxTokens); sum != want {
+		t.Errorf("the spans account for %d tokens, want %d", sum, want)
+	}
+	// The single-choice request has nothing to index, so it must not carry the attribute.
+	if len(single) != 1 {
+		t.Fatalf("got %d spans without a choice index, want 1 for the single-choice request",
+			len(single))
+	}
+}
+
+// traceSpan is the part of a span these tests assert on.
+type traceSpan struct {
+	index        int64
+	count        int64
+	outputTokens int64
+	hasIndex     bool
+}
+
+// traceSpans reads the spans out of an OTLP/JSON trace body.
+func traceSpans(t *testing.T, body []byte) []traceSpan {
+	t.Helper()
+	var doc struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					Attrs []struct {
+						Key   string `json:"key"`
+						Value struct {
+							Int string `json:"intValue"`
+						} `json:"value"`
+					} `json:"attributes"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("decode trace body: %v\n%s", err, body)
+	}
+	var out []traceSpan
+	for _, rs := range doc.ResourceSpans {
+		for _, ss := range rs.ScopeSpans {
+			for _, sp := range ss.Spans {
+				s := traceSpan{}
+				for _, a := range sp.Attrs {
+					if a.Value.Int == "" {
+						continue
+					}
+					var v int64
+					if _, err := fmt.Sscan(a.Value.Int, &v); err != nil {
+						t.Fatalf("attribute %q: %v", a.Key, err)
+					}
+					switch a.Key {
+					case "orbix.choice_index":
+						s.index, s.hasIndex = v, true
+					case "orbix.choice_count":
+						s.count = v
+					case "gen_ai.usage.output_tokens":
+						s.outputTokens = v
+					}
+				}
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // TestFeatureInteractions is the cross-product check the per-feature tests cannot be.

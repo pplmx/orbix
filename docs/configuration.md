@@ -361,9 +361,16 @@ is written to be read.
 
 ## Tracing covers requests that reach the engine
 
-`--otlp-endpoint` posts OTLP/HTTP+JSON to a collector. What arrives is one span per request, and
-the attributes are the OpenTelemetry `gen_ai` ones plus three of this engine's own, which split
-the request's duration into the parts an operator has to tell apart:
+`--otlp-endpoint` posts OTLP/HTTP+JSON to a collector. What arrives is one span per **sequence**,
+and the attributes are the OpenTelemetry `gen_ai` ones plus a few of this engine's own, which split
+the duration into the parts an operator has to tell apart.
+
+One span per sequence rather than per request, because a request with `n: 3` is three sequences:
+the server submits one per choice so they share a batch. `best_of` adds more, since its candidates
+are sequences too. The spans of one HTTP request share `gen_ai.response.id`, and
+`orbix.choice_index` is what tells them apart -- without it a trace reader could count three spans
+and learn nothing from any of them. The attribute is absent when the request had a single sequence,
+where an index of 0 would say nothing.
 
 | Attribute                    | Meaning                                             |
 | ---------------------------- | --------------------------------------------------- |
@@ -375,6 +382,8 @@ the request's duration into the parts an operator has to tell apart:
 | `orbix.queue_ms`             | Milliseconds from span start until work began       |
 | `orbix.prefill_ms`           | Milliseconds from work starting until prefill ended |
 | `orbix.decode_ms`            | Milliseconds from prefill until the span ended      |
+| `orbix.choice_index`         | Which of the request's sequences this span is       |
+| `orbix.choice_count`         | How many sequences the request generated            |
 
 Measured against a live collector on Llama 3.2 1B with a 7-token prompt and `max_tokens: 8`:
 `input_tokens` 7, `output_tokens` 8, `prefill_ms` 238, `decode_ms` 797.
@@ -391,7 +400,11 @@ A request that never began — cancelled while queued, or failed before its firs
 whole lifetime as `queue_ms` and omits the other two, because those are the requests whose wait
 matters most and reporting nothing would hide them.
 
-There is one span per request, not one per scheduling round, so this is where the attribution ends.
+There is one span per sequence, not one per scheduling round, so this is where the attribution
+ends. The two views of the token counts agree: `usage.completion_tokens` in the response body
+counts every sequence generated, and the sum of `gen_ai.usage.output_tokens` over a request's
+spans is the same number. Measured with `n: 3` and `max_tokens: 4`, the usage block said 12 and
+three spans said 4 each.
 
 A request the server refuses before it reaches the engine produces **no span at all**. A pool
 that cannot hold the request, a missing prompt, a bad sampler value: all are refused with a 400

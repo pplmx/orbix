@@ -8083,3 +8083,87 @@ func TestPenaltyRangeIsEnforced(t *testing.T) {
 		}
 	}
 }
+
+// TestPrefixCacheUnderN covers the two things a shared prefix must not break: the candidates have
+// to stay independent, and the answer has to be the one a cache-less server would give.
+//
+// n>1 is the shape that matters for this. Every choice is a separate sequence with the same prompt,
+// so with prefix reuse on, the second and later choices adopt the first one's blocks instead of
+// prefilling -- which is the whole benefit, and also the way they could end up sampling from one
+// another's state. Measured on Gemma 3 270M with prefix reuse on, four choices at temperature 1.5
+// came back as four different completions, and a seeded request returned the same two completions
+// with the cache on as with it off.
+//
+// The fixture is enough for the independence half: it has a real paged cache and real per-sequence
+// sampling, which is where a shared buffer would show up.
+func TestPrefixCacheUnderN(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+
+	// run builds a server over a fresh engine, so the two cache settings cannot see each
+	// other's index, and returns the texts of one n-choice response.
+	run := func(prefixCache bool, n int) []string {
+		t.Helper()
+		eng, err := engine.New(path, engine.Options{
+			MaxActive: 1, BlockSize: 8, Blocks: 128, PrefixCache: prefixCache,
+		})
+		if err != nil {
+			t.Fatalf("engine.New: %v", err)
+		}
+		cfg := eng.Model().Config()
+		srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		srv.StartPump(ctx)
+
+		body := fmt.Sprintf(
+			`{"prompt": "Once upon a time", "max_tokens": 4, "temperature": 1.5, "seed": 7, "n": %d}`,
+			n)
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		out := decodeBody[struct {
+			Choices []struct {
+				Text string `json:"text"`
+			} `json:"choices"`
+		}](t, resp)
+		texts := make([]string, len(out.Choices))
+		for i := range out.Choices {
+			texts[i] = out.Choices[i].Text
+		}
+		return texts
+	}
+
+	// A shared prefix must not make the choices identical: each is its own sequence with its own
+	// sampling stream.
+	cached := run(true, 4)
+	distinct := make(map[string]bool, len(cached))
+	for _, s := range cached {
+		distinct[s] = true
+	}
+	if len(distinct) == 1 && len(cached) > 1 {
+		t.Errorf("all %d choices returned %q; a shared prefix must not share the sampling",
+			len(cached), cached[0])
+	}
+
+	// And the cache is an optimisation, not a behaviour: the same seeded request has to produce
+	// the same text either way.
+	without := run(false, 4)
+	if len(cached) != len(without) {
+		t.Fatalf("%d choices with the cache, %d without", len(cached), len(without))
+	}
+	for i := range cached {
+		if cached[i] != without[i] {
+			t.Errorf("choice %d = %q with prefix reuse and %q without; the cache changed the answer",
+				i, cached[i], without[i])
+		}
+	}
+}

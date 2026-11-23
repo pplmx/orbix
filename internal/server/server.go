@@ -347,10 +347,15 @@ type chatRequest struct {
 	// rather than ignored; see the type comment. Their types are loose on purpose: the
 	// only thing read is whether the client asked for something, and a value this struct
 	// would reject as malformed is still a value the caller meant to send.
-	N           int   `json:"n"`
-	Logprobs    *bool `json:"logprobs"`
-	TopLogprobs *int  `json:"top_logprobs"`
-	Echo        *bool `json:"echo"`
+	N int `json:"n"`
+	// Function calling. Parsed to be refused: see chatToolFields.
+	Tools        json.RawMessage `json:"tools"`
+	ToolChoice   json.RawMessage `json:"tool_choice"`
+	Functions    json.RawMessage `json:"functions"`
+	FunctionCall json.RawMessage `json:"function_call"`
+	Logprobs     *bool           `json:"logprobs"`
+	TopLogprobs  *int            `json:"top_logprobs"`
+	Echo         *bool           `json:"echo"`
 
 	// Priority ranks this request against others waiting for a slot; higher advances
 	// first, and an omitted value means "with the rest". It is Orbix's own extension:
@@ -398,6 +403,12 @@ type streamOptions struct {
 type chatMessage struct {
 	Role    string      `json:"role"`
 	Content chatContent `json:"content"`
+	// The tool fields are parsed so the handler can refuse them by name. They are not part of
+	// the conversation this server renders: a tool result has no place in a prompt for a model
+	// that was never told which tools exist.
+	ToolCalls  json.RawMessage `json:"tool_calls"`
+	ToolCallID string          `json:"tool_call_id"`
+	Name       string          `json:"name"`
 }
 
 // chatContent is a message body: a JSON string, or an array of {"type","text"} parts.
@@ -878,6 +889,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if s.rejectShapeFields(w, chatShapeFields, &req) {
 		return
 	}
+	if s.chatToolFields(w, &req) {
+		return
+	}
 	if len(req.Messages) == 0 {
 		writeErrorParam(w, http.StatusBadRequest, "messages is required", "messages", "missing_required_parameter")
 		return
@@ -900,6 +914,81 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		topLogprobs:         derefInt(req.TopLogprobs),
 		includeUsage:        req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
+}
+
+// jsonAsks reports whether a raw JSON value asks for something, given that "no" is spelled four
+// ways in practice: an absent field, an explicit null, an empty array, and the string "none"
+// that tool_choice and function_call use.
+//
+// It is a string test rather than a decode because the fields carry structures this server does
+// not model, and the only question here is whether the caller asked for them.
+func jsonAsks(raw json.RawMessage) bool {
+	switch strings.TrimSpace(string(raw)) {
+	case "", "null", "[]", `"none"`:
+		return false
+	}
+	return true
+}
+
+// chatToolFields refuses function calling, in both its current and its legacy spelling.
+//
+// The refusal exists because the alternative is the failure this server refuses everywhere else:
+// tools sent, nothing done with them, and a response that looks like an answer. Measured before
+// this check, a request with a get_weather tool and one without it produced byte-identical
+// responses, and the model answered "Please provide me with the tool you are referring to" --
+// it had never been told the tool existed.
+//
+// A message carrying a tool result is refused for the same reason. Rendering it would put a
+// turn into the prompt with a role the checkpoint's template has no branch for (Gemma's writes
+// "<start_of_turn>tool"), and the model would answer a conversation it cannot see the shape of.
+//
+// The way out is named in every message, because "not implemented" alone leaves a caller
+// guessing whether to drop the field or change servers.
+func (s *Server) chatToolFields(w http.ResponseWriter, req *chatRequest) bool {
+	const why = "function calling is not implemented: the tools a request declares reach no " +
+		"prompt, and the response never carries tool_calls, so the model would answer as though " +
+		"it had never been told the tools exist"
+	for _, f := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"tools", req.Tools},
+		{"tool_choice", req.ToolChoice},
+		{"functions", req.Functions},
+		{"function_call", req.FunctionCall},
+	} {
+		if !jsonAsks(f.raw) {
+			continue
+		}
+		writeRequestError(w, http.StatusBadRequest, newParamError(f.name, "unsupported_parameter",
+			"%s; send the request without %s, or select and carry out the call outside this "+
+				"server", why, f.name))
+		return true
+	}
+	for i, m := range req.Messages {
+		switch {
+		case m.Role == "tool":
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				fmt.Sprintf("messages[%d].role", i), "unsupported_parameter",
+				"%s; send the conversation without its tool turns, or run the call outside this "+
+					"server", why))
+			return true
+		case jsonAsks(m.ToolCalls):
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				fmt.Sprintf("messages[%d].tool_calls", i), "unsupported_parameter",
+				"%s; sending a previous turn's calls back asks the model to continue a "+
+					"conversation it cannot see the shape of -- drop them, or run the call "+
+					"outside this server", why))
+			return true
+		case m.ToolCallID != "":
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				fmt.Sprintf("messages[%d].tool_call_id", i), "unsupported_parameter",
+				"%s; a result that answers no call this server issued cannot be rendered, "+
+					"so drop it or run the call outside this server", why))
+			return true
+		}
+	}
+	return false
 }
 
 // handleCompletion and handleChat check a request in the same order, and the order is the

@@ -66,6 +66,13 @@
 // implemented, and suffix is what remains, where a client reading text with an insertion would
 // fail far from the request that caused it.
 //
+// Function calling is refused in every spelling, on both the request and the messages: tools,
+// tool_choice, functions, function_call, tool_calls, tool_call_id and role "tool". The reason is
+// the same rule as everywhere else in this file -- the fields were once dropped by the decoder and
+// the request answered as though they had not been sent, which meant a model answering a question
+// about a tool it was never told existed. Their empty forms are served, since they ask for what
+// the server would do anyway.
+//
 // The refused set differs per endpoint, because the two schemas do: chat refuses echo and
 // completions refuses nothing through this path any more -- n, logprobs, top_logprobs, echo,
 // max_completion_tokens, best_of and suffix have each been implemented and left it. Chat's echo

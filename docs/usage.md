@@ -58,13 +58,21 @@ Unsupported fields split by what a client does with the answer. Sampling knobs -
 Fields describing the *response* are refused with a 400 naming every one, since a client that
 sent `n: 3` indexes `choices[2]`.
 
-Only one field is still refused this way, and only on one endpoint: chat's `echo`, which OpenAI's
-chat schema does not define, so there it describes a field the caller sent that the endpoint
-cannot use. Everything else that used to be refused has been implemented instead -- `n`,
-`logprobs`, `top_logprobs`, `echo` on completions, `max_completion_tokens`, `best_of` and
-`suffix` -- each leaving the list when it did. A field belonging to the other endpoint is not
-refused there: it is an unknown member and is ignored, so `suffix` sent to chat is silently
-dropped rather than named.
+Only two things are still refused this way. Chat's `echo` is one: OpenAI's chat schema does not
+define it, so there it describes a field the caller sent that the endpoint cannot use. Function
+calling is the other, and it is refused in every spelling a client might use -- `tools`,
+`tool_choice`, and the legacy `functions` and `function_call`, plus any message carrying
+`tool_calls`, `tool_call_id` or `role: "tool"`. Before that check those fields were dropped by the
+decoder and the request was answered as though they had never been sent: measured against a real
+checkpoint, a request declaring a `get_weather` tool and one without it came back byte-identical,
+with the model asking "Please provide me with the tool you are referring to". The empty forms are
+still served, because they ask for what the server would do anyway -- `tools: []` and
+`tool_choice: "none"` answer normally.
+
+Everything else that used to be refused has been implemented instead -- `n`, `logprobs`,
+`top_logprobs`, `echo` on completions, `max_completion_tokens`, `best_of` and `suffix` -- each
+leaving the list when it did. A field belonging to the other endpoint is not refused there: it is
+an unknown member and is ignored, so `suffix` sent to chat is silently dropped rather than named.
 
 `logprobs` is honoured on both, in each endpoint's own shape: completions answers with parallel
 arrays (`tokens`, `token_logprobs`, `text_offset`, `top_logprobs`), chat with a list of objects

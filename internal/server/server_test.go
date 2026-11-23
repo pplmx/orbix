@@ -4376,6 +4376,97 @@ type featureCombo struct {
 	wantCode   string
 }
 
+// TestChatRefusesFunctionCalling covers the fields this server parses only in order to refuse.
+//
+// Before this check they were dropped by the decoder and the request was answered as though they
+// had never been sent: measured against a real checkpoint, a request declaring a get_weather tool
+// and one without it came back byte-identical, with the model asking "Please provide me with the
+// tool you are referring to". A field that changes the prompt being silently ignored is the
+// failure this package refuses everywhere else, and tools are the last ones left.
+//
+// The four spellings are all covered because clients mix them: tools and tool_choice are the
+// current API, functions and function_call are what older SDKs still send.
+func TestChatRefusesFunctionCalling(t *testing.T) {
+	srv, _ := newTestServer(t)
+	const userTurn = `[{"role": "user", "content": "hi"}]`
+
+	cases := []struct {
+		name  string
+		body  string
+		param string
+	}{
+		{"tools", `{"messages": ` + userTurn + `, "max_tokens": 1, "tools": [{"type": "function",
+			"function": {"name": "get_weather", "parameters": {"type": "object"}}}]}`, "tools"},
+		{"tool_choice auto", `{"messages": ` + userTurn + `, "max_tokens": 1, "tool_choice": "auto"}`, "tool_choice"},
+		{"tool_choice required", `{"messages": ` + userTurn + `, "max_tokens": 1, "tool_choice": "required"}`, "tool_choice"},
+		{"tool_choice named", `{"messages": ` + userTurn + `, "max_tokens": 1,
+			"tool_choice": {"type": "function", "function": {"name": "get_weather"}}}`, "tool_choice"},
+		{"functions", `{"messages": ` + userTurn + `, "max_tokens": 1, "functions": [{"name": "f"}]}`, "functions"},
+		{"function_call", `{"messages": ` + userTurn + `, "max_tokens": 1, "function_call": "auto"}`, "function_call"},
+		{"tool result message", `{"messages": [{"role": "user", "content": "hi"},
+			{"role": "tool", "content": "22", "tool_call_id": "call_1"}], "max_tokens": 1}`,
+			"messages[1].role"},
+		{"tool_calls on a previous turn", `{"messages": [{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function",
+			"function": {"name": "get_weather", "arguments": "{}"}}]}], "max_tokens": 1}`,
+			"messages[1].tool_calls"},
+		{"tool_call_id alone", `{"messages": [{"role": "user", "content": "hi"},
+			{"role": "user", "content": "22", "tool_call_id": "call_1"}], "max_tokens": 1}`,
+			"messages[1].tool_call_id"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/chat/completions", c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != 400 {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			body := decodeBody[errorBody](t, resp)
+			if body.Error.Param != c.param {
+				t.Errorf("param = %q, want %q", body.Error.Param, c.param)
+			}
+			if body.Error.Code != "unsupported_parameter" {
+				t.Errorf("code = %q, want unsupported_parameter", body.Error.Code)
+			}
+			// The message has to say what is missing and what to do instead: a caller told only
+			// "not implemented" cannot tell whether to drop the field or change servers.
+			for _, want := range []string{"not implemented", "outside this server"} {
+				if !strings.Contains(body.Error.Message, want) {
+					t.Errorf("message %q does not mention %q", body.Error.Message, want)
+				}
+			}
+		})
+	}
+}
+
+// TestChatServesTheEmptyFormsOfTheToolFields keeps the zero values inert.
+//
+// "I did not ask for tools" is spelled more than one way, and every one of them is a request this
+// server answers correctly: an empty list says nothing, and tool_choice "none" says explicitly
+// what the server would do anyway. Refusing those would fail a caller that always sends the field,
+// which is what several client libraries do.
+func TestChatServesTheEmptyFormsOfTheToolFields(t *testing.T) {
+	srv, _ := newTestServer(t)
+	const userTurn = `[{"role": "user", "content": "hi"}]`
+	cases := []struct{ name, body string }{
+		{"empty tools", `{"messages": ` + userTurn + `, "max_tokens": 1, "tools": []}`},
+		{"null tools", `{"messages": ` + userTurn + `, "max_tokens": 1, "tools": null}`},
+		{"tool_choice none", `{"messages": ` + userTurn + `, "max_tokens": 1, "tool_choice": "none"}`},
+		{"function_call none", `{"messages": ` + userTurn + `, "max_tokens": 1, "function_call": "none"}`},
+		{"no tool fields at all", `{"messages": ` + userTurn + `, "max_tokens": 1}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/chat/completions", c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != 200 {
+				out := decodeBody[errorBody](t, resp)
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+			}
+		})
+	}
+}
+
 // TestFeatureInteractions is the cross-product check the per-feature tests cannot be.
 //
 // Each field added over the last few rounds has its own test, and each pins one behaviour in

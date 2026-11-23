@@ -89,6 +89,39 @@ prompt costs a full prefill on every turn. `orbix_prefix_positions_reused_total`
 the symptom, and a smaller `--block-size` is the fix -- not a larger one, which raises the
 threshold.
 
+The rule holds on a real checkpoint as well as in that table, which was taken from a fixture.
+Measured on gemma-3-270m-it-Q8_0 with a 30-token prompt sent twice, varying only `--block-size`:
+
+| `--block-size` | Reused positions |
+| -------------- | ---------------- |
+| 8              | 16               |
+| 16             | 16               |
+| 32             | 0                |
+| 64             | 0                |
+
+The same 30 tokens reuse 16 positions below the threshold and none above it, and for the reason the
+paragraph gives: at 32 the prompt never fills a block, so nothing is ever published.
+
+How much is reused does grow with the prompt, in whole blocks. Measured on the same checkpoint with
+`--block-size 16`, a fresh server per row, the same prompt sent twice, and the counter read across
+the second request only:
+
+| Prompt sent | Second request reused |
+| ----------- | --------------------- |
+| 1 sentence  | 0 positions           |
+| 3 sentences | 32                    |
+| 6 sentences | 48                    |
+| 12 sentences| 112                   |
+
+One sentence is about ten tokens, so it fills no block and reuses nothing -- the rule at the top of
+this section. Four sentences' worth is where the count starts moving, and it keeps moving: the reused
+positions are the whole blocks below the prompt's tail, so a longer prompt reuses more and the
+ceiling is the prompt length rounded down to a block boundary.
+
+Throughput barely moves across these values, measured on stories15M-q4_0 with eight requests at
+concurrency four: 413.7 tok/s at a block size of 8 down to 406.4 at 64, a spread smaller than the
+run-to-run noise. `--block-size` is a cache-granularity setting, not a throughput one.
+
 With reuse off the combination is accepted, and deliberately so: a block larger than the context
 is then just a pool with one block in practice, which serves text correctly. Measured on a
 64-position fixture with `--blocks 8 --block-size 128`: `serve` and `bench` start, while the same

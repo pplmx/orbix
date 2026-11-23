@@ -358,3 +358,53 @@ the paths in the recipe would mean every contributor's `just test` ran a differe
 An untrained file produces a flat next-token distribution, so its output is gibberish whatever
 the implementation does. The MoE test therefore asserts that zeroing the experts changes the
 logits -- a statement about the code, not about the file.
+
+# Checking the engine against a second implementation
+
+`internal/llama/reference_test.go` compares this engine to a numpy forward pass on fixtures the
+numpy side did not produce. The fixtures in `internal/gguftest` are written and read by this
+repository, so a wrong assumption about a dimension order, a block layout, or where a tensor's
+bytes begin is invisible to every test built on them -- the same code makes the same mistake in
+both directions. A second implementation written from the architecture description shares no code
+with this one, so a disagreement points at one of the two rather than at a shared premise.
+
+The expected values live in `internal/llama/testdata/reference/logits.json` and are checked
+against three fixtures: a plain `llama` shape, a `gemma2` sandwich-norm shape, and a `gemma3`
+fixture with a window of 4 and a twelve-token prompt, so the window actually binds. That third
+one is not redundant: the sliding window's off-by-one survived every fixture test in the
+repository for several rounds *because* every prompt was shorter than every window, and the
+fixture that exceeds its window is what makes the boundary observable.
+
+The three disagreements the test currently shows are 1.9e-06 to 3.1e-06 logits, against a
+tolerance of 1e-3. That gap is float64 accumulation on the numpy side against float32 here, not
+slack in the check: the injected faults measured while writing it were 0.154 (window reach) and
+0.219 (rope pairing), two orders of magnitude above the tolerance.
+
+## Regenerating the expected values
+
+The numpy side is not in this repository, because a Go project does not need a Python dependency
+to build or test. To reproduce it, write the fixtures and this engine's logits with:
+
+```bash
+ORBIX_REFERENCE_DIR=/tmp/golden \
+  go test -run TestGenerateReferenceInputs -v ./internal/llama/
+```
+
+That writes one `.gguf` and one `.bin` per spec -- the fixture, and this engine's logits in a flat
+format a numpy script can read without a JSON parser -- plus `engine.json` with the same numbers.
+Have a numpy implementation of the same architecture reproduce the logits from the `.gguf` files,
+then write its results into `testdata/reference/logits.json` as
+`{"<spec>": {"ids": [...], "logits": [...]}}`. The test compares this engine against that file, so
+what it checks is the numpy side; `engine.json` is there to make a disagreement easy to locate. What matters is that the numpy side is written from
+the architecture rather than translated from this engine; a translation reproduces the same
+mistakes and the check becomes decorative.
+
+Two things the numpy side has to get right, both found by it disagreeing:
+
+- The rope pairing is per architecture. `llama` and `mistral` rotate adjacent pairs (2k, 2k+1);
+  the Qwen and Gemma families rotate k with k + d/2. Using one formula for both made the `llama`
+  fixture disagree by 0.219 logits while the argmax stayed correct -- a model that answers the same
+  token from the wrong numbers.
+- Whether to apply `attn_q_norm` is an architecture property, not a tensor's presence. The
+  `gemma2` fixture carries the tensor and the architecture does not use it; a reference keyed on
+  whether the tensor exists applied it and disagreed by 0.342.

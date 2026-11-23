@@ -18,6 +18,36 @@ Orbix is a learning project, and these are the shapes to expect:
   comes from parallelism over independent outputs instead, which took decoding on stories15M
   from 65 to 235 tok/s on a 128-core EPYC.
 
+  How much of that a given `--workers` value buys, measured on gemma-3-270m-it-Q8_0 with a
+  10-token prompt and 20 decode steps each, one process:
+
+  | `--workers` | ms/token | speed-up |
+  | ----------- | -------- | -------- |
+  | 1           | 315.83   | 1.00x    |
+  | 2           | 141.33   | 2.23x    |
+  | 4           | 70.16    | 4.50x    |
+  | 8           | 42.31    | 7.46x    |
+  | 16          | 30.64    | 10.31x   |
+  | 32          | 34.32    | 9.20x    |
+  | 64          | 32.27    | 9.79x    |
+  | 128         | 25.67    | 12.30x   |
+
+  The curve is not monotone: 32 workers measured slower than 16, and 64 only just beat 16. The
+  end of the table is the figure for a machine like this one, 12.3x on 128 cores.
+
+  Why 32 sits above 16 is not established. `parts()` splits a projection into
+  `min(workers, work/workPerWorker)` pieces, so the number of pieces stops growing once the work
+  per piece would fall below 16384 multiply-adds, and a plausible reading is that the middle rows
+  sit where more goroutines share a fixed total rather than each getting a full slice. That is an
+  inference from reading the split rule, not a measurement -- the numbers above are what was
+  measured. What the last row rests on is firmer: the kernels are bound by reading weights, so
+  once the bus is saturated more workers cannot read the same bytes faster, and 12.3x is that
+  ceiling rather than a scheduling choice.
+
+  The default is 0, meaning `GOMAXPROCS`, so the last row is what an unconfigured server already
+  does. A smaller value is for a host running several processes -- see the note on
+  `--workers` in configuration.md.
+
 - **Parallelism is over independent outputs, never over a reduction.** The split picks which
   goroutine computes which output element -- rows for a matvec, columns for a transposed product
   -- and never splits the dot product, so float32 addition is never reassociated and the

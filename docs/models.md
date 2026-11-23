@@ -28,6 +28,9 @@ Five architectures are checked against real checkpoints: `llama` against llama.c
 log-probabilities, `qwen2` against a converted official checkpoint, `gemma` and `gemma2` against
 llama.cpp's log-probabilities on converted Gemma 2B files, and `qwen3` the same way on Qwen3-0.6B. The MoE path has its own real file.
 `mistral` is not -- its configuration and sliding window are covered against constructed files.
+A real Mistral checkpoint was read as a check of the GGUF version 2 support instead: TheBloke's
+conversion declares `general.architecture = llama` and no sliding window, so it exercises the
+format revision and not the `mistral` spec.
 
 `gemma` differs from `llama` in three ways that no packet listing shows, and each one was found
 by comparing against llama.cpp rather than by reading the reference code:

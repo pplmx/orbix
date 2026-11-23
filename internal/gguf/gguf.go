@@ -124,8 +124,11 @@ func Read(r io.Reader) (*File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gguf: read version: %w", err)
 	}
-	if version != Version {
-		return nil, fmt.Errorf("gguf: unsupported version %d, want %d", version, Version)
+	if version < MinVersion || version > Version {
+		// Both numbers, always: a reader who sees only "unsupported version" has to decode the
+		// header themselves to learn which revision the file claims.
+		return nil, fmt.Errorf("gguf: unsupported version %d, want %d to %d",
+			version, MinVersion, Version)
 	}
 
 	count, err := rr.u64()

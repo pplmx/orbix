@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguf"
 )
 
 // These tests use a synthetic config rather than a model file: the RoPE and
@@ -766,5 +768,91 @@ func TestKVCacheSpansAddressEveryLayerAndHead(t *testing.T) {
 	if l0[0].data[0] != 11 || l1[0].data[0] != 22 {
 		t.Errorf("layers share storage: layer 0 reads %v, layer 1 reads %v, want 11 and 22",
 			l0[0].data[0], l1[0].data[0])
+	}
+}
+
+// TestLlamaV2MatchesReferenceLogprobs checks a GGUF version 2 file against llama.cpp.
+//
+// Version 2 is what a large part of the published corpus still is -- TheBloke's Mistral and Llama 2
+// conversions were written before version 3 existed -- and the package refused every one of them
+// until this round. Accepting the revision is safe because little-endian version 2 and version 3
+// lay out identically, but "safe in principle" is the kind of claim that needs a real file.
+//
+// Set MISTRAL_MODEL to mistral-7b-instruct-v0.1.Q2_K.gguf (TheBloke) to run it. Expected values
+// from llama.cpp 0.3.37, prompt "The capital of France is", top-8 at the first generated position.
+// The prompt encodes to the same six ids on both sides, and the deviations measured over the eight
+// shared tokens are 0.017, 0.057, 0.044, 0.000, 0.042, 0.117, 0.038 and 0.057 nats -- the tightest
+// agreement of any checkpoint in this package, and an order of magnitude below what a wrong
+// rotation or a missing bias would produce.
+func TestLlamaV2MatchesReferenceLogprobs(t *testing.T) {
+	path := os.Getenv("MISTRAL_MODEL")
+	if path == "" {
+		t.Skip("set MISTRAL_MODEL to a version 2 GGUF file")
+	}
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	// The expected values are Mistral 7B's. Another file gives different numbers for reasons that
+	// have nothing to do with the format revision.
+	if cfg.VocabSize != 32000 || cfg.Layers != 32 || cfg.Hidden != 4096 {
+		t.Skipf("the expected values are Mistral 7B's (vocab 32000, 32 layers, 4096 hidden);"+
+			" this file has vocab %d, %d layers, %d hidden",
+			cfg.VocabSize, cfg.Layers, cfg.Hidden)
+	}
+	// The revision this test exists for, read from the header rather than from the model: the
+	// config carries no version, and the point of the test is the format, not the architecture.
+	if f, err := gguf.Open(path); err != nil {
+		t.Fatalf("Open: %v", err)
+	} else if f.Version != 2 {
+		t.Skipf("this file is GGUF version %d; the test covers version 2", f.Version)
+	}
+	if cfg.KVHeads != 8 || cfg.Heads != 32 {
+		t.Errorf("heads = %d/%d kv, want 32/8", cfg.Heads, cfg.KVHeads)
+	}
+
+	cache, err := NewKVCache(cfg, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logits []float32
+	for pos, id := range []int{1, 415, 5565, 302, 4843, 349} {
+		logits, err = m.Forward(cache, id, pos)
+		if err != nil {
+			t.Fatalf("Forward: %v", err)
+		}
+	}
+
+	want := []struct {
+		id   int32
+		text string
+		lp   float64
+	}{
+		{5465, " Paris", -0.513865},
+		{264, " a", -2.584949},
+		{272, " the", -3.165631},
+		{2651, " known", -3.196797},
+		{459, " not", -3.413416},
+		{624, " one", -3.660639},
+		{396, " an", -3.754688},
+		{1611, " home", -4.351425},
+	}
+	const tolerance = 0.25
+	for _, w := range want {
+		got := logSoftmax(logits, w.id)
+		if d := math.Abs(got - w.lp); d > tolerance {
+			t.Errorf("logprob of %q (id %d) = %.4f, llama.cpp says %.4f, off by %.4f",
+				w.text, w.id, got, w.lp, d)
+		}
+	}
+	argmax := int32(0)
+	for i, v := range logits {
+		if v > logits[argmax] {
+			argmax = int32(i)
+		}
+	}
+	if argmax != 5465 {
+		t.Errorf("greedy token is %d, want 5465 (\" Paris\")", argmax)
 	}
 }

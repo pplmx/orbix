@@ -347,10 +347,10 @@ func TestReadRejectsBadInput(t *testing.T) {
 	}
 
 	badVersion := append([]byte(nil), good...)
-	badVersion[4] = 2
+	badVersion[4] = 1
 	_, verr := Read(bytes.NewReader(badVersion))
 	if verr == nil || !strings.Contains(verr.Error(), "version") {
-		t.Errorf("Read(version 2) = %v, want a version error", verr)
+		t.Errorf("Read(version 1) = %v, want a version error", verr)
 	}
 	// Both the version found and the one supported belong in the message: a reader who sees only
 	// "unsupported version" has to decode the header themselves to learn which number was wrong.
@@ -378,7 +378,7 @@ func TestReadRejectsBadInput(t *testing.T) {
 // the code rejects every other revision, and this says so.
 func TestReadRejectsEveryOtherVersion(t *testing.T) {
 	good := buildFile(nil, nil, 0, nil)
-	for _, v := range []uint32{0, 1, 2, Version + 1, Version + 2, 99, 1 << 31} {
+	for _, v := range []uint32{0, MinVersion - 1, Version + 1, Version + 2, 99, 1 << 31} {
 		t.Run(strconv.FormatUint(uint64(v), 10), func(t *testing.T) {
 			b := append([]byte(nil), good...)
 			binary.LittleEndian.PutUint32(b[4:], v)
@@ -2067,5 +2067,68 @@ func TestAlignmentMustBeAWholeNumberInRange(t *testing.T) {
 				t.Errorf("error %q does not name the key", err)
 			}
 		})
+	}
+}
+
+// TestReadAcceptsVersionTwo checks the claim that makes version 2 support safe rather than a guess:
+// for a little-endian file the two revisions lay out identically, so the same bytes with only the
+// version field changed must parse to the same directory.
+//
+// That is the whole reason to accept it. A large part of the published corpus -- TheBloke's
+// Mistral and Llama 2 conversions among them -- is version 2 and was never re-converted, and
+// reading those files as though version 1's 32-bit counts applied would produce a plausible and
+// wrong tensor list. Version 1 stays refused, which the range test above pins.
+func TestReadAcceptsVersionTwo(t *testing.T) {
+	kvs := []kv{
+		{"general.architecture", strVal("llama")},
+		{"llama.block_count", u32Val(2)},
+	}
+	tensors := []TensorInfo{
+		{Name: "token_embd.weight", Dims: []uint64{8, 4}, Type: F32, Offset: 0},
+		{Name: "output_norm.weight", Dims: []uint64{8}, Type: F32, Offset: 128},
+	}
+	data := make([]byte, 128+32)
+
+	asV3 := buildFileVersion(Version, kvs, tensors, 32, data)
+	asV2 := buildFileVersion(MinVersion, kvs, tensors, 32, data)
+
+	three, err := Read(bytes.NewReader(asV3))
+	if err != nil {
+		t.Fatalf("Read(version %d): %v", Version, err)
+	}
+	two, err := Read(bytes.NewReader(asV2))
+	if err != nil {
+		t.Fatalf("Read(version %d): %v", MinVersion, err)
+	}
+
+	if got, want := two.Version, uint32(MinVersion); got != want {
+		t.Errorf("Version = %d, want %d", got, want)
+	}
+	// The whole directory, compared rather than sampled: the point is that nothing about the
+	// layout differs.
+	if got, want := two.TensorCount(), three.TensorCount(); got != want {
+		t.Errorf("tensor count = %d, want %d", got, want)
+	}
+	if got, want := two.MetadataCount(), three.MetadataCount(); got != want {
+		t.Errorf("metadata count = %d, want %d", got, want)
+	}
+	twoList := slices.Collect(two.Tensors())
+	threeList := slices.Collect(three.Tensors())
+	if len(twoList) != len(threeList) {
+		t.Fatalf("%d tensors at version %d, %d at version %d",
+			len(twoList), MinVersion, len(threeList), Version)
+	}
+	for i := range twoList {
+		t2, t3 := twoList[i], threeList[i]
+		if t2.Name != t3.Name || t2.Type != t3.Type || !slices.Equal(t2.Dims, t3.Dims) ||
+			t2.Offset != t3.Offset {
+			t.Errorf("tensor %d differs between revisions: %+v and %+v", i, t2, t3)
+		}
+	}
+	if arch, ok := two.Get[string]("general.architecture"); !ok || arch != "llama" {
+		t.Errorf("general.architecture = %q, %v", arch, ok)
+	}
+	if n, ok := two.Get[int]("llama.block_count"); !ok || n != 2 {
+		t.Errorf("llama.block_count = %d, %v", n, ok)
 	}
 }

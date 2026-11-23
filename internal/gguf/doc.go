@@ -12,9 +12,16 @@
 //
 // # Decisions worth knowing about
 //
-// Only the version this package implements is accepted. A newer GGUF revision may
-// mean a different tensor encoding, and parsing one as if it were version 2 would produce
-// a plausible-looking file full of wrong numbers. Rejecting it names the version instead.
+// Versions 2 and 3 are accepted, and nothing else is. A newer GGUF revision may mean a
+// different tensor encoding, and parsing one as if it were version 3 would produce a
+// plausible-looking file full of wrong numbers; rejecting it names the version instead.
+//
+// Version 2 is in the range because much of the published corpus is still written in it and
+// version 3 changed nothing it could break: the only edit was dropping big-endian support, so a
+// little-endian version 2 file has the same header, metadata and directory. A big-endian version
+// 2 file reads little-endian as version 0x02000000 and falls outside the range, which is the
+// right answer for a revision this package cannot parse. Version 1 used 32-bit counts for both
+// directories and stays refused for that reason.
 //
 // Tensors are described by offset, not loaded. TensorData returns a reader for one
 // tensor's bytes, so the decoder and the compute layer decide how much of the file is in

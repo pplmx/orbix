@@ -14,6 +14,12 @@ type kv struct {
 // buildFile renders a complete GGUF file: magic, version, counts, metadata,
 // tensor directory, alignment padding, then tensor data.
 func buildFile(kvs []kv, tensors []TensorInfo, alignment uint64, data []byte) []byte {
+	return buildFileVersion(Version, kvs, tensors, alignment, data)
+}
+
+// buildFileVersion is buildFile with the header's version chosen, so a test can present the same
+// content as an older revision.
+func buildFileVersion(version uint32, kvs []kv, tensors []TensorInfo, alignment uint64, data []byte) []byte {
 	var b bytes.Buffer
 	b.WriteString(Magic)
 	u32 := func(v uint32) {
@@ -31,7 +37,7 @@ func buildFile(kvs []kv, tensors []TensorInfo, alignment uint64, data []byte) []
 		b.WriteString(s)
 	}
 
-	u32(Version)
+	u32(version)
 	u64(uint64(len(tensors)))
 	u64(uint64(len(kvs)))
 

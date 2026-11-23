@@ -8,12 +8,23 @@ import (
 // Magic is the four-byte file signature that starts every GGUF file.
 const Magic = "GGUF"
 
-// Version is the GGUF format revision this package can parse.
-//
-// Version 3 is the only format llama.cpp still writes, and it is what
-// current model releases use. Earlier revisions changed the tensor info
-// layout and are rejected rather than guessed at.
+// Version is the newest GGUF format revision this package parses.
 const Version = 3
+
+// MinVersion is the oldest revision it parses.
+//
+// Version 2 is still what a large part of the published corpus is: TheBloke's Mistral and Llama 2
+// conversions, among others, were written before version 3 existed and were never re-converted.
+// Accepting them is safe for the same reason it is necessary -- little-endian version 2 and
+// version 3 have the same header, the same metadata and the same tensor directory, because the
+// only thing version 3 changed was to drop big-endian support. A big-endian version 2 file does
+// not look like version 2 here: read little-endian its version field is 0x02000000, which is
+// outside [MinVersion, Version] and is refused.
+//
+// Version 1 used 32-bit counts for the tensor and metadata directories, so parsing it as version 2
+// would read the second count from the wrong bytes and produce a plausible, wrong directory. It
+// stays refused.
+const MinVersion = 2
 
 // ValueType identifies the type of a metadata value.
 type ValueType uint32

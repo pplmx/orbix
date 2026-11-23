@@ -467,14 +467,27 @@ also why this test compares relative error against a tolerance of 1e-3 while the
 absolute logits -- 1e-3 absolute against a residual of 5109 would be asking float32 for twelve
 significant figures.
 
-Four reference files are checked, one per property none of the others can see:
+Six reference files are checked, one per property none of the others can see:
 
-| File               | Checkpoint    | What only this one can see                             |
-| ------------------ | ------------- | ------------------------------------------------------ |
-| `gemma3-270m.json` | gemma-3-270m  | the numerical range of trained weights                 |
-| `gemma3-513.json`  | gemma-3-270m  | the sliding window binding past position 512           |
-| `mistral-v2.json`  | Mistral v0.1  | GGUF **version 2** and K-quant tensors                 |
-| `gemma-1.json`     | Gemma 2B      | a block with no QK norm and no sandwich norms          |
+| File               | Checkpoint   | What only this one can see                               |
+| ------------------ | ------------ | -------------------------------------------------------- |
+| `gemma3-270m.json` | gemma-3-270m | the numerical range of trained weights                   |
+| `gemma3-513.json`  | gemma-3-270m | the sliding window binding past position 512             |
+| `mistral-v2.json`  | Mistral v0.1 | GGUF **version 2** and K-quant tensors                   |
+| `gemma-1.json`     | Gemma 2B     | a block with no QK norm and no sandwich norms            |
+| `qwen2.json`       | Qwen2.5-0.5B | q/k/v attention biases with NeoX rope                    |
+| `qwen3.json`       | Qwen3-0.6B   | per-head QK norm on a prompt whose tokenizer adds no BOS |
+
+The two Qwen files are the only ones with NeoX rope outside the Gemma family, and between them they
+separate the two features that travel together elsewhere: `qwen2` has the biases without the QK norm,
+`qwen3` the QK norm without the biases. A reference that pairs them -- applying one because the other
+is present, or keying either on the architecture's family rather than its spec -- disagrees with one
+of these two while agreeing with every Gemma file.
+
+`qwen3.json` also covers a tokenizer difference rather than an arithmetic one: its prompt is five
+tokens with no BOS, where the same text under Qwen2 produces six with one. Reading the ids from the
+file would have hidden that; both files store their ids, and the difference between them is visible
+in the two files side by side.
 
 `mistral-v2.json` is the only one that loads a version 2 file. Gemma 3 changed nothing about the
 containers this project reads, so a regression in the version check would not show up in any Gemma

@@ -80,6 +80,16 @@ func TestMatchesNumPyReferenceOnRealWeights(t *testing.T) {
 			env:  "GEMMA_MODEL",
 			why:  "the first Gemma block: scaled embeddings and GeGLU, no QK norm, no sandwich norms",
 		},
+		{
+			name: "qwen2",
+			env:  "QWEN2_MODEL",
+			why:  "q/k/v attention biases with NeoX rope, which no Gemma or Llama file exercises",
+		},
+		{
+			name: "qwen3",
+			env:  "QWEN3_MODEL",
+			why:  "per-head QK norm, and a tokenizer whose prompt carries no BOS",
+		},
 	}
 	for _, c := range cases {
 		c := c

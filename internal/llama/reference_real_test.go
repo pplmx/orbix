@@ -5,13 +5,27 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // realReference is one checkpoint's expected logits and per-layer residuals, produced by the numpy
 // reference rather than by this engine.
 type realReference struct {
+	// Ids is the prompt when the file lists it.
 	Ids []int32 `json:"ids"`
+	// PromptRepeat states the prompt as a repeated string, for one long enough that listing its
+	// ids would be most of the file. The test re-tokenizes it with the checkpoint's own
+	// tokenizer, so the ids are produced the way the engine produces them rather than copied.
+	PromptRepeat *struct {
+		Text  string `json:"text"`
+		Times int    `json:"times"`
+	} `json:"prompt_repeat,omitempty"`
+	// PromptTokens is how many of those tokens the reference used.
+	PromptTokens int `json:"prompt_tokens,omitempty"`
 	// Logits and their ids: the whole vocabulary is 262144 wide, which is 5 MiB of JSON for a
 	// comparison whose informative part is the top of the distribution. Keeping the top few and
 	// their indices checks the same thing at 1/140th the size.
@@ -51,7 +65,12 @@ func TestMatchesNumPyReferenceOnRealWeights(t *testing.T) {
 	if err := json.Unmarshal(raw, &expected); err != nil {
 		t.Fatalf("parse %s: %v", expectedPath, err)
 	}
-	if len(expected.Ids) == 0 {
+	prompt := expected.Ids
+	if expected.PromptRepeat != nil {
+		// Resolved after the model is loaded, because the ids come from its tokenizer.
+		prompt = nil
+	}
+	if len(prompt) == 0 && expected.PromptRepeat == nil {
 		t.Fatalf("%s holds no prompt", expectedPath)
 	}
 
@@ -59,8 +78,33 @@ func TestMatchesNumPyReferenceOnRealWeights(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(%s): %v", model, err)
 	}
+	if expected.PromptRepeat != nil {
+		f, err := gguf.Open(model)
+		if err != nil {
+			t.Fatalf("open %s for its tokenizer: %v", model, err)
+		}
+		tok, err := tokenize.New(f)
+		if err != nil {
+			t.Fatalf("tokenizer: %v", err)
+		}
+		text := strings.Repeat(expected.PromptRepeat.Text, expected.PromptRepeat.Times)
+		prompt = tok.Encode(text, true)
+		if n := expected.PromptTokens; n > 0 {
+			if len(prompt) < n {
+				t.Fatalf("the prompt encodes to %d tokens, the reference used %d", len(prompt), n)
+			}
+			// Truncated rather than refused: the reference states the count it used, and a
+			// tokenizer that produces more than that says the two disagree about the text, which
+			// the logits comparison below will show. Refusing here would only hide which.
+			if len(prompt) != n {
+				t.Logf("the prompt encodes to %d tokens, the reference used the first %d",
+					len(prompt), n)
+				prompt = prompt[:n]
+			}
+		}
+	}
 	cfg := m.Config()
-	cache, err := NewKVCache(cfg, len(expected.Ids)+1)
+	cache, err := NewKVCache(cfg, len(prompt)+1)
 	if err != nil {
 		t.Fatalf("NewKVCache: %v", err)
 	}
@@ -70,8 +114,8 @@ func TestMatchesNumPyReferenceOnRealWeights(t *testing.T) {
 		trace[l] = make([]float32, cfg.Hidden)
 	}
 	var logits []float32
-	for pos, id := range expected.Ids {
-		if pos == len(expected.Ids)-1 && len(expected.Layers) > 0 {
+	for pos, id := range prompt {
+		if pos == len(prompt)-1 && len(expected.Layers) > 0 {
 			m.layerTrace = trace
 		}
 		logits, err = m.Forward(cache, int(id), pos)

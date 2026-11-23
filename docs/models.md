@@ -467,13 +467,29 @@ also why this test compares relative error against a tolerance of 1e-3 while the
 absolute logits -- 1e-3 absolute against a residual of 5109 would be asking float32 for twelve
 significant figures.
 
-Measured: the three sampled layer residuals agree, the top eight logits agree to within 1e-3
-relative, and the argmax is the same. Injected faults that this test does catch include a 1% error in
-the embedding scale (6.7e-03 relative, reported against the specific logits that exceed the
-tolerance). One it does not catch, by construction: the sliding window's off-by-one, because six
-tokens is far shorter than a window of 512. That case belongs to the `window-edge` fixture, and the
-two tests are complementary rather than redundant -- one covers the numerical range, the other the
-boundary.
+Two reference files are checked, and the difference between them is the reason there are two:
+
+| File               | Prompt     | What only this one can see                        |
+| ------------------ | ---------- | ------------------------------------------------- |
+| `gemma3-270m.json` | 6 tokens   | the numerical range of trained weights            |
+| `gemma3-513.json`  | 513 tokens | the sliding window binding past position 512      |
+
+Measured: on both, the three sampled layer residuals agree, the top eight logits agree to within
+1e-3 relative, and the argmax is the same token. On the 513-token file that argmax is `brown`, which
+is what llama.cpp answers too -- an independent third opinion, since the numpy reference shares no
+code with either.
+
+Injected faults this catches include a 1% error in the embedding scale (6.7e-03 relative, reported
+against the specific logits that exceed tolerance) and, on the 513-token file only, the sliding
+window's off-by-one: that fault moves `brown` from 42.01 to 39.14, a relative error of 6.8e-02, sixty
+times the tolerance. The six-token file is blind to it because six tokens is far shorter than a
+window of 512. This is why the `window-edge` fixture and the 513-token checkpoint file both exist:
+the fixture catches the boundary in a few milliseconds, the checkpoint confirms the same boundary at
+real magnitudes.
+
+A repeated prompt is stored as `prompt_repeat` rather than as 513 ids, and the test re-tokenizes it
+with the checkpoint's own tokenizer. Listing the ids would make the file mostly prompt, and copying
+them would skip the tokenizer -- which is one of the things being checked.
 
 Only the top eight logits and three layer residuals are stored, 37 KiB rather than 5 MiB. The
 informative part of a 262144-wide distribution is its head, and the first, middle and last blocks are

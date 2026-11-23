@@ -107,7 +107,15 @@ divisor to apply.
 
 `best_of` on completions generates that many candidates and returns the best. "Best" is the
 highest mean log probability per token -- the mean rather than the sum, because every term is
-negative and a sum always prefers the shortest completion. With `n`, `best_of` is the candidate
+negative and a sum always prefers the shortest completion.
+
+"Per token" means per token the response reports, which after a `stop` string is not the same as per
+token the candidate generated. A candidate that runs past its stop string has those tokens cut from
+the response, and scoring them would let it win on text the caller cannot see. That is not
+hypothetical: with `stop: "."` and temperature 2, the returned choices came back in an order that
+rose and fell, because the candidate that had generated thirty tokens past its stop was ranked on all
+of them. `shownTokens` in `internal/server/bestof.go` is the code that draws this line, and it is the
+place to look when a ranking looks wrong. With `n`, `best_of` is the candidate
 count and `n` is how many to return, in ranked order with `index` counting from 0; a `best_of`
 that is not greater than `n` is refused rather than ignored, since it asks for no selection at
 all. `stream: true` is refused for the same reason OpenAI documents: the candidates can only be

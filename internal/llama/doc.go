@@ -14,11 +14,20 @@
 //
 // Architecture differences are a table, not a type hierarchy. archSpecs maps an
 // architecture name to the handful of properties that actually differ -- the RoPE pairing
-// convention and whether attention carries a bias, which is the whole of it. A Go type per
-// family would duplicate the forward pass per family; the table keeps one forward pass and
-// makes the differences enumerable at a glance. The cost is that a genuine structural
-// difference has no home here, which is the point at which a second implementation is
-// cheaper than more flags.
+// convention, whether attention carries a bias, how the checkpoint stores its normalisation
+// weights, whether embeddings are scaled on the way in, and which activation gates the
+// feed-forward network. A Go type per family would duplicate the forward pass per family; the
+// table keeps one forward pass and makes the differences enumerable at a glance. The cost is
+// that a genuine structural difference has no home here, which is the point at which a second
+// implementation is cheaper than more flags.
+//
+// The five are not equally visible, which is why they are all in the table rather than three
+// of them being inferred. Gemma shares every shape and every tensor name with Llama and differs
+// in three numbers, so a loader that fell back to Llama's settings would run cleanly and
+// generate fluent English with the wrong distribution. The norm offset is folded into the
+// weights once at load, so nothing downstream sees it; the embedding scale is applied at the
+// lookup, because the matrix it scales is usually also the tied output projection and the
+// projection has to see the unscaled weights; the gate is dispatched per matrix multiply.
 //
 // The table is not the only place architecture varies. The sliding window is a metadata key
 // (attention.sliding_window) read straight into Config, and the expert count likewise: both

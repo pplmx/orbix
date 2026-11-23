@@ -261,6 +261,27 @@ func SiLU(x []float32) {
 	}
 }
 
+// GELU applies the Gaussian error linear unit in place, using the tanh approximation
+// 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3))).
+//
+// This is Gemma's feed-forward gate. The approximation is the one the reference implementations
+// use: the exact form needs erff, and the two differ by 1.5e-4 at 1 and less elsewhere over the
+// range a gate sees, far below what inference is sensitive to.
+//
+// Unlike SiLU there is no clamp. tanh saturates on its own, so a value far from zero costs the
+// same as any other and neither tail is truncated.
+func GELU(x []float32) {
+	// sqrt(2/pi), the constant the approximation is defined with.
+	const scale = 0.7978845608028654
+	// The cubic coefficient from the approximation.
+	const cubic = 0.044715
+	for i, v := range x {
+		f := float64(v)
+		inner := scale * (f + cubic*f*f*f)
+		x[i] = 0.5 * v * (1 + float32(math.Tanh(inner)))
+	}
+}
+
 // AddInPlace adds b to a elementwise, a += b. Both must have the same length.
 func AddInPlace(a, b []float32) error {
 	if len(a) != len(b) {

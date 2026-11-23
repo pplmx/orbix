@@ -363,9 +363,10 @@ func TestLoadConfigRejects(t *testing.T) {
 			name: "unsupported architecture",
 			mutate: func(c *tinyConfig) []kv {
 				kvs := c.kvs()
-				// qwen2 is supported now; the test needs an architecture this
-				// package genuinely does not implement.
-				kvs[0] = kv{"general.architecture", strVal("gemma")}
+				// qwen2 and gemma are both supported now, and every name this test could
+				// borrow from a real checkpoint risks becoming supported and quietly turning
+				// this case into a different one. A name no architecture uses cannot.
+				kvs[0] = kv{"general.architecture", strVal("not-an-architecture")}
 				return kvs
 			},
 			want: "unsupported architecture",

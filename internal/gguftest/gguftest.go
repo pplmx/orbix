@@ -366,7 +366,7 @@ func (m Model) Bytes() ([]byte, error) {
 		}
 		infos[i].Offset = uint64(offset)
 		vals := make([]float32, n)
-		fillWeights(vals, spec.name)
+		fillWeights(vals, spec.name, m.Arch)
 		if spec.name == "rope_freqs.weight" {
 			copy(vals, m.RopeFreqs)
 		}
@@ -379,20 +379,32 @@ func (m Model) Bytes() ([]byte, error) {
 
 // fillWeights writes deterministic values into one tensor.
 //
-// Normalization weights are 1, so the residual stream keeps its scale; a fixture whose
-// norms were also patterned would either saturate every layer or decay to zero, and
-// either way a test would be comparing infinities or denormals instead of the property
-// it meant to check.
+// Normalization weights are the identity, so the residual stream keeps its scale; a fixture
+// whose norms were also patterned would either saturate every layer or decay to zero, and
+// either way a test would be comparing infinities or denormals instead of the property it
+// meant to check.
+//
+// "Identity" is architecture-dependent. Gemma stores its norm weights as (w-1) so that a
+// randomly initialised checkpoint starts at the identity, which means the identity is written
+// as 0 rather than 1. Writing 1 into a Gemma fixture would produce norms of 2 after loading --
+// a working model with every norm doubled, which is not what "identity" was ever meant to say.
+// A test can therefore assert the loaded norms are 1 for both architectures, which is a
+// statement about the conversion rather than about the number the file happened to hold.
 //
 // Everything else uses a cheap pseudo-random sequence rather than a short repeating
 // pattern. A repeating pattern makes every vocabulary row differ from its neighbour by a
 // fixed multiple, and the projection then has a stable preference that wins at every
 // position -- generation stops after one token because the same token always comes out.
 // The sequence below has a long period, so distinct rows stay distinct.
-func fillWeights(vals []float32, name string) {
+func fillWeights(vals []float32, name, arch string) {
 	if isNorm(name) {
+		identity := float32(1)
+		if arch == "gemma" {
+			// The file stores w-1, so the identity is 0.
+			identity = 0
+		}
 		for i := range vals {
-			vals[i] = 1
+			vals[i] = identity
 		}
 		return
 	}

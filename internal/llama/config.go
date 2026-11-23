@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/kernel"
 )
 
 // Config holds the hyperparameters read from a GGUF file.
@@ -117,6 +118,42 @@ type Config struct {
 
 	// BOSID is the beginning-of-sequence token, or -1 when undefined.
 	BOSID int
+
+	// NormOnes reports that the checkpoint stored its RMSNorm weights as (w-1). Weights() has
+	// already added the 1 back by the time a Model exists, so nothing below this line has to
+	// know: the flag is kept for the summary and for tests that check the conversion happened.
+	NormOnes bool
+
+	// EmbedScale is the factor token embeddings are multiplied by on the way into the network.
+	// It is 1 for architectures that do not scale them.
+	//
+	// This is applied at the lookup rather than folded into the embedding matrix, because that
+	// matrix is usually also the tied output projection and that must see the unscaled weights.
+	EmbedScale float32
+
+	// FFNAct is the activation on the gated feed-forward branch.
+	FFNAct ffnAct
+}
+
+// activateGate applies the architecture's gated feed-forward activation in place.
+//
+// The gate is the one place a Llama-shaped and a Gemma-shaped block differ numerically without
+// differing in shape, so getting it wrong loads cleanly and generates text that is merely
+// wrong -- which is why it is selected from the architecture table rather than hardcoded.
+func (cfg Config) activateGate(x []float32) {
+	if cfg.FFNAct == ffnGELU {
+		kernel.GELU(x)
+		return
+	}
+	kernel.SiLU(x)
+}
+
+// activationName names the feed-forward gate, for the model summary.
+func (a ffnAct) String() string {
+	if a == ffnGELU {
+		return "gelu"
+	}
+	return "silu"
 }
 
 // RopeLayout is a rotary embedding dimension pairing.
@@ -143,11 +180,35 @@ func (l RopeLayout) String() string {
 // block structure, RMSNorm, the gated FFN, grouped-query attention -- is shared, and
 // that sharing is the point of treating these as one implementation with a spec
 // rather than two copies.
+// ffnAct is the activation on the gated feed-forward branch.
+type ffnAct uint8
+
+const (
+	// ffnSiLU is x/(1+exp(-x)), the SwiGLU gate the Llama family uses.
+	ffnSiLU ffnAct = iota
+	// ffnGELU is the tanh approximation of the Gaussian error linear unit, the GeGLU gate
+	// Gemma uses. Swapping it changes every feed-forward output, so it is a per-architecture
+	// property rather than something a config file can set.
+	ffnGELU
+)
+
 type archSpec struct {
 	// rope is the dimension pairing the model was trained with.
 	rope RopeLayout
 	// attnBias reports whether the attention projections carry bias vectors.
 	attnBias bool
+	// normOnes reports that the RMSNorm weights are stored as (w-1) rather than w. Gemma
+	// saves them that way so that a randomly initialised checkpoint starts at the identity.
+	// Loading adds the 1 back, which keeps every norm site in this package ordinary.
+	normOnes bool
+	// embedScale reports that token embeddings are multiplied by sqrt(hidden) on the way in.
+	//
+	// It cannot be folded into the embedding matrix the way normOnes is folded into the norm
+	// weights: the same matrix is usually the tied output projection, and that projection must
+	// see the unscaled weights.
+	embedScale bool
+	// ffn is the activation on the gated feed-forward branch.
+	ffn ffnAct
 }
 
 // archSpecs lists the architectures this package implements.
@@ -160,6 +221,14 @@ var archSpecs = map[string]archSpec{
 	"llama":   {rope: RopeNormal, attnBias: false},
 	"mistral": {rope: RopeNormal, attnBias: false},
 	"qwen2":   {rope: RopeNeox, attnBias: true},
+	// Gemma differs from Llama in three ways that are invisible in a packet listing: its
+	// norms are stored one off, its embeddings are scaled on the way in, and its feed-forward
+	// gate is GELU. Loading one with Llama's settings produces coherent English with the wrong
+	// numbers, which is exactly the failure this table exists to prevent.
+	"gemma": {
+		rope: RopeNormal, attnBias: false,
+		normOnes: true, embedScale: true, ffn: ffnGELU,
+	},
 }
 
 // LoadConfig reads the architecture parameters and validates them.
@@ -188,7 +257,14 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		return v, nil
 	}
 
-	cfg := Config{Arch: arch, RopeLayout: spec.rope, AttnBias: spec.attnBias}
+	cfg := Config{
+		Arch:       arch,
+		RopeLayout: spec.rope,
+		AttnBias:   spec.attnBias,
+		NormOnes:   spec.normOnes,
+		FFNAct:     spec.ffn,
+		EmbedScale: 1,
+	}
 	if name, ok := f.Get[string]("general.name"); ok {
 		cfg.Name = name
 	}
@@ -312,6 +388,12 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// normally.
 	if v, ok := f.Get[int](arch + ".attention.sliding_window"); ok && v > 0 {
 		cfg.WindowLen = v
+	}
+
+	// Gemma scales the embeddings by sqrt(hidden) on the way in. Computed here, once, so the
+	// three lookup sites multiply by a constant instead of taking a square root per token.
+	if spec.embedScale {
+		cfg.EmbedScale = float32(math.Sqrt(float64(cfg.Hidden)))
 	}
 
 	cfg.RMSNormEps = 1e-5
@@ -469,10 +551,24 @@ func (c Config) String() string {
 	if c.AttnBias {
 		bias = ", attention bias"
 	}
+	// The architecture differences are named rather than left implicit in the entrypoint's
+	// name, because they are exactly what a reader comparing two checkpoints cannot see: the
+	// same shapes and the same tensor names describe a Llama block and a Gemma block that
+	// differ in three numbers.
+	extra := ""
+	if c.NormOnes {
+		extra += ", norms stored as w-1"
+	}
+	if c.EmbedScale != 1 && c.EmbedScale != 0 {
+		extra += fmt.Sprintf(", embeddings scaled by %g", c.EmbedScale)
+	}
+	if c.FFNAct != ffnSiLU {
+		extra += ", " + c.FFNAct.String() + " gate"
+	}
 	return fmt.Sprintf(
-		"%s: %d layers, %d hidden, %d heads (%d kv), head dim %d, ffn %d, ctx %d, vocab %d, rope dim %d base %g %s, eps %g, %s%s",
+		"%s: %d layers, %d hidden, %d heads (%d kv), head dim %d, ffn %d, ctx %d, vocab %d, rope dim %d base %g %s, eps %g, %s%s%s",
 		c.Arch, c.Layers, c.Hidden, c.Heads, c.KVHeads, c.HeadDim, c.FFN,
-		c.ContextLen, c.VocabSize, c.RopeDim, c.RopeBase, c.RopeLayout, c.RMSNormEps, tie, bias,
+		c.ContextLen, c.VocabSize, c.RopeDim, c.RopeBase, c.RopeLayout, c.RMSNormEps, tie, bias, extra,
 	)
 }
 

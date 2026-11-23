@@ -283,7 +283,7 @@ func TestQwen2ArchitectureRegistry(t *testing.T) {
 	// names come out of a map, and a message that reordered itself between runs would be
 	// the thing the sort exists to prevent. Contains cannot see that -- removing the sort
 	// leaves it green.
-	if got, want := supportedArchs(), "llama, mistral, qwen2"; got != want {
+	if got, want := supportedArchs(), "gemma, llama, mistral, qwen2"; got != want {
 		t.Errorf("supportedArchs() = %q, want %q", got, want)
 	}
 	spec, ok := archSpecs["qwen2"]

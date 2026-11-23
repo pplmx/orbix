@@ -286,7 +286,7 @@ func (m *Model) embedBatch(b *batch, tokens []int32) error {
 		if off+cfg.Hidden > len(m.W.TokenEmbedding) {
 			return fmt.Errorf("llama: token %d embedding outside %d values", tok, len(m.W.TokenEmbedding))
 		}
-		copy(b.x[i*cfg.Hidden:(i+1)*cfg.Hidden], m.W.TokenEmbedding[off:off+cfg.Hidden])
+		embedInto(b.x[i*cfg.Hidden:(i+1)*cfg.Hidden], m.W.TokenEmbedding[off:off+cfg.Hidden], cfg.EmbedScale)
 	}
 	return nil
 }
@@ -435,7 +435,7 @@ func (m *Model) feedForwardBatch(b *batch, cfg Config, l int) error {
 	if err := m.run.MatMulTransposed(b.up, b.xn, layer.wUp, n, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
-	kernel.SiLU(b.gate[:n*cfg.FFN])
+	cfg.activateGate(b.gate[:n*cfg.FFN])
 	if err := kernel.MulInPlace(b.up[:n*cfg.FFN], b.gate[:n*cfg.FFN]); err != nil {
 		return err
 	}
@@ -612,7 +612,7 @@ func (b *decodeBatch) embed(m *Model, row, token int) error {
 	if off+cfg.Hidden > len(m.W.TokenEmbedding) {
 		return fmt.Errorf("llama: token %d embedding outside %d values", token, len(m.W.TokenEmbedding))
 	}
-	copy(b.x[row*cfg.Hidden:(row+1)*cfg.Hidden], m.W.TokenEmbedding[off:off+cfg.Hidden])
+	embedInto(b.x[row*cfg.Hidden:(row+1)*cfg.Hidden], m.W.TokenEmbedding[off:off+cfg.Hidden], cfg.EmbedScale)
 	return nil
 }
 
@@ -750,7 +750,7 @@ func (b *decodeBatch) feedForward(m *Model, l int) error {
 	if err := m.run.MatMulTransposed(b.up, b.xn, layer.wUp, n, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
-	kernel.SiLU(b.gate[:n*cfg.FFN])
+	cfg.activateGate(b.gate[:n*cfg.FFN])
 	if err := kernel.MulInPlace(b.up[:n*cfg.FFN], b.gate[:n*cfg.FFN]); err != nil {
 		return err
 	}

@@ -205,7 +205,7 @@ func (m *Model) embed(token int) error {
 	if off+cfg.Hidden > len(m.W.TokenEmbedding) {
 		return fmt.Errorf("llama: token %d embedding outside %d values", token, len(m.W.TokenEmbedding))
 	}
-	copy(m.x, m.W.TokenEmbedding[off:off+cfg.Hidden])
+	embedInto(m.x, m.W.TokenEmbedding[off:off+cfg.Hidden], cfg.EmbedScale)
 	return nil
 }
 
@@ -298,7 +298,7 @@ func (m *Model) feedForward(l int) error {
 	if err := m.run.MatVec(m.up, layer.wUp, m.xn, cfg.FFN, cfg.Hidden); err != nil {
 		return err
 	}
-	kernel.SiLU(m.gate)
+	m.W.Config.activateGate(m.gate)
 	if err := kernel.MulInPlace(m.up, m.gate); err != nil {
 		return err
 	}
@@ -366,7 +366,7 @@ func (m *Model) feedForwardMoE(l int) error {
 		if err := m.run.MatVec(m.up, layer.expertUp[e], m.xn, cfg.FFN, cfg.Hidden); err != nil {
 			return err
 		}
-		kernel.SiLU(m.gate)
+		m.W.Config.activateGate(m.gate)
 		if err := kernel.MulInPlace(m.up, m.gate); err != nil {
 			return err
 		}

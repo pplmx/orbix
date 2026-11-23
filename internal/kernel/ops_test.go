@@ -1124,3 +1124,51 @@ func TestMatVecAndOneRowMatMulAgree(t *testing.T) {
 		})
 	}
 }
+
+// TestGELUValues checks the approximation against values worked out independently.
+//
+// The exact answers at zero and at the tails are what make this more than a
+// self-consistency check: gelu(0) is 0 for any implementation, gelu(x) tends to x for large
+// positive x and to 0 for large negative x, and a formula that dropped the cubic term or
+// used the wrong constant still satisfies all three only by accident.
+func TestGELUValues(t *testing.T) {
+	near := func(got, want float32) bool {
+		return math.Abs(float64(got-want)) < 1e-6
+	}
+	// gelu(0) = 0.
+	if got := GELUValues(0); !near(got, 0) {
+		t.Errorf("gelu(0) = %v, want 0", got)
+	}
+	// Far out, the two tails are exact: the tanh saturates.
+	if got := GELUValues(20); !near(got, 20) {
+		t.Errorf("gelu(20) = %v, want 20", got)
+	}
+	if got := GELUValues(-20); !near(got, 0) {
+		t.Errorf("gelu(-20) = %v, want 0", got)
+	}
+	// At 1 the approximation and the exact definition are distinguishable, which is the point
+	// of asserting both: the tanh form gives 0.84119, and 0.5*(1+erf(1/sqrt(2))) is 0.84134.
+	//
+	// Asserting the approximation's own value is deliberate. Asserting the exact one would
+	// require erff and make this a different function; a tolerance wide enough to cover both
+	// would not be able to tell the approximation from a formula with the cubic coefficient
+	// dropped, which gives 0.831426 -- an order of magnitude further out than the gap between
+	// the approximation and the exact function.
+	const approx1 = 0.84119
+	if got := GELUValues(1); math.Abs(float64(got-approx1)) > 1e-5 {
+		t.Errorf("gelu(1) = %v, want the tanh approximation's %v", got, approx1)
+	}
+	// The minimum is about -0.170 at x = -0.752. A formula that clamped its output at zero,
+	// which is a tempting simplification since GELU is nearly linear in both tails, would
+	// answer 0 there and reduce the function's range by a fifth.
+	if got := GELUValues(-0.751); got >= 0 {
+		t.Errorf("gelu(-0.751) = %v, want the small negative minimum the real function has", got)
+	}
+}
+
+// GELUValues returns the activation at one input, for the assertions above.
+func GELUValues(x float32) float32 {
+	v := []float32{x}
+	GELU(v)
+	return v[0]
+}

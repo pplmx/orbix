@@ -3220,6 +3220,383 @@ func TestStreamingSeveralChoicesUsage(t *testing.T) {
 	}
 }
 
+// TestLogprobsOnBothEndpoints covers the two schemas, which are shaped differently and share
+// no field names beyond the probability itself.
+//
+// The invariants asserted are the ones a caller actually relies on:
+//
+//   - the token list has the same length as the probability list, or a client indexing one by
+//     the other runs off the end;
+//   - the tokens concatenate to the response text. This is what catches a per-token decoding
+//     that loses the byte state a token's text depends on, which produces plausible-looking
+//     pieces that do not add up to the sentence the caller sees;
+//   - text_offset is the cumulative byte length, so tokens[i] begins where offsets[i] says;
+//   - every log probability is finite and not positive. A value above zero is not a
+//     probability, and NaN cannot be encoded as JSON at all.
+func TestLogprobsOnBothEndpoints(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	t.Run("completions", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "Once upon a time", "max_tokens": 6, "seed": 3, "logprobs": 0}`)
+		if resp.StatusCode != 200 {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []struct {
+				Text     string `json:"text"`
+				Logprobs *struct {
+					Tokens        []string         `json:"tokens"`
+					TokenLogprobs []float32        `json:"token_logprobs"`
+					TextOffset    []int            `json:"text_offset"`
+					TopLogprobs   []map[string]any `json:"top_logprobs"`
+				} `json:"logprobs"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		lp := got.Choices[0].Logprobs
+		if lp == nil {
+			t.Fatal("logprobs is null for a request that asked for it")
+		}
+		if len(lp.Tokens) == 0 {
+			t.Fatal("no tokens described")
+		}
+		if len(lp.Tokens) != len(lp.TokenLogprobs) || len(lp.Tokens) != len(lp.TextOffset) ||
+			len(lp.Tokens) != len(lp.TopLogprobs) {
+			t.Fatalf("parallel arrays disagree: tokens %d, logprobs %d, offsets %d, top %d",
+				len(lp.Tokens), len(lp.TokenLogprobs), len(lp.TextOffset), len(lp.TopLogprobs))
+		}
+		if joined := strings.Join(lp.Tokens, ""); joined != got.Choices[0].Text {
+			t.Errorf("tokens join to %q, the response text is %q", joined, got.Choices[0].Text)
+		}
+		at := 0
+		for i, tok := range lp.Tokens {
+			if lp.TextOffset[i] != at {
+				t.Errorf("text_offset[%d] = %d, want %d (the byte it starts at)",
+					i, lp.TextOffset[i], at)
+			}
+			at += len(tok)
+			if lp.TokenLogprobs[i] > 0 {
+				t.Errorf("token_logprobs[%d] = %v, a log probability cannot be positive",
+					i, lp.TokenLogprobs[i])
+			}
+			// logprobs: 0 asks for the chosen token only, so there are no alternatives.
+			if lp.TopLogprobs[i] != nil {
+				t.Errorf("top_logprobs[%d] = %v with logprobs=0, want null", i, lp.TopLogprobs[i])
+			}
+		}
+
+		// With a count, each position carries its alternatives, keyed by the alternative's
+		// own text as the schema asks.
+		resp = post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "Once upon a time", "max_tokens": 2, "seed": 3, "logprobs": 2}`)
+		var two struct {
+			Choices []struct {
+				Logprobs *struct {
+					TopLogprobs []map[string]float32 `json:"top_logprobs"`
+				} `json:"logprobs"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&two); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		for i, top := range two.Choices[0].Logprobs.TopLogprobs {
+			if len(top) == 0 {
+				t.Errorf("top_logprobs[%d] is empty with logprobs=2", i)
+			}
+			for text, v := range top {
+				if v > 0 {
+					t.Errorf("top_logprobs[%d][%q] = %v, a log probability cannot be positive", i, text, v)
+				}
+			}
+		}
+	})
+
+	t.Run("chat", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "Once upon a time"}], "max_tokens": 4, `+
+				`"seed": 3, "logprobs": true, "top_logprobs": 2}`)
+		if resp.StatusCode != 200 {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+				Logprobs *struct {
+					Content []struct {
+						Token       string  `json:"token"`
+						Bytes       []int   `json:"bytes"`
+						Logprob     float32 `json:"logprob"`
+						TopLogprobs []struct {
+							Token   string  `json:"token"`
+							Bytes   []int   `json:"bytes"`
+							Logprob float32 `json:"logprob"`
+						} `json:"top_logprobs"`
+					} `json:"content"`
+					Refusal any `json:"refusal"`
+				} `json:"logprobs"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		lp := got.Choices[0].Logprobs
+		if lp == nil {
+			t.Fatal("logprobs is null for a request that asked for it")
+		}
+		if lp.Refusal != nil {
+			t.Errorf("refusal = %v, want null: this server has no refusal channel", lp.Refusal)
+		}
+		var joined strings.Builder
+		for i, c := range lp.Content {
+			joined.WriteString(c.Token)
+			if c.Logprob > 0 {
+				t.Errorf("content[%d].logprob = %v, a log probability cannot be positive", i, c.Logprob)
+			}
+			// bytes is the token's UTF-8, which is what lets a client reassemble text it
+			// cannot get back from the token string alone.
+			if want := []byte(c.Token); len(c.Bytes) != len(want) {
+				t.Errorf("content[%d].bytes = %v, the token %q is %d bytes",
+					i, c.Bytes, c.Token, len(want))
+			} else {
+				for j, b := range want {
+					if c.Bytes[j] != int(b) {
+						t.Errorf("content[%d].bytes[%d] = %d, want %d", i, j, c.Bytes[j], b)
+					}
+				}
+			}
+			// An empty alternative list is allowed by the schema, but a request asking for two
+			// over a vocabulary of thousands should get them.
+			if len(c.TopLogprobs) == 0 {
+				t.Errorf("content[%d].top_logprobs is empty with top_logprobs=2", i)
+			}
+			for j, alt := range c.TopLogprobs {
+				if alt.Logprob > 0 {
+					t.Errorf("content[%d].top_logprobs[%d].logprob = %v", i, j, alt.Logprob)
+				}
+			}
+		}
+		if joined.String() != got.Choices[0].Message.Content {
+			t.Errorf("tokens join to %q, the message content is %q",
+				joined.String(), got.Choices[0].Message.Content)
+		}
+	})
+
+	t.Run("absent means null", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2}`)
+		defer func() { _ = resp.Body.Close() }()
+		var got struct {
+			Choices []map[string]json.RawMessage `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		raw, ok := got.Choices[0]["logprobs"]
+		if !ok {
+			t.Fatal("the logprobs key is missing; the schema has it present and null")
+		}
+		if string(raw) != "null" {
+			t.Errorf("logprobs = %s for a request that did not ask, want null", raw)
+		}
+	})
+}
+
+// TestStreamingLogprobsMatchBlocking pins the agreement between the two transports, which is
+// the property most likely to break silently.
+//
+// The streaming path decodes one token at a time and the blocking path decodes the whole
+// sequence, so they can describe the same request differently without either looking wrong on
+// its own: a different number of entries, offsets counted from a different place, or a token
+// described in one and missing from the other. All three are checked for the same seeded
+// request.
+//
+// A stop string is included because it is where the two paths genuinely diverge in structure:
+// the streamer holds text back and the blocker cuts a rendered string, and a token that
+// straddles the cut has to be dropped by both or the lists disagree.
+func TestStreamingLogprobsMatchBlocking(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	cases := []struct {
+		name string
+		stop string
+	}{
+		{"no stop", ""},
+		// A comma appears early in this fixture's continuations, so this exercises the match.
+		{"stop that matches", `", "`},
+		{"stop that never matches", `"zzzznotpresent"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stopField := ""
+			if c.stop != "" {
+				stopField = `, "stop": ` + c.stop
+			}
+
+			// Blocking.
+			resp := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Once upon a time", "max_tokens": 8, "seed": 21, "logprobs": 1`+
+					stopField+`}`)
+			if resp.StatusCode != 200 {
+				out := decodeBody[errorBody](t, resp)
+				t.Fatalf("blocking status = %d: %s", resp.StatusCode, out.Error.Message)
+			}
+			var whole struct {
+				Choices []struct {
+					Text     string `json:"text"`
+					Logprobs *struct {
+						Tokens     []string  `json:"tokens"`
+						TextOffset []int     `json:"text_offset"`
+						Logprobs   []float32 `json:"token_logprobs"`
+					} `json:"logprobs"`
+				} `json:"choices"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&whole); err != nil {
+				_ = resp.Body.Close()
+				t.Fatalf("decode: %v", err)
+			}
+			_ = resp.Body.Close()
+
+			// Streaming, reassembling the text, the offsets and the probabilities in order.
+			streamed := post(t, srv.Handler(), "/v1/completions",
+				`{"prompt": "Once upon a time", "max_tokens": 8, "seed": 21, "logprobs": 1, `+
+					`"stream": true`+stopField+`}`)
+			if streamed.StatusCode != 200 {
+				out := decodeBody[errorBody](t, streamed)
+				t.Fatalf("stream status = %d: %s", streamed.StatusCode, out.Error.Message)
+			}
+			var text strings.Builder
+			var tokens []string
+			var offsets []int
+			var logprobs []float32
+			if err := eachSSEChunk(streamed.Body, func(chunk []byte) {
+				var c struct {
+					Choices []struct {
+						Text     string `json:"text"`
+						Logprobs *struct {
+							Tokens     []string  `json:"tokens"`
+							TextOffset []int     `json:"text_offset"`
+							Logprobs   []float32 `json:"token_logprobs"`
+						} `json:"logprobs"`
+					} `json:"choices"`
+				}
+				if err := json.Unmarshal(chunk, &c); err != nil {
+					t.Fatalf("chunk %s: %v", chunk, err)
+				}
+				for _, ch := range c.Choices {
+					text.WriteString(ch.Text)
+					if ch.Logprobs != nil {
+						tokens = append(tokens, ch.Logprobs.Tokens...)
+						offsets = append(offsets, ch.Logprobs.TextOffset...)
+						logprobs = append(logprobs, ch.Logprobs.Logprobs...)
+					}
+				}
+			}); err != nil {
+				t.Fatalf("reading the stream: %v", err)
+			}
+
+			block := whole.Choices[0]
+			if block.Logprobs == nil {
+				t.Fatal("the blocking response has no logprobs")
+			}
+			if text.String() != block.Text {
+				t.Errorf("streamed text %q, blocking text %q", text.String(), block.Text)
+			}
+			if fmt.Sprint(tokens) != fmt.Sprint(block.Logprobs.Tokens) {
+				t.Errorf("streamed tokens %v, blocking tokens %v", tokens, block.Logprobs.Tokens)
+			}
+			if fmt.Sprint(offsets) != fmt.Sprint(block.Logprobs.TextOffset) {
+				t.Errorf("streamed offsets %v, blocking offsets %v", offsets, block.Logprobs.TextOffset)
+			}
+			if fmt.Sprint(logprobs) != fmt.Sprint(block.Logprobs.Logprobs) {
+				t.Errorf("streamed logprobs %v, blocking logprobs %v", logprobs, block.Logprobs.Logprobs)
+			}
+		})
+	}
+}
+
+// TestLogprobsCountIsValidated covers the caps, which differ per endpoint because OpenAI's
+// schema documents different maxima.
+//
+// Both are refused rather than clamped: a caller that asked for twenty alternatives and got
+// five has been silently given a different answer, and the count is visible in the response's
+// own arrays, so the discrepancy would be noticed without being explained.
+func TestLogprobsCountIsValidated(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	cases := []struct {
+		name   string
+		path   string
+		body   string
+		field  string
+		expect string
+	}{
+		{"chat above its cap", "/v1/chat/completions",
+			fmt.Sprintf(`{"messages": [{"role": "user", "content": "hi"}], "logprobs": true, `+
+				`"top_logprobs": %d}`, maxChatTopLogprobs+1), "top_logprobs",
+			fmt.Sprintf("at most %d", maxChatTopLogprobs)},
+		{"completions above its cap", "/v1/completions",
+			fmt.Sprintf(`{"prompt": "hi", "logprobs": %d}`, maxCompletionLogprobs+1), "logprobs",
+			fmt.Sprintf("at most %d", maxCompletionLogprobs)},
+		{"chat negative", "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "logprobs": true, "top_logprobs": -1}`,
+			"top_logprobs", "-1"},
+		{"completions negative", "/v1/completions",
+			`{"prompt": "hi", "logprobs": -1}`, "logprobs", "-1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != 400 {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			body := decodeBody[errorBody](t, resp)
+			if body.Error.Code != "invalid_value" || body.Error.Param != c.field {
+				t.Errorf("code/param = %q/%q, want invalid_value/%s",
+					body.Error.Code, body.Error.Param, c.field)
+			}
+			// The message states the bound or the value, so the caller learns what would have
+			// been accepted rather than only that it was wrong.
+			if !strings.Contains(body.Error.Message, c.expect) {
+				t.Errorf("message %q does not mention %q", body.Error.Message, c.expect)
+			}
+		})
+	}
+}
+
+// eachSSEChunk calls fn with each data payload before [DONE].
+func eachSSEChunk(body io.ReadCloser, fn func([]byte)) error {
+	defer func() { _ = body.Close() }()
+	sc := bufio.NewScanner(body)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			return nil
+		}
+		fn([]byte(payload))
+	}
+	return sc.Err()
+}
+
 // TestMaxCompletionTokensIsHonoured covers OpenAI's newer name for the token budget.
 //
 // max_tokens is deprecated in favour of max_completion_tokens, so a client migrated to the
@@ -3454,20 +3831,13 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		field string
 		all   []string
 	}{
-		{"logprobs on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1}`, "logprobs", nil},
 		{"suffix on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix", nil},
 		{"best_of on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of", nil},
-		{"top_logprobs on chat", "/v1/chat/completions",
-			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": 2}`,
-			"top_logprobs", nil},
-		// The chat endpoint has a logprobs field of its own, separate from top_logprobs. It was the
-		// one entry in chatShapeFields with no case.
-		{"logprobs on chat", "/v1/chat/completions",
-			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": true}`,
-			"logprobs", nil},
+		// logprobs and top_logprobs are honoured now, on both endpoints; see
+		// TestLogprobsOnBothEndpoints. Only suffix, best_of and chat's echo are still refused
+		// as response shapes.
 		// echo is still refused on chat, which is the only place it is left: OpenAI's chat
 		// schema has no such field, so there the refusal describes a field the caller sent
 		// that the endpoint has no use for. On completions it is honoured -- see
@@ -3477,9 +3847,7 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 			"echo", nil},
 		// max_completion_tokens and echo moved to the served set when they were implemented;
 		// two fields are still enough to check that one refusal names both.
-		{"two at once", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1, "suffix": "END"}`,
-			"logprobs", []string{"logprobs", "suffix"}},
+
 	}
 	for _, c := range tooLoud {
 		t.Run(c.name, func(t *testing.T) {
@@ -3614,10 +3982,6 @@ func TestShapeFieldsAreRefusedByValueNotPresence(t *testing.T) {
 			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of"},
 		{"echo=true on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": true}`, "echo"},
-		{"logprobs=true on chat", "/v1/chat/completions",
-			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": true}`, "logprobs"},
-		{"top_logprobs=1 on chat", "/v1/chat/completions",
-			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": 1}`, "top_logprobs"},
 		{"suffix on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix"},
 	}
@@ -4747,7 +5111,7 @@ func TestEveryErrorCarriesACode(t *testing.T) {
 		},
 		{
 			name: "response-shape field", method: http.MethodPost, path: "/v1/completions",
-			body:   `{"prompt":"hi","logprobs":1}`,
+			body:   `{"prompt":"hi","suffix":"END"}`,
 			status: http.StatusBadRequest, code: "unsupported_parameter",
 		},
 		{
@@ -5171,9 +5535,9 @@ func TestValidationOrderIsFixed(t *testing.T) {
 		// Shape fields before the required-field check: the response would be the wrong
 		// shape regardless of what the prompt holds.
 		{"shape field beats a missing prompt", "/v1/completions",
-			`{"prompt": "  ", "logprobs": 1}`, http.StatusBadRequest, "logprobs"},
+			`{"prompt": "  ", "suffix": "END"}`, http.StatusBadRequest, "suffix"},
 		{"shape field beats a chat with no messages", "/v1/chat/completions",
-			`{"logprobs": true}`, http.StatusBadRequest, "logprobs"},
+			`{"echo": true}`, http.StatusBadRequest, "echo"},
 		// Required fields before value ranges.
 		{"missing prompt beats a bad max_tokens", "/v1/completions",
 			`{"prompt": "", "max_tokens": -5}`, http.StatusBadRequest, "prompt"},

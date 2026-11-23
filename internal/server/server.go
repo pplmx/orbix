@@ -727,21 +727,12 @@ var chatShapeFields = []shapeField{
 	// the table so that bound is checked before any refusal below it, which is the order a
 	// client relies on when a request has more than one problem.
 	{name: "n", invalid: func(v any) (string, bool) { return checkChoices(v.(*chatRequest).N) }},
-	{name: "logprobs",
-		asked: func(v any) bool {
-			p := v.(*chatRequest).Logprobs
-			return p != nil && *p
-		},
-		why: "token log-probabilities are not computed or returned"},
-	{name: "top_logprobs",
-		asked: func(v any) bool {
-			p := v.(*chatRequest).TopLogprobs
-			return p != nil && *p > 0
-		},
-		why: "alternative-token log-probabilities are not computed or returned",
-		invalid: func(v any) (string, bool) {
-			return negativeCount("top_logprobs", derefInt(v.(*chatRequest).TopLogprobs))
-		}},
+	// logprobs and top_logprobs are not here: they are computed now. Their ranges are
+	// checked by checkLogprobs, which runs beside the other invalid checks so a bad count is
+	// still reported before any refusal below it.
+	{name: "top_logprobs", invalid: func(v any) (string, bool) {
+		return checkLogprobs(v.(*chatRequest).TopLogprobs, maxChatTopLogprobs, "top_logprobs")
+	}},
 	{name: "echo",
 		asked: func(v any) bool {
 			p := v.(*chatRequest).Echo
@@ -753,12 +744,9 @@ var chatShapeFields = []shapeField{
 // completionShapeFields are the response-shape fields the completions endpoint refuses.
 var completionShapeFields = []shapeField{
 	{name: "n", invalid: func(v any) (string, bool) { return checkChoices(v.(*completionRequest).N) }},
-	{name: "logprobs",
-		// Unlike the chat endpoint's logprobs, which is a bool, this one is a count: any
-		// value at all asks for the sampled token's log-probability in the body, which the
-		// response never carries.
-		asked: func(v any) bool { return v.(*completionRequest).Logprobs != nil },
-		why:   "token log-probabilities are not computed or returned"},
+	{name: "logprobs", invalid: func(v any) (string, bool) {
+		return checkLogprobs(v.(*completionRequest).Logprobs, maxCompletionLogprobs, "logprobs")
+	}},
 	{name: "suffix",
 		asked: func(v any) bool {
 			p := v.(*completionRequest).Suffix
@@ -774,6 +762,33 @@ var completionShapeFields = []shapeField{
 		why: "best_of returns the candidate with the highest log probability, and token " +
 			"log-probabilities are not computed here; use n to receive every sample",
 		invalid: func(v any) (string, bool) { return negativeCount("best_of", v.(*completionRequest).BestOf) }},
+}
+
+// The two endpoints cap log probabilities differently in OpenAI's schema: chat documents
+// top_logprobs at a maximum of 20, completions documents logprobs at 5. Both are enforced
+// rather than clamped, because a caller that asked for more alternatives and got fewer has
+// been silently given a different answer -- the count is in the response's own arrays, so the
+// discrepancy is visible but unexplained.
+const (
+	maxChatTopLogprobs    = 20
+	maxCompletionLogprobs = 5
+)
+
+// checkLogprobs validates an optional count of alternatives.
+//
+// The field is a pointer because both endpoints distinguish "not sent" from a zero, and a
+// zero is a real request: it asks for the chosen token's log probability and no alternatives.
+func checkLogprobs(count *int, max int, name string) (string, bool) {
+	if count == nil {
+		return "", false
+	}
+	if *count < 0 {
+		return fmt.Sprintf("%s must not be negative, got %d", name, *count), true
+	}
+	if *count > max {
+		return fmt.Sprintf("%s must be at most %d, got %d", name, max, *count), true
+	}
+	return "", false
 }
 
 // maxChoices is the largest n this server honours.
@@ -896,6 +911,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		seed:                req.Seed,
 		choices:             req.N,
 		maxCompletionTokens: req.MaxCompletionTokens,
+		logprobs:            req.Logprobs != nil && *req.Logprobs,
+		topLogprobs:         derefInt(req.TopLogprobs),
 		includeUsage:        req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
@@ -940,7 +957,11 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		choices:             req.N,
 		maxCompletionTokens: req.MaxCompletionTokens,
 		echo:                req.Echo != nil && *req.Echo,
-		includeUsage:        req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
+		// On this endpoint logprobs is a count rather than a switch: its presence turns the
+		// feature on and its value is how many alternatives to describe.
+		logprobs:     req.Logprobs != nil,
+		topLogprobs:  derefInt(req.Logprobs),
+		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
 
@@ -1012,6 +1033,13 @@ type generateParams struct {
 	// echo asks the completions endpoint to return the prompt ahead of the generated text.
 	// It has no meaning on the chat endpoint, whose schema has no such field.
 	echo bool
+	// logprobs asks for each generated token's log probability. It is one flag rather than a
+	// count because the two endpoints spell "the chosen token and no alternatives"
+	// differently: chat sends logprobs: true, completions sends logprobs: 0.
+	logprobs bool
+	// topLogprobs is how many alternatives to describe at each position. Zero means the
+	// chosen token only.
+	topLogprobs int
 }
 
 // choiceCount is how many completions the request asks for, with the omitted field reading
@@ -1102,7 +1130,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		maxTokens = room
 	}
 	choices := p.choiceCount()
-	samplers, err := s.samplers(p.temperature, p.topK, p.topP, p.seed, choices)
+	samplers, effectiveTemp, err := s.samplers(p.temperature, p.topK, p.topP, p.seed, choices)
 	if err != nil {
 		// The sampler's errors are all about one request field, so they carry it rather
 		// than making the client infer which of temperature and top_p was wrong.
@@ -1207,6 +1235,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			Priority:      p.priority,
 			Stop:          stopIDs,
 			Sampler:       sm,
+			Logprobs:      p.logprobs,
+			TopLogprobs:   p.topLogprobs,
+			Temperature:   effectiveTemp,
 			Cancel:        r.Context().Done(),
 			Trace:         s.cfg.Trace,
 			Operation:     op,
@@ -1260,6 +1291,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 	// between them without a lock: different elements are different memory.
 	type collected struct {
 		out     []int32
+		samples []sampledToken
 		reason  string
 		closed  bool
 		failure error
@@ -1282,6 +1314,14 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 				}
 				if ev.HasToken {
 					c.out = append(c.out, ev.Token)
+					// Positioned by construction: the engine sets HasLogprob on every token
+					// event when the request asked for them, so samples ends up the same
+					// length as out and index i describes token i.
+					if ev.HasLogprob {
+						c.samples = append(c.samples, sampledToken{
+							id: ev.Token, logprob: ev.Logprob, top: ev.Top,
+						})
+					}
 				}
 				if ev.Done {
 					c.reason = ev.FinishReason
@@ -1344,6 +1384,29 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 			text = cut
 			reason = "stop"
 		}
+		// The logprob lists are cut to the text the response shows, which is the stop-cut
+		// text and not the echoed one: the prompt was not generated, so it has no logprob
+		// here. With echo the offsets move past it, because they index into the text the
+		// caller receives.
+		//
+		// A token whose text straddles the cut is dropped rather than half-reported: half of
+		// its text survived, and neither keeping it nor truncating it would describe the
+		// probability of the thing the caller can see.
+		var logprobs any
+		if p.logprobs {
+			described := s.describeTokens(c.samples)
+			keep, _ := keptTokens(described, len(text))
+			if p.chat {
+				logprobs = chatLogprobs(described, keep)
+			} else {
+				offset := 0
+				if p.echo {
+					offset = len(p.prompt)
+				}
+				logprobs = completionLogprobs(described, keep, offset)
+			}
+		}
+
 		// echo prepends the prompt after the stop cut, not before: the cut applies to what
 		// the model generated, and a stop string that happens to appear in the prompt must
 		// not truncate the part of the answer the caller already typed. The prompt is echoed
@@ -1364,6 +1427,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 				"index":         i,
 				"message":       map[string]string{"role": "assistant", "content": text},
 				"finish_reason": finishReasonFor(reason),
+				"logprobs":      logprobs,
 			}
 			continue
 		}
@@ -1371,6 +1435,7 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 			"index":         i,
 			"text":          text,
 			"finish_reason": finishReasonFor(reason),
+			"logprobs":      logprobs,
 		}
 	}
 
@@ -1442,6 +1507,10 @@ type streamItem struct {
 	reason string
 	// err, when set, is a mid-stream failure to report in band.
 	err error
+	// logprobs, when non-nil, is this token's entry in the chunk's logprobs field. The reader
+	// builds it because the object needs the token's byte offset in the response, which only
+	// the reader is tracking; the writer would have to duplicate the count.
+	logprobs any
 }
 
 // streamResponse writes server-sent events, one per token.
@@ -1560,7 +1629,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 		if it.reason != "" {
 			return send(finalChoice(p.chat, it.index, finishReasonFor(it.reason)))
 		}
-		return send(chunkPayload(p.chat, it.index, it.delta))
+		return send(chunkPayload(p.chat, it.index, it.delta, it.logprobs))
 	}
 
 	// echo returns the prompt ahead of the generated text, so it has to arrive before any
@@ -1569,13 +1638,13 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 	// to be accumulating. Nothing is read from the engine until this has been written.
 	if p.echo && !p.chat {
 		for i := range chans {
-			if !send(chunkPayload(p.chat, i, p.prompt)) {
+			if !send(chunkPayload(p.chat, i, p.prompt, nil)) {
 				return
 			}
 		}
 	}
 
-	generated, cancelled, broken := s.streamChoices(chans, p.chat, p.stop, writeItem)
+	generated, cancelled, broken := s.streamChoices(chans, p, writeItem)
 	if broken {
 		// The client is gone, or a choice reported a failure that was already written. Either
 		// way there is nobody left to read a usage chunk or a sentinel, and writing one after a
@@ -1637,13 +1706,13 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 // has nothing to gain from the wait. The sequences they leave behind are abandoned by the
 // engine within abandonGrace, which releases their KV blocks -- the same trade the n=1 path
 // makes when a client hangs up, and the reason its pump is bounded.
-func (s *Server) streamChoices(chans []<-chan engine.Event, chat bool, stop []string, writeItem func(streamItem) bool) (generated int, cancelled, broken bool) {
+func (s *Server) streamChoices(chans []<-chan engine.Event, p generateParams, writeItem func(streamItem) bool) (generated int, cancelled, broken bool) {
 	type totals struct {
 		generated int
 		cancelled bool
 	}
 	if len(chans) == 1 {
-		g, c, ok := s.streamOneChoice(chans[0], 0, chat, stop, writeItem)
+		g, c, ok := s.streamOneChoice(chans[0], 0, p, writeItem)
 		return g, c, !ok
 	}
 
@@ -1657,7 +1726,7 @@ func (s *Server) streamChoices(chans []<-chan engine.Event, chat bool, stop []st
 		wg.Go(func() {
 			// ok is deliberately ignored here: a choice whose sink refused has already told
 			// this function through an item, or the stream is stopping for another reason.
-			g, c, _ := s.streamOneChoice(ch, i, chat, stop, func(it streamItem) bool {
+			g, c, _ := s.streamOneChoice(ch, i, p, func(it streamItem) bool {
 				select {
 				case items <- it:
 					return true
@@ -1709,7 +1778,7 @@ const streamFanInBuffer = 64
 // It returns the choice's own token total (for usage) and whether the engine cancelled it
 // (for withholding the sentinel). ok is false when emit refused a write, which means the
 // stream is over and the caller should stop.
-func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, chat bool, stop []string, emit func(streamItem) bool) (generated int, cancelled, ok bool) {
+func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generateParams, emit func(streamItem) bool) (generated int, cancelled, ok bool) {
 	dec := s.tok.Seq()
 	reason := "stop"
 	// seen is the text already handed to the client, kept only when a stop string has to be
@@ -1718,6 +1787,10 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, chat bool, s
 	// sent is how much of seen the client already has. With a stop list the tail is held
 	// back until it cannot be the start of a match, so this trails seen.
 	sent := 0
+	// tokenOffset is how many bytes of this choice's text the tokens so far have accounted
+	// for. It is the offset a logprob entry reports, and it is tracked separately from sent
+	// because held-back text has an offset before it has been written.
+	tokenOffset := 0
 	for ev := range ch {
 		if ev.Err != nil {
 			emit(streamItem{index: index, err: ev.Err})
@@ -1730,19 +1803,50 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, chat bool, s
 			// two agree for one request.
 			generated++
 			text := dec.Token(ev.Token)
-			if text == "" {
+			// The token's byte offset in this choice's text, counted before it is written:
+			// a stop list can hold text back, and the offset describes where the text lands
+			// rather than when it was released.
+			var chunkLogprobs any
+			// advance is how much of the choice's text this token accounts for. Without
+			// logprobs it is the text the stream decoder released; with them it is the length
+			// of the token's own rendering, because that is what the blocking path counts and
+			// the two offsets have to agree. They differ exactly when a character spans
+			// several tokens, where the decoder holds text back and attributes it all to one.
+			advance := len(text)
+			if p.logprobs && ev.HasLogprob {
+				// first says whether this is the token the leading-space rule applies to.
+				described := s.describeStreamedToken(ev.Token, text, ev.Logprob, ev.Top, tokenOffset == 0)
+				advance = len(described[0].text)
+				if p.chat {
+					chunkLogprobs = chatLogprobs(described, 1)
+				} else {
+					chunkLogprobs = completionLogprobs(described, 1, tokenOffset)
+				}
+			}
+			tokenOffset += advance
+			// A token that decodes to nothing still has a log probability, and a caller who
+			// asked for them expects one entry per generated token. Without this the streamed
+			// list would be shorter than the blocking one for the same request.
+			if text == "" && chunkLogprobs == nil {
 				continue
 			}
 			// A stop string has to be applied to the stream as well as to the whole body.
 			// The engine only knows about single tokens, so the check is on the text
 			// accumulated so far: it can only be recognised once the rune that completes it
 			// arrives, which is exactly when the client should stop seeing output.
-			if len(stop) > 0 {
+			if len(p.stop) > 0 {
 				seen += text
-				if kept, found := cutAtStop(seen, stop); found {
+				if kept, found := cutAtStop(seen, p.stop); found {
 					// Output up to the stop string is the client's; the stop and anything
 					// after it are not. `sent` is what the client already has, so only the
 					// part between them still needs sending.
+					// No log probability travels with this tail, and none is sent for the
+					// token that completed the match. That token's text is the stop string,
+					// which is not in the response, so a logprob for it would describe
+					// something the caller cannot see -- and when its text straddles the cut,
+					// part of it survives and neither "include" nor "truncate" is right.
+					// Dropping the straddling token is what the blocking path does, so the two
+					// transports report the same list for the same request.
 					if tail := kept[min(len(kept), sent):]; tail != "" {
 						if !emit(streamItem{index: index, delta: tail}) {
 							return generated, cancelled, false
@@ -1778,15 +1882,21 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, chat bool, s
 				// Hold back the longest tail that is a prefix of some stop string, and send
 				// everything before it. Without this, stop=["北京"] streamed "北" where the
 				// non-streaming body returned nothing.
-				if safe := safePrefixLen(seen, stop); safe > sent {
-					if !emit(streamItem{index: index, delta: seen[sent:safe]}) {
+				if safe := safePrefixLen(seen, p.stop); safe > sent {
+					if !emit(streamItem{index: index, delta: seen[sent:safe], logprobs: chunkLogprobs}) {
 						return generated, cancelled, false
 					}
 					sent = safe
+				} else if chunkLogprobs != nil {
+					// Everything visible is already out and this token's text is being held,
+					// so the entry travels alone. The text follows when the tail is released.
+					if !emit(streamItem{index: index, logprobs: chunkLogprobs}) {
+						return generated, cancelled, false
+					}
 				}
 				continue
 			}
-			if !emit(streamItem{index: index, delta: text}) {
+			if !emit(streamItem{index: index, delta: text, logprobs: chunkLogprobs}) {
 				// The client went away. Its context is cancelled, so the engine
 				// stops the sequence; draining is the caller's job and this loop
 				// is already past that point.
@@ -1835,14 +1945,15 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, chat bool, s
 // index is the choice's position, which for n=1 is always 0 and is why this took no index
 // before. A client accumulates deltas per index, so a chunk carrying the wrong index appends
 // one choice's text to another's.
-func chunkPayload(chat bool, index int, text string) map[string]any {
+func chunkPayload(chat bool, index int, text string, logprobs any) map[string]any {
 	if chat {
 		return map[string]any{"choices": []map[string]any{{
-			"index": index, "delta": map[string]string{"content": text}, "finish_reason": nil,
+			"index": index, "delta": map[string]string{"content": text},
+			"finish_reason": nil, "logprobs": logprobs,
 		}}}
 	}
 	return map[string]any{"choices": []map[string]any{{
-		"index": index, "text": text, "finish_reason": nil,
+		"index": index, "text": text, "finish_reason": nil, "logprobs": logprobs,
 	}}}
 }
 
@@ -1873,35 +1984,40 @@ func finalChoice(chat bool, index int, reason string) map[string]any {
 // once and offsetting it gives n distinct seeds, while letting each choice read the clock for
 // itself is a race that two calls in the same nanosecond can lose -- the sampler would then
 // return the same text for both, which is exactly the case n>1 exists to avoid.
-func (s *Server) samplers(temp *float64, topK int, topP *float64, seed int64, n int) ([]llama.Sampler, error) {
+func (s *Server) samplers(temp *float64, topK int, topP *float64, seed int64, n int) ([]llama.Sampler, float32, error) {
 	reproducible := seed != 0
 	base := seed
 	if !reproducible {
 		base = time.Now().UnixNano()
 	}
 	out := make([]llama.Sampler, n)
+	// The temperature the samplers actually use is reported back because the engine needs it
+	// to describe the distribution when log probabilities are requested, and re-deriving it
+	// there would be a second copy of the default-and-validate rule.
+	var effective float32
 	for i := range n {
 		// seeded is true even for the clock case: the seed is resolved at this point, so
 		// sampler() must use the value rather than substitute one. A derived seed of zero is
 		// legitimate here -- seed -1 with two choices derives -1 and 0 -- and passes through
 		// as the real stream seed.
-		sm, err := s.sampler(temp, topK, topP, base+int64(i), true)
+		sm, t, err := s.sampler(temp, topK, topP, base+int64(i), true)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out[i] = sm
+		effective = t
 	}
-	return out, nil
+	return out, effective, nil
 }
 
 // sampler builds the sampler a request asked for, or the server default.
-func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, seeded bool) (llama.Sampler, error) {
+func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, seeded bool) (llama.Sampler, float32, error) {
 	t := s.cfg.Temperature
 	if temp != nil {
 		t = *temp
 	}
 	if t < 0 {
-		return nil, newParamError("temperature", "invalid_value",
+		return nil, 0, newParamError("temperature", "invalid_value",
 			"temperature must not be negative, got %v", t)
 	}
 	// A negative top_k is refused rather than treated as "unset". The field is a plain int,
@@ -1912,7 +2028,7 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, see
 	// and top_p above are refused here, so this was the one sampling knob that quietly
 	// substituted a value.
 	if topK < 0 {
-		return nil, newParamError("top_k", "invalid_value",
+		return nil, 0, newParamError("top_k", "invalid_value",
 			"top_k must not be negative, got %d", topK)
 	}
 	if topK == 0 {
@@ -1933,12 +2049,12 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, see
 		p = *topP
 	}
 	if p < 0 || p > 1 {
-		return nil, newParamError("top_p", "invalid_value",
+		return nil, 0, newParamError("top_p", "invalid_value",
 			"top_p must be between 0 and 1, got %v", p)
 	}
 	if t == 0 {
 		// Greedy is the default and the reproducible choice.
-		return greedySampler{}, nil
+		return greedySampler{}, 0, nil
 	}
 	// A caller-supplied seed makes the request reproducible, which is the whole point of
 	// the parameter: the same prompt and settings give the same text. Leaving it to the
@@ -1953,7 +2069,7 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, see
 	if !seeded {
 		seed = time.Now().UnixNano()
 	}
-	return temperatureSampler{temp: float32(t), topK: topK, topP: float32(p), src: newRand(seed)}, nil
+	return temperatureSampler{temp: float32(t), topK: topK, topP: float32(p), src: newRand(seed)}, float32(t), nil
 }
 
 // stopTokenIDs maps stop strings onto token ids for the engine's early-out.

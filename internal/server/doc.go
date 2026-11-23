@@ -60,16 +60,26 @@
 // that only tunes sampling -- logit_bias, presence_penalty, response_format -- is ignored,
 // because the SDKs send such fields whether or not the engine can use them; the text is not
 // what was asked for, but it is the shape the client reads. A field that describes the
-// response is refused with a 400 naming it: a client that sent logprobs reads
-// choice.logprobs, so omitting the field is not a smaller response but a different one, and the
-// failure surfaces as a KeyError far from the request that caused it. (The example used to be
-// n: 3 and choices[2], which is no longer hypothetical: n is honoured now, and a response that
-// did not carry the choices a caller indexed would fail exactly as described.)
+// response is refused with a 400 naming it. The examples that used to illustrate this -- n: 3
+// and choices[2], then logprobs and choice.logprobs -- are both honoured now, which is the
+// point of the rule rather than an exception to it: what remains refused is suffix and
+// best_of, and a client reading either of those would fail far from the request that caused it.
 //
-// The refused set differs per endpoint, because the two schemas do: chat refuses logprobs,
-// top_logprobs and echo, while completions refuses logprobs, suffix and best_of. Chat's echo is
-// there because the chat schema has no such field -- on completions the same name is defined and
-// is honoured, returning the prompt ahead of the generated text.
+// The refused set differs per endpoint, because the two schemas do: chat refuses echo, while
+// completions refuses suffix and best_of. Chat's echo is there because the chat schema has no
+// such field -- on completions the same name is defined and is honoured, returning the prompt
+// ahead of the generated text.
+//
+// logprobs is honoured on both, in each endpoint's own shape: parallel arrays on completions, a
+// list of per-token objects with bytes on chat. The counts are capped per endpoint because
+// OpenAI documents different maxima (5 and 20) and a caller that asked for more and got fewer
+// has been silently given a different answer.
+//
+// The numbers come from a log-softmax over the whole vocabulary at the request's temperature,
+// not from the truncated set top_k or top_p leaves behind. That is the difference between
+// reporting how surprising a token was to the model and reporting how the request was
+// configured -- a logprob of 0 under top_k: 1 would claim certainty the model never had. See
+// llama.TokenLogprobs, and tokenize.PieceBytes for why chat carries bytes separately from text.
 //
 // max_completion_tokens is honoured on both. It is OpenAI's newer name for the same limit, with
 // max_tokens deprecated in favour of it, so refusing it made the endpoint unusable from a
@@ -109,7 +119,7 @@
 //
 // What decides the remaining refusals is the value, not the field's presence. A field sent
 // with the value the response already carries is a request this server serves: best_of: 1,
-// logprobs: false, top_logprobs: 0 and suffix: "" all answer 200. The official
+// suffix: "" answers 200. The official
 // SDKs serialise a keyword argument the caller passed even when it equals the API default, so
 // completions.create(best_of=1) sends "best_of": 1 -- and refusing on presence answered it
 // with "best_of needs several candidates", which is a sentence about a different request.

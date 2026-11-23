@@ -59,11 +59,30 @@ Fields describing the *response* are refused with a 400 naming every one, since 
 sent `n: 3` indexes `choices[2]`.
 
 The refused set is not the same on the two endpoints, because their schemas differ. Chat refuses
-`logprobs`, `top_logprobs` and `echo`; completions refuses `logprobs`, `suffix` and `best_of`. A
-field belonging to the other endpoint is not refused there -- it is an unknown member and is
-ignored, so `suffix` sent to chat is silently dropped rather than named. Chat's `echo` is in the
-refused set because OpenAI's chat schema has no such field, so there it is a field the caller sent
-that the endpoint cannot use.
+`echo`; completions refuses `suffix` and `best_of`. A field belonging to the other endpoint is not
+refused there -- it is an unknown member and is ignored, so `suffix` sent to chat is silently
+dropped rather than named. Chat's `echo` is in the refused set because OpenAI's chat schema has no
+such field, so there it is a field the caller sent that the endpoint cannot use.
+
+`logprobs` is honoured on both, in each endpoint's own shape: completions answers with parallel
+arrays (`tokens`, `token_logprobs`, `text_offset`, `top_logprobs`), chat with a list of objects
+carrying `token`, `bytes`, `logprob` and `top_logprobs`. The count of alternatives differs by
+endpoint because OpenAI documents different maxima -- `logprobs` at most 5 on completions,
+`top_logprobs` at most 20 on chat -- and a count past either is refused with `invalid_value`
+naming the bound rather than clamped. Streaming carries a logprobs object on each delta chunk,
+and the streamed and non-streaming lists are equal for the same request, offsets included.
+
+The probabilities come from a log-softmax over the whole vocabulary at the request's
+temperature, not from the truncated set a `top_k` or `top_p` setting leaves. That distinction
+matters: describing the truncated set would report a logprob of 0 whenever `top_k` is 1, which
+says "the model was certain" about a position where the request merely narrowed the choice. A
+greedy request (`temperature: 0`) reports the distribution at temperature 1, since there is no
+divisor to apply.
+
+A token whose bytes are not valid UTF-8 on their own -- one half of a character, in a byte-level
+vocabulary -- is described by its bytes, which is why chat's schema has that field: `bytes` is
+authoritative and `token` is its rendering. Concatenating `bytes` over the entries reconstructs
+the message content exactly.
 
 `max_completion_tokens` is honoured on both: it is OpenAI's newer name for the same limit, and
 `max_tokens` is deprecated in favour of it, so a migrated client sends only the newer one. Sending
@@ -109,8 +128,8 @@ interleaved texts, two `finish_reason: "length"` chunks, one `[DONE]`, and
 
 The refusal turns on the **value**, not on the field being present. A field that was sent with
 the value the response already carries asks for nothing this server would not have done anyway,
-so it is served: `best_of: 1`, `logprobs: false`, `top_logprobs: 0` and `suffix: ""` all answer
-200. That matters because the official SDKs serialise a keyword argument
+so it is served: `best_of: 1` and `suffix: ""` answer 200, and `logprobs: false` asks for no
+log probabilities, which is what the response does. That matters because the official SDKs serialise a keyword argument
 the caller passed even when it equals the API default -- `completions.create(best_of=1)` puts
 `"best_of": 1` on the wire. Refusing on presence told such a caller `best_of needs several
 candidates` about `best_of: 1`, for a request it serves correctly; measured through the OpenAI

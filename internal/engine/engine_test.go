@@ -3189,3 +3189,59 @@ func TestPenaltiesDiscourageRepetition(t *testing.T) {
 		t.Error("a negative presence penalty produced no tokens")
 	}
 }
+
+// TestAFailedSequenceStillReportsDone covers what a caller learns when the block pool runs out.
+//
+// finish closes the sequence's channel whether or not the event it carries is a completion, so a
+// failure that omitted Done left the channel closing after some tokens and no finish_reason. A
+// caller looping over the channel cannot tell that from an answer that was cut short: the server
+// turns it into a 200 whose content is truncated, which is the failure mode a length limit is
+// supposed to be distinguishable from.
+//
+// Both failure sites were missing the flag -- the prefill path and the batched decode -- and the
+// decode one is the harder to notice, because by then the sequence has already emitted tokens and
+// looks like it is working.
+func TestAFailedSequenceStillReportsDone(t *testing.T) {
+	// The fixture's prompt is short enough that a pool of one block cannot hold it with any
+	// budget, which is the reachable way to make prefill fail from outside the engine.
+	e, _, _ := loadModelPath(t, Options{
+		MaxActive: 2, Workers: 1, BlockSize: 16, Blocks: 1,
+	})
+	// Twenty-four positions against a sixteen-position block: the prompt itself needs two
+	// blocks, so prefill cannot complete with one.
+	prompt := make([]int32, 24)
+	for i := range prompt {
+		prompt[i] = int32(3 + i%10)
+	}
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 8})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+
+	var last Event
+	n := 0
+	for ev := range ch {
+		n++
+		last = ev
+	}
+	if n == 0 {
+		t.Fatal("the sequence emitted nothing at all; the channel closing empty says even less" +
+			" than closing without a finish reason")
+	}
+	if !last.Done {
+		t.Fatalf("the last of %d events is not Done: a caller cannot tell this from a truncated"+
+			" answer", n)
+	}
+	if last.FinishReason != "error" {
+		t.Errorf("finish reason %q, want \"error\"", last.FinishReason)
+	}
+	if last.Err == nil {
+		t.Error("the completing event carries no error, so the reason has nothing behind it")
+	}
+	if s := e.Stats(); s.Active != 0 || s.PoolFree != s.PoolBlocks {
+		t.Errorf("after a failed sequence: active %d, %d of %d blocks free", s.Active,
+			s.PoolFree, s.PoolBlocks)
+	}
+}

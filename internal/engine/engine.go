@@ -654,7 +654,12 @@ func (e *Engine) prefill(s *sequence) {
 	}
 	out, err := e.model.PrefillWithPrefix(s.cache, s.req.Prompt[s.pos:], s.pos)
 	if err != nil {
-		e.finish(s, Event{Err: err, FinishReason: "error"})
+		// Done is what closes the sequence for the caller: every other finish in this file sets
+		// it, and this one did not, so a prefill failure -- a block pool with too few blocks is
+		// the reachable case -- closed the channel without ever saying the sequence had ended.
+		// A caller looping over the channel saw the tokens that followed and no finish_reason,
+		// which a server turns into a response that looks truncated rather than failed.
+		e.finish(s, Event{Done: true, FinishReason: "error", Err: err})
 		return
 	}
 	if s.traceOn {
@@ -764,7 +769,10 @@ func (e *Engine) decode(batch []pending) {
 		// with the error rather than leaving some in the active set with a cache
 		// that no longer matches its position.
 		for _, p := range batch {
-			e.finish(p.s, Event{Err: err, FinishReason: "error"})
+			// Done for the same reason as the prefill failure above: without it the channel
+			// closes without a finish_reason, and a caller cannot tell a truncated answer from
+			// a failed one.
+			e.finish(p.s, Event{Done: true, FinishReason: "error", Err: err})
 		}
 		return
 	}

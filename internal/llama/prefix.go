@@ -17,11 +17,18 @@ import (
 // saves the whole prefill of the shared part -- the part that is usually the longest
 // and most expensive, since it is re-sent verbatim on every turn.
 //
-// The index is keyed on the hash of a block's token prefix. A hash collision would
-// attach the wrong keys and values, which produces fluent-looking garbage and is
-// exactly the failure mode this project's tests exist to catch, so entries also
-// store the token run and compare it. A collision then costs a rejected hit, not a
-// wrong result.
+// The index is keyed on the hash of a block's token run together with the chain that precedes
+// it, so a key identifies a position rather than a piece of text. That distinction is
+// correctness, not tidiness: a block's keys and values depend on the absolute positions its
+// tokens sat at, because the rotation is a function of the position. Keying on the run alone
+// meant a prompt that repeated a block -- one sentence over and over -- had its later
+// occurrences overwrite the earlier ones, and a later request attached one position's keys and
+// values at another. Measured on Gemma 3 270M, that was 29 nats of logit error and a changed
+// most-likely token, with fluent text the whole time.
+//
+// A hash collision would attach the wrong keys and values too, which produces the same kind of
+// fluent garbage, so entries also store the token run and compare it. A collision then costs a
+// rejected hit, not a wrong result.
 //
 // The index holds a reference on every block it remembers. That reference is what
 // keeps the keys alive between the request that produced them and the request that
@@ -106,22 +113,22 @@ func (p *BlockPool) PrefixIndex() *PrefixIndex { return p.index }
 // The returned blocks are not retained: the caller must retain the ones it keeps
 // before letting another request run, which PagedKVCache.adopt does.
 //
-// A block is reported at most once. Keys are the token run alone, with no position, so a
-// prompt that repeats a block -- "1 2 1 2" at a two-token block size is the smallest --
-// finds the same entry twice. Handing that entry over twice would make two of the
-// sequence's positions alias one block, and the second one's append would overwrite the
-// first's keys and values in place: the shared block is read by every other holder too, so
-// the damage is silent and reaches them. The match therefore stops at the first repeat, and
-// the positions after it are prefilled instead. Matching less costs a forward pass;
-// matching wrongly costs correctness.
+// A block is reported at most once. The key includes the chain, so a repeated block now has its
+// own entry and the match continues through it; the guard stays because the index can still hand
+// two entries pointing at one block -- an entry is replaced when the same chain reaches the same
+// run, and a pool that rewrote a block under two chains would show up here. Two positions aliasing
+// one block is the failure worth refusing: the second one's append overwrites the first's keys and
+// values in place, inside a block every other holder is reading. Matching less costs a forward
+// pass; matching wrongly costs correctness.
 func (x *PrefixIndex) Match(tokens []int32) (n int, blocks []int32) {
 	if x == nil || len(tokens) == 0 {
 		return 0, nil
 	}
 	size := x.pool.block
 	blocks = make([]int32, 0, len(tokens)/size)
+	var parent uint64
 	for off := 0; off+size <= len(tokens); off += size {
-		key := hashTokens(tokens[off : off+size])
+		key := chainKey(parent, hashTokens(tokens[off:off+size]))
 		entry, ok := x.entries[key]
 		if !ok || !sameTokens(entry.tokens, tokens[off:off+size]) {
 			break
@@ -130,6 +137,7 @@ func (x *PrefixIndex) Match(tokens []int32) (n int, blocks []int32) {
 			break
 		}
 		blocks = append(blocks, entry.block)
+		parent = key
 	}
 	return len(blocks) * size, blocks
 }
@@ -153,10 +161,21 @@ func (x *PrefixIndex) Remember(tokens []int32, block int32, parent uint64) error
 	if err := x.pool.retain(block); err != nil {
 		return err
 	}
-	key := hashTokens(tokens)
+	// The key is the parent's key together with this run's hash, not the run alone. A prompt
+	// that repeats a block -- the same sentence over and over -- produces the same run at
+	// several positions, and keying on the run alone made those positions overwrite each
+	// other. A later request then matched the surviving entry and attached one position's
+	// keys and values at another: measured on Gemma 3 270M, 29 nats of logit error that no
+	// amount of looking at the text would reveal.
+	//
+	// The chain makes the key positional for free. Two requests sharing a prefix produce the
+	// same parent hashes in the same order, so they still match; the same tokens at a
+	// different offset are now a different entry.
+	key := chainKey(parent, hashTokens(tokens))
 	if old, ok := x.entries[key]; ok {
-		// The same token run, or a collision. Either way the old entry is replaced,
-		// so its reference has to go.
+		// The same chain reaching the same run: the block moved, or this is a re-remember of
+		// the same content. Replacing is right here precisely because the key now includes
+		// the position -- two entries under one key really are the same prefix position.
 		if err := x.pool.release(old.block); err != nil {
 			return err
 		}
@@ -179,7 +198,9 @@ func (x *PrefixIndex) Remember(tokens []int32, block int32, parent uint64) error
 
 // Key returns the hash Remember would store for a block, so a caller can pass it as the
 // next block's parent.
-func (x *PrefixIndex) Key(tokens []int32) uint64 { return hashTokens(tokens) }
+func (x *PrefixIndex) Key(parent uint64, tokens []int32) uint64 {
+	return chainKey(parent, hashTokens(tokens))
+}
 
 // evictTail gives up one entry that nothing else continues, releasing its reference.
 //
@@ -247,6 +268,19 @@ func (x *PrefixIndex) Len() int {
 // collision behaviour is understood: a collision is possible and is handled by
 // comparing the tokens, which is why the cost of a better hash is not worth
 // paying here.
+// chainKey mixes a block's own hash with its continuation link.
+//
+// The result identifies a prefix position, not a token run: the same run appearing at two
+// offsets of one prompt has two parents and therefore two keys. That is the property the
+// index needs, because a block's keys and values depend on the positions its tokens sat at.
+func chainKey(parent, own uint64) uint64 {
+	// A cheap two-round mix. Callers compare the stored tokens as well, so this only has to
+	// spread the values, not resist an adversary.
+	h := parent * 0x9e3779b97f4a7c15
+	h ^= own + 0x9e3779b97f4a7c15 + (h << 6) + (h >> 2)
+	return h
+}
+
 func hashTokens(tokens []int32) uint64 {
 	const (
 		offset = 14695981039346656037

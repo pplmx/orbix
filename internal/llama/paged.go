@@ -413,17 +413,28 @@ func (c *PagedKVCache) rememberFullBlock(tokens []int32, pos int) error {
 		return fmt.Errorf("llama: block %d needs tokens up to %d, have %d", idx-1, start+c.block, len(tokens))
 	}
 	// The block continues the one before it in this same prefill, which is what the index
-	// needs to know to evict a chain from its end rather than its middle. The parent's key
-	// is the hash of the preceding block's tokens; idx-1 == 0 means this is the head.
-	var parent uint64
-	if idx-1 > 0 {
-		parentStart := start - c.block
-		parent = pool.index.Key(tokens[parentStart : parentStart+c.block])
-	}
+	// needs to know to evict a chain from its end rather than its middle.
+	//
+	// The parent is the root of the whole chain up to here, not just the preceding block's
+	// hash: the index keys a block by its chain, so that the same tokens at two offsets are
+	// two entries. Walking the blocks already published for this prompt rebuilds the same
+	// chain Match will walk.
+	parent := chainRoot(pool.index, c.block, tokens, idx-1)
 	// Remember takes the index's own reference. This cache already holds its
 	// reference from the allocation, so the block now has two holders and stays
 	// alive after the sequence finishes -- which is the whole point.
 	return pool.index.Remember(tokens[start:start+c.block], c.blocks[idx-1], parent)
+}
+
+// chainRoot returns the key the block at position end belongs under, given the chain that precedes
+// it. It folds every block up to end, so the result identifies a position rather than a token run.
+func chainRoot(idx *PrefixIndex, block int, tokens []int32, end int) uint64 {
+	var parent uint64
+	for i := range end {
+		start := i * block
+		parent = chainKey(parent, hashTokens(tokens[start:start+block]))
+	}
+	return parent
 }
 
 // ensureBlocks makes sure the sequence holds a block covering pos.

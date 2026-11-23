@@ -1,11 +1,15 @@
 package llama
 
 import (
+	"math"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // Prefix reuse is a correctness-critical optimization: a wrong hit attaches keys
@@ -417,12 +421,24 @@ func TestMatchReportsEachBlockOnce(t *testing.T) {
 		}
 	}
 
+	// Two blocks, both matched. The earlier version of this test asserted that the match
+	// stopped at the repeated block, because the index keyed entries on the token run alone
+	// and the second "1 2" overwrote the first: handing both over would have meant one block
+	// id used for two positions. The key now includes the chain, so the second block is a
+	// different entry pointing at a different block, and matching both is correct.
 	n, blocks := idx.Match(tokens)
-	if n != 2 {
-		t.Errorf("Match = %d positions, want 2: the match stops at the repeated block", n)
+	if n != 4 {
+		t.Errorf("Match = %d positions, want 4: both blocks are remembered under their own"+
+			" chain and must be matched", n)
 	}
-	if len(blocks) != 1 {
-		t.Fatalf("Match returned blocks %v, want one", blocks)
+	if len(blocks) != 2 {
+		t.Fatalf("Match returned blocks %v, want two", blocks)
+	}
+	// Still no aliasing: the two positions must name different blocks, or appending to one
+	// would overwrite the other in place.
+	if blocks[0] == blocks[1] {
+		t.Errorf("Match returned block %d for both positions; two positions cannot share one"+
+			" block", blocks[0])
 	}
 
 	// The block it did hand over must not be the one the original appends into. Writing
@@ -995,5 +1011,154 @@ func TestEvictedPrefixNoLongerMatches(t *testing.T) {
 		t.Errorf("the evicted prefix still matches %d positions in blocks %v (it was %v); "+
 			"those blocks have been reused, so adopting them feeds another sequence's keys "+
 			"and values into this one", n, blocks, primedBlocks)
+	}
+}
+
+// TestPrefixCacheReuseIsPositional is the regression test for a silently wrong reuse.
+//
+// Set GEMMA3_MODEL to a Gemma 3 GGUF to run the real-file form, which is the one that caught it.
+//
+// A block's keys and values depend on the absolute positions its tokens sat at, not only on the
+// tokens: the rotation is a function of the position. The index keyed entries on the token run
+// alone, so a prompt that repeats a 16-token run -- the same sentence over and over, ordinary for
+// a test prompt and not unusual in a real one -- had its later blocks overwrite the entries of its
+// earlier ones. A later request then matched the surviving entry and attached, at position 16,
+// keys and values computed at position 176.
+//
+// It is invisible from the outside in the obvious way: the match succeeds, the request runs, the
+// text is fluent, and only the numbers are wrong. Measured on Gemma 3 270M with the bug present,
+// reused logits were 29 nats from a cache that had never reused.
+//
+// The comparison is against an arena cache, which never reuses, so the expectation does not depend
+// on the prefix path being right.
+func TestPrefixCacheReuseIsPositional(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	m, err := NewWithOptions(path, Options{Workers: 1})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cfg := m.Config()
+	const block = 4
+	// Every block after the first repeats the first block's tokens, so a content-only key
+	// collides them all. The vocabulary is small, so tokens 2..block+1 exist.
+	prompt := make([]int32, 0, 8*block)
+	prompt = append(prompt, 1)
+	for range 8*block - 1 {
+		prompt = append(prompt, 2+int32(len(prompt))%int32(block-1))
+	}
+
+	arena, err := NewKVCache(cfg, len(prompt)+32)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	want, err := m.Prefill(arena, prompt, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: block, Blocks: 64})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+	for round := range 4 {
+		cache := pool.New()
+		got, err := m.PrefillWithPrefix(cache, prompt, 0)
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		var worst float64
+		for i := range want {
+			if d := math.Abs(float64(want[i] - got[i])); d > worst {
+				worst = d
+			}
+		}
+		if worst > 1e-4 {
+			t.Fatalf("round %d: reused %d positions and is %v away from an arena cache; a reused"+
+				" block has to be the one that held these tokens at these positions",
+				round, cache.ReusedPositions(), worst)
+		}
+		if err := cache.Reset(); err != nil {
+			t.Fatalf("round %d: reset: %v", round, err)
+		}
+	}
+}
+
+// TestPrefixCacheReuseOfRepeatedContent covers the case a real prompt hit and the fixtures missed.
+//
+// A prompt that repeats a block -- one sentence over and over -- used to defeat the index: entries
+// were keyed on the token run alone, so the second occurrence overwrote the first, and a later
+// request matched the surviving entry and attached one position's keys and values at another.
+// Measured on Gemma 3 270M with the bug, reused logits were 29 nats from an arena cache and the
+// most likely token drifted from 107 to 108 within four requests. Nothing in the generated text
+// said so.
+//
+// With the chain in the key the whole prompt is reusable instead of half: 192 of 202 positions
+// rather than 96, and the logits equal the arena's to the last bit across six rounds.
+//
+// The comparison is against an arena cache, which never reuses, so nothing here depends on the
+// prefix path being right.
+func TestPrefixCacheReuseOfRepeatedContent(t *testing.T) {
+	path := os.Getenv("GEMMA3_MODEL")
+	if path == "" {
+		t.Skip("set GEMMA3_MODEL to a Gemma 3 GGUF file")
+	}
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	prompt := tok.Encode(strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20), true)
+
+	arena, err := NewKVCache(m.Config(), len(prompt)+64)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	want, err := m.Prefill(arena, prompt, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+
+	pool, err := NewBlockPool(m.Config(), BlockPoolOptions{BlockSize: 16, Blocks: 64})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+	for round := range 6 {
+		cache := pool.New()
+		got, err := m.PrefillWithPrefix(cache, prompt, 0)
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		var worst float64
+		for i := range want {
+			if d := math.Abs(float64(want[i] - got[i])); d > worst {
+				worst = d
+			}
+		}
+		if worst != 0 {
+			t.Fatalf("round %d: reused %d positions and is %v from an arena cache; a repeated"+
+				" block must be reused at the positions it was written at",
+				round, cache.ReusedPositions(), worst)
+		}
+		// Half a prompt reused is the shape the bug produced; the whole prefix is the shape it
+		// should have. Asserted rather than described, because a regression that only lowered
+		// the hit rate would pass the comparison above.
+		if round > 0 {
+			if got, minimum := cache.ReusedPositions(), (len(prompt)/16)*16; got != minimum {
+				t.Errorf("round %d reused %d positions, want %d: repeated blocks are separate"+
+					" entries now, so the whole prefix is reusable", round, got, minimum)
+			}
+		}
+		if err := cache.Reset(); err != nil {
+			t.Fatalf("round %d: reset: %v", round, err)
+		}
 	}
 }

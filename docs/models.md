@@ -246,16 +246,49 @@ check every claim the project makes. `go test ./... -v | grep -c '^--- SKIP'` is
 it is worth re-measuring rather than trusting these figures -- adding a gated test raises it.
 Measured 2026-11:
 
-| Gates set                                                                   | Skipped |
-| --------------------------------------------------------------------------- | ------- |
-| none                                                                        | 16      |
-| the four original (`MODEL`, `QWEN2_MODEL`, `MIXTRAL_MODEL`, `MODEL_KQUANT`) | 1       |
-| all eight                                                                   | 0       |
+| Gates set     | Skipped |
+| ------------- | ------- |
+| none          | 24      |
+| all thirteen  | 0       |
 
-The single skip in the middle row is `TestRealWeightMatrixStats`: it was added after the other
-gates, and it needs one of the four 32-weight variables. So the four original checkpoints no
-longer reach zero on their own, which is why the table is here instead of a sentence claiming
-a number that moved.
+Both figures re-measured 2026-11 with `go test -v ./...`. The table names two rows rather than a
+ladder because the middle rungs stop meaning anything once the gates outnumber the checkpoints: a
+row for "the four original" said something when four was most of them and says nothing now, and the
+number under it moves whenever a gated test is added. What a reader needs is where the count starts
+and that it reaches zero.
+
+There are thirteen gates: nine named directly at the call site and four that
+`internal/quant/formats_real_test.go` looks up from a table.
+
+| Variable        | Checkpoint                   | Covers                        |
+| --------------- | ---------------------------- | ----------------------------- |
+| `MODEL`         | `stories15M-q4_0.gguf`       | generation, batching, tracing |
+| `QWEN2_MODEL`   | a converted Qwen2 file       | `qwen2`                       |
+| `QWEN3_MODEL`   | `Qwen3-0.6B-Q4_K_M.gguf`     | `qwen3`                       |
+| `MISTRAL_MODEL` | a version 2 GGUF             | GGUF v2 parsing               |
+| `GEMMA_MODEL`   | `gemma-2b.gguf`              | `gemma`                       |
+| `GEMMA2_MODEL`  | `gemma2.gguf` (Q3_K_L)       | `gemma2`, sliding window      |
+| `GEMMA3_MODEL`  | `gemma-3-270m-it-Q8_0.gguf`  | `gemma3`, prompt token ids    |
+| `MIXTRAL_MODEL` | `tinymoe2m.F32.gguf`         | the MoE path                  |
+| `MODEL_KQUANT`  | `tinyllama-q2k.gguf`         | K-quant decode                |
+| `MODEL_Q4_1`    | a Q4_1 file                  | `Q4_1` decode                 |
+| `MODEL_Q5_0`    | a Q5_0 file                  | `Q5_0` decode                 |
+| `MODEL_Q5_1`    | a Q5_1 file                  | `Q5_1` decode                 |
+| `MODEL_IQ4_NL`  | an IQ4_NL file               | `IQ4_NL` decode               |
+
+The four quantization ones are easy to miss when auditing this list: they are not `os.Getenv("...")`
+at the call site but rows in a table that `TestRealWeightMatrixStats` walks, so a search for
+`Getenv("` finds nine gates and the four rows are invisible. Measured both ways -- 24 skipped with no
+variables, 0 with all thirteen.
+
+That search is worth trusting only after measuring, because the two answers look equally plausible.
+Setting the nine that `Getenv("` finds leaves exactly one skip, `TestRealWeightMatrixStats`, which is
+the one test the four table rows feed. So nine gates do not reach zero and thirteen do, and the count
+in the table above is the one that was measured rather than derived from a grep.
+
+`MISTRAL_MODEL` covers the format revision rather than an architecture: the first real Mistral
+checkpoint reached this project was GGUF **version 2**, and the file declares `llama` with no sliding
+window. It is the test that would have caught the refusal of every version 2 file in circulation.
 
 ```bash
 MODEL=/tmp/stories15M-q4_0.gguf \

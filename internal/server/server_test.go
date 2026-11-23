@@ -2235,7 +2235,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
 
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
@@ -2253,7 +2253,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch2)
 	w2 := httptest.NewRecorder()
 	srv.streamResponse(w2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch2, "cmpl-test", 1700000000, false, []string{"this stop never appears"}, false, 0)
+		[]<-chan engine.Event{ch2}, "cmpl-test", 1700000000, false, []string{"this stop never appears"}, false, 0)
 	if withStop := collectStream(t, io.NopCloser(strings.NewReader(w2.Body.String()))); withStop != want {
 		t.Errorf("with a stop configured, streamed %q, want %q", withStop, want)
 	}
@@ -2269,7 +2269,7 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch3)
 	w3 := httptest.NewRecorder()
 	srv.streamResponse(w3, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch3, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ch3}, "cmpl-test", 1700000000, false, nil, false, 0)
 	if got := collectStream(t, io.NopCloser(strings.NewReader(w3.Body.String()))); got != wantSingle {
 		t.Errorf("one-byte stream gave %q, the same token decodes to %q", got, wantSingle)
 	}
@@ -2350,7 +2350,7 @@ func TestStreamReleasesHeldTextWhenNoStopMatches(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", 1700000000, false, []string{"中X"}, false, 0)
+		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, []string{"中X"}, false, 0)
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
 		t.Errorf("streamed %q with an unmatched stop, want %q", got, want)
@@ -2809,10 +2809,8 @@ func TestSeveralChoicesAreReproducible(t *testing.T) {
 // negative count and a count past maxChoices are malformed values, reported with
 // invalid_value and the number that arrived rather than as an unimplemented feature.
 //
-// The last case is the honest partial: n>1 with stream=true still needs the choices' deltas
-// interleaved into one event stream, which is not implemented. The refusal has to name the way
-// out, because "not implemented" alone leaves a caller guessing whether to drop n or the
-// stream.
+// Every case here is about the /count/, not about the transport: n>1 with stream=true used to
+// be refused as well and is served now, so the request's own validation is all that is left.
 func TestChoiceCountIsValidated(t *testing.T) {
 	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
 
@@ -2870,24 +2868,238 @@ func TestChoiceCountIsValidated(t *testing.T) {
 		}
 	})
 
-	t.Run("n>1 with stream", func(t *testing.T) {
-		resp := post(t, srv.Handler(), "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 2, "n": 2, "stream": true}`)
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", resp.StatusCode)
+	// n>1 with stream=true used to be refused here. It is served now; see
+	// TestStreamingSeveralChoices for what the interleaved stream has to contain.
+}
+
+// sseChoice is one choice's slice of a streamed response, reassembled by index.
+type sseChoice struct {
+	text   strings.Builder
+	chunks int
+	// finishReasons collects every finish_reason the stream named for this index, in order.
+	finishReasons []string
+}
+
+// readSSEChoices parses a streaming response into per-choice text, indexed by the chunk's
+// own index field rather than by arrival order.
+//
+// It fails on a chunk whose index is negative or outside want, because both mean the server
+// attributed a delta to a choice that does not exist -- which a client accumulating deltas
+// would silently drop, leaving one choice short with no error anywhere.
+func readSSEChoices(t *testing.T, body io.ReadCloser, want int) (map[int]*sseChoice, bool) {
+	t.Helper()
+	defer func() { _ = body.Close() }()
+	out := make(map[int]*sseChoice, want)
+	for i := range want {
+		out[i] = &sseChoice{}
+	}
+	sawDone := false
+	sc := bufio.NewScanner(body)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
 		}
-		body := decodeBody[errorBody](t, resp)
-		if body.Error.Code != "unsupported_parameter" || body.Error.Param != "n" {
-			t.Errorf("code/param = %q/%q, want unsupported_parameter/n",
-				body.Error.Code, body.Error.Param)
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			sawDone = true
+			break
 		}
-		// The way out has to be in the message: one of the two fields has to change.
-		if !strings.Contains(body.Error.Message, "stream=false") {
-			t.Errorf("message %q does not name stream=false as the way to get the choices",
-				body.Error.Message)
+		var chunk struct {
+			Choices []struct {
+				Index        int     `json:"index"`
+				Text         string  `json:"text"`
+				FinishReason *string `json:"finish_reason"`
+				Delta        struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
 		}
-	})
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			t.Fatalf("chunk %q: %v", payload, err)
+		}
+		for _, c := range chunk.Choices {
+			ch, ok := out[c.Index]
+			if !ok {
+				t.Fatalf("chunk names index %d, which is outside the %d choices requested",
+					c.Index, want)
+			}
+			ch.chunks++
+			ch.text.WriteString(c.Delta.Content)
+			ch.text.WriteString(c.Text)
+			if c.FinishReason != nil {
+				ch.finishReasons = append(ch.finishReasons, *c.FinishReason)
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("reading the stream: %v", err)
+	}
+	return out, sawDone
+}
+
+// TestStreamingSeveralChoices covers n>1 with stream=true, which used to be refused with
+// "the choices' deltas would have to be interleaved into one event stream".
+//
+// Interleaving is what the implementation has to get right, and what a client depends on:
+//
+//   - every delta carries the index of the choice it belongs to, so a client accumulating
+//     per index reassembles n texts. A delta with the wrong index appends one choice's words
+//     to another's and the failure shows up as garbled text, not as an error.
+//   - every choice gets its own finish chunk. The sentinel [DONE] arrives once for the whole
+//     stream, so a client learns that a particular index stopped from that index's
+//     finish_reason; without it, a choice that ended early is indistinguishable from one that
+//     is still going.
+//   - the stream still ends with [DONE].
+//   - text is not duplicated or lost when the choices advance in different rounds, which is
+//     why the reassembled text is compared for equality against the same request sent
+//     non-streaming rather than only being checked for length.
+func TestStreamingSeveralChoices(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	for _, path := range []string{"/v1/completions", "/v1/chat/completions"} {
+		t.Run(path, func(t *testing.T) {
+			const n, maxTokens = 3, 6
+			body := fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d, "n": %d, `+
+				`"temperature": 1.2}`, maxTokens, n)
+			if path == "/v1/chat/completions" {
+				body = fmt.Sprintf(`{"messages": [{"role": "user", "content": "Once upon a time"}], `+
+					`"max_tokens": %d, "n": %d, "temperature": 1.2}`, maxTokens, n)
+			}
+
+			streamed := post(t, srv.Handler(), path, body[:len(body)-1]+`, "stream": true}`)
+			if streamed.StatusCode != http.StatusOK {
+				out := decodeBody[errorBody](t, streamed)
+				t.Fatalf("status = %d, want 200: %s", streamed.StatusCode, out.Error.Message)
+			}
+			choices, sawDone := readSSEChoices(t, streamed.Body, n)
+
+			if !sawDone {
+				t.Error("the stream ended without the [DONE] sentinel")
+			}
+			for i := range n {
+				c := choices[i]
+				if c.text.Len() == 0 {
+					t.Errorf("choice %d streamed no text at all", i)
+				}
+				if len(c.finishReasons) != 1 {
+					t.Errorf("choice %d got %d finish chunks, want exactly 1: %v",
+						i, len(c.finishReasons), c.finishReasons)
+				} else if c.finishReasons[0] == "" {
+					t.Errorf("choice %d finished with an empty finish_reason", i)
+				}
+			}
+
+			// The same request without streaming has to produce the same text per index. The
+			// fixture is deterministic only with a seed, so ask for one: the point is that
+			// streaming and blocking agree, not that sampling is stable.
+			seeded := body[:len(body)-1] + `, "seed": 11}`
+			blocked := post(t, srv.Handler(), path, seeded)
+			if blocked.StatusCode != http.StatusOK {
+				out := decodeBody[errorBody](t, blocked)
+				t.Fatalf("blocking status = %d, want 200: %s", blocked.StatusCode, out.Error.Message)
+			}
+			var whole struct {
+				Choices []struct {
+					Text    string `json:"text"`
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+			}
+			if err := json.NewDecoder(blocked.Body).Decode(&whole); err != nil {
+				_ = blocked.Body.Close()
+				t.Fatalf("decode: %v", err)
+			}
+			_ = blocked.Body.Close()
+
+			streamedSeeded := post(t, srv.Handler(), path,
+				seeded[:len(seeded)-1]+`, "stream": true}`)
+			if streamedSeeded.StatusCode != http.StatusOK {
+				out := decodeBody[errorBody](t, streamedSeeded)
+				t.Fatalf("seeded stream status = %d: %s", streamedSeeded.StatusCode, out.Error.Message)
+			}
+			seededChoices, done := readSSEChoices(t, streamedSeeded.Body, n)
+			if !done {
+				t.Error("the seeded stream ended without [DONE]")
+			}
+			for i := range n {
+				want := whole.Choices[i].Text
+				if path == "/v1/chat/completions" {
+					want = whole.Choices[i].Message.Content
+				}
+				if got := seededChoices[i].text.String(); got != want {
+					t.Errorf("choice %d: streamed %q, the same request blocking returned %q",
+						i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestStreamingSeveralChoicesUsage pins the usage chunk for n>1, which is where the two
+// paths most easily disagree.
+//
+// The counts span every choice: completion_tokens is the sum of what all n generated, and
+// prompt_tokens is the prompt once, matching the non-streaming body for the same request. A
+// client billing from a stream that reported one choice's tokens would under-report by a
+// factor of n, and nothing in the body would say so.
+func TestStreamingSeveralChoicesUsage(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	const n, maxTokens = 3, 5
+	resp := post(t, srv.Handler(), "/v1/completions",
+		fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d, "n": %d, `+
+			`"temperature": 1.2, "stream": true, "stream_options": {"include_usage": true}}`,
+			maxTokens, n))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var gotUsage bool
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []json.RawMessage `json:"choices"`
+			Usage   *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			t.Fatalf("chunk %q: %v", payload, err)
+		}
+		// The usage chunk is the one with an empty choices array; every other chunk in the
+		// same stream carries usage: null, which decodes to a nil pointer here.
+		if len(chunk.Choices) != 0 || chunk.Usage == nil {
+			continue
+		}
+		gotUsage = true
+		if want := n * maxTokens; chunk.Usage.CompletionTokens != want {
+			t.Errorf("completion_tokens = %d, want %d (%d choices x %d tokens)",
+				chunk.Usage.CompletionTokens, want, n, maxTokens)
+		}
+		if chunk.Usage.TotalTokens != chunk.Usage.PromptTokens+chunk.Usage.CompletionTokens {
+			t.Errorf("total_tokens = %d, want prompt+completion = %d",
+				chunk.Usage.TotalTokens, chunk.Usage.PromptTokens+chunk.Usage.CompletionTokens)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("reading the stream: %v", err)
+	}
+	if !gotUsage {
+		t.Error("include_usage produced no usage chunk with an empty choices array")
+	}
 }
 
 // TestResponseShapeFieldsAreRefused covers the one kind of unsupported request field this
@@ -3377,7 +3589,7 @@ func TestStreamStopsWhenWritesFail(t *testing.T) {
 	go func() {
 		defer close(done)
 		srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-			ch, "cmpl-test", 1700000000, false, nil, false, 0)
+			[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
 	}()
 	select {
 	case <-done:
@@ -3415,7 +3627,7 @@ func TestStreamRefusesAConnectionItCannotFlush(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.streamResponse(&noFlushWriter{ResponseWriter: rec},
 		httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ch, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -3774,7 +3986,7 @@ func TestStreamReportsAMidStreamError(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
-	srv.streamResponse(w, r, ch, "req-1", 1700000000, false, nil, false, 3)
+	srv.streamResponse(w, r, []<-chan engine.Event{ch}, "req-1", 1700000000, false, nil, false, 3)
 
 	body := w.Body.String()
 	// The error has to be visible to the client, not only in a log.
@@ -4955,7 +5167,7 @@ func TestStreamChunksShareOneTimestamp(t *testing.T) {
 		close(ch)
 	}()
 	const createdArg = int64(1700000000)
-	srv.streamResponse(rec, req, ch, "cmpl-test", createdArg, false, nil, true, 3)
+	srv.streamResponse(rec, req, []<-chan engine.Event{ch}, "cmpl-test", createdArg, false, nil, true, 3)
 
 	created := make(map[int64]int, 8)
 	chunks := 0
@@ -5511,7 +5723,7 @@ func TestACancelledStreamOmitsDone(t *testing.T) {
 	go func() {
 		defer close(done)
 		srv.streamResponse(rec, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-			ch, "cmpl-test", 1700000000, false, nil, false, 0)
+			[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
 	}()
 	select {
 	case <-done:
@@ -5539,7 +5751,7 @@ func TestACancelledStreamOmitsDone(t *testing.T) {
 	close(chatCh)
 	recChat := httptest.NewRecorder()
 	srv.streamResponse(recChat, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
-		chatCh, "chatcmpl-test", 1700000000, true, nil, false, 0)
+		[]<-chan engine.Event{chatCh}, "chatcmpl-test", 1700000000, true, nil, false, 0)
 	if strings.Contains(recChat.Body.String(), "data: [DONE]") {
 		t.Errorf("a cancelled chat stream sent [DONE]:\n%s", recChat.Body.String())
 	}
@@ -5552,7 +5764,7 @@ func TestACancelledStreamOmitsDone(t *testing.T) {
 	close(ok)
 	rec2 := httptest.NewRecorder()
 	srv.streamResponse(rec2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		ok, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ok}, "cmpl-test", 1700000000, false, nil, false, 0)
 	if !strings.Contains(rec2.Body.String(), "data: [DONE]") {
 		t.Error("a normally finished stream lost its [DONE] sentinel")
 	}

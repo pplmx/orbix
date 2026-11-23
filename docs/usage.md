@@ -73,11 +73,18 @@ figures describe: the prompt was prefilled once per sequence but is the same tex
 `seed`, choice *i* is seeded with *seed + i*, so the same request returns the same set in the
 same order; without one, the choices still differ from each other.
 
-Two limits remain on `n`, and both are reported rather than silent. It must be at most 8, since
-each choice holds its own KV blocks and they are all in flight at once. And `stream: true` with
-`n > 1` is refused with `unsupported_parameter`, because the choices' deltas would have to be
-interleaved into one event stream and named by `index`; the message names `stream: false` as the
-way to get all of them.
+One limit remains on `n`, and it is reported rather than silent: it must be at most 8, since
+each choice holds its own KV blocks and they are all in flight at once. The refusal names the
+bound, so a caller learns what would have been accepted.
+
+`stream: true` works with `n > 1` too. The chunks are interleaved as the choices advance, and
+every chunk's `index` says which choice its delta belongs to, so a client accumulates per index
+and gets `n` texts. Each choice gets its own finish chunk carrying its `finish_reason`, because
+`[DONE]` arrives once for the whole stream and is not a per-choice signal. With
+`stream_options.include_usage`, the usage chunk totals every choice the same way the
+non-streaming body does. Measured through the OpenAI Python SDK with `n=2, max_tokens=6`: two
+interleaved texts, two `finish_reason: "length"` chunks, one `[DONE]`, and
+`completion_tokens: 12`, `prompt_tokens: 4`.
 
 The refusal turns on the **value**, not on the field being present. A field that was sent with
 the value the response already carries asks for nothing this server would not have done anyway,

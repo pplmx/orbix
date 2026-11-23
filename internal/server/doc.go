@@ -78,10 +78,16 @@
 // prompt_tokens once -- the prompt was prefilled per sequence but is the same text. Each
 // choice gets its own sampler, seeded from the request's seed plus the choice index, so a
 // seeded request returns the same set in the same order and the choices differ from each
-// other. Two limits remain: maxChoices, because every choice holds its own KV blocks at once,
-// and stream=true with n>1, which needs the choices' deltas interleaved into one event stream
-// and named by index. Both are reported, and the second names stream=false as the way to get
-// all the choices.
+// other. One limit remains: maxChoices, because every choice holds its own KV blocks at once,
+// and the refusal names the bound.
+//
+// stream=true works with n>1 as well. One reader goroutine per choice decodes its own
+// sequence -- each has its own StreamDecoder, so the stop-string tail held back for one choice
+// cannot swallow another's text -- and a fan-in channel carries what they produce to the one
+// goroutine allowed to write the response, because http.ResponseWriter is not safe for
+// concurrent use. Every chunk names its choice in index, and each choice gets its own finish
+// chunk: [DONE] arrives once for the whole stream, so it cannot say that a particular index
+// stopped. The usage chunk totals every choice, matching the non-streaming body.
 //
 // What decides the remaining refusals is the value, not the field's presence. A field sent
 // with the value the response already carries is a request this server serves: best_of: 1,

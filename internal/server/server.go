@@ -1070,23 +1070,6 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		maxTokens = room
 	}
 	choices := p.choiceCount()
-	// Streaming with several choices needs the choices' deltas interleaved into one event
-	// stream, each chunk naming its choice in `index`. That is not implemented, and the
-	// refusal has to come before anything is submitted: answering 400 after starting n
-	// sequences would leave them generating for a caller that has already been told no.
-	//
-	// This is the one remaining limit on n, and it is a limit on the transport rather than on
-	// generation -- stream=false serves every count up to maxChoices.
-	if p.stream && choices > 1 {
-		writeRequestError(w, http.StatusBadRequest, newParamError(
-			"n", "unsupported_parameter",
-			"this server does not implement n>1 with stream=true; %d deltas would have to be "+
-				"interleaved into one event stream and named by index, which is not implemented. "+
-				"Send n=1, or set stream=false to receive all %d choices in one body",
-			choices, choices))
-		return
-	}
-
 	samplers, err := s.samplers(p.temperature, p.topK, p.topP, p.seed, choices)
 	if err != nil {
 		// The sampler's errors are all about one request field, so they carry it rather
@@ -1226,7 +1209,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 
 	if p.stream {
-		s.streamResponse(w, r, chans[0], id, created, p.chat, p.stop, p.includeUsage, len(promptTokens))
+		s.streamResponse(w, r, chans, id, created, p.chat, p.stop, p.includeUsage, len(promptTokens))
 		return
 	}
 	s.blockingResponse(w, r, chans, id, created, p, promptTokens)
@@ -1398,7 +1381,38 @@ func drainEvents(ctx context.Context, ch <-chan engine.Event, fn func(engine.Eve
 	}
 }
 
-func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, created int64, chat bool, stop []string, includeUsage bool, promptTokens int) {
+// streamItem is one thing a choice's reader wants written to the client.
+//
+// The reader does the deciding -- decoding, stop-string matching, holding back a partial
+// match -- and hands the result here, so the code that writes to the socket has nothing to
+// know about tokens and the code that reads tokens has nothing to know about the socket.
+type streamItem struct {
+	// index is the choice this belongs to.
+	index int
+	// delta is text to send. It is empty on a terminal or error item.
+	delta string
+	// reason, when set, makes this the choice's final chunk. It is the engine's own
+	// vocabulary ("stop", "length", "cancel"), not the schema's.
+	reason string
+	// err, when set, is a mid-stream failure to report in band.
+	err error
+}
+
+// streamResponse writes server-sent events, one per token.
+//
+// chans holds one event channel per choice, in choice order. n=1 -- the common case -- runs
+// its single choice inline, so its output is byte-for-byte what it was before choices existed.
+// n>1 runs one reader goroutine per choice and writes what they produce from this goroutine,
+// because http.ResponseWriter is not safe for concurrent use and the chunks have to be
+// interleaved by whatever order the choices actually advance in.
+//
+// includeUsage asks for the closing usage chunk OpenAI sends when
+// stream_options.include_usage is set. Its contract has two halves and both matter: the
+// extra chunk has an empty choices array and carries the totals, and every ordinary chunk
+// in the same stream carries "usage": null. A client written against the documented shape
+// distinguishes the two by choices being empty, and one that reads usage off every chunk
+// without a null there would see the field missing rather than absent.
+func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []<-chan engine.Event, id string, created int64, chat bool, stop []string, includeUsage bool, promptTokens int) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this connection")
@@ -1473,39 +1487,183 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 		return true
 	}
 
+	// writeItem is the one place a streamItem becomes bytes, so the inline and the fan-in
+	// paths cannot disagree about the shape of a chunk.
+	writeItem := func(it streamItem) bool {
+		if it.err != nil {
+			// The response has already started, so a status code is no longer available:
+			// report the failure in the stream and stop.
+			//
+			// The refusal counters still move, even though the client cannot be told the cause
+			// through a status code. They are what an operator watches, and a streaming
+			// deployment whose requests all lose the race for blocks would otherwise report
+			// zero pool refusals while refusing every one of them -- measured, four streaming
+			// requests against an exhausted pool left refused_pool_total at 0 against 4 for the
+			// same four sent blocking. The count is the only signal that survives the
+			// protocol's inability to say it in the response.
+			if errors.Is(it.err, llama.ErrPoolExhausted) {
+				s.refusedPool.Add(1)
+			}
+			return send(map[string]any{
+				"choices": []map[string]any{{
+					"index": it.index, "delta": map[string]string{}, "finish_reason": "error",
+				}},
+				"error": it.err.Error(),
+			})
+		}
+		if it.reason != "" {
+			return send(finalChoice(chat, it.index, finishReasonFor(it.reason)))
+		}
+		return send(chunkPayload(chat, it.index, it.delta))
+	}
+
+	generated, cancelled, broken := s.streamChoices(chans, chat, stop, writeItem)
+	if broken {
+		// The client is gone, or a choice reported a failure that was already written. Either
+		// way there is nobody left to read a usage chunk or a sentinel, and writing one after a
+		// broken pipe is the case the write error already covered.
+		return
+	}
+
+	// The usage chunk, when asked for, goes after the last choice's finish chunk and before
+	// [DONE]. OpenAI's shape is specific and a client depends on both halves: choices is an
+	// empty array (which is how a client tells this chunk apart from a text one) and usage
+	// carries the whole request's counts. Sending it with a choice in it, or without the empty
+	// array, breaks the check a client uses to find it.
+	//
+	// The totals span every choice, matching the non-streaming body: prompt_tokens counted
+	// once because the prompt is one text, completion_tokens summed because each choice
+	// generated its own.
+	if includeUsage {
+		usage := map[string]any{
+			"id": id, "object": object, "created": created, "model": s.cfg.ModelName,
+			"choices": []map[string]any{},
+			"usage": map[string]int{
+				"prompt_tokens":     promptTokens,
+				"completion_tokens": generated,
+				"total_tokens":      promptTokens + generated,
+			},
+		}
+		ub, err := json.Marshal(usage)
+		if err != nil {
+			return
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", ub); err != nil {
+			return
+		}
+	}
+	if cancelled {
+		// No [DONE]: the stream did not complete, and saying it did is the difference between
+		// a client that retries and one that keeps a truncated reply. Flushing what is already
+		// buffered still happens so the deltas that did arrive are delivered.
+		flusher.Flush()
+		return
+	}
+	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	flusher.Flush()
+}
+
+// streamChoices runs every choice and reports the stream's totals.
+//
+// One choice runs here, inline. More than one runs one goroutine per channel behind a fan-in
+// channel, because the deltas have to reach the socket in the order the choices produce them
+// and http.ResponseWriter cannot be written from several goroutines. writeItem is only ever
+// called from this goroutine, which is what makes that safe.
+//
+// broken means the stream must stop without a sentinel: the client stopped reading, or a choice
+// failed and its error chunk has already been written.
+//
+// Once broken, the other readers are told to stop through done rather than being allowed to
+// run on. That is deliberate: letting them finish would make the error response wait for the
+// remaining budget of every choice, and a client that has already been told the request failed
+// has nothing to gain from the wait. The sequences they leave behind are abandoned by the
+// engine within abandonGrace, which releases their KV blocks -- the same trade the n=1 path
+// makes when a client hangs up, and the reason its pump is bounded.
+func (s *Server) streamChoices(chans []<-chan engine.Event, chat bool, stop []string, writeItem func(streamItem) bool) (generated int, cancelled, broken bool) {
+	type totals struct {
+		generated int
+		cancelled bool
+	}
+	if len(chans) == 1 {
+		g, c, ok := s.streamOneChoice(chans[0], 0, chat, stop, writeItem)
+		return g, c, !ok
+	}
+
+	results := make([]totals, len(chans))
+	// done lets the writers give up promptly once this function has stopped reading.
+	done := make(chan struct{})
+	items := make(chan streamItem, streamFanInBuffer)
+	var wg sync.WaitGroup
+	for i, ch := range chans {
+		t := &results[i]
+		wg.Go(func() {
+			// ok is deliberately ignored here: a choice whose sink refused has already told
+			// this function through an item, or the stream is stopping for another reason.
+			g, c, _ := s.streamOneChoice(ch, i, chat, stop, func(it streamItem) bool {
+				select {
+				case items <- it:
+					return true
+				case <-done:
+					return false
+				}
+			})
+			t.generated, t.cancelled = g, c
+		})
+	}
+	go func() {
+		wg.Wait()
+		close(items)
+	}()
+
+	for it := range items {
+		if broken {
+			// Still draining: the readers are blocked on this channel and would never return
+			// if it stopped being read once the stream was declared broken.
+			continue
+		}
+		if !writeItem(it) || it.err != nil {
+			broken = true
+			close(done)
+		}
+	}
+	// close(done) above may not have run; the drain has finished either way by now.
+	select {
+	case <-done:
+	default:
+		close(done)
+	}
+	for i := range results {
+		generated += results[i].generated
+		cancelled = cancelled || results[i].cancelled
+	}
+	return generated, cancelled, broken
+}
+
+// streamFanInBuffer is how many items the choice readers can have queued before one blocks.
+//
+// One choice can produce at most a token per round, and the readers only queue work that is
+// already decoded, so a small buffer is enough to keep them from being the bottleneck without
+// letting a stalled reader hold an unbounded amount of text.
+const streamFanInBuffer = 64
+
+// streamOneChoice consumes one choice's events and hands every write to emit.
+//
+// It returns the choice's own token total (for usage) and whether the engine cancelled it
+// (for withholding the sentinel). ok is false when emit refused a write, which means the
+// stream is over and the caller should stop.
+func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, chat bool, stop []string, emit func(streamItem) bool) (generated int, cancelled, ok bool) {
 	dec := s.tok.Seq()
 	reason := "stop"
-	// cancelled marks a stream the engine stopped because it was told to. It suppresses the
-	// [DONE] sentinel; see the Done branch below for why that is the honest signal.
-	cancelled := false
-	// generated counts engine tokens for the usage chunk; see the HasToken branch.
-	generated := 0
-	// seen is the text already handed to the client, kept only when a stop string has to
-	// be matched against it.
+	// seen is the text already handed to the client, kept only when a stop string has to be
+	// matched against it.
 	seen := ""
 	// sent is how much of seen the client already has. With a stop list the tail is held
 	// back until it cannot be the start of a match, so this trails seen.
 	sent := 0
 	for ev := range ch {
 		if ev.Err != nil {
-			// The response has already started, so a status code is no longer
-			// available: report the failure in the stream and stop.
-			//
-			// The refusal counters still move, even though the client cannot be told the
-			// cause through a status code. They are what an operator watches, and a
-			// streaming deployment whose requests all lose the race for blocks would
-			// otherwise report zero pool refusals while refusing every one of them --
-			// measured, four streaming requests against an exhausted pool left
-			// refused_pool_total at 0 against 4 for the same four sent blocking. The
-			// count is the only signal that survives the protocol's inability to say it
-			// in the response.
-			if errors.Is(ev.Err, llama.ErrPoolExhausted) {
-				s.refusedPool.Add(1)
-			}
-			send(map[string]any{"choices": []map[string]any{{
-				"index": 0, "delta": map[string]string{}, "finish_reason": "error",
-			}}, "error": ev.Err.Error()})
-			return
+			emit(streamItem{index: index, err: ev.Err})
+			return generated, cancelled, false
 		}
 		if ev.HasToken {
 			// Counted here rather than from the emitted text: the usage figures describe what
@@ -1528,8 +1686,8 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 					// after it are not. `sent` is what the client already has, so only the
 					// part between them still needs sending.
 					if tail := kept[min(len(kept), sent):]; tail != "" {
-						if !send(chunkPayload(chat, tail)) {
-							return
+						if !emit(streamItem{index: index, delta: tail}) {
+							return generated, cancelled, false
 						}
 					}
 					// The sequence is still running; its context drives it to completion
@@ -1563,18 +1721,18 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 				// everything before it. Without this, stop=["北京"] streamed "北" where the
 				// non-streaming body returned nothing.
 				if safe := safePrefixLen(seen, stop); safe > sent {
-					if !send(chunkPayload(chat, seen[sent:safe])) {
-						return
+					if !emit(streamItem{index: index, delta: seen[sent:safe]}) {
+						return generated, cancelled, false
 					}
 					sent = safe
 				}
 				continue
 			}
-			if !send(chunkPayload(chat, text)) {
+			if !emit(streamItem{index: index, delta: text}) {
 				// The client went away. Its context is cancelled, so the engine
 				// stops the sequence; draining is the caller's job and this loop
 				// is already past that point.
-				return
+				return generated, cancelled, false
 			}
 		}
 		if ev.Done {
@@ -1594,86 +1752,54 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, ch <-cha
 	// the same sequence produces without streaming, which breaks the contract
 	// TestStreamingReassemblesToSameText states.
 	if tail := dec.Flush(); tail != "" {
-		if !send(chunkPayload(chat, tail)) {
-			return
+		if !emit(streamItem{index: index, delta: tail}) {
+			return generated, cancelled, false
 		}
 	}
 	// Text held back in case it began a stop string is the client's after all: no match was
 	// found, so the tail was ordinary output. Sending it is what makes a stop list that never
 	// matches cost nothing but a later chunk.
 	if reason != "stop" && sent < len(seen) {
-		if !send(chunkPayload(chat, seen[sent:])) {
-			return
+		if !emit(streamItem{index: index, delta: seen[sent:]}) {
+			return generated, cancelled, false
 		}
 	}
-	stopReason := finishReasonFor(reason)
-	// One final chunk carries the finish reason and an empty delta, then the
-	// sentinel every OpenAI stream ends with. Clients that accumulate deltas see no
-	// text change from either.
-	final := map[string]any{
-		"id": id, "object": object, "created": created, "model": s.cfg.ModelName,
-		"choices": []map[string]any{{"index": 0, "delta": map[string]string{}, "finish_reason": stopReason}},
+	// One final chunk carries the finish reason and an empty delta. Clients that accumulate
+	// deltas see no text change from it, and it is what tells a client that this index stopped.
+	if !emit(streamItem{index: index, reason: reason}) {
+		return generated, cancelled, false
 	}
-	if !chat {
-		final["choices"] = []map[string]any{{"index": 0, "text": "", "finish_reason": stopReason}}
-	}
-	if includeUsage {
-		// The finish chunk is built here rather than by send, so it needs the null too.
-		// Missing it here is easy to overlook and visible to a client: the docs say every
-		// chunk in the stream carries the field, so a client reading usage off each chunk
-		// sees one absence in the middle of the nulls.
-		final["usage"] = nil
-	}
-	b, err := json.Marshal(final)
-	if err != nil {
-		return
-	}
-	if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-		return
-	}
-	// The usage chunk, when asked for, goes after the finish chunk and before [DONE].
-	// OpenAI's shape is specific and a client depends on both halves: choices is an empty
-	// array (which is how a client tells this chunk apart from a text one) and usage carries
-	// the whole request's counts. Sending it with a choice in it, or without the empty array,
-	// breaks the check a client uses to find it.
-	if includeUsage {
-		usage := map[string]any{
-			"id": id, "object": object, "created": created, "model": s.cfg.ModelName,
-			"choices": []map[string]any{},
-			"usage": map[string]int{
-				"prompt_tokens":     promptTokens,
-				"completion_tokens": generated,
-				"total_tokens":      promptTokens + generated,
-			},
-		}
-		ub, err := json.Marshal(usage)
-		if err != nil {
-			return
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", ub); err != nil {
-			return
-		}
-	}
-	if cancelled {
-		// No [DONE]: the stream did not complete, and saying it did is the difference between
-		// a client that retries and one that keeps a truncated reply. Flushing what is already
-		// buffered still happens so the deltas that did arrive are delivered.
-		flusher.Flush()
-		return
-	}
-	_, _ = w.Write([]byte("data: [DONE]\n\n"))
-	flusher.Flush()
+	return generated, cancelled, true
 }
 
-// chunkPayload builds one streaming chunk.
-func chunkPayload(chat bool, text string) map[string]any {
+// chunkPayload builds one streaming delta chunk for a choice.
+//
+// index is the choice's position, which for n=1 is always 0 and is why this took no index
+// before. A client accumulates deltas per index, so a chunk carrying the wrong index appends
+// one choice's text to another's.
+func chunkPayload(chat bool, index int, text string) map[string]any {
 	if chat {
 		return map[string]any{"choices": []map[string]any{{
-			"index": 0, "delta": map[string]string{"content": text}, "finish_reason": nil,
+			"index": index, "delta": map[string]string{"content": text}, "finish_reason": nil,
 		}}}
 	}
 	return map[string]any{"choices": []map[string]any{{
-		"index": 0, "text": text, "finish_reason": nil,
+		"index": index, "text": text, "finish_reason": nil,
+	}}}
+}
+
+// finalChoice builds the chunk that ends one choice, carrying its finish reason and no text.
+//
+// Every choice gets one, including under n=1: a client uses it to know that particular index
+// stopped rather than to infer it from the sentinel, which arrives once for the whole stream.
+func finalChoice(chat bool, index int, reason string) map[string]any {
+	if chat {
+		return map[string]any{"choices": []map[string]any{{
+			"index": index, "delta": map[string]string{}, "finish_reason": reason,
+		}}}
+	}
+	return map[string]any{"choices": []map[string]any{{
+		"index": index, "text": "", "finish_reason": reason,
 	}}}
 }
 

@@ -60,27 +60,40 @@
 // that only tunes sampling -- logit_bias, presence_penalty, response_format -- is ignored,
 // because the SDKs send such fields whether or not the engine can use them; the text is not
 // what was asked for, but it is the shape the client reads. A field that describes the
-// response is refused with a 400 naming it: a client that sent n: 3 indexes choices[2], so
-// answering with one choice is not a smaller response but a different one, and the failure
-// would surface as an IndexError far from the request that caused it.
+// response is refused with a 400 naming it: a client that sent logprobs reads
+// choice.logprobs, so omitting the field is not a smaller response but a different one, and the
+// failure surfaces as a KeyError far from the request that caused it. (The example used to be
+// n: 3 and choices[2], which is no longer hypothetical: n is honoured now, and a response that
+// did not carry the choices a caller indexed would fail exactly as described.)
 //
-// The refused set differs per endpoint, because the two schemas do: chat refuses n, logprobs,
-// top_logprobs and echo, while completions refuses n, logprobs, echo, suffix and best_of.
+// The refused set differs per endpoint, because the two schemas do: chat refuses logprobs,
+// top_logprobs and echo, while completions refuses logprobs, echo, suffix and best_of.
 // max_completion_tokens is refused on both, for a sharper reason than the rest -- it replaces
 // max_tokens rather than accompanying it, so a migrated client sends only the newer name and
 // would otherwise get the default length with nothing saying so.
 //
-// What decides a refusal is the value, not the field's presence. A field sent with the value
-// the response already carries is a request this server serves: n: 1, best_of: 1, echo: false,
-// logprobs: false, top_logprobs: 0 and suffix: "" all answer 200. The official SDKs serialise
-// a keyword argument the caller passed even when it equals the API default, so
-// completions.create(n=1) sends "n": 1 -- and refusing on presence answered it with
-// "n>1 needs several sequences", which is a sentence about a different request.
+// n is not refused any more: the server generates the choices it asks for, one sequence each,
+// all admitted to the same batch so they advance together. The response carries choices[i]
+// with index i, and usage counts completion_tokens across every choice while counting
+// prompt_tokens once -- the prompt was prefilled per sequence but is the same text. Each
+// choice gets its own sampler, seeded from the request's seed plus the choice index, so a
+// seeded request returns the same set in the same order and the choices differ from each
+// other. Two limits remain: maxChoices, because every choice holds its own KV blocks at once,
+// and stream=true with n>1, which needs the choices' deltas interleaved into one event stream
+// and named by index. Both are reported, and the second names stream=false as the way to get
+// all the choices.
+//
+// What decides the remaining refusals is the value, not the field's presence. A field sent
+// with the value the response already carries is a request this server serves: best_of: 1,
+// echo: false, logprobs: false, top_logprobs: 0 and suffix: "" all answer 200. The official
+// SDKs serialise a keyword argument the caller passed even when it equals the API default, so
+// completions.create(best_of=1) sends "best_of": 1 -- and refusing on presence answered it
+// with "best_of needs several candidates", which is a sentence about a different request.
 //
 // A value the API does not define is malformed rather than unimplemented: n: -1 answers 400
 // invalid_value naming the number. The distinction is whose decision it is. A negative count
-// has to change whatever this server implements, while a unimplemented field has to be dropped,
-// and naming the wrong one sends the caller to edit the wrong part of the request.
+// has to change whatever this server implements, while an unimplemented field has to be
+// dropped, and naming the wrong one sends the caller to edit the wrong part of the request.
 //
 // stream_options.include_usage is honoured rather than ignored, because it is the only way a
 // streaming caller learns what it spent: without it a streamed response reports no usage at

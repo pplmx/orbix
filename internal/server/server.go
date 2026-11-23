@@ -712,10 +712,11 @@ func negativeCount(name string, v int) (string, bool) {
 
 // chatShapeFields are the response-shape fields the chat endpoint refuses.
 var chatShapeFields = []shapeField{
-	{name: "n",
-		asked:   func(v any) bool { return v.(*chatRequest).N > 1 },
-		why:     "n>1 needs several sequences per request, and this server generates one",
-		invalid: func(v any) (string, bool) { return negativeCount("n", v.(*chatRequest).N) }},
+	// n is validated here rather than refused: the server generates several choices now, so
+	// the only thing left to reject is a count outside the range it will honour. It stays in
+	// the table so that bound is checked before any refusal below it, which is the order a
+	// client relies on when a request has more than one problem.
+	{name: "n", invalid: func(v any) (string, bool) { return checkChoices(v.(*chatRequest).N) }},
 	{name: "logprobs",
 		asked: func(v any) bool {
 			p := v.(*chatRequest).Logprobs
@@ -745,10 +746,7 @@ var chatShapeFields = []shapeField{
 
 // completionShapeFields are the response-shape fields the completions endpoint refuses.
 var completionShapeFields = []shapeField{
-	{name: "n",
-		asked:   func(v any) bool { return v.(*completionRequest).N > 1 },
-		why:     "n>1 needs several sequences per request, and this server generates one",
-		invalid: func(v any) (string, bool) { return negativeCount("n", v.(*completionRequest).N) }},
+	{name: "n", invalid: func(v any) (string, bool) { return checkChoices(v.(*completionRequest).N) }},
 	{name: "logprobs",
 		// Unlike the chat endpoint's logprobs, which is a bool, this one is a count: any
 		// value at all asks for the sampled token's log-probability in the body, which the
@@ -768,13 +766,42 @@ var completionShapeFields = []shapeField{
 		},
 		why: "suffix generation is not implemented, so the reply would silently lack it"},
 	{name: "best_of",
-		asked:   func(v any) bool { return v.(*completionRequest).BestOf > 1 },
-		why:     "best_of needs several candidates per request, and this server samples one",
+		asked: func(v any) bool { return v.(*completionRequest).BestOf > 1 },
+		// best_of is not "several candidates" any more -- n covers that. What it still needs is
+		// a ranking: OpenAI returns the candidate with the highest log probability, and token
+		// log-probabilities are not computed here, so any choice among the candidates would be
+		// a different sample under a name that promises the best one.
+		why: "best_of returns the candidate with the highest log probability, and token " +
+			"log-probabilities are not computed here; use n to receive every sample",
 		invalid: func(v any) (string, bool) { return negativeCount("best_of", v.(*completionRequest).BestOf) }},
 	{name: "max_completion_tokens",
 		asked: func(v any) bool { return v.(*completionRequest).MaxCompletionTokens != nil },
 		why: "this server reads max_tokens; sending only the newer name would silently generate " +
 			"the default length instead of the one asked for"},
+}
+
+// maxChoices is the largest n this server honours.
+//
+// Every choice is a separate engine sequence with its own KV cache, and they are all in
+// flight at once, so n multiplies what one request costs. The engine's default queue holds
+// 8*MaxActive entries -- 64 by default -- and a cap of 8 keeps a single request from taking a
+// meaningful share of it at any default setting. OpenAI's own ceiling is 128, which this
+// engine could only reach with a pool sized for it, so the bound is reported rather than
+// guessed at: a caller that needs more can send the request several times.
+const maxChoices = 8
+
+// checkChoices validates n, which used to be refused outright and is now generated.
+//
+// A negative count and a count past maxChoices are both malformed values rather than
+// unimplemented features, so both are reported with invalid_value and the number that arrived.
+func checkChoices(n int) (string, bool) {
+	if n < 0 {
+		return fmt.Sprintf("n must not be negative, got %d", n), true
+	}
+	if n > maxChoices {
+		return fmt.Sprintf("n must be at most %d, got %d", maxChoices, n), true
+	}
+	return "", false
 }
 
 // derefInt reads an optional count as a number, treating absent as zero.
@@ -797,12 +824,15 @@ func derefInt(p *int) int {
 // in the caller's code, far from the request that caused it, and the 400 here is the same
 // fact said at the call site.
 //
-// The line runs through the value, not the field name. n=3 asks for three choices and gets
-// one; n=1 asks for the one choice the response has, so it is served. Narrowing this to the
-// values a client can actually read a difference from is what keeps the refusal from costing
-// a request it should have answered: measured through the OpenAI Python SDK, n=1, best_of=1,
-// echo=false and logprobs=false were all refused with "this server does not implement ..."
-// before, and each is a keyword the SDK passes through verbatim when the caller sets it.
+// The line runs through the value, not the field name. A field sent with the value the
+// response already carries asks for nothing, so it is served: measured through the OpenAI
+// Python SDK, n=1, best_of=1, echo=false and logprobs=false were all refused with "this
+// server does not implement ..." before, and each is a keyword the SDK passes through
+// verbatim when the caller sets it.
+//
+// n is not refused at all any more -- the server generates the choices it asks for -- so its
+// table entry carries only an invalid check, which is why asked may be nil here. An entry
+// with no asked participates in validation and never in refusal.
 //
 // Every field is named rather than the first: a caller fixing these should not need one
 // round trip per field. That is the rule cmd/orbix's bench follows for the flags --suite
@@ -823,7 +853,9 @@ func (s *Server) rejectShapeFields(w http.ResponseWriter, fields []shapeField, r
 	}
 	var names, whys []string
 	for _, f := range fields {
-		if f.asked(req) {
+		// A nil asked means the field is validated but no longer refused; see the comment
+		// above about n.
+		if f.asked != nil && f.asked(req) {
 			names = append(names, f.name)
 			whys = append(whys, f.why)
 		}
@@ -866,6 +898,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		stop:         req.Stop,
 		chat:         true,
 		seed:         req.Seed,
+		choices:      req.N,
 		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
@@ -907,6 +940,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		stream:       req.Stream,
 		stop:         req.Stop,
 		seed:         req.Seed,
+		choices:      req.N,
 		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
@@ -968,6 +1002,19 @@ type generateParams struct {
 	// seed makes sampling reproducible. Zero means "choose one", which is what a caller
 	// that did not ask for reproducibility gets.
 	seed int64
+	// choices is the request's n: how many completions to generate. Zero means one, which is
+	// what an omitted field decodes to. Every choice is its own engine sequence with its own
+	// sampler, and the range has already been checked by checkChoices.
+	choices int
+}
+
+// choiceCount is how many completions the request asks for, with the omitted field reading
+// as one.
+func (p generateParams) choiceCount() int {
+	if p.choices <= 0 {
+		return 1
+	}
+	return p.choices
 }
 
 func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generateParams) {
@@ -1021,7 +1068,25 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	if room := s.cfg.ContextLen - len(promptTokens); maxTokens > room {
 		maxTokens = room
 	}
-	sampler, err := s.sampler(p.temperature, p.topK, p.topP, p.seed)
+	choices := p.choiceCount()
+	// Streaming with several choices needs the choices' deltas interleaved into one event
+	// stream, each chunk naming its choice in `index`. That is not implemented, and the
+	// refusal has to come before anything is submitted: answering 400 after starting n
+	// sequences would leave them generating for a caller that has already been told no.
+	//
+	// This is the one remaining limit on n, and it is a limit on the transport rather than on
+	// generation -- stream=false serves every count up to maxChoices.
+	if p.stream && choices > 1 {
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			"n", "unsupported_parameter",
+			"this server does not implement n>1 with stream=true; %d deltas would have to be "+
+				"interleaved into one event stream and named by index, which is not implemented. "+
+				"Send n=1, or set stream=false to receive all %d choices in one body",
+			choices, choices))
+		return
+	}
+
+	samplers, err := s.samplers(p.temperature, p.topK, p.topP, p.seed, choices)
 	if err != nil {
 		// The sampler's errors are all about one request field, so they carry it rather
 		// than making the client infer which of temperature and top_p was wrong.
@@ -1055,7 +1120,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	// the caller was told to shorten a prompt whose real problem was the temperature. A
 	// refusal that names the wrong field costs more than the retry loop it was added to stop.
 	if st := s.eng.Stats(); st.PoolBlocks > 0 {
-		if need, have := blocksNeeded(len(promptTokens)+maxTokens, st.PoolBlockSize),
+		if need, have := blocksNeeded(len(promptTokens)+maxTokens, st.PoolBlockSize)*choices,
 			st.PoolBlocks; need > have {
 			// param names whichever side accounts for more of the request, because the check
 			// compares prompt+budget and either can be what makes it unservable. Naming the
@@ -1070,14 +1135,24 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			if maxTokens > len(promptTokens) {
 				blamed = "max_tokens"
 			}
+			// With several choices the need is n times one choice's, and a message that
+			// printed only the prompt-plus-budget figure would read as if one choice needed
+			// those blocks. The detail clause names the multiplication when there is one, so
+			// the arithmetic in the message accounts for the total it is quoting.
+			positions := len(promptTokens) + maxTokens
+			detail := fmt.Sprintf("%d positions for the prompt and budget", positions)
+			if choices > 1 {
+				detail = fmt.Sprintf("%d positions for the prompt and budget, times %d choices "+
+					"at %d blocks each", positions, choices,
+					blocksNeeded(positions, st.PoolBlockSize))
+			}
 			writeRequestError(w, http.StatusBadRequest, newParamError(
 				blamed, "context_length_exceeded",
-				"this request needs %d KV cache blocks of %d positions (%d positions for the "+
-					"prompt and budget) but the pool holds %d (%d positions), so no other "+
-					"request finishing can make room for it; shorten the prompt or lower "+
-					"max_tokens, or start the server with a larger --blocks",
-				need, st.PoolBlockSize, len(promptTokens)+maxTokens, have,
-				have*st.PoolBlockSize))
+				"this request needs %d KV cache blocks of %d positions (%s) but the pool holds "+
+					"%d (%d positions), so no other request finishing can make room for it; "+
+					"shorten the prompt or lower max_tokens or n, or start the server with a "+
+					"larger --blocks",
+				need, st.PoolBlockSize, detail, have, have*st.PoolBlockSize))
 			return
 		}
 	}
@@ -1104,129 +1179,187 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	if p.chat {
 		op = "chat"
 	}
-	ch, err := s.eng.Submit(engine.Request{
-		Prompt:        promptTokens,
-		MaxTokens:     maxTokens,
-		Priority:      p.priority,
-		Stop:          stopIDs,
-		Sampler:       sampler,
-		Cancel:        r.Context().Done(),
-		Trace:         s.cfg.Trace,
-		Operation:     op,
-		ResponseID:    id,
-		Stream:        p.stream,
-		ResponseModel: s.cfg.ModelName,
-	})
-	if err != nil {
-		// A full queue is not the client's fault and not permanent: the request is well
-		// formed and would succeed later. 503 with Retry-After is what a client or proxy
-		// knows to back off on, where 400 would tell it to stop sending this at all.
-		if errors.Is(err, engine.ErrQueueFull) {
-			s.refusedQueueFull.Add(1)
-			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusServiceUnavailable, err.Error())
+
+	// One sequence per choice, each with its own sampler. Submitting them together is what
+	// makes n choices cost a batch rather than n requests: the engine advances every active
+	// sequence in the same rounds.
+	chans := make([]<-chan engine.Event, 0, choices)
+	for _, sm := range samplers {
+		ch, err := s.eng.Submit(engine.Request{
+			Prompt:        promptTokens,
+			MaxTokens:     maxTokens,
+			Priority:      p.priority,
+			Stop:          stopIDs,
+			Sampler:       sm,
+			Cancel:        r.Context().Done(),
+			Trace:         s.cfg.Trace,
+			Operation:     op,
+			ResponseID:    id,
+			Stream:        p.stream,
+			ResponseModel: s.cfg.ModelName,
+		})
+		if err != nil {
+			// A later choice failing leaves the earlier ones running, and the engine abandons
+			// a sequence whose events nobody reads only after abandonGrace -- holding its KV
+			// blocks until then. Draining them here releases the blocks as soon as each
+			// finishes instead of leaving the pool short for two seconds.
+			for _, done := range chans {
+				go func() {
+					for range done {
+					}
+				}()
+			}
+			// A full queue is not the client's fault and not permanent: the request is well
+			// formed and would succeed later. 503 with Retry-After is what a client or proxy
+			// knows to back off on, where 400 would tell it to stop sending this at all.
+			if errors.Is(err, engine.ErrQueueFull) {
+				s.refusedQueueFull.Add(1)
+				w.Header().Set("Retry-After", "1")
+				writeError(w, http.StatusServiceUnavailable, err.Error())
+				return
+			}
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		chans = append(chans, ch)
 	}
 
 	if p.stream {
-		s.streamResponse(w, r, ch, id, created, p.chat, p.stop, p.includeUsage, len(promptTokens))
+		s.streamResponse(w, r, chans[0], id, created, p.chat, p.stop, p.includeUsage, len(promptTokens))
 		return
 	}
-	s.blockingResponse(w, r, ch, id, created, p, promptTokens)
+	s.blockingResponse(w, r, chans, id, created, p, promptTokens)
 }
 
 // blockingResponse collects the whole output and writes one JSON body.
-func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, ch <-chan engine.Event, id string, created int64, p generateParams, promptTokens []int32) {
-	var out []int32
-	reason := "stop"
-	// An error stops the drain and is reported after it, rather than inside the callback: a
-	// callback cannot return from this function, and writing a status from inside one would
-	// leave the drain still reading a channel nobody wants.
-	var failure error
-	closed := drainEvents(r.Context(), ch, func(ev engine.Event) {
-		if ev.Err != nil {
-			if failure == nil {
-				failure = ev.Err
+//
+// chans holds one event channel per requested choice, in choice order, so the response's
+// choices[i] is the i-th channel's output. The channels are drained concurrently rather than
+// one after another: the engine advances every sequence in the same rounds, and its emit path
+// gives a full event buffer two seconds before deciding the caller is gone. Draining them in
+// turn would let the choice that is not being read hit that deadline while the first choice
+// is still generating, which abandons it and truncates the answer.
+func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans []<-chan engine.Event, id string, created int64, p generateParams, promptTokens []int32) {
+	// One result per channel, each written by exactly one goroutine, so the slice is shared
+	// between them without a lock: different elements are different memory.
+	type collected struct {
+		out     []int32
+		reason  string
+		closed  bool
+		failure error
+	}
+	results := make([]collected, len(chans))
+	var wg sync.WaitGroup
+	for i, ch := range chans {
+		c := &results[i]
+		c.reason = "stop"
+		wg.Go(func() {
+			// An error stops the drain and is reported after it, rather than from inside the
+			// callback: a callback cannot return from this function, and writing a status from
+			// inside one would leave the drain still reading a channel nobody wants.
+			c.closed = drainEvents(r.Context(), ch, func(ev engine.Event) {
+				if ev.Err != nil {
+					if c.failure == nil {
+						c.failure = ev.Err
+					}
+					return
+				}
+				if ev.HasToken {
+					c.out = append(c.out, ev.Token)
+				}
+				if ev.Done {
+					c.reason = ev.FinishReason
+				}
+			})
+		})
+	}
+	wg.Wait()
+
+	// The first failure in choice order decides the status, so the answer does not depend on
+	// which goroutine happened to be scheduled first.
+	for i := range results {
+		if f := results[i].failure; f != nil {
+			// A pool that ran out is capacity, not a fault in the request or the server: the
+			// same request succeeds once another sequence releases its blocks. 503 with
+			// Retry-After is what a client backs off on, and 500 would have it treat a
+			// temporary condition as a permanent one.
+			if errors.Is(f, llama.ErrPoolExhausted) {
+				s.refusedPool.Add(1)
+				w.Header().Set("Retry-After", "1")
+				writeError(w, http.StatusServiceUnavailable, f.Error())
+				return
 			}
+			writeError(w, http.StatusInternalServerError, f.Error())
 			return
 		}
-		if ev.HasToken {
-			out = append(out, ev.Token)
-		}
-		if ev.Done {
-			reason = ev.FinishReason
-		}
-	})
-	if failure != nil {
-		// A pool that ran out is capacity, not a fault in the request or the server: the same
-		// request succeeds once another sequence releases its blocks. 503 with Retry-After is
-		// what a client backs off on, and 500 would have it treat a temporary condition as a
-		// permanent one.
-		if errors.Is(failure, llama.ErrPoolExhausted) {
-			s.refusedPool.Add(1)
-			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusServiceUnavailable, failure.Error())
+	}
+	for i := range results {
+		if !results[i].closed {
+			// The request was abandoned before the sequence finished, so what arrived is a
+			// prefix and there is no honest 200 to build from it. Saying so gives the client
+			// a status it can retry on; the alternative was no response at all.
+			//
+			// One abandoned choice is enough to fail the whole request. A body with n
+			// choices where some are prefixes and some are complete would be a 200 whose
+			// content is partly truncated, and nothing in the schema says which choice that
+			// was.
+			writeError(w, http.StatusServiceUnavailable,
+				"the request was abandoned before it finished")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, failure.Error())
-		return
 	}
-	if !closed {
-		// The request was abandoned before the sequence finished, so what arrived is a prefix
-		// and there is no honest 200 to build from it. Saying so gives the client a status it
-		// can retry on; the alternative was no response at all.
-		writeError(w, http.StatusServiceUnavailable,
-			"the request was abandoned before it finished")
-		return
-	}
-	text := s.tok.DecodeCompletion(out)
-	// A stop string is text, and generation halts where it would appear. OpenAI's API takes
-	// strings, and a string need not be one token: " Paris" encodes as a space token
-	// followed by the word's own. stopTokenIDs can only hand the engine a single token, so
-	// the engine-side check cannot express this -- and taking the first token of a
-	// multi-token string is actively wrong, since the space token then stops every sequence
-	// at its first space and the response comes back empty.
-	if cut, found := cutAtStop(text, p.stop); found {
-		text = cut
-		reason = "stop"
+
+	// Chooses each choice's text and finish reason, and the totals across them. OpenAI's
+	// usage counts completion_tokens across every choice and prompt_tokens once, because the
+	// prompt was prefilled once per sequence but is the same text.
+	choices := make([]map[string]any, len(results))
+	generated := 0
+	for i := range results {
+		c := &results[i]
+		text := s.tok.DecodeCompletion(c.out)
+		// A stop string is text, and generation halts where it would appear. OpenAI's API
+		// takes strings, and a string need not be one token: " Paris" encodes as a space
+		// token followed by the word's own. stopTokenIDs can only hand the engine a single
+		// token, so the engine-side check cannot express this -- and taking the first token
+		// of a multi-token string is actively wrong, since the space token then stops every
+		// sequence at its first space and the response comes back empty.
+		reason := c.reason
+		if cut, found := cutAtStop(text, p.stop); found {
+			text = cut
+			reason = "stop"
+		}
+		generated += len(c.out)
+		if p.chat {
+			choices[i] = map[string]any{
+				"index":         i,
+				"message":       map[string]string{"role": "assistant", "content": text},
+				"finish_reason": finishReasonFor(reason),
+			}
+			continue
+		}
+		choices[i] = map[string]any{
+			"index":         i,
+			"text":          text,
+			"finish_reason": finishReasonFor(reason),
+		}
 	}
 
 	usage := map[string]int{
 		"prompt_tokens":     len(promptTokens),
-		"completion_tokens": len(out),
-		"total_tokens":      len(promptTokens) + len(out),
+		"completion_tokens": generated,
+		"total_tokens":      len(promptTokens) + generated,
 	}
-	stopReason := finishReasonFor(reason)
-
+	object := "text_completion"
 	if p.chat {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"id":      id,
-			"object":  "chat.completion",
-			"created": created,
-			"model":   s.cfg.ModelName,
-			"choices": []map[string]any{{
-				"index":         0,
-				"message":       map[string]string{"role": "assistant", "content": text},
-				"finish_reason": stopReason,
-			}},
-			"usage": usage,
-		})
-		return
+		object = "chat.completion"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      id,
-		"object":  "text_completion",
+		"object":  object,
 		"created": created,
 		"model":   s.cfg.ModelName,
-		"choices": []map[string]any{{
-			"index":         0,
-			"text":          text,
-			"finish_reason": stopReason,
-		}},
-		"usage": usage,
+		"choices": choices,
+		"usage":   usage,
 	})
 }
 
@@ -1543,8 +1676,41 @@ func chunkPayload(chat bool, text string) map[string]any {
 	}}}
 }
 
+// samplers builds one sampler per choice.
+//
+// Several choices have to differ from each other, or n>1 would return the same text n times.
+// The seed is therefore anchored on the request and offset by the choice index: choice i gets
+// seed+i, so the same request reproduces the same set of completions in the same order, which
+// is what a caller comparing samples needs.
+//
+// Every seed is resolved here rather than in sampler(), including the clock read for a request
+// that supplied none. That is what makes the choices differ in that case too: reading the clock
+// once and offsetting it gives n distinct seeds, while letting each choice read the clock for
+// itself is a race that two calls in the same nanosecond can lose -- the sampler would then
+// return the same text for both, which is exactly the case n>1 exists to avoid.
+func (s *Server) samplers(temp *float64, topK int, topP *float64, seed int64, n int) ([]llama.Sampler, error) {
+	reproducible := seed != 0
+	base := seed
+	if !reproducible {
+		base = time.Now().UnixNano()
+	}
+	out := make([]llama.Sampler, n)
+	for i := range n {
+		// seeded is true even for the clock case: the seed is resolved at this point, so
+		// sampler() must use the value rather than substitute one. A derived seed of zero is
+		// legitimate here -- seed -1 with two choices derives -1 and 0 -- and passes through
+		// as the real stream seed.
+		sm, err := s.sampler(temp, topK, topP, base+int64(i), true)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = sm
+	}
+	return out, nil
+}
+
 // sampler builds the sampler a request asked for, or the server default.
-func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (llama.Sampler, error) {
+func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, seeded bool) (llama.Sampler, error) {
 	t := s.cfg.Temperature
 	if temp != nil {
 		t = *temp
@@ -1592,7 +1758,14 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64) (ll
 	// A caller-supplied seed makes the request reproducible, which is the whole point of
 	// the parameter: the same prompt and settings give the same text. Leaving it to the
 	// clock is what makes two otherwise identical requests differ.
-	if seed == 0 {
+	//
+	// seeded rather than "seed != 0": the caller has already decided, and a derived seed for a
+	// later choice can legitimately be 0 (seed -1 with two choices derives -1 and 0). Reading
+	// 0 here as "pick one" would make that one choice irreproducible while its siblings were
+	// not, which is worse than either behaviour on its own. Zero is a usable stream seed; it is
+	// only the /request/ field's zero that means "unset", because a JSON number has no way to
+	// say absent otherwise.
+	if !seeded {
 		seed = time.Now().UnixNano()
 	}
 	return temperatureSampler{temp: float32(t), topK: topK, topP: float32(p), src: newRand(seed)}, nil

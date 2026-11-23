@@ -2656,6 +2656,240 @@ func TestStreamIncludeUsage(t *testing.T) {
 	})
 }
 
+// TestSeveralChoicesAreGenerated covers n, which used to be refused outright.
+//
+// A caller that sent n=3 used to get 400 "n>1 needs several sequences per request", which was
+// true and left the feature missing: OpenAI's n is how a client asks for several samples of
+// one prompt, self-consistency and best-of both need it, and this engine already runs several
+// sequences in one batch, so the scheduler could always have done the work.
+//
+// What the response has to get right, and what this asserts:
+//
+//   - choices has n entries whose index runs 0..n-1 in order. A client indexes choices[i] and
+//     reads index to tell them apart, so a short list or a shuffled one fails in the caller.
+//   - usage.completion_tokens is the total across every choice, not one choice's count. The
+//     prompt is prefilled once per sequence but is the same text, so prompt_tokens is counted
+//     once. A client billing from this number would otherwise under-report by a factor of n.
+//   - each choice is a distinct sample. Handing the same seed to every choice would return the
+//     same text n times at any temperature, which is the one thing a caller asking for n is not
+//     looking for.
+func TestSeveralChoicesAreGenerated(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	for _, path := range []string{"/v1/completions", "/v1/chat/completions"} {
+		t.Run(path, func(t *testing.T) {
+			const n, maxTokens = 3, 6
+			body := fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": %d, "n": %d, `+
+				`"temperature": 1.2}`, maxTokens, n)
+			if path == "/v1/chat/completions" {
+				body = fmt.Sprintf(`{"messages": [{"role": "user", "content": "Once upon a time"}], `+
+					`"max_tokens": %d, "n": %d, "temperature": 1.2}`, maxTokens, n)
+			}
+			resp := post(t, srv.Handler(), path, body)
+			if resp.StatusCode != http.StatusOK {
+				out := decodeBody[errorBody](t, resp)
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+			}
+			var got struct {
+				Choices []struct {
+					Index        int    `json:"index"`
+					Text         string `json:"text"`
+					FinishReason string `json:"finish_reason"`
+					Message      struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+				Usage struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+					TotalTokens      int `json:"total_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				_ = resp.Body.Close()
+				t.Fatalf("decode: %v", err)
+			}
+			_ = resp.Body.Close()
+
+			if len(got.Choices) != n {
+				t.Fatalf("choices = %d, want %d", len(got.Choices), n)
+			}
+			seen := make(map[string]bool, n)
+			for i, c := range got.Choices {
+				if c.Index != i {
+					t.Errorf("choices[%d].index = %d, want %d: a client indexes by position", i, c.Index, i)
+				}
+				if c.FinishReason == "" {
+					t.Errorf("choices[%d] has no finish_reason", i)
+				}
+				text := c.Text
+				if path == "/v1/chat/completions" {
+					text = c.Message.Content
+				}
+				seen[text] = true
+			}
+			// With n choices and a temperature, getting one distinct continuation and n-1
+			// copies of it means the per-choice seeds collapsed to one value. The fixture's
+			// weights are random, so more than one candidate is always reachable.
+			if len(seen) < 2 {
+				t.Errorf("all %d choices have the same text, so the per-choice seeds did not "+
+					"differ", n)
+			}
+			// Every choice generated its own budget, and usage has to say so.
+			if want := n * maxTokens; got.Usage.CompletionTokens != want {
+				t.Errorf("completion_tokens = %d, want %d (%d choices x %d tokens)",
+					got.Usage.CompletionTokens, want, n, maxTokens)
+			}
+			if got.Usage.TotalTokens != got.Usage.PromptTokens+got.Usage.CompletionTokens {
+				t.Errorf("total_tokens = %d, want prompt+completion = %d",
+					got.Usage.TotalTokens, got.Usage.PromptTokens+got.Usage.CompletionTokens)
+			}
+		})
+	}
+}
+
+// TestSeveralChoicesAreReproducible pins the other half of the seed contract for n>1.
+//
+// A seed makes a request reproducible, and with several choices that has to mean the whole
+// set: the same request must return the same n texts in the same order. Deriving the choice
+// seeds from the clock instead of from the request's seed would give a caller different output
+// on every call while the seed said otherwise, which is worse than not supporting a seed.
+//
+// It also covers the case that makes the derivation delicate: seed -1 with two choices derives
+// -1 and 0, and zero is the value the request field uses for "unset". Reading the derived zero
+// as unset would make one choice irreproducible while its sibling was not.
+func TestSeveralChoicesAreReproducible(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	run := func(t *testing.T, seed int) []string {
+		t.Helper()
+		body := fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": 6, "n": 2, `+
+			`"temperature": 1.2, "seed": %d}`, seed)
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		if resp.StatusCode != http.StatusOK {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []struct {
+				Text string `json:"text"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		texts := make([]string, len(got.Choices))
+		for i, c := range got.Choices {
+			texts[i] = c.Text
+		}
+		return texts
+	}
+
+	for _, seed := range []int{4242, -1} {
+		first := run(t, seed)
+		second := run(t, seed)
+		if len(first) != len(second) {
+			t.Fatalf("seed %d: choice count changed between identical requests: %d then %d",
+				seed, len(first), len(second))
+		}
+		for i := range first {
+			if first[i] != second[i] {
+				t.Errorf("seed %d: choices[%d] differs between identical requests: %q then %q",
+					seed, i, first[i], second[i])
+			}
+		}
+	}
+}
+
+// TestChoiceCountIsValidated covers the two ends of n and the one transport limit on it.
+//
+// n=0 is what an omitted field decodes to, so it means one choice rather than none. A
+// negative count and a count past maxChoices are malformed values, reported with
+// invalid_value and the number that arrived rather than as an unimplemented feature.
+//
+// The last case is the honest partial: n>1 with stream=true still needs the choices' deltas
+// interleaved into one event stream, which is not implemented. The refusal has to name the way
+// out, because "not implemented" alone leaves a caller guessing whether to drop n or the
+// stream.
+func TestChoiceCountIsValidated(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	t.Run("n=0 means one", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2, "n": 0}`)
+		if resp.StatusCode != http.StatusOK {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []json.RawMessage `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		if len(got.Choices) != 1 {
+			t.Errorf("choices = %d for n=0, want 1", len(got.Choices))
+		}
+	})
+
+	t.Run("negative n", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2, "n": -1}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := decodeBody[errorBody](t, resp)
+		if body.Error.Code != "invalid_value" || body.Error.Param != "n" {
+			t.Errorf("code/param = %q/%q, want invalid_value/n", body.Error.Code, body.Error.Param)
+		}
+		// The message names the number, which is what the caller has to change.
+		if !strings.Contains(body.Error.Message, "-1") {
+			t.Errorf("message %q does not name the value sent", body.Error.Message)
+		}
+	})
+
+	t.Run("n past the cap", func(t *testing.T) {
+		over := fmt.Sprintf(`{"prompt": "hi", "max_tokens": 2, "n": %d}`, maxChoices+1)
+		resp := post(t, srv.Handler(), "/v1/completions", over)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := decodeBody[errorBody](t, resp)
+		if body.Error.Code != "invalid_value" || body.Error.Param != "n" {
+			t.Errorf("code/param = %q/%q, want invalid_value/n", body.Error.Code, body.Error.Param)
+		}
+		// The bound is stated, so the caller learns what would have been accepted.
+		if want := fmt.Sprintf("at most %d", maxChoices); !strings.Contains(body.Error.Message, want) {
+			t.Errorf("message %q does not state the bound %q", body.Error.Message, want)
+		}
+	})
+
+	t.Run("n>1 with stream", func(t *testing.T) {
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 2, "n": 2, "stream": true}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := decodeBody[errorBody](t, resp)
+		if body.Error.Code != "unsupported_parameter" || body.Error.Param != "n" {
+			t.Errorf("code/param = %q/%q, want unsupported_parameter/n",
+				body.Error.Code, body.Error.Param)
+		}
+		// The way out has to be in the message: one of the two fields has to change.
+		if !strings.Contains(body.Error.Message, "stream=false") {
+			t.Errorf("message %q does not name stream=false as the way to get the choices",
+				body.Error.Message)
+		}
+	})
+}
+
 // TestResponseShapeFieldsAreRefused covers the one kind of unsupported request field this
 // server cannot ignore.
 //
@@ -2682,8 +2916,6 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		field string
 		all   []string
 	}{
-		{"n on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "n": 3}`, "n", nil},
 		{"logprobs on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1}`, "logprobs", nil},
 		{"echo on completions", "/v1/completions",
@@ -2692,8 +2924,6 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix", nil},
 		{"best_of on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of", nil},
-		{"n on chat", "/v1/chat/completions",
-			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "n": 2}`, "n", nil},
 		{"top_logprobs on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "top_logprobs": 2}`,
 			"top_logprobs", nil},
@@ -2717,9 +2947,9 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		{"max_completion_tokens on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_completion_tokens": 3}`,
 			"max_completion_tokens", nil},
-		{"three at once", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "n": 2, "logprobs": 1, "echo": true}`,
-			"n", []string{"n", "logprobs", "echo"}},
+		{"two at once", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1, "echo": true}`,
+			"logprobs", []string{"logprobs", "echo"}},
 	}
 	for _, c := range tooLoud {
 		t.Run(c.name, func(t *testing.T) {
@@ -2827,12 +3057,29 @@ func TestShapeFieldsAreRefusedByValueNotPresence(t *testing.T) {
 		})
 	}
 
-	// The one value past the default still asks for a shape the server does not produce.
-	stillRefused := []struct{ name, path, body, field string }{
+	// n>1 is generated now, so it belongs with the served values; see
+	// TestSeveralChoicesAreGenerated for what the extra choices contain. These two stay here
+	// because "the field was sent" is what used to decide the refusal, and n=2 is the value
+	// that used to be refused for being past the default.
+	multiChoice := []struct{ name, path, body string }{
 		{"n=2 on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "n": 2}`, "n"},
+			`{"prompt": "hi", "max_tokens": 1, "n": 2}`},
 		{"n=2 on chat", "/v1/chat/completions",
-			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "n": 2}`, "n"},
+			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "n": 2}`},
+	}
+	for _, c := range multiChoice {
+		t.Run(c.name+" is served", func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				body := decodeBody[errorBody](t, resp)
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body.Error.Message)
+			}
+		})
+	}
+
+	// The values past the default still ask for a shape the server does not produce.
+	stillRefused := []struct{ name, path, body, field string }{
 		{"best_of=2 on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of"},
 		{"echo=true on completions", "/v1/completions",
@@ -3630,7 +3877,7 @@ func whyPhrase(field string) string {
 		"top_logprobs": "alternative-token",
 		"echo":         "never includes the prompt",
 		"suffix":       "suffix generation is not implemented",
-		"best_of":      "several candidates",
+		"best_of":      "highest log probability",
 	}[field]
 }
 
@@ -3969,7 +4216,7 @@ func TestEveryErrorCarriesACode(t *testing.T) {
 		},
 		{
 			name: "response-shape field", method: http.MethodPost, path: "/v1/completions",
-			body:   `{"prompt":"hi","n":3}`,
+			body:   `{"prompt":"hi","logprobs":1}`,
 			status: http.StatusBadRequest, code: "unsupported_parameter",
 		},
 		{
@@ -4393,9 +4640,9 @@ func TestValidationOrderIsFixed(t *testing.T) {
 		// Shape fields before the required-field check: the response would be the wrong
 		// shape regardless of what the prompt holds.
 		{"shape field beats a missing prompt", "/v1/completions",
-			`{"prompt": "  ", "n": 3}`, http.StatusBadRequest, "n"},
+			`{"prompt": "  ", "logprobs": 1}`, http.StatusBadRequest, "logprobs"},
 		{"shape field beats a chat with no messages", "/v1/chat/completions",
-			`{"n": 3}`, http.StatusBadRequest, "n"},
+			`{"logprobs": true}`, http.StatusBadRequest, "logprobs"},
 		// Required fields before value ranges.
 		{"missing prompt beats a bad max_tokens", "/v1/completions",
 			`{"prompt": "", "max_tokens": -5}`, http.StatusBadRequest, "prompt"},

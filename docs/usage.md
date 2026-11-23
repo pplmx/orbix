@@ -59,20 +59,34 @@ Fields describing the *response* are refused with a 400 naming every one, since 
 sent `n: 3` indexes `choices[2]`.
 
 The refused set is not the same on the two endpoints, because their schemas differ. Chat refuses
-`n`, `logprobs`, `top_logprobs` and `echo`; completions refuses `n`, `logprobs`, `echo`, `suffix`
-and `best_of`. A field belonging to the other endpoint is not refused there -- it is an unknown
+`logprobs`, `top_logprobs` and `echo`; completions refuses `logprobs`, `echo`, `suffix` and
+`best_of`. A field belonging to the other endpoint is not refused there -- it is an unknown
 member and is ignored, so `suffix` sent to chat is silently dropped rather than named.
 `max_completion_tokens` is refused on both, for a sharper reason: it replaces `max_tokens` rather
 than accompanying it, so a migrated client would silently get the default length.
 
+`n` is not on either list: the server generates the choices it asks for. Every choice is a
+separate sequence in the same batch, so `n: 3` costs one round per token rather than three
+requests, and the body carries `choices[0..n-1]` with `index` set to the position. `usage`
+counts `completion_tokens` across all of them and `prompt_tokens` once, which is what the
+figures describe: the prompt was prefilled once per sequence but is the same text. With a
+`seed`, choice *i* is seeded with *seed + i*, so the same request returns the same set in the
+same order; without one, the choices still differ from each other.
+
+Two limits remain on `n`, and both are reported rather than silent. It must be at most 8, since
+each choice holds its own KV blocks and they are all in flight at once. And `stream: true` with
+`n > 1` is refused with `unsupported_parameter`, because the choices' deltas would have to be
+interleaved into one event stream and named by `index`; the message names `stream: false` as the
+way to get all of them.
+
 The refusal turns on the **value**, not on the field being present. A field that was sent with
 the value the response already carries asks for nothing this server would not have done anyway,
-so it is served: `n: 1`, `best_of: 1`, `echo: false`, `logprobs: false`, `top_logprobs: 0` and
+so it is served: `best_of: 1`, `echo: false`, `logprobs: false`, `top_logprobs: 0` and
 `suffix: ""` all answer 200. That matters because the official SDKs serialise a keyword argument
-the caller passed even when it equals the API default -- `completions.create(n=1)` puts `"n": 1`
-on the wire. Refusing on presence told such a caller `n>1 needs several sequences` about `n=1`,
-for a request it serves correctly; measured through the OpenAI Python SDK, four such calls went
-from 400 to 200.
+the caller passed even when it equals the API default -- `completions.create(best_of=1)` puts
+`"best_of": 1` on the wire. Refusing on presence told such a caller `best_of needs several
+candidates` about `best_of: 1`, for a request it serves correctly; measured through the OpenAI
+Python SDK, four such calls went from 400 to 200.
 
 A value the API does not define is reported as malformed rather than unimplemented: `n: -1` is
 400 `invalid_value` naming the number, not `unsupported_parameter` describing `n: 3`. The two ask

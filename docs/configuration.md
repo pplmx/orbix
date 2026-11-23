@@ -362,22 +362,36 @@ is written to be read.
 ## Tracing covers requests that reach the engine
 
 `--otlp-endpoint` posts OTLP/HTTP+JSON to a collector. What arrives is one span per request, and
-the attributes are the OpenTelemetry `gen_ai` ones plus two of this engine's own:
+the attributes are the OpenTelemetry `gen_ai` ones plus three of this engine's own, which split
+the request's duration into the parts an operator has to tell apart:
 
-| Attribute                    | Meaning                                        |
-| ---------------------------- | ---------------------------------------------- |
-| `gen_ai.request.model`       | The name the request asked for                 |
-| `gen_ai.response.model`      | The name this server answers as                |
-| `gen_ai.request.max_tokens`  | The budget the request asked for               |
-| `gen_ai.usage.input_tokens`  | Prompt tokens, counted after tokenization      |
-| `gen_ai.usage.output_tokens` | Tokens actually generated                      |
-| `orbix.prefill_ms`           | Milliseconds from span start until prefill     |
-| `orbix.decode_ms`            | Milliseconds from prefill until the span ended |
+| Attribute                    | Meaning                                             |
+| ---------------------------- | --------------------------------------------------- |
+| `gen_ai.request.model`       | The name the request asked for                      |
+| `gen_ai.response.model`      | The name this server answers as                     |
+| `gen_ai.request.max_tokens`  | The budget the request asked for                    |
+| `gen_ai.usage.input_tokens`  | Prompt tokens, counted after tokenization           |
+| `gen_ai.usage.output_tokens` | Tokens actually generated                           |
+| `orbix.queue_ms`             | Milliseconds from span start until work began       |
+| `orbix.prefill_ms`           | Milliseconds from work starting until prefill ended |
+| `orbix.decode_ms`            | Milliseconds from prefill until the span ended      |
 
 Measured against a live collector on Llama 3.2 1B with a 7-token prompt and `max_tokens: 8`:
-`input_tokens` 7, `output_tokens` 8, `prefill_ms` 238, `decode_ms` 797. The two timing
-attributes are what make a slow answer attributable to prefill or to decode instead of a guess,
-and they are the whole attribution: there is one span per request, not one per scheduling round.
+`input_tokens` 7, `output_tokens` 8, `prefill_ms` 238, `decode_ms` 797.
+
+The three timing attributes are what make a slow answer attributable instead of a guess, and they
+have to be three: the span starts when the request is submitted, so a request that waits for a slot
+spends part of its span doing nothing, and measuring prefill from the span's start would make a
+saturated server look like a slow model. `queue_ms` is that wait; `prefill_ms` and `decode_ms` are
+measured from the moment the first forward pass began. Measured on the test fixture with one active
+slot, a request queued behind a 2000-token prefill reports `queue_ms` 317, `prefill_ms` 0, while the
+request that went first reports `queue_ms` 1, `prefill_ms` 316.
+
+A request that never began — cancelled while queued, or failed before its first pass — reports its
+whole lifetime as `queue_ms` and omits the other two, because those are the requests whose wait
+matters most and reporting nothing would hide them.
+
+There is one span per request, not one per scheduling round, so this is where the attribution ends.
 
 A request the server refuses before it reaches the engine produces **no span at all**. A pool
 that cannot hold the request, a missing prompt, a bad sampler value: all are refused with a 400

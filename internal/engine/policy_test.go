@@ -2,11 +2,13 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -663,6 +665,203 @@ func TestTracingRecordsRequestSpans(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the collector received no trace")
 	}
+}
+
+// TestTracingSplitsQueueFromCompute checks that the span's three phases measure three different
+// things.
+//
+// The span starts at Submit, so anything measured from its start includes the time the sequence
+// waited for a slot. Before this test the only two attributes were measured that way, which made
+// a saturated server indistinguishable from a slow model: "orbix.prefill_ms" carried the wait.
+//
+// The case forces the split rather than hoping for one. With one active slot, a long request
+// holds the slot while a short one queues behind it; the short one's queue time is then most of
+// its life and its own prefill is a fraction of it. An implementation that still measured prefill
+// from the span's start reports queue_ms near zero and prefill_ms near the whole duration, which
+// fails both assertions below.
+func TestTracingSplitsQueueFromCompute(t *testing.T) {
+	type captured struct{ body []byte }
+	got := make(chan captured, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case got <- captured{body: body}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	exp, err := otel.NewExporter(otel.ExporterOptions{
+		Endpoint: srv.URL,
+		Interval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	defer func() { _ = exp.Close() }()
+
+	// NoEOS, because the long request has to run its whole budget: the default fixture stops on
+	// the end-of-sequence token after a few tokens, which leaves the short request waiting two
+	// milliseconds and proves nothing about the split.
+	path := gguftest.Model{NoEOS: true, ContextLen: 3000}.Write(t, t.TempDir())
+	e, tok := loadEngineAt(t, path, Options{MaxActive: 1, Workers: 2})
+	prompt := tok.Encode("Once upon a time", true)
+	// The wait comes from a long prompt rather than a long generation: one batched prefill costs
+	// a few hundred milliseconds, while the same time spent decoding would be thousands of
+	// rounds. The property under test is which phase the wait is attributed to, and prefill and
+	// decode are equally good at producing it.
+	longPrompt := make([]int32, 0, 2048)
+	for len(longPrompt) < 2000 {
+		longPrompt = append(longPrompt, prompt...)
+	}
+
+	// The long request takes the only slot; the short one waits for it.
+	long, err := e.Submit(Request{Prompt: longPrompt, MaxTokens: 1, Trace: exp, ResponseID: "long"})
+	if err != nil {
+		t.Fatalf("Submit long: %v", err)
+	}
+	short, err := e.Submit(Request{Prompt: prompt, MaxTokens: 2, Trace: exp, ResponseID: "short"})
+	if err != nil {
+		t.Fatalf("Submit short: %v", err)
+	}
+	for e.Pump() > 0 {
+	}
+	for _, ch := range []<-chan Event{long, short} {
+		for ev := range ch {
+			if ev.Err != nil {
+				t.Fatalf("event error: %v", ev.Err)
+			}
+		}
+	}
+	if err := exp.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	var body []byte
+	select {
+	case c := <-got:
+		body = c.body
+	case <-time.After(5 * time.Second):
+		t.Fatal("the collector received no trace")
+	}
+
+	spans := parseSpans(t, body)
+	byID := map[string]spanAttrs{}
+	for _, sp := range spans {
+		byID[sp.responseID] = sp
+	}
+	sh, ok := byID["short"]
+	if !ok {
+		t.Fatalf("no span for the short request; got %d spans with ids %v", len(spans), keys(byID))
+	}
+	lg := byID["long"]
+
+	// Every span carries a queue time, including one that never ran.
+	if _, ok := sh.attrs["orbix.queue_ms"]; !ok {
+		t.Errorf("the short request's span has no orbix.queue_ms: %v", sh.attrs)
+	}
+	// The short request spent most of its life waiting, so its queue time is several times
+	// its own prefill. The regime is asserted first: if the wait were only a few milliseconds
+	// the ratio would be decided by timer granularity rather than by the split, and the test
+	// should say so instead of passing or failing by luck.
+	if sh.attrs["orbix.queue_ms"] < 20 {
+		t.Fatalf("the short request waited %d ms behind a 30-token request; the test did not"+
+			" reach the regime where the two phases are separable", sh.attrs["orbix.queue_ms"])
+	}
+	if sh.attrs["orbix.queue_ms"] <= 2*sh.attrs["orbix.prefill_ms"] {
+		t.Errorf("short request: queue_ms = %d, prefill_ms = %d; the wait should dominate when"+
+			" it queued behind another request",
+			sh.attrs["orbix.queue_ms"], sh.attrs["orbix.prefill_ms"])
+	}
+	// The long request took the only slot immediately, so almost none of its span is queue time
+	// and almost all of it is the work it did. Together the two make the numbers attributable
+	// rather than merely present: one span is nearly all wait, the other nearly all prefill.
+	if lg.attrs["orbix.queue_ms"] > lg.attrs["orbix.prefill_ms"] {
+		t.Errorf("long request: queue_ms = %d, prefill_ms = %d; it took the slot immediately",
+			lg.attrs["orbix.queue_ms"], lg.attrs["orbix.prefill_ms"])
+	}
+	// The phases have to account for the span: a gap would mean time attributed to nothing.
+	for _, sp := range spans {
+		sum := sp.attrs["orbix.queue_ms"] + sp.attrs["orbix.prefill_ms"] + sp.attrs["orbix.decode_ms"]
+		if d := sp.durationMs - sum; d > 2 || d < -2 {
+			t.Errorf("span %q: phases sum to %d ms, the span lasted %d ms",
+				sp.responseID, sum, sp.durationMs)
+		}
+	}
+}
+
+// spanAttrs is one span's identity, duration and integer attributes.
+type spanAttrs struct {
+	responseID string
+	durationMs int64
+	attrs      map[string]int64
+}
+
+// parseSpans reads the spans out of an OTLP/JSON trace body.
+//
+// The body is JSON, so the assertions can be about numbers rather than about text: a test that
+// searched for `"orbix.queue_ms"` would pass whether or not the value made sense.
+func parseSpans(t *testing.T, body []byte) []spanAttrs {
+	t.Helper()
+	var doc struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					Start string `json:"startTimeUnixNano"`
+					End   string `json:"endTimeUnixNano"`
+					Attrs []struct {
+						Key   string `json:"key"`
+						Value struct {
+							Int string `json:"intValue"`
+							Str string `json:"stringValue"`
+						} `json:"value"`
+					} `json:"attributes"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("decode trace body: %v\n%s", err, body)
+	}
+	var out []spanAttrs
+	for _, rs := range doc.ResourceSpans {
+		for _, ss := range rs.ScopeSpans {
+			for _, sp := range ss.Spans {
+				s := spanAttrs{attrs: map[string]int64{}}
+				for _, a := range sp.Attrs {
+					switch {
+					case a.Key == "gen_ai.response.id":
+						s.responseID = a.Value.Str
+					case a.Value.Int != "":
+						var v int64
+						if _, err := fmt.Sscan(a.Value.Int, &v); err != nil {
+							t.Fatalf("attribute %q: %v", a.Key, err)
+						}
+						s.attrs[a.Key] = v
+					}
+				}
+				start, err1 := strconv.ParseInt(sp.Start, 10, 64)
+				end, err2 := strconv.ParseInt(sp.End, 10, 64)
+				if err1 != nil || err2 != nil {
+					t.Fatalf("timestamps: %v %v", err1, err2)
+				}
+				s.durationMs = (end - start) / 1e6
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func keys(m map[string]spanAttrs) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // TestTracingOffCostsNothing pins the default: an engine with no tracer must run exactly

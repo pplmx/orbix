@@ -106,8 +106,9 @@ type Request struct {
 	// generate its whole token budget into a channel nobody reads.
 	Cancel <-chan struct{}
 
-	// Trace, when non-nil, records one span for this request, carrying orbix.prefill_ms and
-	// orbix.decode_ms so a slow answer can be attributed to prefill or decode rather than
+	// Trace, when non-nil, records one span for this request, carrying orbix.queue_ms,
+	// orbix.prefill_ms and orbix.decode_ms so a slow answer can be attributed to the wait for
+	// a slot, the prompt pass, or generation rather than
 	// guessed at.
 	//
 	// One span, not one per round: those two attributes are the whole attribution, and they
@@ -189,6 +190,10 @@ type sequence struct {
 	reqSpan otel.Span
 	// traceOn reports whether reqSpan is live, keeping the check a single bool load.
 	traceOn bool
+	// started is when the first forward pass over this request's prompt began. It is zero
+	// until the scheduler picks the sequence up, which is what makes the wait before it
+	// measurable: the span starts at Submit, so the time between the two is queue time.
+	started time.Time
 	// prefilled is when the prompt finished prefilling, so the request's span can
 	// separate the cost of reading the prompt from the cost of generating. Both phases
 	// are recorded as attributes on one span rather than as child spans, because a
@@ -620,6 +625,9 @@ type pending struct {
 // pos so a later, resumable prefill keeps working, but prefix reuse itself only
 // applies to a whole prompt from position zero.
 func (e *Engine) prefill(s *sequence) {
+	if s.traceOn && s.started.IsZero() {
+		s.started = time.Now()
+	}
 	out, err := e.model.PrefillWithPrefix(s.cache, s.req.Prompt[s.pos:], s.pos)
 	if err != nil {
 		e.finish(s, Event{Err: err, FinishReason: "error"})
@@ -901,11 +909,24 @@ func (e *Engine) finish(s *sequence, last Event) {
 		}
 		// Finish first, so the span has an end time to measure the decode phase against.
 		span = span.Finish(spanErr)
+		// Three phases, because the span starts at Submit and the scheduler may not pick the
+		// sequence up for a while. Folding that wait into prefill would make a saturated
+		// server look like a slow model, which is the opposite of what these numbers are for.
+		//
+		// A request that never began -- cancelled while queued, or failed before its first
+		// pass -- reports its whole lifetime as queue time rather than reporting nothing:
+		// those are the requests whose wait matters most.
+		began := s.started
+		if began.IsZero() {
+			began = span.End
+		}
+		// Milliseconds as integers: a trace viewer can plot them and a reader can compare
+		// them against the bench suite's numbers.
+		span.Attributes = append(span.Attributes,
+			otel.IntAttr("orbix.queue_ms", began.Sub(span.Start).Milliseconds()))
 		if !s.prefilled.IsZero() {
-			// Milliseconds as integers: a trace viewer can plot them and a reader can
-			// compare them against the bench suite's numbers.
 			span.Attributes = append(span.Attributes,
-				otel.IntAttr("orbix.prefill_ms", s.prefilled.Sub(span.Start).Milliseconds()),
+				otel.IntAttr("orbix.prefill_ms", s.prefilled.Sub(began).Milliseconds()),
 				otel.IntAttr("orbix.decode_ms", span.End.Sub(s.prefilled).Milliseconds()),
 			)
 		}

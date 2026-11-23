@@ -10,12 +10,20 @@ import (
 	"github.com/pplmx/orbix/internal/quant"
 )
 
-// TestQuantizedDotMatchesDecodeThenDot is the baseline for a Q8_0-aware matvec.
-//
-// The current design decodes a whole tensor to float32 and then multiplies. A kernel that reads
-// the blocks directly would skip the intermediate array, but only if the arithmetic agrees -- so
-// before any such kernel exists, this pins that a block-at-a-time dot product equals the
+// TestQuantizedDotMatchesDecodeThenDot pins that a block-at-a-time dot product equals the
 // decode-then-dot result.
+//
+// It exists because a Q8_0-aware matvec was considered and measured, and the arithmetic had to be
+// settled before the speed question could be answered honestly. The speed question came out against
+// it: with the current design decoding each tensor once at load, a plain dot over the float32 array
+// costs 0.439 ms per 2048x640 projection, while re-reading the blocks on every call costs 1.817 ms
+// -- 4.14x slower, not faster. Writing a quantized kernel would only pay if it also avoided the
+// per-call block walk, which means reproducing ggml's structure rather than adding a loop.
+//
+// So this test is not a step toward that refactor. It records the arithmetic a quantized path would
+// have to reproduce, and it stands on its own as a check that the block layout is understood: a
+// wrong offset or byte order moves the result by the scale, six orders of magnitude past the
+// tolerance below.
 //
 // A tolerance rather than bit equality, and the reason is the point: the quantized form factors
 // the scale out of each block (sum of int8*v, then times the scale), while the decoded form
@@ -70,8 +78,8 @@ func TestQuantizedDotMatchesDecodeThenDot(t *testing.T) {
 }
 
 // quantizedDotQ8_0 is the reference form of a block-at-a-time dot product, kept here rather than
-// in the package because no kernel uses it yet. Its speed is measured in the round that proposed
-// it: 1.68x the decode-then-dot path, which is where the case for writing one rests.
+// in the package because no kernel uses it: measured 4.14x slower than the current path, so nothing
+// should.
 func quantizedDotQ8_0(raw []byte, v []float32) float32 {
 	var sum float32
 	for b := range len(v) / 32 {

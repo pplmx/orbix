@@ -251,3 +251,129 @@ func TestGemma2MatchesReferenceLogprobs(t *testing.T) {
 		t.Errorf("greedy token is %d, want 5231 (\" **\")", argmax)
 	}
 }
+
+// TestAttendSoftcapFlattensTheDistribution is the precise test of the attention cap, at a
+// magnitude where the cap actually binds.
+//
+// The real checkpoint cannot provide this: at the reference position its scores are well inside
+// a cap of 50, which is why turning the cap off there moved the log probabilities by 0.004. The
+// case below is chosen so both answers are computable by hand. Two keys score 200 and 100
+// against a unit query, with scale 1, over values 1 and 0:
+//
+//	uncapped: softmax(200, 100) is 1 and 0 in float32, so the output is 1.
+//	capped at 50: the scores become 50*tanh(4) and 50*tanh(2), 49.964 and 48.211, and
+//	softmax over a difference of 1.753 gives weights 0.852 and 0.148, so the output is 0.852.
+//
+// Those two numbers are far apart, so an implementation that ignored the cap, applied it before
+// the scale, or applied it to the output instead of the scores fails on a value rather than on a
+// rounded comparison.
+func TestAttendSoftcapFlattensTheDistribution(t *testing.T) {
+	q := []float32{1, 0}
+	keys := []float32{
+		200, 0, // position 0: dot 200
+		100, 0, // position 1: dot 100
+	}
+	values := []float32{
+		1, 1, // position 0
+		0, 0, // position 1
+	}
+	keysSpans := []span{{data: keys, stride: 2, rows: 2, width: 2}}
+	valuesSpans := []span{{data: values, stride: 2, rows: 2, width: 2}}
+	scores := make([]float32, 2)
+	out := make([]float32, 2)
+
+	if err := attend(q, keysSpans, valuesSpans, 2, scores, out, attnParams{scale: 1}); err != nil {
+		t.Fatalf("attend: %v", err)
+	}
+	if out[0] < 0.999 {
+		t.Errorf("uncapped output[0] = %v, want the first value to dominate at ~1", out[0])
+	}
+
+	if err := attend(q, keysSpans, valuesSpans, 2, scores, out, attnParams{scale: 1, softcap: 50}); err != nil {
+		t.Fatalf("attend: %v", err)
+	}
+	// The capped scores, worked out independently of the implementation.
+	s0 := 50 * math.Tanh(200.0/50)
+	s1 := 50 * math.Tanh(100.0/50)
+	want := float32(math.Exp(s0) / (math.Exp(s0) + math.Exp(s1)))
+	if math.Abs(float64(out[0]-want)) > 1e-5 {
+		t.Errorf("capped output[0] = %v, want %v", out[0], want)
+	}
+	// The cap's whole point: the ratio between the two keys is compressed, so the second
+	// position keeps a real share of the attention rather than none.
+	if out[0] > 0.95 {
+		t.Errorf("capped output[0] = %v; the cap did not flatten the distribution", out[0])
+	}
+}
+
+// TestFinalSoftcapBoundsTheLogits covers the other cap, which is the one an operator would notice:
+// without it a model whose output projection is hot reports logits in the hundreds and a
+// distribution that is all but one token.
+//
+// The regime is reached by scaling the final norm weight rather than by building a fixture with
+// large weights: RMSNorm is linear in its weight, so multiplying it by 100 multiplies the logits
+// by 100 and nothing else in the forward pass changes. The test asserts the regime, the bound,
+// and that the two runs differ -- without the first, a cap that did nothing would still satisfy
+// the bound.
+func TestFinalSoftcapBoundsTheLogits(t *testing.T) {
+	path := gguftest.Model{Arch: "gemma2", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
+		PostNorms: true, AttnSoftcap: 50, FinalSoftcap: 30}.Write(t, t.TempDir())
+	m, err := NewWithOptions(path, Options{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Hot output projection, reached through the last norm.
+	for i := range m.W.OutputNorm {
+		m.W.OutputNorm[i] = 100
+	}
+
+	run := func(cap float32) []float32 {
+		t.Helper()
+		m.W.Config.FinalSoftcap = cap
+		cache, err := NewKVCache(m.W.Config, 32)
+		if err != nil {
+			t.Fatalf("cache: %v", err)
+		}
+		logits, err := m.Prefill(cache, []int32{1, 2}, 0)
+		if err != nil {
+			t.Fatalf("prefill: %v", err)
+		}
+		return append([]float32(nil), logits...)
+	}
+
+	uncapped := run(0)
+	capped := run(30)
+
+	var maxUncapped float32
+	uncapped = uncapped[:m.Config().VocabSize]
+	for _, v := range uncapped {
+		if v > maxUncapped {
+			maxUncapped = v
+		}
+	}
+	if maxUncapped <= 30 {
+		t.Fatalf("the largest uncapped logit is %v; the fixture is not in the regime where the"+
+			" cap binds, so this test would pass without a cap", maxUncapped)
+	}
+
+	capped = capped[:m.Config().VocabSize]
+	for i, v := range capped {
+		if v > 30 || v < -30 {
+			t.Fatalf("logit %d is %v, outside the cap of 30", i, v)
+		}
+	}
+	// Saturated, not merely inside: the scaled projection puts the largest logit far past 30.
+	if capped[0] > 30 {
+		t.Errorf("logit 0 = %v, want it bounded", capped[0])
+	}
+	same := true
+	for i := range capped {
+		if capped[i] != uncapped[i] {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Error("the capped and uncapped logits are identical; the cap never ran")
+	}
+}

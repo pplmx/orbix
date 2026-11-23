@@ -61,10 +61,15 @@ measured, and removed.
 
 Measured on gemma-2-2b-it-Q3_K_L against llama.cpp: the same top-8 tokens in the same order, with
 a worst deviation of 0.37 nats. That is larger than Gemma 1's 0.19 on a four-bit file, which is
-what a three-bit quantisation costs when two implementations dequantize independently. One thing
-this comparison cannot see is the softcaps: at that position the logits are well inside their cap,
-so turning both off moves the deviation by 0.004. They are required by the architecture and
-numerically inert there, and no test in this repo would notice them applied in the wrong place.
+what a three-bit quantisation costs when two implementations dequantize independently.
+
+The softcaps cannot be checked against a real checkpoint this way, because at any ordinary
+position the logits sit well inside their cap: turning both off moves the deviation by 0.004.
+They are covered by constructed cases instead, at magnitudes where the cap binds -- a pair of
+attention scores 200 and 100 with a cap of 50, and an output projection scaled until its logits
+leave the +/-30 band -- and both answers are computable by hand. Writing those found a real bug:
+the cap had been added to the single-token and batched-decode projections but not to the prefill
+one, so the first token of every response came from a different distribution than the rest.
 
 Quantization is checked at the block level rather than by comparing generations across formats:
 exact-value tests on constructed blocks for the 32-weight formats, a round-trip error bound for

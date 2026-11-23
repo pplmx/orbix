@@ -469,7 +469,16 @@ func (m *Model) finishBatch(b *batch) error {
 	if w == nil {
 		w = m.W.TokenEmbedding
 	}
-	return m.run.MatVec(b.logits, w, xn, cfg.VocabSize, cfg.Hidden)
+	if err := m.run.MatVec(b.logits, w, xn, cfg.VocabSize, cfg.Hidden); err != nil {
+		return err
+	}
+	// The same bound the decode path applies. There are three places that project onto the
+	// vocabulary -- Forward, Prefill and DecodeStep -- and a cap applied to two of them makes the
+	// first token of a response come from a different distribution than the rest. This one was
+	// missed when the cap was added, and TestFinalSoftcapBoundsTheLogits is what found it: the
+	// uncapped logit read -165 where the cap allows -30.
+	kernel.Softcap(b.logits, cfg.FinalSoftcap)
+	return nil
 }
 
 // DecodeStep advances several sequences by one token each in a single pass.

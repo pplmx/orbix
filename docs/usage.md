@@ -59,11 +59,26 @@ Fields describing the *response* are refused with a 400 naming every one, since 
 sent `n: 3` indexes `choices[2]`.
 
 The refused set is not the same on the two endpoints, because their schemas differ. Chat refuses
-`logprobs`, `top_logprobs` and `echo`; completions refuses `logprobs`, `echo`, `suffix` and
-`best_of`. A field belonging to the other endpoint is not refused there -- it is an unknown
-member and is ignored, so `suffix` sent to chat is silently dropped rather than named.
-`max_completion_tokens` is refused on both, for a sharper reason: it replaces `max_tokens` rather
-than accompanying it, so a migrated client would silently get the default length.
+`logprobs`, `top_logprobs` and `echo`; completions refuses `logprobs`, `suffix` and `best_of`. A
+field belonging to the other endpoint is not refused there -- it is an unknown member and is
+ignored, so `suffix` sent to chat is silently dropped rather than named. Chat's `echo` is in the
+refused set because OpenAI's chat schema has no such field, so there it is a field the caller sent
+that the endpoint cannot use.
+
+`max_completion_tokens` is honoured on both: it is OpenAI's newer name for the same limit, and
+`max_tokens` is deprecated in favour of it, so a migrated client sends only the newer one. Sending
+both is refused with `invalid_value` naming both fields and both numbers, because they are
+alternatives rather than a pair and the two values can disagree; picking one silently would
+answer with a budget the caller may not have meant.
+
+`echo: true` on completions returns the prompt ahead of the generated text rather than refusing
+it. Two things about it are worth knowing. The stop list applies to the generated part only, so a
+stop string that appears in the prompt does not truncate the prompt; the echoed text is exactly
+what the caller sent. And the echoed prompt is not counted in `completion_tokens` -- it is already
+in `prompt_tokens`, and counting it twice would bill the same text once per field. That last point
+is this server's choice rather than a documented rule: the schema does not say, and the reading
+that keeps `prompt_tokens + completion_tokens` equal to the tokens actually processed is the one
+taken. Streaming sends the prompt as a delta before any generated token, once per choice.
 
 `n` is not on either list: the server generates the choices it asks for. Every choice is a
 separate sequence in the same batch, so `n: 3` costs one round per token rather than three
@@ -88,8 +103,8 @@ interleaved texts, two `finish_reason: "length"` chunks, one `[DONE]`, and
 
 The refusal turns on the **value**, not on the field being present. A field that was sent with
 the value the response already carries asks for nothing this server would not have done anyway,
-so it is served: `best_of: 1`, `echo: false`, `logprobs: false`, `top_logprobs: 0` and
-`suffix: ""` all answer 200. That matters because the official SDKs serialise a keyword argument
+so it is served: `best_of: 1`, `logprobs: false`, `top_logprobs: 0` and `suffix: ""` all answer
+200. That matters because the official SDKs serialise a keyword argument
 the caller passed even when it equals the API default -- `completions.create(best_of=1)` puts
 `"best_of": 1` on the wire. Refusing on presence told such a caller `best_of needs several
 candidates` about `best_of: 1`, for a request it serves correctly; measured through the OpenAI

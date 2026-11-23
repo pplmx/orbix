@@ -67,10 +67,15 @@
 // did not carry the choices a caller indexed would fail exactly as described.)
 //
 // The refused set differs per endpoint, because the two schemas do: chat refuses logprobs,
-// top_logprobs and echo, while completions refuses logprobs, echo, suffix and best_of.
-// max_completion_tokens is refused on both, for a sharper reason than the rest -- it replaces
-// max_tokens rather than accompanying it, so a migrated client sends only the newer name and
-// would otherwise get the default length with nothing saying so.
+// top_logprobs and echo, while completions refuses logprobs, suffix and best_of. Chat's echo is
+// there because the chat schema has no such field -- on completions the same name is defined and
+// is honoured, returning the prompt ahead of the generated text.
+//
+// max_completion_tokens is honoured on both. It is OpenAI's newer name for the same limit, with
+// max_tokens deprecated in favour of it, so refusing it made the endpoint unusable from a
+// migrated client. Both at once is refused with invalid_value naming both fields and both
+// numbers: they are alternatives, the values can disagree, and choosing one silently would answer
+// with a budget the caller may not have meant.
 //
 // n is not refused any more: the server generates the choices it asks for, one sequence each,
 // all admitted to the same batch so they advance together. The response carries choices[i]
@@ -80,6 +85,14 @@
 // seeded request returns the same set in the same order and the choices differ from each
 // other. One limit remains: maxChoices, because every choice holds its own KV blocks at once,
 // and the refusal names the bound.
+//
+// echo on completions returns the prompt ahead of the generated text, and the two properties
+// that are easy to get wrong are both deliberate: the stop list is applied to the generated part
+// before the prompt is prepended, so a stop string in the prompt cannot truncate the text the
+// caller already typed; and the echoed prompt is not added to completion_tokens, because
+// prompt_tokens already counts it and billing the same text twice would make the two figures sum
+// to more than the tokens processed. The schema states neither rule, so the second is a
+// documented choice rather than a quotation.
 //
 // stream=true works with n>1 as well. One reader goroutine per choice decodes its own
 // sequence -- each has its own StreamDecoder, so the stop-string tail held back for one choice
@@ -91,7 +104,7 @@
 //
 // What decides the remaining refusals is the value, not the field's presence. A field sent
 // with the value the response already carries is a request this server serves: best_of: 1,
-// echo: false, logprobs: false, top_logprobs: 0 and suffix: "" all answer 200. The official
+// logprobs: false, top_logprobs: 0 and suffix: "" all answer 200. The official
 // SDKs serialise a keyword argument the caller passed even when it equals the API default, so
 // completions.create(best_of=1) sends "best_of": 1 -- and refusing on presence answered it
 // with "best_of needs several candidates", which is a sentence about a different request.

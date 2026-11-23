@@ -330,12 +330,15 @@ type chatRequest struct {
 	Messages  []chatMessage `json:"messages"`
 	MaxTokens int           `json:"max_tokens"`
 
-	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens. It is a pointer so an
-	// omitted field is distinguishable from a zero, and it is refused rather than ignored:
-	// measured, a request carrying only this field generated the server's default 256 tokens
-	// where the client asked for 3, and nothing in the response said so. Ignoring a limit is
-	// worse than ignoring a sampling knob -- the reply is 85 times longer than requested and
-	// still parses, so the caller never learns.
+	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens, and it is honoured rather
+	// than refused: max_tokens is deprecated in favour of it, so a migrated client sends only
+	// the newer name. A pointer so an omitted field is distinguishable from a zero, which is
+	// what lets generate tell "not sent" from "sent as 0".
+	//
+	// Sending both is refused, because the two are alternatives rather than a pair: OpenAI
+	// documents max_completion_tokens as the replacement, so a request carrying both is a
+	// caller mid-migration whose two numbers may disagree, and picking one silently would
+	// answer with a budget the caller might not have meant.
 	MaxCompletionTokens *int `json:"max_completion_tokens"`
 
 	// N, Logprobs, TopLogprobs and Echo change the response body, so they are refused
@@ -480,8 +483,8 @@ type completionRequest struct {
 	Prompt    string `json:"prompt"`
 	MaxTokens int    `json:"max_tokens"`
 
-	// MaxCompletionTokens is refused for the same reason as on the chat endpoint; see
-	// chatRequest.MaxCompletionTokens.
+	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens and is honoured; see
+	// chatRequest.MaxCompletionTokens for why both at once is refused.
 	MaxCompletionTokens *int `json:"max_completion_tokens"`
 
 	// The response-shape fields, refused rather than ignored; see chatRequest.
@@ -739,10 +742,6 @@ var chatShapeFields = []shapeField{
 			return p != nil && *p
 		},
 		why: "the response never includes the prompt, and a silent omission is worse than a refusal"},
-	{name: "max_completion_tokens",
-		asked: func(v any) bool { return v.(*chatRequest).MaxCompletionTokens != nil },
-		why: "this server reads max_tokens; sending only the newer name would silently generate " +
-			"the default length instead of the one asked for"},
 }
 
 // completionShapeFields are the response-shape fields the completions endpoint refuses.
@@ -754,12 +753,6 @@ var completionShapeFields = []shapeField{
 		// response never carries.
 		asked: func(v any) bool { return v.(*completionRequest).Logprobs != nil },
 		why:   "token log-probabilities are not computed or returned"},
-	{name: "echo",
-		asked: func(v any) bool {
-			p := v.(*completionRequest).Echo
-			return p != nil && *p
-		},
-		why: "the response never includes the prompt, and a silent omission is worse than a refusal"},
 	{name: "suffix",
 		asked: func(v any) bool {
 			p := v.(*completionRequest).Suffix
@@ -775,10 +768,6 @@ var completionShapeFields = []shapeField{
 		why: "best_of returns the candidate with the highest log probability, and token " +
 			"log-probabilities are not computed here; use n to receive every sample",
 		invalid: func(v any) (string, bool) { return negativeCount("best_of", v.(*completionRequest).BestOf) }},
-	{name: "max_completion_tokens",
-		asked: func(v any) bool { return v.(*completionRequest).MaxCompletionTokens != nil },
-		why: "this server reads max_tokens; sending only the newer name would silently generate " +
-			"the default length instead of the one asked for"},
 }
 
 // maxChoices is the largest n this server honours.
@@ -889,18 +878,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	prompt := s.renderChat(req.Messages)
 	s.generate(w, r, generateParams{
-		prompt:       prompt,
-		maxTokens:    req.MaxTokens,
-		priority:     req.Priority,
-		temperature:  req.Temperature,
-		topK:         req.TopK,
-		topP:         req.TopP,
-		stream:       req.Stream,
-		stop:         req.Stop,
-		chat:         true,
-		seed:         req.Seed,
-		choices:      req.N,
-		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
+		prompt:              prompt,
+		maxTokens:           req.MaxTokens,
+		priority:            req.Priority,
+		temperature:         req.Temperature,
+		topK:                req.TopK,
+		topP:                req.TopP,
+		stream:              req.Stream,
+		stop:                req.Stop,
+		chat:                true,
+		seed:                req.Seed,
+		choices:             req.N,
+		maxCompletionTokens: req.MaxCompletionTokens,
+		includeUsage:        req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
 
@@ -932,17 +922,19 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.generate(w, r, generateParams{
-		prompt:       req.Prompt,
-		maxTokens:    req.MaxTokens,
-		priority:     req.Priority,
-		temperature:  req.Temperature,
-		topK:         req.TopK,
-		topP:         req.TopP,
-		stream:       req.Stream,
-		stop:         req.Stop,
-		seed:         req.Seed,
-		choices:      req.N,
-		includeUsage: req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
+		prompt:              req.Prompt,
+		maxTokens:           req.MaxTokens,
+		priority:            req.Priority,
+		temperature:         req.Temperature,
+		topK:                req.TopK,
+		topP:                req.TopP,
+		stream:              req.Stream,
+		stop:                req.Stop,
+		seed:                req.Seed,
+		choices:             req.N,
+		maxCompletionTokens: req.MaxCompletionTokens,
+		echo:                req.Echo != nil && *req.Echo,
+		includeUsage:        req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	})
 }
 
@@ -1007,6 +999,13 @@ type generateParams struct {
 	// what an omitted field decodes to. Every choice is its own engine sequence with its own
 	// sampler, and the range has already been checked by checkChoices.
 	choices int
+	// maxCompletionTokens is OpenAI's newer name for the budget. Nil means the field was not
+	// sent; the two names are reconciled in generate, which is where the precedence is
+	// visible next to the negative check it has to stay ordered against.
+	maxCompletionTokens *int
+	// echo asks the completions endpoint to return the prompt ahead of the generated text.
+	// It has no meaning on the chat endpoint, whose schema has no such field.
+	echo bool
 }
 
 // choiceCount is how many completions the request asks for, with the omitted field reading
@@ -1031,7 +1030,34 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			"max_tokens", "invalid_value")
 		return
 	}
+	// The two names for the budget are alternatives, not a pair. OpenAI documents
+	// max_tokens as deprecated in favour of max_completion_tokens, so a request carrying
+	// both is a caller mid-migration, and the two numbers can disagree -- 3 and 300 are a
+	// typo either way round, and choosing one silently answers with a budget the caller may
+	// not have meant. Naming both is the one answer that cannot be wrong about which field
+	// to fix.
+	//
+	// The check comes after the negative one so a request with max_tokens: -5 and nothing
+	// else is reported for the value it got wrong rather than for a conflict that is not
+	// there.
+	if p.maxCompletionTokens != nil && p.maxTokens > 0 {
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			"max_completion_tokens", "invalid_value",
+			"max_tokens and max_completion_tokens are two spellings of one limit and cannot "+
+				"both be set (got %d and %d); send max_completion_tokens alone",
+			p.maxTokens, *p.maxCompletionTokens))
+		return
+	}
 	maxTokens := p.maxTokens
+	if p.maxCompletionTokens != nil {
+		if *p.maxCompletionTokens < 0 {
+			writeRequestError(w, http.StatusBadRequest, newParamError(
+				"max_completion_tokens", "invalid_value",
+				"max_completion_tokens must not be negative, got %d", *p.maxCompletionTokens))
+			return
+		}
+		maxTokens = *p.maxCompletionTokens
+	}
 	if maxTokens <= 0 {
 		maxTokens = s.cfg.MaxTokens
 	}
@@ -1209,7 +1235,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	}
 
 	if p.stream {
-		s.streamResponse(w, r, chans, id, created, p.chat, p.stop, p.includeUsage, len(promptTokens))
+		s.streamResponse(w, r, chans, id, created, p, len(promptTokens))
 		return
 	}
 	s.blockingResponse(w, r, chans, id, created, p, promptTokens)
@@ -1312,6 +1338,20 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 			text = cut
 			reason = "stop"
 		}
+		// echo prepends the prompt after the stop cut, not before: the cut applies to what
+		// the model generated, and a stop string that happens to appear in the prompt must
+		// not truncate the part of the answer the caller already typed. The prompt is echoed
+		// as the caller sent it rather than re-decoded from its token ids, because that text
+		// is exactly what they are asking to see back.
+		//
+		// The echoed prompt is not counted again in usage: prompt_tokens already covers it,
+		// and adding it to completion_tokens as well would bill the same text twice. This is
+		// a choice, not a documented OpenAI rule -- the schema does not say -- and it is the
+		// one that keeps prompt_tokens + completion_tokens equal to the tokens actually
+		// processed.
+		if p.echo && !p.chat {
+			text = p.prompt + text
+		}
 		generated += len(c.out)
 		if p.chat {
 			choices[i] = map[string]any{
@@ -1412,7 +1452,7 @@ type streamItem struct {
 // in the same stream carries "usage": null. A client written against the documented shape
 // distinguishes the two by choices being empty, and one that reads usage off every chunk
 // without a null there would see the field missing rather than absent.
-func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []<-chan engine.Event, id string, created int64, chat bool, stop []string, includeUsage bool, promptTokens int) {
+func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []<-chan engine.Event, id string, created int64, p generateParams, promptTokens int) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this connection")
@@ -1441,7 +1481,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 	// differ here, since chat streams object="chat.completion.chunk". A client that switches
 	// on this field to tell a delta from a whole body looks for the chunk name it knows.
 	object := "text_completion"
-	if chat {
+	if p.chat {
 		object = "chat.completion.chunk"
 	}
 	send := func(payload map[string]any) bool {
@@ -1449,7 +1489,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 		payload["object"] = object
 		payload["created"] = created
 		payload["model"] = s.cfg.ModelName
-		if includeUsage {
+		if p.includeUsage {
 			// Set on every ordinary chunk, not only the usage one: OpenAI documents the
 			// field as present-and-null here, and a client that inspects it on each chunk
 			// then needs no branch for "the field is missing".
@@ -1512,12 +1552,24 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 			})
 		}
 		if it.reason != "" {
-			return send(finalChoice(chat, it.index, finishReasonFor(it.reason)))
+			return send(finalChoice(p.chat, it.index, finishReasonFor(it.reason)))
 		}
-		return send(chunkPayload(chat, it.index, it.delta))
+		return send(chunkPayload(p.chat, it.index, it.delta))
 	}
 
-	generated, cancelled, broken := s.streamChoices(chans, chat, stop, writeItem)
+	// echo returns the prompt ahead of the generated text, so it has to arrive before any
+	// generated delta. One chunk per choice, because with n>1 every choice's text includes
+	// the prompt and a single shared chunk would land in whichever index the client happened
+	// to be accumulating. Nothing is read from the engine until this has been written.
+	if p.echo && !p.chat {
+		for i := range chans {
+			if !send(chunkPayload(p.chat, i, p.prompt)) {
+				return
+			}
+		}
+	}
+
+	generated, cancelled, broken := s.streamChoices(chans, p.chat, p.stop, writeItem)
 	if broken {
 		// The client is gone, or a choice reported a failure that was already written. Either
 		// way there is nobody left to read a usage chunk or a sentinel, and writing one after a
@@ -1534,7 +1586,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 	// The totals span every choice, matching the non-streaming body: prompt_tokens counted
 	// once because the prompt is one text, completion_tokens summed because each choice
 	// generated its own.
-	if includeUsage {
+	if p.includeUsage {
 		usage := map[string]any{
 			"id": id, "object": object, "created": created, "model": s.cfg.ModelName,
 			"choices": []map[string]any{},

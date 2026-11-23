@@ -2235,7 +2235,8 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000,
+		generateParams{chat: false}, 0)
 
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
@@ -2253,7 +2254,8 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch2)
 	w2 := httptest.NewRecorder()
 	srv.streamResponse(w2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		[]<-chan engine.Event{ch2}, "cmpl-test", 1700000000, false, []string{"this stop never appears"}, false, 0)
+		[]<-chan engine.Event{ch2}, "cmpl-test", 1700000000,
+		generateParams{chat: false, stop: []string{"this stop never appears"}}, 0)
 	if withStop := collectStream(t, io.NopCloser(strings.NewReader(w2.Body.String()))); withStop != want {
 		t.Errorf("with a stop configured, streamed %q, want %q", withStop, want)
 	}
@@ -2269,7 +2271,8 @@ func TestStreamFlushesTrailingPartialCharacter(t *testing.T) {
 	close(ch3)
 	w3 := httptest.NewRecorder()
 	srv.streamResponse(w3, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		[]<-chan engine.Event{ch3}, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ch3}, "cmpl-test", 1700000000,
+		generateParams{chat: false}, 0)
 	if got := collectStream(t, io.NopCloser(strings.NewReader(w3.Body.String()))); got != wantSingle {
 		t.Errorf("one-byte stream gave %q, the same token decodes to %q", got, wantSingle)
 	}
@@ -2350,7 +2353,8 @@ func TestStreamReleasesHeldTextWhenNoStopMatches(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, []string{"中X"}, false, 0)
+		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000,
+		generateParams{chat: false, stop: []string{"中X"}}, 0)
 	got := collectStream(t, io.NopCloser(strings.NewReader(w.Body.String())))
 	if got != want {
 		t.Errorf("streamed %q with an unmatched stop, want %q", got, want)
@@ -3216,6 +3220,210 @@ func TestStreamingSeveralChoicesUsage(t *testing.T) {
 	}
 }
 
+// TestMaxCompletionTokensIsHonoured covers OpenAI's newer name for the token budget.
+//
+// max_tokens is deprecated in favour of max_completion_tokens, so a client migrated to the
+// newer name sends only that one. Refusing it -- which is what this server did -- made the
+// whole endpoint unusable from such a client, and ignoring it would have been worse: the
+// request would generate the server's default length and still parse, so nothing in the
+// response would say the limit was missed.
+//
+// Both names at once is refused rather than resolved. They are alternatives, so the two
+// numbers can disagree, and picking one silently answers with a budget the caller may not
+// have meant. The refusal names both fields and the values, which is the only answer that
+// cannot send the caller to fix the wrong part of the request.
+func TestMaxCompletionTokensIsHonoured(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	// generated asks for a body with the given budget fields and returns the completion_tokens
+	// count, which is the figure the budget actually decided.
+	generated := func(t *testing.T, path, budget string) int {
+		t.Helper()
+		var body string
+		if path == "/v1/chat/completions" {
+			body = `{"messages": [{"role": "user", "content": "hi"}], ` + budget + `}`
+		} else {
+			body = `{"prompt": "hi", ` + budget + `}`
+		}
+		resp := post(t, srv.Handler(), path, body)
+		if resp.StatusCode != http.StatusOK {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Usage struct {
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		return got.Usage.CompletionTokens
+	}
+
+	for _, path := range []string{"/v1/completions", "/v1/chat/completions"} {
+		t.Run(path+" honours the newer name", func(t *testing.T) {
+			// Both budgets produce the same count, which is what "two spellings of one limit"
+			// has to mean. A count far below the default also shows the field was read rather
+			// than ignored -- the default is 256 and the window is 512.
+			const want = 3
+			if got := generated(t, path, `"max_completion_tokens": 3`); got != want {
+				t.Errorf("max_completion_tokens=3 generated %d tokens, want %d", got, want)
+			}
+			if got := generated(t, path, `"max_tokens": 3`); got != want {
+				t.Errorf("max_tokens=3 generated %d tokens, want %d", got, want)
+			}
+		})
+
+		t.Run(path+" refuses both at once", func(t *testing.T) {
+			var body string
+			if path == "/v1/chat/completions" {
+				body = `{"messages": [{"role": "user", "content": "hi"}], ` +
+					`"max_tokens": 3, "max_completion_tokens": 9}`
+			} else {
+				body = `{"prompt": "hi", "max_tokens": 3, "max_completion_tokens": 9}`
+			}
+			resp := post(t, srv.Handler(), path, body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: two disagreeing budgets is not a request to guess at",
+					resp.StatusCode)
+			}
+			out := decodeBody[errorBody](t, resp)
+			if out.Error.Code != "invalid_value" || out.Error.Param != "max_completion_tokens" {
+				t.Errorf("code/param = %q/%q, want invalid_value/max_completion_tokens",
+					out.Error.Code, out.Error.Param)
+			}
+			// Both field names and both values, so one round trip fixes the request.
+			for _, want := range []string{"max_tokens", "max_completion_tokens", "3", "9"} {
+				if !strings.Contains(out.Error.Message, want) {
+					t.Errorf("message %q does not name %q", out.Error.Message, want)
+				}
+			}
+		})
+
+		t.Run(path+" refuses a negative newer name", func(t *testing.T) {
+			var body string
+			if path == "/v1/chat/completions" {
+				body = `{"messages": [{"role": "user", "content": "hi"}], ` +
+					`"max_completion_tokens": -2}`
+			} else {
+				body = `{"prompt": "hi", "max_completion_tokens": -2}`
+			}
+			resp := post(t, srv.Handler(), path, body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			out := decodeBody[errorBody](t, resp)
+			if out.Error.Code != "invalid_value" || out.Error.Param != "max_completion_tokens" {
+				t.Errorf("code/param = %q/%q, want invalid_value/max_completion_tokens",
+					out.Error.Code, out.Error.Param)
+			}
+			// The value that arrived is what the caller has to change.
+			if !strings.Contains(out.Error.Message, "-2") {
+				t.Errorf("message %q does not name the value sent", out.Error.Message)
+			}
+		})
+	}
+}
+
+// TestEchoReturnsThePrompt covers the completions endpoint's echo, which returns the prompt
+// ahead of the generated text instead of refusing the caller's request.
+//
+// The two properties that matter and are easy to get wrong:
+//
+//   - the echoed prompt is the text the caller sent, so it must not be truncated by a stop
+//     string that happens to appear in it -- the stop list applies to what the model
+//     generated, and the prompt is not generated;
+//   - it is not counted twice in usage. prompt_tokens already covers it, so adding it to
+//     completion_tokens as well would bill the same text twice.
+//
+// The comparison is against the same request with echo off, so the test asserts that echo
+// adds exactly the prompt and nothing else, rather than only checking a prefix.
+func TestEchoReturnsThePrompt(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	const prompt = "Once upon a time"
+	// ask posts one completion and returns its text and usage.
+	ask := func(t *testing.T, extra string) (string, int, int) {
+		t.Helper()
+		body := fmt.Sprintf(`{"prompt": %q, "max_tokens": 5, "temperature": 1.2, "seed": 77%s}`,
+			prompt, extra)
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		if resp.StatusCode != http.StatusOK {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []struct {
+				Text string `json:"text"`
+			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		return got.Choices[0].Text, got.Usage.PromptTokens, got.Usage.CompletionTokens
+	}
+
+	plain, plainPrompt, plainGen := ask(t, "")
+	if plain == "" {
+		t.Fatal("the fixture generated nothing, so the comparison proves nothing")
+	}
+	echoed, echoPrompt, echoGen := ask(t, `, "echo": true`)
+
+	if want := prompt + plain; echoed != want {
+		t.Errorf("echo text = %q, want the prompt then the same continuation %q", echoed, want)
+	}
+	if echoPrompt != plainPrompt || echoGen != plainGen {
+		t.Errorf("echo changed usage: prompt %d->%d, completion %d->%d;"+
+			" the echoed prompt is already counted in prompt_tokens",
+			plainPrompt, echoPrompt, plainGen, echoGen)
+	}
+
+	// echo=false is the default and must stay byte-identical to omitting the field.
+	quiet, _, _ := ask(t, `, "echo": false`)
+	if quiet != plain {
+		t.Errorf("echo=false text = %q, want %q", quiet, plain)
+	}
+
+	// A stop string that appears in the prompt must not truncate the echoed prompt: the cut
+	// applies to the generated part only.
+	cut, _, _ := ask(t, `, "echo": true, "stop": "Once"`)
+	if !strings.HasPrefix(cut, prompt) {
+		t.Errorf("stop in the prompt truncated the echo: %q does not start with %q", cut, prompt)
+	}
+
+	// Streaming sends the prompt as a delta before any generated text, once per choice, so a
+	// client accumulating by index sees prompt-then-continuation for each.
+	resp := post(t, srv.Handler(), "/v1/completions",
+		fmt.Sprintf(`{"prompt": %q, "max_tokens": 3, "n": 2, "temperature": 1.2, "seed": 77, `+
+			`"echo": true, "stream": true}`, prompt))
+	if resp.StatusCode != http.StatusOK {
+		out := decodeBody[errorBody](t, resp)
+		t.Fatalf("stream status = %d: %s", resp.StatusCode, out.Error.Message)
+	}
+	choices, sawDone := readSSEChoices(t, resp.Body, 2)
+	if !sawDone {
+		t.Error("the stream ended without [DONE]")
+	}
+	for i := range 2 {
+		text := choices[i].text.String()
+		if !strings.HasPrefix(text, prompt) {
+			t.Errorf("choice %d streamed %q, want it to start with the echoed prompt %q",
+				i, text, prompt)
+		}
+	}
+}
+
 // TestResponseShapeFieldsAreRefused covers the one kind of unsupported request field this
 // server cannot ignore.
 //
@@ -3244,8 +3452,6 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 	}{
 		{"logprobs on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1}`, "logprobs", nil},
-		{"echo on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "echo": true}`, "echo", nil},
 		{"suffix on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "suffix": "END"}`, "suffix", nil},
 		{"best_of on completions", "/v1/completions",
@@ -3258,24 +3464,18 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		{"logprobs on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logprobs": true}`,
 			"logprobs", nil},
-		// The chat endpoint refuses echo too, and that case was missing while the
-		// completion one was present -- the two lists are separate, so covering one
-		// says nothing about the other.
+		// echo is still refused on chat, which is the only place it is left: OpenAI's chat
+		// schema has no such field, so there the refusal describes a field the caller sent
+		// that the endpoint has no use for. On completions it is honoured -- see
+		// TestEchoReturnsThePrompt.
 		{"echo on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": true}`,
 			"echo", nil},
-		// max_completion_tokens is a limit rather than a response shape, and it is the one
-		// field here whose silent omission the client cannot detect: it generated the
-		// server's default 256 tokens for a request asking for 3, and the reply still
-		// parsed. Refusing it says so at the call site.
-		{"max_completion_tokens on completions", "/v1/completions",
-			`{"prompt": "hi", "max_completion_tokens": 3}`, "max_completion_tokens", nil},
-		{"max_completion_tokens on chat", "/v1/chat/completions",
-			`{"messages": [{"role": "user", "content": "hi"}], "max_completion_tokens": 3}`,
-			"max_completion_tokens", nil},
+		// max_completion_tokens and echo moved to the served set when they were implemented;
+		// two fields are still enough to check that one refusal names both.
 		{"two at once", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1, "echo": true}`,
-			"logprobs", []string{"logprobs", "echo"}},
+			`{"prompt": "hi", "max_tokens": 1, "logprobs": 1, "suffix": "END"}`,
+			"logprobs", []string{"logprobs", "suffix"}},
 	}
 	for _, c := range tooLoud {
 		t.Run(c.name, func(t *testing.T) {
@@ -3408,8 +3608,6 @@ func TestShapeFieldsAreRefusedByValueNotPresence(t *testing.T) {
 	stillRefused := []struct{ name, path, body, field string }{
 		{"best_of=2 on completions", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "best_of": 2}`, "best_of"},
-		{"echo=true on completions", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "echo": true}`, "echo"},
 		{"echo=true on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "echo": true}`, "echo"},
 		{"logprobs=true on chat", "/v1/chat/completions",
@@ -3703,7 +3901,8 @@ func TestStreamStopsWhenWritesFail(t *testing.T) {
 	go func() {
 		defer close(done)
 		srv.streamResponse(w, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-			[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
+			[]<-chan engine.Event{ch}, "cmpl-test", 1700000000,
+			generateParams{chat: false}, 0)
 	}()
 	select {
 	case <-done:
@@ -3741,7 +3940,8 @@ func TestStreamRefusesAConnectionItCannotFlush(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.streamResponse(&noFlushWriter{ResponseWriter: rec},
 		httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ch}, "cmpl-test", 1700000000,
+		generateParams{chat: false}, 0)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -4100,7 +4300,8 @@ func TestStreamReportsAMidStreamError(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
-	srv.streamResponse(w, r, []<-chan engine.Event{ch}, "req-1", 1700000000, false, nil, false, 3)
+	srv.streamResponse(w, r, []<-chan engine.Event{ch}, "req-1", 1700000000,
+		generateParams{chat: false}, 3)
 
 	body := w.Body.String()
 	// The error has to be visible to the client, not only in a log.
@@ -5281,7 +5482,8 @@ func TestStreamChunksShareOneTimestamp(t *testing.T) {
 		close(ch)
 	}()
 	const createdArg = int64(1700000000)
-	srv.streamResponse(rec, req, []<-chan engine.Event{ch}, "cmpl-test", createdArg, false, nil, true, 3)
+	srv.streamResponse(rec, req, []<-chan engine.Event{ch}, "cmpl-test", createdArg,
+		generateParams{chat: false, includeUsage: true}, 3)
 
 	created := make(map[int64]int, 8)
 	chunks := 0
@@ -5837,7 +6039,8 @@ func TestACancelledStreamOmitsDone(t *testing.T) {
 	go func() {
 		defer close(done)
 		srv.streamResponse(rec, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-			[]<-chan engine.Event{ch}, "cmpl-test", 1700000000, false, nil, false, 0)
+			[]<-chan engine.Event{ch}, "cmpl-test", 1700000000,
+			generateParams{chat: false}, 0)
 	}()
 	select {
 	case <-done:
@@ -5865,7 +6068,8 @@ func TestACancelledStreamOmitsDone(t *testing.T) {
 	close(chatCh)
 	recChat := httptest.NewRecorder()
 	srv.streamResponse(recChat, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
-		[]<-chan engine.Event{chatCh}, "chatcmpl-test", 1700000000, true, nil, false, 0)
+		[]<-chan engine.Event{chatCh}, "chatcmpl-test", 1700000000,
+		generateParams{chat: true}, 0)
 	if strings.Contains(recChat.Body.String(), "data: [DONE]") {
 		t.Errorf("a cancelled chat stream sent [DONE]:\n%s", recChat.Body.String())
 	}
@@ -5878,7 +6082,8 @@ func TestACancelledStreamOmitsDone(t *testing.T) {
 	close(ok)
 	rec2 := httptest.NewRecorder()
 	srv.streamResponse(rec2, httptest.NewRequest(http.MethodPost, "/v1/completions", nil),
-		[]<-chan engine.Event{ok}, "cmpl-test", 1700000000, false, nil, false, 0)
+		[]<-chan engine.Event{ok}, "cmpl-test", 1700000000,
+		generateParams{chat: false}, 0)
 	if !strings.Contains(rec2.Body.String(), "data: [DONE]") {
 		t.Error("a normally finished stream lost its [DONE] sentinel")
 	}

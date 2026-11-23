@@ -98,6 +98,21 @@ endpoint because OpenAI documents different maxima -- `logprobs` at most 5 on co
 naming the bound rather than clamped. Streaming carries a logprobs object on each delta chunk,
 and the streamed and non-streaming lists are equal for the same request, offsets included.
 
+One consequence of those shapes is worth knowing before reading `top_logprobs` on completions. Its
+alternatives are a JSON object keyed by token text, so two alternatives that render to the same
+string become one entry -- and the count that comes back can be shorter than the count that was
+asked for. It is not a rare vocabulary defect: a token whose bytes are not valid UTF-8 on its own
+renders as U+FFFD, and a byte-level vocabulary has one per continuation byte. Measured,
+Qwen3-0.6B has 1138 token ids that render as a single U+FFFD and stories15M has 129. Measured on a
+small fixture with 128 such ids: a request asking for 5 alternatives came back with 4 keys, and two
+of the values were out of descending order because the survivor carried the later position's number.
+The chosen token's own probability is reported separately in `token_logprobs` and is unaffected.
+
+Chat's shape does not share this: its alternatives are a list of objects each carrying `bytes`, so
+nothing collapses and the requested count always comes back. A caller that needs the full list on a
+byte-level vocabulary, or needs to tell two same-rendering tokens apart, should read chat's
+`top_logprobs` instead.
+
 The probabilities come from a log-softmax over the whole vocabulary at the request's
 temperature, not from the truncated set a `top_k` or `top_p` setting leaves. That distinction
 matters: describing the truncated set would report a logprob of 0 whenever `top_k` is 1, which

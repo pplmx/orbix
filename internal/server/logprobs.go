@@ -149,10 +149,23 @@ func keptTokens(described []logprobText, retained int) (keep, used int) {
 //
 // The schema is a set of parallel arrays rather than a list of objects -- tokens, their log
 // probabilities, the byte offset each begins at, and one map of alternatives per position.
-// The map's key is the alternative's text, which is the schema's shape and also its weakness:
-// two alternatives that render identically collapse into one entry. That can only happen with
-// a vocabulary holding duplicate pieces, and there is no way to express both in the object the
-// schema asks for.
+// The map's key is the alternative's text, which is the schema's shape and the reason this
+// endpoint describes fewer alternatives than chat does for the same request.
+//
+// Two alternatives whose bytes render to the same string collapse into one entry, and the
+// surviving value is whichever the encoder wrote last -- so the object can come back with fewer
+// keys than were asked for, and the ordering the type exists to preserve no longer holds past
+// that point.
+//
+// This is not the rare vocabulary defect it was first documented as. Any token whose bytes are
+// not valid UTF-8 on its own renders as U+FFFD, and a byte-level vocabulary has one of those per
+// continuation byte: measured, Qwen3-0.6B has 1138 token ids that render as a single U+FFFD, and
+// stories15M has 129. A top-k list containing two of them cannot be expressed in this object.
+//
+// Kept rather than worked around because the alternative is a non-standard extension -- a suffix
+// on the key, or a bytes field beside it -- and a client parsing OpenAI's schema would then have
+// to special-case this server. chat's shape needs neither: its alternatives are a list of
+// objects, each carrying `bytes`, so nothing collapses there.
 func completionLogprobs(described []logprobText, count int, offset int) map[string]any {
 	tokens := make([]string, count)
 	logprobs := make([]float32, count)

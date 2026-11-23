@@ -34,6 +34,21 @@ Orbix is a learning project, and these are the shapes to expect:
 
 - **Scheduling turns concurrency into throughput.** A round prefills every pending prompt and decodes every active sequence in one pass, so total throughput scales with concurrency: on stories15M-q4_0 with 32 generated tokens per request it goes 239 tok/s at one stream to 655 tok/s at sixteen, medians of seven interleaved runs. Per-stream speed still drops as streams are added, because the model is one shared resource.
 
+- **The same shape holds on a real checkpoint, not only on the tiny one.** Measured on
+  gemma-3-270m-it-Q8_0 with a 4-token prompt and 30 generated tokens, one process, four load
+  levels, `curl` in a shell loop: 20.1 tok/s at one concurrent request, 36.8 at two, 60.5 at
+  four, 61.5 at eight. Latency per request fell from 1493 ms to 496 ms across that range and then
+  flattened between four and eight. The plateau is not `--max-active`: that defaults to 8, so a
+  request at concurrency 8 is still admitted. It is the machine -- the measurements ran on a
+  shared host, and four concurrent sequences are enough to saturate the memory bandwidth the
+  matvecs are bound by, which is the same ceiling the section on parallelism above describes.
+
+  Two numbers from the same run worth keeping beside it, because they are what a single request
+  actually costs: decoding is 28.3 ms per token, and a 64-token prefill is 276 ms batched against
+  1799 ms one token at a time -- a 6.5x gain from the sub-batching that the sequential path cannot
+  have. Both come from `go test -bench` with `MODEL` set, which is where a reader can reproduce
+  them.
+
 - **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a request
   whose prompt starts with blocks the pool already computed attaches them instead of prefilling
   again: 101.0 tok/s against 139.5 for four sequential requests sharing one prompt, with the 96

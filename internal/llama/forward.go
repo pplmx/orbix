@@ -45,6 +45,13 @@ type Model struct {
 	scores       []float32 // [ctx] attention scores for one head
 	logits       []float32 // [vocab]
 
+	// layerTrace, when set, receives a copy of the residual stream after each block. It exists
+	// for the comparison test against the numpy reference: that test needs to say which layer
+	// began to disagree, and the alternative -- re-deriving the layer states from the final
+	// logits -- is what made the sliding window take several rounds to find. Nil in every
+	// production path, and the check below is a pointer comparison.
+	layerTrace [][]float32
+
 	// buf holds the multi-row scratch used by Prefill. It is allocated on first
 	// use and grows to the largest batch seen, so a single-token run never pays
 	// for it.
@@ -173,6 +180,9 @@ func (m *Model) Forward(cache Cache, token int, pos int) ([]float32, error) {
 		}
 		if err := m.feedForward(l); err != nil {
 			return nil, err
+		}
+		if m.layerTrace != nil && l < len(m.layerTrace) {
+			copy(m.layerTrace[l], m.x)
 		}
 	}
 	// The cache length advances only once the position is fully written, so a

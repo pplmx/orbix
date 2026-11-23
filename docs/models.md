@@ -422,3 +422,26 @@ Two things the numpy side has to get right, both found by it disagreeing:
 - Whether to apply `attn_q_norm` is an architecture property, not a tensor's presence. The
   `gemma2` fixture carries the tensor and the architecture does not use it; a reference keyed on
   whether the tensor exists applied it and disagreed by 0.342.
+
+## What a failure tells you
+
+The test reports the first block whose residual disagrees, not only the final logits:
+
+```text
+the divergence begins at layer 1: worst 1.313309 at dimension 26 (engine -133.841248, reference -132.527939)
+layers 0..0 agreed; everything after this is downstream of it
+```
+
+That line is the difference between a test that reports a symptom and one that reports a location.
+The sliding window's off-by-one took six rounds to find largely because nothing said which layer
+disagreed, so each hypothesis had to be tested by rebuilding the comparison by hand. The per-layer
+residuals are stored in `testdata/reference/logits.json` alongside the logits for the same reason the
+window fixtures exist: the cheap-looking addition is what makes the expensive case tractable.
+
+Only the last prompt token's residuals are stored. Earlier positions have their own, and a fault in
+one of them shows up as a fault in the last one anyway, so including them would multiply the file by
+the prompt length for no additional signal.
+
+When every layer agrees the message says so, which is itself informative: a disagreement that
+appears only in the final logits is in the output norm or the vocabulary projection, and those are
+two places rather than the whole model.

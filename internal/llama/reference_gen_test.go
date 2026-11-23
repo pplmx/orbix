@@ -46,9 +46,20 @@ func TestGenerateReferenceInputs(t *testing.T) {
 				t.Fatalf("NewKVCache: %v", err)
 			}
 			ids := spec.prompt
+			cfg := m.Config()
+			trace := make([][]float32, cfg.Layers)
+			for l := range trace {
+				trace[l] = make([]float32, cfg.Hidden)
+			}
 			var logits []float32
 			for pos, id := range ids {
+				// Only the last token's trace is wanted: earlier positions have their own
+				// residuals and would make the file ten times larger for no extra signal.
+				if pos == len(ids)-1 {
+					m.layerTrace = trace
+				}
 				logits, err = m.Forward(cache, int(id), pos)
+				m.layerTrace = nil
 				if err != nil {
 					t.Fatalf("Forward at %d: %v", pos, err)
 				}
@@ -60,6 +71,13 @@ func TestGenerateReferenceInputs(t *testing.T) {
 			r := referenceResult{Ids: ids, Logits: make([]float64, len(logits))}
 			for i := range logits {
 				r.Logits[i] = float64(logits[i])
+			}
+			r.Layers = make([][]float64, len(trace))
+			for l := range trace {
+				r.Layers[l] = make([]float64, len(trace[l]))
+				for i := range trace[l] {
+					r.Layers[l][i] = float64(trace[l][i])
+				}
 			}
 			out[spec.name] = r
 			t.Logf("%s: %d prompt tokens, %d logits", spec.name, len(ids), len(logits))

@@ -15,6 +15,10 @@ import (
 type referenceResult struct {
 	Ids    []int32   `json:"ids"`
 	Logits []float64 `json:"logits"`
+	// Layers holds the residual stream after each block, for the last prompt token. The final
+	// logits say that something disagreed; these say where, which is the difference between a
+	// test that reports a symptom and one that reports a location.
+	Layers [][]float64 `json:"layers,omitempty"`
 }
 
 // referenceTolerance is how far this engine may sit from the numpy reference.
@@ -68,9 +72,18 @@ func TestMatchesNumPyReference(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewKVCache: %v", err)
 			}
+			cfg := m.Config()
+			trace := make([][]float32, cfg.Layers)
+			for l := range trace {
+				trace[l] = make([]float32, cfg.Hidden)
+			}
 			var logits []float32
 			for pos, id := range spec.prompt {
+				if pos == len(spec.prompt)-1 && len(expected.Layers) > 0 {
+					m.layerTrace = trace
+				}
 				logits, err = m.Forward(cache, int(id), pos)
+				m.layerTrace = nil
 				if err != nil {
 					t.Fatalf("Forward at %d: %v", pos, err)
 				}
@@ -93,6 +106,7 @@ func TestMatchesNumPyReference(t *testing.T) {
 				t.Errorf("worst disagreement %.6f at logit %d: engine %.6f, reference %.6f"+
 					" (tolerance %g)", worst, at, logits[at], expected.Logits[at],
 					referenceTolerance)
+				reportFirstDivergentLayer(t, trace, expected.Layers)
 			}
 			t.Logf("worst disagreement %.7f over %d logits", worst, len(logits))
 		})
@@ -175,4 +189,51 @@ var referenceSpecs = []struct {
 			}
 		},
 	},
+}
+
+// reportFirstDivergentLayer says which block began to disagree, or that none did.
+//
+// The final logits say something is wrong; the per-layer residuals say where it started, and the
+// distance between the two is the whole cost of locating a fault. Finding the sliding window's
+// off-by-one took six rounds largely because nothing reported a layer: every hypothesis had to be
+// tested by rebuilding the comparison by hand.
+//
+// It reports the first layer over tolerance and stops, because everything after a wrong residual
+// is downstream of it and printing all of them buries the one that matters.
+func reportFirstDivergentLayer(t *testing.T, got [][]float32, want [][]float64) {
+	t.Helper()
+	if len(want) == 0 {
+		t.Log("no per-layer reference data; regenerate testdata/reference/logits.json to locate" +
+			" the first divergent block")
+		return
+	}
+	for l := range want {
+		if l >= len(got) {
+			t.Errorf("layer %d: the reference has a residual this engine did not produce", l)
+			return
+		}
+		worst, at := 0.0, 0
+		for i := range want[l] {
+			if i >= len(got[l]) {
+				t.Errorf("layer %d: reference residual is %d wide, engine's is %d",
+					l, len(want[l]), len(got[l]))
+				return
+			}
+			if d := math.Abs(float64(got[l][i]) - want[l][i]); d > worst {
+				worst, at = d, i
+			}
+		}
+		if worst > referenceTolerance {
+			t.Errorf("the divergence begins at layer %d: worst %.6f at dimension %d"+
+				" (engine %.6f, reference %.6f)", l, worst, at, got[l][at], want[l][at])
+			if l == 0 {
+				t.Log("no earlier layer to blame; the fault is in the first block or before it")
+			} else {
+				t.Logf("layers 0..%d agreed; everything after this is downstream of it", l-1)
+			}
+			return
+		}
+	}
+	t.Logf("all %d layer residuals agree; the disagreement is in the final norm or the output"+
+		" projection", len(want))
 }

@@ -1,7 +1,9 @@
 package chat
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +121,16 @@ func TestQwen2TemplateWithTools(t *testing.T) {
 // The full Llama 3.2 template is 93 lines. Inlining it would make this file mostly template
 // text, which is harder to review than the code around it and easy to lose a line from when
 // editing. The file keeps its provenance in the name.
+// loadTestTemplate reads a chat-template asset exactly as stored.
+//
+// The assets are byte copies of what a checkpoint holds in tokenizer.chat_template, and that
+// exactness is the point: text outside a {% %} tag is rendered, so a byte the file gained on the
+// way into the repository becomes part of the prompt. Nothing trims, normalises or appends here.
+//
+// Two places keep the files honest. .gitattributes marks them `-text` so a checkout does not
+// rewrite line endings, and .pre-commit-config.yaml excludes them from end-of-file-fixer,
+// trailing-whitespace and mixed-line-ending. Both were needed: restoring the gemma 2 asset to the
+// checkpoint's 591 bytes and running `just hooks` rewrote it to 592.
 func loadTestTemplate(t *testing.T, name string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", name))
@@ -126,6 +138,50 @@ func loadTestTemplate(t *testing.T, name string) string {
 		t.Fatalf("read testdata/%s: %v", name, err)
 	}
 	return string(raw)
+}
+
+// TestTemplateAssetsAreExact guards the convention above with a hash.
+//
+// A hook that starts touching these files again fails here rather than in a rendered prompt: the
+// hash changes the moment a byte does, and the failure says which asset and why it matters. The
+// hashes are of the bytes as committed, so updating an asset deliberately means updating its
+// entry -- which is the moment to check the new content against the checkpoint.
+//
+// llama32-instruct.jinja ends with a newline that is part of the asset as it was first committed.
+// Whether the checkpoint's own template ends that way is not verifiable here, unlike the gemma 2
+// one, which was extracted from a GGUF file that is available locally. The entry records the bytes
+// rather than a claim about their provenance.
+func TestTemplateAssetsAreExact(t *testing.T) {
+	want := map[string]struct {
+		size int
+		sha  string
+	}{
+		"gemma2-it.jinja":        {591, "ecd6ae513fe103f0eb62e8ab5bfa8d0fe45c1074fa398b089c93a7e70c15cfd6"},
+		"llama32-instruct.jinja": {3827, "5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4"},
+	}
+	for name, w := range want {
+		raw, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Errorf("read %s: %v", name, err)
+			continue
+		}
+		if len(raw) != w.size {
+			t.Errorf("%s is %d bytes, want the %d that were committed; a whitespace hook may have"+
+				" rewritten it, and for a chat template that is a change to the prompt",
+				name, len(raw), w.size)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != w.sha {
+			t.Errorf("%s hashes to %s, want %s", name, got, w.sha)
+		}
+	}
+	// The gemma 2 asset must not end with whitespace: the checkpoint's template ends with
+	// "{% endif %}", and a newline after it would be rendered. This is the assertion that names
+	// the specific mistake the hooks used to make.
+	raw, err := os.ReadFile(filepath.Join("testdata", "gemma2-it.jinja"))
+	if err == nil && len(raw) > 0 && raw[len(raw)-1] == '\n' {
+		t.Error("gemma2-it.jinja ends with a newline; the checkpoint's template does not, and the" +
+			" newline would appear in every rendered prompt")
+	}
 }
 
 // TestLlama32TemplateWithTools covers the tool-calling branch of the full Llama 3.2 template,
@@ -285,11 +341,7 @@ func TestLlama32ToolMessageContentIsNotQuoted(t *testing.T) {
 // visible as a startup warning, but for an instruct model it means the turns are wrapped in
 // markers the checkpoint was not trained on.
 func TestGemma2Template(t *testing.T) {
-	// The checkpoint's template ends with "{% endif %}" and no newline. The file has one because
-	// the repository's whitespace hooks require every text file to end with a newline, and here
-	// that byte is not cosmetic: it sits outside every tag, so it would render as output. Trimming
-	// exactly one keeps the asset otherwise byte-identical to the model's own template.
-	tmpl := strings.TrimSuffix(loadTestTemplate(t, "gemma2-it.jinja"), "\n")
+	tmpl := loadTestTemplate(t, "gemma2-it.jinja")
 	parsed, err := Parse(tmpl)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)

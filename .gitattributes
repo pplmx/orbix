@@ -25,6 +25,12 @@ justfile    text eol=lf
 .gitignore  text eol=lf
 .editorconfig text eol=lf
 
+# Chat-template assets are byte copies of a checkpoint's tokenizer.chat_template. Line-ending
+# normalisation would change what they render, because text outside a tag is output, so they are
+# marked as data rather than text and git leaves them alone. The pre-commit hooks exclude the same
+# path for the same reason.
+internal/chat/testdata/*.jinja -text
+
 # Model files are large binaries a contributor may keep beside the tree; nothing here should
 # ever try to diff or merge them.
 *.gguf binary

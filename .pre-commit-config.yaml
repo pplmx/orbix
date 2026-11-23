@@ -7,18 +7,34 @@ default_stages:
 
 fail_fast: true
 
+# The chat-template assets under internal/chat/testdata are byte copies of what a checkpoint
+# stores in tokenizer.chat_template, and every whitespace hook changes what they mean. Removing
+# the final newline is not cosmetic there: text outside a {% %} tag is rendered, so the newline
+# end-of-file-fixer adds becomes part of the prompt. Measured before this exclusion: restoring
+# gemma2-it.jinja to the checkpoint's 591 bytes and running `just hooks` rewrote it to 592 and
+# reported "Fixing", which is a hook quietly changing the model's input format. The same holds
+# for trailing-whitespace, which would strip spaces that are inside the template, and for
+# mixed-line-ending, which would convert a template's own CRLFs.
+#
+# `.gitattributes` marks these files `-text` for the same reason, so a checkout does not rewrite
+# them either.
 repos:
     - repo: builtin
       hooks:
           - id: end-of-file-fixer
+            exclude: ^internal/chat/testdata/.*\.jinja$
           - id: trailing-whitespace
-            exclude: \.md$
+            # Unanchored on purpose: the alternative has to match markdown paths like docs/
+            # usage.md as well as the template assets, so anchoring the whole pattern would leave
+            # only a file literally named ".md" excluded.
+            exclude: (internal/chat/testdata/.*\.jinja|\.md)$
           - id: check-toml
           - id: check-yaml
           - id: check-json
           - id: check-merge-conflict
           - id: mixed-line-ending
             args: ["--fix=lf"]
+            exclude: ^internal/chat/testdata/.*\.jinja$
 
     - repo: https://github.com/commitizen-tools/commitizen
       rev: v4.19.3

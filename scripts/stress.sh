@@ -24,8 +24,17 @@ trap 'kill "${srv:-}" 2>/dev/null; rm -rf "$work"' EXIT
     >"$work/log" 2>&1 &
 srv=$!
 
-for _ in $(seq 1 200); do
+# The wait is generous because the binary is a race build and the checkpoint is read from disk:
+# measured on Gemma 3 270M, the first start took 45.8s while the next two took 2.9s and 2.5s, so
+# page cache rather than the race detector is what the first run pays for. The 20s a previous
+# version allowed was enough on a fixture of a few KB and not on anything real, and the failure
+# read "server did not become ready" on a server that was about to be ready.
+#
+# Waited for on the terminal state rather than a guessed number of seconds: the process either
+# answers or exits, so a dead server fails immediately instead of after the full wait.
+for _ in $(seq 1 1200); do
     curl -sf "http://$addr/healthz" >/dev/null 2>&1 && break
+    kill -0 "$srv" 2>/dev/null || break
     sleep 0.1
 done
 if ! curl -sf "http://$addr/healthz" >/dev/null 2>&1; then
@@ -80,8 +89,17 @@ stream '{"model":"__MODEL__","prompt":"delta","max_tokens":16,"stream":true}'
 # fixture's window is 256 positions, so a 250-token budget plus a prompt of any length exceeds
 # it and the request returns in ~1ms having generated nothing. 120 leaves room for the prompt
 # and still keeps the engine busy for several rounds.
+# The holder's ceiling is its own, not the shared 30s. The binary is a race build, and race
+# instrumentation is what it costs: measured on the 15M fixture, this exact 120-token request
+# takes 47.8s alone and takes longer while three clients are queued behind it -- so a 30s
+# ceiling cancelled the very request that is supposed to stay alive, and the failure surfaced
+# as the holder returning 503 "abandoned before it finished". That reads like an engine defect
+# and is an artefact of the harness giving up first.
+#
+# Generous rather than tuned: the run either finishes or the server stops advancing, and
+# waiting too long only makes a broken run slower.
 echo "stress: one long request holds the engine"
-curl -s -o /dev/null --max-time 30 -X POST "$api" -H 'Content-Type: application/json' \
+curl -s -o /dev/null --max-time 300 -X POST "$api" -H 'Content-Type: application/json' \
     -d "$(payload '{"model":"__MODEL__","prompt":"holder","max_tokens":120}')" &
 holder=$!
 # Give the holder a moment to be admitted and to start advancing. Without this the queued

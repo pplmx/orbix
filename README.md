@@ -39,18 +39,18 @@ client library works against it.
 
 ## At a glance
 
-| Layer          | Package                                         | What it is                                               |
-| -------------- | ----------------------------------------------- | -------------------------------------------------------- |
-| GGUF container | [`internal/gguf`](internal/gguf/doc.go)         | Header, metadata, tensor directory, streamed tensor data |
-| Half precision | [`internal/f16`](internal/f16/doc.go)           | binary16, every one of the 65,536 patterns               |
-| Dequantization | [`internal/quant`](internal/quant/doc.go)       | F32/F16/BF16, Q4/Q5/Q8, IQ4_NL, Q2_K–Q6_K                |
-| Kernels        | [`internal/kernel`](internal/kernel/doc.go)     | MatMul, MatVec, RMSNorm, Softmax, SiLU                   |
-| Tokenizer      | [`internal/tokenize`](internal/tokenize/doc.go) | SentencePiece and byte-level BPE                         |
-| Chat templates | [`internal/chat`](internal/chat/doc.go)         | The Jinja2 subset a checkpoint's template needs          |
-| Engine         | [`internal/engine`](internal/engine/doc.go)     | Continuous batching, admission policy, KV cache          |
-| Transformer    | [`internal/llama`](internal/llama/doc.go)       | Llama and Qwen2 forward passes, RoPE, GQA, MoE           |
-| Tracing        | [`internal/otel`](internal/otel/doc.go)         | OTLP/HTTP+JSON spans, hand-written, no SDK               |
-| Server         | [`internal/server`](internal/server/doc.go)     | OpenAI-compatible API, SSE, `/metrics`, access log       |
+| Layer          | Package                                         | What it is                                                    |
+| -------------- | ----------------------------------------------- | ------------------------------------------------------------- |
+| GGUF container | [`internal/gguf`](internal/gguf/doc.go)         | Header, metadata, tensor directory, streamed tensor data      |
+| Half precision | [`internal/f16`](internal/f16/doc.go)           | binary16, every one of the 65,536 patterns                    |
+| Dequantization | [`internal/quant`](internal/quant/doc.go)       | F32/F16/BF16, Q4/Q5/Q8, IQ4_NL, Q2_K–Q6_K                     |
+| Kernels        | [`internal/kernel`](internal/kernel/doc.go)     | MatMul, MatVec, RMSNorm, Softmax, SiLU                        |
+| Tokenizer      | [`internal/tokenize`](internal/tokenize/doc.go) | SentencePiece and byte-level BPE                              |
+| Chat templates | [`internal/chat`](internal/chat/doc.go)         | The Jinja2 subset a checkpoint's template needs               |
+| Engine         | [`internal/engine`](internal/engine/doc.go)     | Continuous batching, admission policy, KV cache               |
+| Transformer    | [`internal/llama`](internal/llama/doc.go)       | Llama, Qwen2/3 and Gemma 1/2/3 forward passes, RoPE, GQA, MoE |
+| Tracing        | [`internal/otel`](internal/otel/doc.go)         | OTLP/HTTP+JSON spans, hand-written, no SDK                    |
+| Server         | [`internal/server`](internal/server/doc.go)     | OpenAI-compatible API, SSE, `/metrics`, access log            |
 
 ## Why this exists
 

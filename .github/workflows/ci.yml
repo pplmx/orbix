@@ -209,7 +209,7 @@ jobs:
       # rather than a branch that turns red when upstream changes a rule.
       #
       # No extra-args: the action already runs `prek run --all-files`.
-      - uses: j178/prek-action@v3.1.0
+      - uses: j178/prek-action@v3.1.1
 
   # The commit-msg hook checks one message as it is written, and only where `prek install`
   # ran. Nothing checked a branch as a whole: `prek run --all-files` skips commit-msg hooks

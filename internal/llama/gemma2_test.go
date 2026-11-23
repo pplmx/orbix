@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // TestWindowForAlternates pins which layers are bounded, which is the part of Gemma 2's sliding
@@ -85,7 +87,10 @@ func TestAttentionParamsScaleAndSoftcap(t *testing.T) {
 // do not distinguish a correct load from one that skipped the sandwich norms or applied the
 // window to every layer.
 func TestGemma2SummaryNamesItsDifferences(t *testing.T) {
-	path := gguftest.Model{Arch: "gemma2", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
+	// Four layers, because the alternating rule needs more than two to say anything: over two
+	// layers "every second layer" and "every layer" are the same set, and the summary reports what
+	// the configuration computes rather than the rule that produced it.
+	path := gguftest.Model{Arch: "gemma2", Layers: 4, Hidden: 32, Heads: 4, FFN: 64,
 		PostNorms: true, AttnSoftcap: 50, FinalSoftcap: 30, WindowLen: 4096,
 	}.Write(t, t.TempDir())
 	m, err := NewWithOptions(path, Options{})
@@ -93,7 +98,11 @@ func TestGemma2SummaryNamesItsDifferences(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	got := m.Config().String()
-	for _, want := range []string{"softcaps 50/30", "sandwich norms", "every second layer bounded to 4096"} {
+	for _, want := range []string{
+		"softcaps 50/30",
+		"sandwich norms",
+		"2 of 4 layers bounded to 4096",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary %q does not mention %q", got, want)
 		}
@@ -375,5 +384,157 @@ func TestFinalSoftcapBoundsTheLogits(t *testing.T) {
 	}
 	if same {
 		t.Error("the capped and uncapped logits are identical; the cap never ran")
+	}
+}
+
+// TestGemma3MatchesReferenceLogprobs checks the Gemma 3 architecture against llama.cpp.
+//
+// Gemma 3 keeps Gemma 2's block -- sandwich norms, GeGLU, scaled embeddings -- and changes three
+// things this package has to get right: per-head query and key normalization, no attention softcap,
+// and a sliding window whose shape comes from the file rather than from "every second layer".
+//
+// The window is the one that bit: Gemma 3 270M declares a window of 512 and no pattern key at all,
+// and llama.cpp reads that absence as "every layer is local" (set_swa_pattern with n_pattern 0).
+// Reading it as "every second layer" left nine layers attending over the whole context, which
+// loads without complaint and computes something else.
+//
+// Set GEMMA3_MODEL to gemma-3-270m-it-Q8_0.gguf. Expected values from llama.cpp 0.3.37, prompt
+// "The capital of France is"; the prompt encodes to the same six ids on both sides and the greedy
+// token agrees. The deviations over the shared tokens are 0.0001, 0.66, 0.27, 0.08, 0.16, 0.42 and
+// 0.66 nats -- the low-probability tail, as with every checkpoint here, while the token the model
+// actually picks agrees to four decimal places.
+func TestGemma3MatchesReferenceLogprobs(t *testing.T) {
+	path := os.Getenv("GEMMA3_MODEL")
+	if path == "" {
+		t.Skip("set GEMMA3_MODEL to a Gemma 3 GGUF file")
+	}
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if cfg.VocabSize != 262144 {
+		t.Skipf("the expected values are Gemma 3 270M's; this file has a %d-token vocabulary",
+			cfg.VocabSize)
+	}
+
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(f)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	ids := tok.Encode("The capital of France is", true)
+	for i, want := range []int32{2, 818, 5279, 529, 7001, 563} {
+		if ids[i] != want {
+			t.Fatalf("prompt id %d = %d, want %d", i, ids[i], want)
+		}
+	}
+
+	cache, err := NewKVCache(cfg, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logits []float32
+	for pos, id := range ids {
+		logits, err = m.Forward(cache, int(id), pos)
+		if err != nil {
+			t.Fatalf("Forward: %v", err)
+		}
+	}
+
+	// Resolved by exact text so the test does not depend on the ids staying put across files.
+	toks, _ := f.GetArray[string]("tokenizer.ggml.tokens")
+	find := func(p string) int32 {
+		for i, s := range toks {
+			if s == p {
+				return int32(i)
+			}
+		}
+		t.Fatalf("token %q is not in the vocabulary", p)
+		return 0
+	}
+	const tolerance = 1.5
+	for _, w := range []struct {
+		text string
+		ref  float64
+	}{
+		{"▁Paris", -0.000517},
+		{"▁the", -9.133692},
+		{"▁**", -9.396717},
+		{"Paris", -10.126068},
+		{"▁Marseille", -10.469614},
+		{"▁La", -11.122358},
+		{"▁changed", -11.231756},
+	} {
+		got := logSoftmax(logits, find(w.text))
+		if d := math.Abs(got - w.ref); d > tolerance {
+			t.Errorf("logprob of %q = %.4f, llama.cpp says %.4f, off by %.4f",
+				w.text, got, w.ref, d)
+		}
+	}
+
+	argmax := int32(0)
+	for i, v := range logits {
+		if v > logits[argmax] {
+			argmax = int32(i)
+		}
+	}
+	if argmax != find("▁Paris") {
+		t.Errorf("greedy token is %d, want the id of %q", argmax, "▁Paris")
+	}
+
+	// The window shape is part of what this test is for, so it is asserted rather than left to the
+	// summary string.
+	if cfg.WindowLen != 512 {
+		t.Errorf("window = %d, want 512", cfg.WindowLen)
+	}
+	for l := range cfg.Layers {
+		if windowFor(cfg, l) == 0 {
+			t.Errorf("layer %d is unbounded; this file declares no pattern, so every layer is"+
+				" local", l)
+		}
+	}
+}
+
+// TestGemma3RefusesTwoRotationFrequencies covers the one part of Gemma 3 this package leaves out.
+//
+// Gemma 3 can rotate its local layers and its global layers at different rates, declared as
+// gemma3.rope.freq_base_swa alongside the model-wide base. This package keeps one rotation per
+// model, so a file asking for two would be served with the wrong one on half its layers -- and a
+// wrong rotation is invisible: the output stays fluent and every token is slightly wrong.
+//
+// Refused rather than ignored, because a file that says what it needs and does not get it is the
+// failure mode this package is built to avoid. Equal values are not a conflict: a file that repeats
+// the global base for its local layers asks for the single rotation this package has.
+func TestGemma3RefusesTwoRotationFrequencies(t *testing.T) {
+	// The fixture writes no rope.freq_base, so the global base is this package's default of 10000;
+	// the local base has to differ from that to be a second frequency. 10000 would have been the
+	// same single rotation and the test would have passed for the wrong reason.
+	dir := t.TempDir()
+	path := gguftest.Model{Arch: "gemma3", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
+		ExtraFloatKey: "gemma3.rope.freq_base_swa", ExtraFloatValue: 1000000,
+	}.Write(t, dir)
+	_, err := NewWithOptions(path, Options{})
+	if err == nil {
+		t.Fatal("a file with two rotation frequencies loaded; it would rotate half its layers wrongly")
+	}
+	// The message has to carry both numbers, so an operator can see which two the file asks for.
+	for _, want := range []string{"1e+06", "10000", "two rotation frequencies"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// A file repeating the global base is the single rotation this package implements. Checked on
+	// a plain llama fixture rather than a gemma3 one, so the assertion is about the frequency check
+	// and not about the QK-norm tensors a gemma3 file would also need.
+	same := gguftest.Model{Arch: "llama", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
+		ExtraFloatKey: "llama.rope.freq_base_swa", ExtraFloatValue: 10000,
+	}.Write(t, t.TempDir())
+	if _, err := NewWithOptions(same, Options{}); err != nil {
+		t.Errorf("a file whose local and global bases agree was refused: %v", err)
 	}
 }

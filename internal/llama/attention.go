@@ -86,6 +86,15 @@ func attentionParams(cfg Config, l int) attnParams {
 // window from Config for every layer is what would be wrong there -- it would make every block
 // local.
 func windowFor(cfg Config, l int) int {
+	// An explicit pattern wins: Gemma 3 stores one boolean per layer, and a model whose layers are
+	// all local or all global cannot be described by "every second one". The array is what the file
+	// says; the alternating rule below is the shape Gemma 2 was assumed to have.
+	if len(cfg.LocalLayers) > 0 {
+		if l < len(cfg.LocalLayers) && cfg.LocalLayers[l] {
+			return cfg.WindowLen
+		}
+		return 0
+	}
 	if !cfg.SlidingPattern {
 		return cfg.WindowLen
 	}

@@ -11,6 +11,7 @@ Orbix targets the GGUF ecosystem. Initial support:
 | **Mixtral**             | `llama` with experts | v0.3          |
 | **Gemma**               | `gemma`              | done          |
 | **Gemma 2**             | `gemma2`             | done          |
+| **Gemma 3**             | `gemma3`             | v0.4          |
 
 | Quantization                   | Status |
 | ------------------------------ | ------ |
@@ -24,9 +25,33 @@ Orbix targets the GGUF ecosystem. Initial support:
 
 GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally. Two ggml types are defined and sized but not decoded -- `Q8_1` and `Q8_K` -- and both are conversion-tool intermediates rather than formats a released checkpoint uses. A file carrying either is refused with `cannot decode <type>` at load, the same way an unrecognised type is.
 
-Five architectures are checked against real checkpoints: `llama` against llama.cpp's
+Six architectures are checked against real checkpoints: `llama` against llama.cpp's
 log-probabilities, `qwen2` against a converted official checkpoint, `gemma` and `gemma2` against
-llama.cpp's log-probabilities on converted Gemma 2B files, and `qwen3` the same way on Qwen3-0.6B. The MoE path has its own real file.
+llama.cpp's log-probabilities on converted Gemma 2B files, `qwen3` the same way on Qwen3-0.6B, and
+`gemma3` on Gemma 3 270M. The MoE path has its own real file.
+
+`gemma3` keeps Gemma 2's block -- sandwich norms, GeGLU, scaled embeddings -- and differs in three
+ways that matter:
+
+- Each head's query and key are normalized before the rotation. Gemma 2 does not, and its files carry
+  no `attn_q_norm`/`attn_k_norm` tensors at all; adding the flag to `gemma2` was tried this round
+  and reverted, because the loader then demanded tensors the files do not have.
+- The attention softcap is gone. Gemma 2 bounds its scores with `attn_logit_softcapping`; Gemma 3's
+  converter asserts the key is absent. The output softcap stays.
+- The sliding window is per layer, and the file says which. Gemma 3 270M declares a window of 512
+  and no pattern key, which llama.cpp reads as "every layer is local"; reading it as Gemma 2's
+  "every second layer" leaves nine of eighteen layers attending over the whole context. The absence
+  is only read that way for `gemma3`: Gemma 2's files predate the key and are described by the
+  alternating rule, so applying one architecture's convention to the other bounded the wrong
+  layers.
+
+Measured on gemma-3-270m-it-Q8_0 against llama.cpp 0.3.37: the prompt encodes to the same six ids
+and the greedy token agrees, with deviations of 0.0001, 0.66, 0.27, 0.08, 0.16, 0.42 and 0.66 nats
+over the shared top-8 -- the low-probability tail, as with every checkpoint here.
+
+Not implemented for `gemma3`: the separate rotation frequency for local layers. A file that declares
+`gemma3.rope.freq_base_swa` is refused rather than rotated at the wrong rate. The 270M checkpoint
+does not declare one, so it is unaffected.
 `mistral` is not, and the reason is worth stating because it is not a gap this project can close by
 working harder. The `mistral` architecture string is effectively retired upstream: the current
 llama.cpp converter writes `general.architecture = llama` for every Mistral checkpoint it converts

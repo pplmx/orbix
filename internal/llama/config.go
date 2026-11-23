@@ -139,6 +139,12 @@ type Config struct {
 	PostNorms bool
 	// SlidingPattern reports that only every second layer is bounded by WindowLen.
 	SlidingPattern bool
+	// LocalLayers, when non-empty, says layer by layer whether it is bounded by WindowLen.
+	//
+	// It overrides SlidingPattern because a per-file array can describe shapes the alternating
+	// rule cannot: Gemma 3's file states one boolean per layer, and this checkpoint's 18 layers are
+	// all local. Empty means the file did not say, and the architecture's rule applies.
+	LocalLayers []bool
 	// QKNorm reports that each head's query and key are normalised before the rotation.
 	QKNorm bool
 }
@@ -266,6 +272,20 @@ var archSpecs = map[string]archSpec{
 	"gemma2": {
 		rope: RopeNeox, attnBias: false,
 		embedScale: true, ffn: ffnGELU,
+		postNorms: true, slidingPattern: true,
+	},
+	// Gemma 3 keeps Gemma 2's block shape -- sandwich norms, GeGLU, scaled embeddings -- and
+	// changes three things. It normalises each head's query and key, which is Qwen3's step. It drops
+	// the attention softcap (Gemma 2 bounds its scores; Gemma 3 does not) but keeps the output one.
+	// And its sliding window is a per-layer pattern read from the file rather than every second
+	// layer, so a checkpoint whose layers are all local is described exactly rather than rounded to
+	// a rule.
+	//
+	// It also rotates the local and global layers at different frequencies, which is the one piece
+	// this package does not implement: see docs/models.md.
+	"gemma3": {
+		rope: RopeNeox, attnBias: false,
+		embedScale: true, ffn: ffnGELU, qkNorm: true,
 		postNorms: true, slidingPattern: true,
 	},
 }
@@ -468,6 +488,57 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		*capKey.dst = v
 	}
 
+	// A per-layer window pattern is a file-level fact, like the window length itself: Gemma 3
+	// stores one boolean per layer, and a file whose layers are all local cannot be described by
+	// the alternating rule its architecture name suggests. Read here rather than assumed there.
+	// The key is written two ways: an array of one boolean per layer, or a single integer giving
+	// the period of an alternating pattern. llama.cpp reads the array first and falls back to the
+	// integer; a file with neither takes the integer case with a period of zero, which marks every
+	// layer local.
+	//
+	// That last case is Gemma 3 270M: it declares a window of 512 and no pattern at all, so all 18
+	// of its layers are bounded. Reading its absence as "no window" or as "every second layer"
+	// both change what the model computes.
+	if pattern, ok := f.GetArray[bool](arch + ".attention.sliding_window_pattern"); ok {
+		if len(pattern) != cfg.Layers {
+			return Config{}, fmt.Errorf("llama: %s.attention.sliding_window_pattern holds %d "+
+				"entries for %d layers", arch, len(pattern), cfg.Layers)
+		}
+		cfg.LocalLayers = pattern
+	} else if n, ok := f.Get[int](arch + ".attention.sliding_window_pattern"); ok {
+		if n < 0 {
+			return Config{}, fmt.Errorf("llama: %s.attention.sliding_window_pattern = %d, must "+
+				"not be negative", arch, n)
+		}
+		// The period counts every n-th layer as global and the rest local, starting local, which
+		// is llama.cpp's dense_first=false branch.
+		cfg.LocalLayers = make([]bool, cfg.Layers)
+		for l := range cfg.LocalLayers {
+			cfg.LocalLayers[l] = n == 0 || l%n < n-1
+		}
+	} else if cfg.WindowLen > 0 && arch == "gemma3" {
+		// No pattern key at all: llama.cpp's n_pattern == 0 case, where every layer is local.
+		//
+		// This is asserted per architecture rather than for any windowed one, because "the key is
+		// absent" means different things: Gemma 3's converter always writes the array and leaves
+		// it out only when every layer is local, while Gemma 2's files predate the key entirely
+		// and are described by the alternating rule. Applying Gemma 3's reading to Gemma 2
+		// bounded every layer instead of every second one.
+		cfg.LocalLayers = make([]bool, cfg.Layers)
+		for l := range cfg.LocalLayers {
+			cfg.LocalLayers[l] = true
+		}
+	}
+
+	// Gemma 3 can rotate local and global layers at different frequencies, and this package does
+	// not implement that: it keeps one rotation per model. Refused rather than served at the wrong
+	// rate, because a wrong rotation is invisible -- the output stays fluent and every token is
+	// slightly wrong -- and the file says plainly that two rates are wanted.
+	if base, ok := f.Get[float32](arch + ".rope.freq_base_swa"); ok && base != cfg.RopeBase {
+		return Config{}, fmt.Errorf("llama: %s.rope.freq_base_swa = %g with a global base of %g: "+
+			"two rotation frequencies are not implemented", arch, base, cfg.RopeBase)
+	}
+
 	// Gemma scales the embeddings by sqrt(hidden) on the way in. Computed here, once, so the
 	// three lookup sites multiply by a constant instead of taking a square root per token.
 	if spec.embedScale {
@@ -655,8 +726,26 @@ func (c Config) String() string {
 	if c.PostNorms {
 		extra += ", sandwich norms"
 	}
-	if c.SlidingPattern {
-		extra += fmt.Sprintf(", every second layer bounded to %d", c.WindowLen)
+	// The window is per layer when the file (or the architecture's rule) said so, so the summary
+	// counts rather than describing a rule: "every second layer" was wrong for a file whose layers
+	// are all local, and a reader cannot check a claim they cannot see the data for.
+	if c.WindowLen > 0 {
+		local := 0
+		for l := range c.Layers {
+			if windowFor(c, l) > 0 {
+				local++
+			}
+		}
+		switch local {
+		case c.Layers:
+			extra += fmt.Sprintf(", every layer bounded to %d", c.WindowLen)
+		case 0:
+			// WindowLen set but no layer bounded: worth saying, because the two together look
+			// like a configuration mistake even when they are not.
+			extra += fmt.Sprintf(", no layer bounded to %d", c.WindowLen)
+		default:
+			extra += fmt.Sprintf(", %d of %d layers bounded to %d", local, c.Layers, c.WindowLen)
+		}
 	}
 	return fmt.Sprintf(
 		"%s: %d layers, %d hidden, %d heads (%d kv), head dim %d, ffn %d, ctx %d, vocab %d, rope dim %d base %g %s, eps %g, %s%s%s",

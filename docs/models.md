@@ -467,12 +467,25 @@ also why this test compares relative error against a tolerance of 1e-3 while the
 absolute logits -- 1e-3 absolute against a residual of 5109 would be asking float32 for twelve
 significant figures.
 
-Two reference files are checked, and the difference between them is the reason there are two:
+Four reference files are checked, one per property none of the others can see:
 
-| File               | Prompt     | What only this one can see                        |
-| ------------------ | ---------- | ------------------------------------------------- |
-| `gemma3-270m.json` | 6 tokens   | the numerical range of trained weights            |
-| `gemma3-513.json`  | 513 tokens | the sliding window binding past position 512      |
+| File               | Checkpoint    | What only this one can see                             |
+| ------------------ | ------------- | ------------------------------------------------------ |
+| `gemma3-270m.json` | gemma-3-270m  | the numerical range of trained weights                 |
+| `gemma3-513.json`  | gemma-3-270m  | the sliding window binding past position 512           |
+| `mistral-v2.json`  | Mistral v0.1  | GGUF **version 2** and K-quant tensors                 |
+| `gemma-1.json`     | Gemma 2B      | a block with no QK norm and no sandwich norms          |
+
+`mistral-v2.json` is the only one that loads a version 2 file. Gemma 3 changed nothing about the
+containers this project reads, so a regression in the version check would not show up in any Gemma
+file -- and would show up here as a load failure rather than as wrong numbers. Its K-quant tensors
+also come from `gguf.quants` on the reference side rather than a decoder written for this project:
+the block layouts are intricate enough that reimplementing them would be an invitation to copy the
+thing being checked.
+
+`gemma-1.json` is the negative case for two features. Every other checkpoint normalises each head's
+query and key, or applies sandwich norms, or both; Gemma 1 does neither, so it is what fails if
+either gets applied unconditionally.
 
 Measured: on both, the three sampled layer residuals agree, the top eight logits agree to within
 1e-3 relative, and the argmax is the same token. On the 513-token file that argmax is `brown`, which

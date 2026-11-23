@@ -46,16 +46,60 @@ type realReference struct {
 // weights were trained rather than set to one, and a vocabulary large enough that the output
 // projection dominates the error budget.
 //
-// Gated on GEMMA3_REFERENCE, a JSON file written by the numpy reference for the checkpoint named in
-// GEMMA3_MODEL. See docs/models.md for how to produce it.
+// Each case is gated by two variables: the checkpoint's path and the reference file's name under
+// testdata/reference. See docs/models.md for how to produce one.
 func TestMatchesNumPyReferenceOnRealWeights(t *testing.T) {
-	model := os.Getenv("GEMMA3_MODEL")
-	expectedName := os.Getenv("GEMMA3_REFERENCE")
-	if model == "" || expectedName == "" {
-		t.Skip("set GEMMA3_MODEL and GEMMA3_REFERENCE to compare against a real checkpoint")
+	cases := []struct {
+		name  string
+		env   string
+		why   string
+		stock bool
+	}{
+		{
+			name:  "gemma3-270m",
+			env:   "GEMMA3_MODEL",
+			why:   "Q8_0, per-head QK norm, sandwich norms, 262144-wide vocabulary",
+			stock: true,
+		},
+		{
+			// The same checkpoint as above with a prompt one token past its window, so the
+			// oldest reachable position is either in the attention or not. A six-token prompt
+			// cannot see that boundary -- which is why both files exist.
+			name:  "gemma3-513",
+			env:   "GEMMA3_MODEL",
+			why:   "513 tokens against a window of 512, where the window first binds",
+			stock: true,
+		},
+		{
+			name: "mistral-v2",
+			env:  "MISTRAL_MODEL",
+			why:  "GGUF version 2, K-quant tensors, architecture `llama` with no window",
+		},
+		{
+			name: "gemma-1",
+			env:  "GEMMA_MODEL",
+			why:  "the first Gemma block: scaled embeddings and GeGLU, no QK norm, no sandwich norms",
+		},
 	}
-	// The reference is a file name under testdata/reference, not a path: the fixture it belongs to
-	// is part of the repository, and a path would let a run compare against something outside it.
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			runRealReference(t, c.name, c.env, c.why)
+		})
+	}
+}
+
+// runRealReference compares one checkpoint against its stored reference.
+func runRealReference(t *testing.T, name, env, why string) {
+	t.Helper()
+	model := os.Getenv(env)
+	expectedName := name + ".json"
+	if model == "" {
+		t.Skipf("set %s to compare against the %s checkpoint (%s)", env, name, why)
+	}
+	// The reference is a file under testdata/reference rather than a path: it is part of the
+	// repository, and a caller-supplied path would let a run compare against something outside it.
 	expectedPath := filepath.Join("testdata", "reference", expectedName)
 	raw, err := os.ReadFile(expectedPath)
 	if err != nil {

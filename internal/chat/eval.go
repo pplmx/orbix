@@ -341,8 +341,24 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		}
 		return v, nil
 	case callExpr:
-		// No function is implemented. A template reaches this only if it does not guard the
-		// call, and then the honest answer is an error rather than a fabricated value:
+		// raise_exception is the one global implemented, because its semantics are to abort with
+		// the message the template wrote. Gemma's template uses it to reject a system role and a
+		// conversation that does not alternate, and Jinja's own behaviour is to raise -- so
+		// reporting "no function is implemented" would hide the sentence that says what is wrong
+		// with the conversation and leave an operator reading a fallback with no reason.
+		if t.name == "raise_exception" {
+			msg := "the template raised an exception"
+			if len(t.args) > 0 {
+				arg, err := evalExpr(t.args[0], sc)
+				if err != nil {
+					return value{}, err
+				}
+				msg = strings.TrimSpace(arg.text)
+			}
+			return value{}, fmt.Errorf("chat: template raised: %s", msg)
+		}
+		// Everything else is unimplemented. A template reaches this only if it does not guard
+		// the call, and then the honest answer is an error rather than a fabricated value:
 		// strftime_now in particular would otherwise put a wrong date in the system prompt.
 		return value{}, fmt.Errorf("chat: call to %q: no function is implemented", t.name)
 	case attrExpr:

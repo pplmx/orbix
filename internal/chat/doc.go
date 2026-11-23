@@ -18,6 +18,8 @@
 //   - {% set %}, including assigning to a name another statement reads
 //   - {{ expression }} with string and variable operands, + concatenation, - subtraction and
 //     % modulo between integers, and the trim, tojson and length filters
+//   - raise_exception, which is the one global implemented: its job is to abort with the
+//     message the template wrote, and templates use it to assert what a conversation may be
 //   - whitespace control ({%- and -%}), which templates use to keep output tight
 //
 // Anything outside that set makes Parse report an error naming the construct it does

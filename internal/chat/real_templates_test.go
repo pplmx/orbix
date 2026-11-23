@@ -378,7 +378,10 @@ func TestGemma2Template(t *testing.T) {
 	if err == nil {
 		t.Fatal("two user turns in a row rendered; the alternation guard did not fire")
 	}
-	if !strings.Contains(err.Error(), "raise_exception") {
-		t.Errorf("error = %v, want it to name the template's raise_exception", err)
+	// The template's own sentence, not the name of the function it called with. An operator
+	// reading a fallback needs to know the conversation was rejected and why; "call to
+	// raise_exception: no function is implemented" said neither.
+	if !strings.Contains(err.Error(), "roles must alternate") {
+		t.Errorf("error = %v, want it to carry the template's own reason", err)
 	}
 }

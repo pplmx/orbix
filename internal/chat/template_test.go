@@ -3121,3 +3121,60 @@ func TestRenderModuloRejects(t *testing.T) {
 		}
 	}
 }
+
+// TestRaiseExceptionCarriesTheTemplate'sMessage covers the one global this package implements.
+//
+// raise_exception is not a filter or a value-producing function: its semantics are to abort with
+// the text the template wrote, and templates use it as an assertion about the conversation --
+// Gemma rejects a system role and a non-alternating history that way. Reporting "no function is
+// implemented" instead left the operator with a fallback prompt and no idea why.
+//
+// The argument is a general expression rather than a literal, so it is evaluated: a template that
+// builds the message from loop state has to produce the message it would have raised.
+func TestRaiseExceptionCarriesTheTemplatesMessage(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{{ raise_exception('stop here') }}`, "template raised: stop here"},
+		// A guarded call never runs, which is how the real templates use it.
+		{`{% if false %}{{ raise_exception('no') }}{% endif %}ok`, "ok"},
+		// The argument is evaluated like any other expression.
+		{`{% for m in messages %}{{ raise_exception('bad role ' + m.role) }}{% endfor %}`,
+			"template raised: bad role user"},
+	}
+	for _, tc := range cases {
+		parsed, err := Parse(tc.src)
+		if err != nil {
+			t.Errorf("%q: Parse: %v", tc.src, err)
+			continue
+		}
+		got, err := parsed.Render([]Message{{Role: "user", Content: "hi"}}, Inputs{})
+		if strings.Contains(tc.want, "template raised") {
+			if err == nil {
+				t.Errorf("%q rendered %q, want an error", tc.src, got)
+				continue
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%q: error = %v, want it to contain %q", tc.src, err, tc.want)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: Render: %v", tc.src, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q = %q, want %q", tc.src, got, tc.want)
+		}
+	}
+
+	// A different unimplemented call keeps the old behaviour: it is reported, not silently
+	// treated as empty, because strftime_now would otherwise put a wrong date in a prompt.
+	parsed, err := Parse(`{{ strftime_now('%Y') }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := parsed.Render(nil, Inputs{}); err == nil {
+		t.Error("an unimplemented call other than raise_exception rendered instead of failing")
+	} else if !strings.Contains(err.Error(), "no function is implemented") {
+		t.Errorf("error = %v, want it to name the missing function", err)
+	}
+}

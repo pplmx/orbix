@@ -16,10 +16,14 @@ import (
 // the kernels expect, so the forward pass never transposes anything.
 type layer struct {
 	attnNorm []float32 // [hidden]
-	wq       []float32 // [hidden, heads*headDim]
-	wk       []float32 // [hidden, kvHeads*headDim]
-	wv       []float32 // [hidden, kvHeads*headDim]
-	wo       []float32 // [heads*headDim, hidden]
+	// attnPostNorm and ffnPostNorm are [hidden], and nil on architectures that add sub-layer
+	// outputs to the residual without normalizing them first.
+	attnPostNorm []float32
+	ffnPostNorm  []float32
+	wq           []float32 // [hidden, heads*headDim]
+	wk           []float32 // [hidden, kvHeads*headDim]
+	wv           []float32 // [hidden, kvHeads*headDim]
+	wo           []float32 // [heads*headDim, hidden]
 
 	// qBias, kBias, and vBias are added to the projections before attention. They
 	// are nil for architectures that do not use them (Llama) and present for those
@@ -133,6 +137,9 @@ func LoadWeights(path string) (*Weights, error) {
 			p+"attn_norm.weight", p+"attn_q.weight", p+"attn_k.weight",
 			p+"attn_v.weight", p+"attn_output.weight", p+"ffn_norm.weight",
 		)
+		if cfg.PostNorms {
+			names = append(names, p+"post_attention_norm.weight", p+"post_ffw_norm.weight")
+		}
 		if cfg.Experts > 0 {
 			names = append(names,
 				p+"ffn_gate_inp.weight", p+"ffn_gate_exps.weight",
@@ -177,15 +184,17 @@ func LoadWeights(path string) (*Weights, error) {
 	for i := range cfg.Layers {
 		p := fmt.Sprintf("blk.%d.", i)
 		w.Layers[i] = layer{
-			attnNorm: tensors[p+"attn_norm.weight"],
-			wq:       tensors[p+"attn_q.weight"],
-			wk:       tensors[p+"attn_k.weight"],
-			wv:       tensors[p+"attn_v.weight"],
-			wo:       tensors[p+"attn_output.weight"],
-			ffnNorm:  tensors[p+"ffn_norm.weight"],
-			qBias:    tensors[p+"attn_q.bias"],
-			kBias:    tensors[p+"attn_k.bias"],
-			vBias:    tensors[p+"attn_v.bias"],
+			attnNorm:     tensors[p+"attn_norm.weight"],
+			wq:           tensors[p+"attn_q.weight"],
+			wk:           tensors[p+"attn_k.weight"],
+			wv:           tensors[p+"attn_v.weight"],
+			wo:           tensors[p+"attn_output.weight"],
+			ffnNorm:      tensors[p+"ffn_norm.weight"],
+			attnPostNorm: tensors[p+"post_attention_norm.weight"],
+			ffnPostNorm:  tensors[p+"post_ffw_norm.weight"],
+			qBias:        tensors[p+"attn_q.bias"],
+			kBias:        tensors[p+"attn_k.bias"],
+			vBias:        tensors[p+"attn_v.bias"],
 		}
 		if cfg.Experts > 0 {
 			w.Layers[i].router = tensors[p+"ffn_gate_inp.weight"]

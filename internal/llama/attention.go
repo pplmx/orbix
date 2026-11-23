@@ -47,7 +47,55 @@ func (s span) row(i int) []float32 {
 // q is this position's query for the head; scores is scratch at least n long; out
 // is this head's slice of the attention output, which attend overwrites. keys and
 // values must together cover exactly n positions.
-func attend(q []float32, keys, values []span, n int, scores, out []float32, scale float32) error {
+// attnParams is how one layer turns a query-key dot product into a score.
+//
+// It is a struct rather than two float arguments because the two are always set together and
+// because a caller that threaded one of them through and forgot the other would produce a model
+// that runs, generates text, and is silently wrong -- which is the same failure the architecture
+// table exists to prevent.
+type attnParams struct {
+	// scale multiplies every dot product.
+	scale float32
+	// softcap, when non-zero, bounds the scaled score with tanh(s/softcap)*softcap.
+	//
+	// Gemma 2 uses this to keep attention logits inside a range the model was trained on: the
+	// curve is near-linear for small scores and saturates towards +/- softcap, so a head that
+	// would have been extremely confident is pulled back without disturbing the ordinary case.
+	softcap float32
+}
+
+// apply turns one raw dot product into a score.
+func (p attnParams) apply(dot float32) float32 {
+	return kernel.SoftcapValue(dot*p.scale, p.softcap)
+}
+
+// attentionParams returns the layer's score parameters.
+//
+// The scale is 1/sqrt(head dim), where the head dim comes from the file's key_length rather than
+// from Hidden/Heads -- Gemma 2's attention projections are not square, and the two numbers differ
+// by twelve percent there.
+func attentionParams(cfg Config, l int) attnParams {
+	return attnParams{scale: float32(1 / math.Sqrt(float64(cfg.HeadDim))), softcap: cfg.AttnSoftcap}
+}
+
+// windowFor returns how many recent positions layer l may attend to, or 0 for all of them.
+//
+// A pattern of alternating local and global layers is what Gemma 2 does: every second block
+// reads a bounded window and the ones between it read the whole context, which halves the work
+// of the long-range blocks without losing any position from the model's reach. Reading the
+// window from Config for every layer is what would be wrong there -- it would make every block
+// local.
+func windowFor(cfg Config, l int) int {
+	if !cfg.SlidingPattern {
+		return cfg.WindowLen
+	}
+	if l%2 == 0 {
+		return cfg.WindowLen
+	}
+	return 0
+}
+
+func attend(q []float32, keys, values []span, n int, scores, out []float32, p attnParams) error {
 	if n <= 0 {
 		return fmt.Errorf("llama: attention over %d positions", n)
 	}
@@ -73,7 +121,7 @@ func attend(q []float32, keys, values []span, n int, scores, out []float32, scal
 			for j := range q {
 				dot += q[j] * kh[j]
 			}
-			scores[t] = dot * scale
+			scores[t] = p.apply(dot)
 			t++
 		}
 	}
@@ -104,14 +152,6 @@ func spanRows(spans []span) int {
 	return n
 }
 
-// attentionScale is the 1/sqrt(headDim) factor applied to every score.
-//
-// It is applied to the query-side product rather than to each score separately in
-// the fused form, but the arithmetic is identical: one multiply per score.
-func attentionScale(cfg Config) float32 {
-	return float32(1 / math.Sqrt(float64(cfg.HeadDim)))
-}
-
 // attentionCached runs one block's self-attention for a position whose keys and
 // values are already in the cache.
 //
@@ -140,7 +180,7 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 		}
 	}
 
-	scale := attentionScale(cfg)
+	params := attentionParams(cfg, l)
 	group := cfg.Heads / cfg.KVHeads
 	n := pos + 1
 	for h := range cfg.Heads {
@@ -151,19 +191,22 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 		}
 		// A sliding-window model reads only the recent positions, which is a bound on
 		// attention rather than on storage.
-		if cfg.WindowLen > 0 {
-			keys = trimSpans(keys, cfg.WindowLen)
-			values = trimSpans(values, cfg.WindowLen)
+		if w := windowFor(cfg, l); w > 0 {
+			keys = trimSpans(keys, w)
+			values = trimSpans(values, w)
 		}
 		nWin := spanRows(keys)
 		qh := m.q[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 		out := m.attn[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
-		if err := attend(qh, keys, values, nWin, m.scores, out, scale); err != nil {
+		if err := attend(qh, keys, values, nWin, m.scores, out, params); err != nil {
 			return err
 		}
 	}
 
 	if err := m.run.MatVec(m.attnOut, layer.wo, m.attn, cfg.Hidden, cfg.Heads*cfg.HeadDim); err != nil {
+		return err
+	}
+	if err := m.postNorm(m.attnOut, layer.attnPostNorm); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(m.x, m.attnOut)

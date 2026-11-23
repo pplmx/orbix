@@ -61,6 +61,10 @@ type Model struct {
 	// That is the point of the flag for the tests that use it, and a reason not to use it
 	// for a test about text rather than about shapes.
 	NoBytes bool
+	// PostNorms writes the extra per-block norms a "sandwich" architecture applies to its
+	// sub-layer outputs before the residual add. The architecture still has to ask for them:
+	// the tensors alone do not change what the forward pass does.
+	PostNorms bool
 	// ChatTemplate, when set, is written to tokenizer.chat_template.
 	ChatTemplate string
 
@@ -73,6 +77,10 @@ type Model struct {
 	// that accepts the default does; a non-nil value states it explicitly.
 	AddBOS *bool
 
+	// AttnSoftcap and FinalSoftcap set the two <arch> softcap keys a Gemma 2 file carries.
+	// Zero omits them, which is what every other architecture does.
+	AttnSoftcap  float32
+	FinalSoftcap float32
 	// WindowLen sets <arch>.attention.sliding_window, the per-layer attention window a
 	// sliding-window model like Mistral uses. Zero omits the key, which the loader reads as
 	// unbounded -- the same meaning an absent key has in a real file.
@@ -260,6 +268,13 @@ func (m Model) tensors() []tensorSpec {
 			tensorSpec{p + "attn_output.weight", []uint64{h, h}},
 			tensorSpec{p + "ffn_norm.weight", []uint64{h}},
 		)
+		// The sandwich norms a Gemma 2 block carries in addition to the pre-norms.
+		if m.PostNorms {
+			out = append(out,
+				tensorSpec{p + "post_attention_norm.weight", []uint64{h}},
+				tensorSpec{p + "post_ffw_norm.weight", []uint64{h}},
+			)
+		}
 		if m.AttnBias {
 			out = append(out,
 				tensorSpec{p + "attn_q.bias", []uint64{h}},
@@ -410,7 +425,13 @@ func fillWeights(vals []float32, name string) {
 
 // isNorm reports whether a tensor is a normalization weight.
 func isNorm(name string) bool {
-	for _, suffix := range []string{"attn_norm.weight", "ffn_norm.weight", "output_norm.weight"} {
+	// The post-norms are norms too: leaving them out gave them pseudo-random values, so a
+	// sandwich-architecture fixture had every sub-layer output rescaled by noise and a test that
+	// expected the identity after normalization measured 0.58.
+	for _, suffix := range []string{
+		"attn_norm.weight", "ffn_norm.weight", "output_norm.weight",
+		"post_attention_norm.weight", "post_ffw_norm.weight",
+	} {
 		if len(name) >= len(suffix) && name[len(name)-len(suffix):] == suffix {
 			return true
 		}
@@ -438,6 +459,12 @@ func (m Model) kvs() []kv {
 			u32KV(a+".expert_count", m.Experts),
 			u32KV(a+".expert_used_count", m.ExpertUsed),
 		)
+	}
+	if m.AttnSoftcap > 0 {
+		out = append(out, f32KV(a+".attn_logit_softcapping", m.AttnSoftcap))
+	}
+	if m.FinalSoftcap > 0 {
+		out = append(out, f32KV(a+".final_logit_softcapping", m.FinalSoftcap))
 	}
 	if m.WindowLen > 0 {
 		out = append(out, u32KV(a+".attention.sliding_window", m.WindowLen))

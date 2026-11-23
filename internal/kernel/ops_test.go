@@ -1172,3 +1172,74 @@ func GELUValues(x float32) float32 {
 	GELU(v)
 	return v[0]
 }
+
+// TestSoftcapValue checks the bound and the shape of the curve.
+//
+// The three properties that matter are separate: the value is bounded by c, it is unchanged near
+// zero where the model's ordinary scores live, and it is odd (softcap(-v) == -softcap(v)), which
+// is what keeps a bound from favouring one direction. A formula that forgot the factor outside
+// tanh still satisfies the bound and the sign, so the exact values are asserted too.
+func TestSoftcapValue(t *testing.T) {
+	const c = 30
+	near := func(got, want float32) bool { return math.Abs(float64(got-want)) < 1e-5 }
+
+	// Odd, and zero at zero.
+	if got := SoftcapValue(0, c); got != 0 {
+		t.Errorf("softcap(0) = %v, want 0", got)
+	}
+	for _, v := range []float32{1, 12, 100, 1e6} {
+		if pos, neg := SoftcapValue(v, c), SoftcapValue(-v, c); !near(pos, -neg) {
+			t.Errorf("softcap is not odd at %v: %v and %v", v, pos, neg)
+		}
+	}
+	// The bound is |result| <= c, and in float32 tanh reaches 1 on its own: 30*tanh(1e6/30) is
+	// exactly 30, because 1e6/30 is far past the point where the float32 answer is 1. So the
+	// equality case is reachable with a finite input, and the assertion has to allow it.
+	//
+	// Strictness is asserted where it is real: at 3c the curve is still inside the bound, which
+	// is the range a trained model actually produces.
+	cases := []struct {
+		v      float32
+		strict bool
+	}{
+		{100, true}, {1e6, false}, {float32(math.Inf(1)), false},
+	}
+	for _, tc := range cases {
+		got := SoftcapValue(tc.v, c)
+		if got > c || got < 0 {
+			t.Errorf("softcap(%v) = %v, want inside [0, %v]", tc.v, got, c)
+		}
+		if tc.strict && got >= c {
+			t.Errorf("softcap(%v) = %v, want strictly inside [0, %v)", tc.v, got, c)
+		}
+	}
+	// Near zero it is the identity to first order: tanh(x) ~ x, so 1e-3 is unchanged.
+	if got := SoftcapValue(1e-3, c); !near(got, 1e-3) {
+		t.Errorf("softcap(1e-3) = %v, want it left alone", got)
+	}
+	// One exact point, computed independently: 30*tanh(31/30) for v = 31.
+	if got, want := SoftcapValue(31, 30), float32(30*math.Tanh(31.0/30.0)); !near(got, want) {
+		t.Errorf("softcap(31, 30) = %v, want %v", got, want)
+	}
+
+	// A non-positive cap is not a bound anyone could ask for: zero would divide by zero and a
+	// negative one would invert the sign. Both leave the value alone.
+	for _, bad := range []float32{0, -30} {
+		if got := SoftcapValue(5, bad); got != 5 {
+			t.Errorf("softcap(5, %v) = %v, want it left alone", bad, got)
+		}
+	}
+
+	// The slice form agrees with the scalar one.
+	vals := []float32{-100, -1, 0, 1, 100}
+	want := make([]float32, len(vals))
+	for i, v := range vals {
+		want[i] = SoftcapValue(v, c)
+	}
+	Softcap(vals, c)
+	for i := range vals {
+		if vals[i] != want[i] {
+			t.Errorf("Softcap[%d] = %v, want %v", i, vals[i], want[i])
+		}
+	}
+}

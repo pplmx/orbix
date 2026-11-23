@@ -128,6 +128,17 @@ type Config struct {
 
 	// FFNAct is the activation on the gated feed-forward branch.
 	FFNAct ffnAct
+
+	// AttnSoftcap, when non-zero, bounds every attention score with
+	// tanh(score/AttnSoftcap)*AttnSoftcap.
+	AttnSoftcap float32
+	// FinalSoftcap, when non-zero, bounds the output logits the same way.
+	FinalSoftcap float32
+	// PostNorms reports that each block normalises its sub-layer outputs before the residual
+	// add. The weights are nil on architectures that do not.
+	PostNorms bool
+	// SlidingPattern reports that only every second layer is bounded by WindowLen.
+	SlidingPattern bool
 }
 
 // activateGate applies the architecture's gated feed-forward activation in place.
@@ -200,6 +211,15 @@ type archSpec struct {
 	embedScale bool
 	// ffn is the activation on the gated feed-forward branch.
 	ffn ffnAct
+	// postNorms reports that each block normalises its attention and feed-forward outputs
+	// before adding them to the residual, as Gemma 2 does. The usual pre-norm block adds a
+	// sub-layer's output directly; this one normalises it first, which is why the tensors have
+	// to be present as well as the flag set.
+	postNorms bool
+	// slidingPattern reports that attention alternates between a bounded window and the whole
+	// context, layer by layer. The window length itself is a metadata key; this says whether it
+	// applies to every layer or to every second one.
+	slidingPattern bool
 }
 
 // archSpecs lists the architectures this package implements.
@@ -226,6 +246,16 @@ var archSpecs = map[string]archSpec{
 	"gemma": {
 		rope: RopeNeox, attnBias: false,
 		embedScale: true, ffn: ffnGELU,
+	},
+	// Gemma 2 adds three things on top of Gemma: both attention scores and output logits are
+	// bounded by a softcap, each block normalises its sub-layer outputs before the residual
+	// ("sandwich" norms), and only every second block is bounded by the sliding window. The two
+	// cap values and the window length are metadata keys; what belongs here is that the blocks
+	// are shaped that way at all.
+	"gemma2": {
+		rope: RopeNeox, attnBias: false,
+		embedScale: true, ffn: ffnGELU,
+		postNorms: true, slidingPattern: true,
 	},
 }
 
@@ -261,6 +291,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		AttnBias:   spec.attnBias,
 		FFNAct:     spec.ffn,
 		EmbedScale: 1,
+		PostNorms:  spec.postNorms, SlidingPattern: spec.slidingPattern,
 	}
 	if name, ok := f.Get[string]("general.name"); ok {
 		cfg.Name = name
@@ -295,7 +326,25 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	if cfg.Hidden%cfg.Heads != 0 {
 		return Config{}, fmt.Errorf("llama: embedding_length %d is not divisible by head_count %d", cfg.Hidden, cfg.Heads)
 	}
+	// The per-head width is usually Hidden/Heads, but not always: Gemma 2 has 2304 hidden and 8
+	// heads with 256-wide queries and keys, so the attention projections are not square. A file
+	// that states key_length overrides the derived value, and the tensor shapes below then
+	// validate the result.
 	cfg.HeadDim = cfg.Hidden / cfg.Heads
+	if v, ok := f.Get[int](arch + ".attention.key_length"); ok {
+		if v <= 0 || v > cfg.Hidden {
+			return Config{}, fmt.Errorf("llama: %s.attention.key_length = %d, outside (0, %d]",
+				arch, v, cfg.Hidden)
+		}
+		cfg.HeadDim = v
+	}
+	// One width for q, k and v is what the rest of the package assumes, so a file that asks for
+	// different key and value widths is refused rather than half-supported: the attention
+	// output would be assembled from the wrong slice of the wrong length.
+	if v, ok := f.Get[int](arch + ".attention.value_length"); ok && v != cfg.HeadDim {
+		return Config{}, fmt.Errorf("llama: %s.attention.value_length = %d, but key_length is %d; "+
+			"equal widths are the only shape this package implements", arch, v, cfg.HeadDim)
+	}
 	if cfg.Heads%cfg.KVHeads != 0 {
 		return Config{}, fmt.Errorf("llama: head_count %d is not divisible by head_count_kv %d", cfg.Heads, cfg.KVHeads)
 	}
@@ -385,6 +434,27 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// normally.
 	if v, ok := f.Get[int](arch + ".attention.sliding_window"); ok && v > 0 {
 		cfg.WindowLen = v
+	}
+
+	// The two caps are per-file numbers, so they are read by key rather than taken from the
+	// architecture. A negative or non-finite value would invert or destroy every score, so both
+	// are refused instead of being clamped to something that runs.
+	for _, capKey := range []struct {
+		name string
+		dst  *float32
+	}{
+		{"attn_logit_softcapping", &cfg.AttnSoftcap},
+		{"final_logit_softcapping", &cfg.FinalSoftcap},
+	} {
+		v, ok := f.Get[float32](arch + "." + capKey.name)
+		if !ok {
+			continue
+		}
+		if v <= 0 || math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return Config{}, fmt.Errorf("llama: %s.%s = %v, must be a finite positive number",
+				arch, capKey.name, v)
+		}
+		*capKey.dst = v
 	}
 
 	// Gemma scales the embeddings by sqrt(hidden) on the way in. Computed here, once, so the
@@ -558,6 +628,15 @@ func (c Config) String() string {
 	}
 	if c.FFNAct != ffnSiLU {
 		extra += ", " + c.FFNAct.String() + " gate"
+	}
+	if c.AttnSoftcap != 0 || c.FinalSoftcap != 0 {
+		extra += fmt.Sprintf(", softcaps %g/%g", c.AttnSoftcap, c.FinalSoftcap)
+	}
+	if c.PostNorms {
+		extra += ", sandwich norms"
+	}
+	if c.SlidingPattern {
+		extra += fmt.Sprintf(", every second layer bounded to %d", c.WindowLen)
 	}
 	return fmt.Sprintf(
 		"%s: %d layers, %d hidden, %d heads (%d kv), head dim %d, ffn %d, ctx %d, vocab %d, rope dim %d base %g %s, eps %g, %s%s%s",

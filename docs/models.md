@@ -9,6 +9,7 @@ Orbix targets the GGUF ecosystem. Initial support:
 | **Mistral**             | `mistral`            | v0.3          |
 | **Mixtral**             | `llama` with experts | v0.3          |
 | **Gemma**               | `gemma`              | done          |
+| **Gemma 2**             | `gemma2`             | done          |
 
 | Quantization                   | Status |
 | ------------------------------ | ------ |
@@ -22,9 +23,9 @@ Orbix targets the GGUF ecosystem. Initial support:
 
 GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally. Two ggml types are defined and sized but not decoded -- `Q8_1` and `Q8_K` -- and both are conversion-tool intermediates rather than formats a released checkpoint uses. A file carrying either is refused with `cannot decode <type>` at load, the same way an unrecognised type is.
 
-Three architectures are checked against real checkpoints: `llama` against llama.cpp's
-log-probabilities, `qwen2` against a converted official checkpoint, and `gemma` against
-llama.cpp's log-probabilities on a converted Gemma 2B. The MoE path has its own real file.
+Four architectures are checked against real checkpoints: `llama` against llama.cpp's
+log-probabilities, `qwen2` against a converted official checkpoint, and `gemma` and `gemma2`
+against llama.cpp's log-probabilities on converted Gemma 2B files. The MoE path has its own real file.
 `mistral` is not -- its configuration and sliding window are covered against constructed files.
 
 `gemma` differs from `llama` in three ways that no packet listing shows, and each one was found
@@ -44,6 +45,26 @@ The reference implementation's norm layer multiplies by `(1 + weight)`, which in
 add the 1 at load time. This format does not need it: using the stored values directly reproduces
 llama.cpp's log probabilities, while adding 1 puts them 26 nats away. The conversion was written,
 measured, and removed.
+
+`gemma2` adds four more, and one of them changes a shape rather than a number:
+
+- Attention scores and output logits are each bounded by a softcap (`tanh(x/c)*c`), with the two
+  values read from `attn_logit_softcapping` and `final_logit_softcapping`.
+- Every block normalises its attention output and its feed-forward output before adding them to
+  the residual. Without this the model is not recognisable at all: measured against llama.cpp,
+  dropping both norms puts the top-8 log probabilities 130 nats away.
+- Only every second block is bounded by the sliding window; the blocks between read the whole
+  context. Applying the window to every layer is what the metadata key alone would do.
+- The attention projections are not square. Gemma 2 2B has 2304 hidden and 8 heads but 256-wide
+  queries and keys, so the per-head width comes from `attention.key_length` rather than from
+  `hidden/heads`, which would give 288.
+
+Measured on gemma-2-2b-it-Q3_K_L against llama.cpp: the same top-8 tokens in the same order, with
+a worst deviation of 0.37 nats. That is larger than Gemma 1's 0.19 on a four-bit file, which is
+what a three-bit quantisation costs when two implementations dequantize independently. One thing
+this comparison cannot see is the softcaps: at that position the logits are well inside their cap,
+so turning both off moves the deviation by 0.004. They are required by the architecture and
+numerically inert there, and no test in this repo would notice them applied in the wrong place.
 
 Quantization is checked at the block level rather than by comparing generations across formats:
 exact-value tests on constructed blocks for the 32-weight formats, a round-trip error bound for

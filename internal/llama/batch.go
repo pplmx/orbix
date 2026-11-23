@@ -335,7 +335,7 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 		}
 	}
 
-	scale := attentionScale(cfg)
+	params := attentionParams(cfg, l)
 	group := cfg.Heads / cfg.KVHeads
 
 	// Store the whole batch first, in position order, then attend. Writing first is safe
@@ -392,15 +392,15 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 				attMu.Unlock()
 				return
 			}
-			if cfg.WindowLen > 0 {
-				keys = trimSpans(keys, cfg.WindowLen)
-				values = trimSpans(values, cfg.WindowLen)
+			if w := windowFor(cfg, l); w > 0 {
+				keys = trimSpans(keys, w)
+				values = trimSpans(values, w)
 			}
 			nWin := spanRows(keys)
 			qOff := i*qdim + h*cfg.HeadDim
 			qh := b.q[qOff : qOff+cfg.HeadDim]
 			out := b.attn[i*qdim+h*cfg.HeadDim : i*qdim+(h+1)*cfg.HeadDim]
-			if err := attend(qh, keys, values, nWin, sc, out, scale); err != nil {
+			if err := attend(qh, keys, values, nWin, sc, out, params); err != nil {
 				attMu.Lock()
 				attErr = err
 				attMu.Unlock()
@@ -413,6 +413,9 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	}
 
 	if err := m.run.MatMulTransposed(b.attnOut, b.attn, layer.wo, n, cfg.Hidden, qdim); err != nil {
+		return err
+	}
+	if err := m.postNormRows(b.attnOut, layer.attnPostNorm, n); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
@@ -440,6 +443,9 @@ func (m *Model) feedForwardBatch(b *batch, cfg Config, l int) error {
 		return err
 	}
 	if err := m.run.MatMulTransposed(b.attnOut, b.up, layer.wDown, n, cfg.Hidden, cfg.FFN); err != nil {
+		return err
+	}
+	if err := m.postNormRows(b.attnOut, layer.ffnPostNorm, n); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
@@ -662,7 +668,7 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 	}
 
 	// Each sequence rotates at its own position and appends at its own cache end.
-	scale := attentionScale(cfg)
+	params := attentionParams(cfg, l)
 	group := cfg.Heads / cfg.KVHeads
 
 	for r := range n {
@@ -693,20 +699,23 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 			if err != nil {
 				return err
 			}
-			if cfg.WindowLen > 0 {
-				keys = trimSpans(keys, cfg.WindowLen)
-				values = trimSpans(values, cfg.WindowLen)
+			if w := windowFor(cfg, l); w > 0 {
+				keys = trimSpans(keys, w)
+				values = trimSpans(values, w)
 			}
 			nWin := spanRows(keys)
 			qh := qRow[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 			out := b.attn[r*qdim+h*cfg.HeadDim : r*qdim+(h+1)*cfg.HeadDim]
-			if err := attend(qh, keys, values, nWin, b.scores[r], out, scale); err != nil {
+			if err := attend(qh, keys, values, nWin, b.scores[r], out, params); err != nil {
 				return err
 			}
 		}
 	}
 
 	if err := m.run.MatMulTransposed(b.attnOut, b.attn, layer.wo, n, cfg.Hidden, qdim); err != nil {
+		return err
+	}
+	if err := m.postNormRows(b.attnOut, layer.attnPostNorm, n); err != nil {
 		return err
 	}
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
@@ -757,6 +766,9 @@ func (b *decodeBatch) feedForward(m *Model, l int) error {
 	if err := m.run.MatMulTransposed(b.attnOut, b.up, layer.wDown, n, cfg.Hidden, cfg.FFN); err != nil {
 		return err
 	}
+	if err := m.postNormRows(b.attnOut, layer.ffnPostNorm, n); err != nil {
+		return err
+	}
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
 }
 
@@ -775,7 +787,13 @@ func (b *decodeBatch) finish(m *Model) error {
 	if w == nil {
 		w = m.W.TokenEmbedding
 	}
-	return m.run.MatMulTransposed(b.logits, b.xn, w, n, cfg.VocabSize, cfg.Hidden)
+	if err := m.run.MatMulTransposed(b.logits, b.xn, w, n, cfg.VocabSize, cfg.Hidden); err != nil {
+		return err
+	}
+	for r := range n {
+		kernel.Softcap(b.logits[r*cfg.VocabSize:(r+1)*cfg.VocabSize], cfg.FinalSoftcap)
+	}
+	return nil
 }
 
 // feedForwardMoERows runs a mixture-of-experts block for every row.

@@ -282,6 +282,29 @@ func GELU(x []float32) {
 	}
 }
 
+// SoftcapValue bounds one value with c*tanh(v/c), for c > 0.
+//
+// The curve is near-linear for |v| well inside c and saturates towards +/-c outside it, so a
+// model that uses it keeps ordinary scores untouched while an extreme one cannot run away. A
+// non-positive c returns v unchanged: zero would divide by zero and a negative cap would invert
+// the sign, and neither is a bound anything would ask for.
+func SoftcapValue(v, c float32) float32 {
+	if c <= 0 {
+		return v
+	}
+	return c * float32(math.Tanh(float64(v/c)))
+}
+
+// Softcap applies SoftcapValue to every element in place.
+func Softcap(x []float32, c float32) {
+	if c <= 0 {
+		return
+	}
+	for i, v := range x {
+		x[i] = SoftcapValue(v, c)
+	}
+}
+
 // AddInPlace adds b to a elementwise, a += b. Both must have the same length.
 func AddInPlace(a, b []float32) error {
 	if len(a) != len(b) {

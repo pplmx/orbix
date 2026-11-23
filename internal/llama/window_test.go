@@ -418,7 +418,7 @@ func TestAttendRefusesInconsistentArguments(t *testing.T) {
 	scores := make([]float32, 2)
 
 	// The happy path first, so a refusal below is about the argument rather than about attend.
-	if err := attend(q, good, good, 2, scores, out, 0.5); err != nil {
+	if err := attend(q, good, good, 2, scores, out, attnParams{scale: 0.5}); err != nil {
 		t.Fatalf("attend with consistent arguments: %v", err)
 	}
 
@@ -478,7 +478,7 @@ func TestAttendRefusesInconsistentArguments(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := attend(q, c.keys, c.values, c.n, c.scores, c.out, 0.5)
+			err := attend(q, c.keys, c.values, c.n, c.scores, c.out, attnParams{scale: 0.5})
 			if err == nil {
 				t.Fatalf("attend accepted %s", c.name)
 			}
@@ -940,7 +940,7 @@ func TestAttendMatchesAHandComputedCase(t *testing.T) {
 	scores := make([]float32, n)
 	out := make([]float32, 2)
 
-	if err := attend(q, keysSpans, valuesSpans, n, scores, out, 1); err != nil {
+	if err := attend(q, keysSpans, valuesSpans, n, scores, out, attnParams{scale: 1}); err != nil {
 		t.Fatalf("attend: %v", err)
 	}
 	// Both scores are dot(q, key) = 1, so after the softmax each weight is 1/2 and the
@@ -956,7 +956,7 @@ func TestAttendMatchesAHandComputedCase(t *testing.T) {
 	keys[2], keys[3] = -1000, 0 // position 1 now scores ~0 against a query of {1,0}
 	// Recompute: position 0 scores 1, position 1 scores -1000. After the softmax the first
 	// weight is 1/(1+e^-1001) which is 1 in float32, so the output is value 0 exactly.
-	if err := attend(q, keysSpans, valuesSpans, n, scores, out, 1); err != nil {
+	if err := attend(q, keysSpans, valuesSpans, n, scores, out, attnParams{scale: 1}); err != nil {
 		t.Fatalf("attend: %v", err)
 	}
 	for j, want := range []float32{1, 1} {

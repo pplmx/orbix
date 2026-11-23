@@ -248,7 +248,7 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 		return err
 	}
 
-	scale := attentionScale(cfg)
+	params := attentionParams(cfg, l)
 	group := cfg.Heads / cfg.KVHeads
 	n := pos + 1
 
@@ -262,14 +262,14 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 		}
 		// A sliding-window model reads only the recent positions, which bounds
 		// attention rather than storage: the cache still holds the whole context.
-		if cfg.WindowLen > 0 {
-			keys = trimSpans(keys, cfg.WindowLen)
-			values = trimSpans(values, cfg.WindowLen)
+		if w := windowFor(cfg, l); w > 0 {
+			keys = trimSpans(keys, w)
+			values = trimSpans(values, w)
 		}
 		nWin := spanRows(keys)
 		qh := m.q[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
 		out := m.attn[h*cfg.HeadDim : (h+1)*cfg.HeadDim]
-		if err := attend(qh, keys, values, nWin, m.scores, out, scale); err != nil {
+		if err := attend(qh, keys, values, nWin, m.scores, out, params); err != nil {
 			return err
 		}
 	}
@@ -277,7 +277,45 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 	if err := m.run.MatVec(m.attnOut, layer.wo, m.attn, cfg.Hidden, cfg.Heads*cfg.HeadDim); err != nil {
 		return err
 	}
+	if err := m.postNorm(m.attnOut, layer.attnPostNorm); err != nil {
+		return err
+	}
 	return kernel.AddInPlace(m.x, m.attnOut)
+}
+
+// postNorm normalizes a sub-layer's output in place when the architecture asks for it.
+//
+// The usual pre-norm block hands the sub-layer output straight to the residual add; Gemma 2
+// normalizes it first, which is the "sandwich" in the name. weight is nil on every architecture
+// that does not, and the flag is what decides rather than the nil check -- a Gemma 2 file whose
+// norm tensors were missing should be reported by the loader, not silently downgraded to a
+// Llama-shaped block.
+func (m *Model) postNorm(v, weight []float32) error {
+	return m.postNormRows(v, weight, 1)
+}
+
+// postNormRows is postNorm for a batch, one normalization per row.
+func (m *Model) postNormRows(v, weight []float32, rows int) error {
+	if !m.W.Config.PostNorms {
+		return nil
+	}
+	if len(weight) == 0 {
+		return fmt.Errorf("llama: post-norm weight is missing on a model that normalizes sub-layer outputs")
+	}
+	h := m.W.Config.Hidden
+	// Checked rather than assumed: a short buffer here is a shape bug somewhere upstream, and a
+	// slice-bounds panic inside a forward pass names neither the layer nor the tensor.
+	if len(v) < rows*h {
+		return fmt.Errorf("llama: post-norm received %d values for %d rows of %d",
+			len(v), rows, h)
+	}
+	for r := range rows {
+		row := v[r*h : (r+1)*h]
+		if err := kernel.RMSNorm(row, row, weight, m.W.Config.RMSNormEps); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // feedForward runs one block's gated feed-forward network.
@@ -306,6 +344,9 @@ func (m *Model) feedForward(l int) error {
 	if err := m.run.MatVec(m.attnOut, layer.wDown, m.up, cfg.Hidden, cfg.FFN); err != nil {
 		return err
 	}
+	if err := m.postNorm(m.attnOut, layer.ffnPostNorm); err != nil {
+		return err
+	}
 	return kernel.AddInPlace(m.x, m.attnOut)
 }
 
@@ -321,7 +362,14 @@ func (m *Model) finish() error {
 	if w == nil {
 		w = m.W.TokenEmbedding
 	}
-	return m.run.MatVec(m.logits, w, m.xn, cfg.VocabSize, cfg.Hidden)
+	if err := m.run.MatVec(m.logits, w, m.xn, cfg.VocabSize, cfg.Hidden); err != nil {
+		return err
+	}
+	// Gemma 2 bounds the logits themselves, which is a bound on the distribution rather than on
+	// the attention scores: with both, the model cannot report more confidence than it was
+	// trained to express at either end.
+	kernel.Softcap(m.logits, cfg.FinalSoftcap)
+	return nil
 }
 
 // feedForwardMoE runs one mixture-of-experts block.

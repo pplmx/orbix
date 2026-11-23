@@ -20,6 +20,13 @@
 // that a genuine structural difference has no home here, which is the point at which a second
 // implementation is cheaper than more flags.
 //
+// Some architectures need more than a flag: Gemma 2 bounds its attention scores and its output
+// logits with a softcap, normalises each sub-layer output before the residual add, and applies its
+// sliding window to every second block rather than to all of them. Those live in the same forward
+// pass as well -- the softcap inside the score loop, the norms behind one nil-checked helper, the
+// window behind windowFor -- and the values that parameterise them stay metadata keys, because
+// they are per-file numbers rather than per-family switches.
+//
 // They are not equally visible, which is why they are all in the table rather than inferred.
 // Gemma shares every shape and every tensor name with Llama and differs in three of them, so a
 // loader that fell back to Llama's settings runs cleanly and generates fluent English with the

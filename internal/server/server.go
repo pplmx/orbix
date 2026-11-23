@@ -330,7 +330,7 @@ func (s *Server) Shutdown() {
 type chatRequest struct {
 	Model     string        `json:"model"`
 	Messages  []chatMessage `json:"messages"`
-	MaxTokens int           `json:"max_tokens"`
+	MaxTokens *int          `json:"max_tokens"`
 
 	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens, and it is honoured rather
 	// than refused: max_tokens is deprecated in favour of it, so a migrated client sends only
@@ -494,7 +494,7 @@ func (c *chatContent) UnmarshalJSON(b []byte) error {
 type completionRequest struct {
 	Model     string `json:"model"`
 	Prompt    string `json:"prompt"`
-	MaxTokens int    `json:"max_tokens"`
+	MaxTokens *int   `json:"max_tokens"`
 
 	// MaxCompletionTokens is honoured here even though OpenAI defines it only for chat: the
 	// official SDK's completions parameters do not include it, so no SDK client can send it,
@@ -899,7 +899,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	prompt := s.renderChat(req.Messages)
 	s.generate(w, r, generateParams{
 		prompt:              prompt,
-		maxTokens:           req.MaxTokens,
+		maxTokens:           derefInt(req.MaxTokens),
+		maxTokensGiven:      req.MaxTokens != nil,
 		priority:            req.Priority,
 		temperature:         req.Temperature,
 		topK:                req.TopK,
@@ -1050,7 +1051,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.generate(w, r, generateParams{
 		prompt:              req.Prompt,
-		maxTokens:           req.MaxTokens,
+		maxTokens:           derefInt(req.MaxTokens),
+		maxTokensGiven:      req.MaxTokens != nil,
 		priority:            req.Priority,
 		temperature:         req.Temperature,
 		topK:                req.TopK,
@@ -1172,6 +1174,11 @@ type generateParams struct {
 	// what an omitted field decodes to. Every choice is its own engine sequence with its own
 	// sampler, and the range has already been checked by checkChoices.
 	choices int
+	// maxTokensGiven reports that max_tokens was sent, which matters because zero is a budget
+	// of zero rather than "unset". The field is a pointer on the wire so the two are
+	// distinguishable; this carries that distinction into generate, where the budget is
+	// reconciled with max_completion_tokens.
+	maxTokensGiven bool
 	// maxCompletionTokens is OpenAI's newer name for the budget. Nil means the field was not
 	// sent; the two names are reconciled in generate, which is where the precedence is
 	// visible next to the negative check it has to stay ordered against.
@@ -1228,7 +1235,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 	// The check comes after the negative one so a request with max_tokens: -5 and nothing
 	// else is reported for the value it got wrong rather than for a conflict that is not
 	// there.
-	if p.maxCompletionTokens != nil && p.maxTokens > 0 {
+	if p.maxCompletionTokens != nil && *p.maxCompletionTokens < 0 {
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			"max_completion_tokens", "invalid_value",
+			"max_completion_tokens must not be negative, got %d", *p.maxCompletionTokens))
+		return
+	}
+	if p.maxCompletionTokens != nil && p.maxTokensGiven {
 		writeRequestError(w, http.StatusBadRequest, newParamError(
 			"max_completion_tokens", "invalid_value",
 			"max_tokens and max_completion_tokens are two spellings of one limit and cannot "+
@@ -1236,18 +1249,19 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			p.maxTokens, *p.maxCompletionTokens))
 		return
 	}
-	maxTokens := p.maxTokens
-	if p.maxCompletionTokens != nil {
-		if *p.maxCompletionTokens < 0 {
-			writeRequestError(w, http.StatusBadRequest, newParamError(
-				"max_completion_tokens", "invalid_value",
-				"max_completion_tokens must not be negative, got %d", *p.maxCompletionTokens))
-			return
-		}
+	// Absent, not zero: an omitted budget takes the server's default, while an explicit zero is
+	// a budget of zero and is passed through. The engine finishes a sequence whose budget is
+	// already spent before sampling anything, so the caller gets an empty completion with
+	// finish_reason "length" -- the request it made, rather than the server's default length.
+	//
+	// This used to be one int, so zero meant both and an explicit zero silently became the
+	// default: measured, max_tokens: 0 came back with a full-length paragraph.
+	maxTokens := s.cfg.MaxTokens
+	switch {
+	case p.maxCompletionTokens != nil:
 		maxTokens = *p.maxCompletionTokens
-	}
-	if maxTokens <= 0 {
-		maxTokens = s.cfg.MaxTokens
+	case p.maxTokensGiven:
+		maxTokens = p.maxTokens
 	}
 
 	// Encode with BOS only when the model defines one: a model without a BOS id

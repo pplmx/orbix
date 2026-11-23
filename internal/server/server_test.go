@@ -5523,39 +5523,65 @@ func TestCutAtStop(t *testing.T) {
 	}
 }
 
-// TestMaxTokensZeroTakesTheDefault covers the value the API cannot spell.
+// TestMaxTokensZeroGeneratesNothing covers the value the API can spell now.
 //
-// max_tokens is an int, so decoding {\"max_tokens\": 0} and omitting the field produce the same
-// struct: both leave the field at its zero value. The server therefore treats an explicit 0 as
-// "use MaxTokens", and the two bodies have to generate the same completion rather than one of
-// them returning an empty result. The engine does the opposite -- 0 there means no tokens -- which
-// is why the CLI's --max-tokens 0 emits nothing and this test is about the server's layer only.
+// The field used to be a plain int, so {"max_tokens": 0} and omitting it decoded to the same
+// struct and the server read an explicit 0 as "use MaxTokens" -- an earlier test pinned that, and
+// its own comment gave the type as the reason rather than the meaning. Making the field a pointer
+// separate absence from zero, which is what the two actually mean: an omitted budget takes the
+// server's default, an explicit zero is a budget of zero.
 //
-// The assertion is equality of the two responses, not a specific token count: the count follows
-// the prompt and the window, and pinning a number would make this a test of the fixture.
-func TestMaxTokensZeroTakesTheDefault(t *testing.T) {
+// Zero is honoured rather than refused because the engine already answers it: a sequence whose
+// budget is spent finishes before sampling, so the caller gets an empty completion with
+// finish_reason "length". The CLI has always behaved this way for --max-tokens 0, and the server
+// differing was the surprise: a client that computed a budget of zero got a full-length paragraph,
+// which is both wrong and expensive.
+func TestMaxTokensZeroGeneratesNothing(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()
 
-	withZero := decodeBody[completionResponse](t,
+	zero := decodeBody[completionResponse](t,
 		post(t, h, "/v1/completions", `{"prompt": "hi", "max_tokens": 0}`))
-	without := decodeBody[completionResponse](t,
-		post(t, h, "/v1/completions", `{"prompt": "hi"}`))
+	if got := zero.Usage.CompletionTokens; got != 0 {
+		t.Errorf("max_tokens: 0 generated %d tokens, want 0", got)
+	}
+	if len(zero.Choices) != 1 {
+		t.Fatalf("got %d choices, want 1", len(zero.Choices))
+	}
+	if zero.Choices[0].Text != "" {
+		t.Errorf("text = %q, want empty", zero.Choices[0].Text)
+	}
+	// "length" because the budget ran out, which is what the response says for any budget that
+	// ends generation rather than a stop string or the end of the prompt.
+	if got := zero.Choices[0].FinishReason; got != "length" {
+		t.Errorf("finish_reason = %q, want \"length\"", got)
+	}
 
-	if withZero.Usage.CompletionTokens != without.Usage.CompletionTokens {
-		t.Errorf("explicit 0 generated %d tokens, omitting the field generated %d; the server "+
-			"cannot distinguish them, so they must agree",
-			withZero.Usage.CompletionTokens, without.Usage.CompletionTokens)
+	// Omitting the field still takes the server's default, which is the other half of the
+	// distinction and the one every ordinary request relies on.
+	absent := decodeBody[completionResponse](t,
+		post(t, h, "/v1/completions", `{"prompt": "hi"}`))
+	if absent.Usage.CompletionTokens == 0 {
+		t.Error("omitting max_tokens generated nothing; the server default was not applied")
 	}
-	if withZero.Usage.CompletionTokens == 0 {
-		t.Error("an explicit 0 produced no tokens, so it was not read as the default")
+
+	// The newer spelling means the same thing.
+	chatZero := decodeBody[chatResponse](t,
+		post(t, h, "/v1/chat/completions",
+			`{"messages": [{"role": "user", "content": "hi"}], "max_completion_tokens": 0}`))
+	if got := chatZero.Usage.CompletionTokens; got != 0 {
+		t.Errorf("max_completion_tokens: 0 generated %d tokens, want 0", got)
 	}
-	if got, want := withZero.Choices[0].Text, without.Choices[0].Text; got != want {
-		t.Errorf("the two bodies produced different text: %q vs %q", got, want)
-	}
-	if withZero.Choices[0].FinishReason != "length" {
-		t.Errorf("finish reason %q, want \"length\": the default budget outlasts the window",
-			withZero.Choices[0].FinishReason)
+
+	// Two spellings set is a conflict whether or not one of them is zero: the request names the
+	// same limit twice, and the caller has to say which one it meant.
+	resp := post(t, h, "/v1/completions",
+		`{"prompt": "hi", "max_tokens": 0, "max_completion_tokens": 5}`)
+	body := decodeBody[errorBody](t, resp)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 400 || body.Error.Param != "max_completion_tokens" {
+		t.Errorf("max_tokens: 0 with max_completion_tokens: 5 answered %d %q, want a 400 naming"+
+			" max_completion_tokens", resp.StatusCode, body.Error.Param)
 	}
 }
 

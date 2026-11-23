@@ -138,6 +138,12 @@ both is refused with `invalid_value` naming both fields and both numbers, becaus
 alternatives rather than a pair and the two values can disagree; picking one silently would
 answer with a budget the caller may not have meant.
 
+A budget of zero is honoured, not read as "unset": the response is empty with `finish_reason`
+`"length"`, which is what a caller who computed a budget of zero asked for. Omitting the field is
+what takes the server's default. The two used to be the same thing -- the field decoded to a plain
+integer, so an explicit zero silently became the default length, and a request for nothing came back
+with a full paragraph. The types distinguish them now.
+
 OpenAI defines the field on chat only -- the official SDK's completions parameters do not include
 it, so no SDK client sends it there. This server honours it on completions as a deliberate
 superset: treating it as an unknown member and ignoring it, which is the rule for unknown fields,

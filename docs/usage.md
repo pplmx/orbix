@@ -117,6 +117,20 @@ so an operator can see what the checkpoint would have needed. Generating from th
 would be worse than the refusal: it is a plausible continuation that silently ignores half of what
 the caller sent.
 
+The assembled prompt matches llama.cpp token for token on a real code model. Measured on
+Qwen2.5-Coder-0.5B whose prefix ends in an indented `return` and whose suffix opens two new function
+definitions, both produce the same eighteen ids, the markers coming through as single special tokens
+rather than as text. That distinction is worth stating because the same check written without llama.cpp's special-
+token flag agrees with the wrong answer: it splits `<|fim_prefix|>` into nine ordinary pieces and
+still produces a plausible-looking list, so a comparison that skipped the flag would pass while
+testing the tokenizer rather than the markers.
+
+What the model does with a correct prompt is its own business. The same file answered that prefix and
+suffix with `return a * b` -- multiplication inside `add` -- and then carried on writing further
+functions, and llama.cpp produces the identical text from the identical prompt. A 0.5B AWQ
+quantization is not a code model to judge an implementation by; the markers are checked here, the
+completions are not.
+
 Declaring the markers is necessary but not sufficient. A vocabulary comes from the tokenizer a
 checkpoint was converted with, so an instruct model can carry a code model's markers without
 having been trained to use them -- measured on Qwen2.5-0.5B-Instruct, which declares all three,

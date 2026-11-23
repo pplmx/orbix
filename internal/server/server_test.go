@@ -7881,3 +7881,61 @@ func TestTopLogprobsKeepDescendingOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestFIMPromptMatchesReferenceIDs checks the assembled prompt against llama.cpp on a real
+// code model, which is the part the fixture cannot say.
+//
+// The fixture's vocabulary is constructed, so it can pin the order the parts are joined in -- that
+// is TestFIMPromptAssembly above -- but not whether the marker ids this server picks are the ones a
+// published file means. A real Qwen2.5-Coder carries <|fim_prefix|>, <|fim_suffix|> and
+// <|fim_middle|> as single special tokens, and the same text must tokenize to the same ids here.
+//
+// Set CODER_MODEL to a Qwen2.5-Coder GGUF. The expected list is llama.cpp 0.3.37 tokenizing
+// "<|fim_prefix|>" + prefix + "<|fim_suffix|>" + suffix + "<|fim_middle|>" with special tokens
+// enabled; without that flag llama.cpp splits the markers into ordinary text and produces a
+// different, longer list, which is what makes this a check of the marker ids rather than of the
+// tokenizer alone.
+func TestFIMPromptMatchesReferenceIDs(t *testing.T) {
+	path := os.Getenv("CODER_MODEL")
+	if path == "" {
+		t.Skip("set CODER_MODEL to a Qwen2.5-Coder GGUF file")
+	}
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	fim, ok := tok.FIMTokens()
+	if !ok {
+		t.Fatal("no FIM markers were detected in this vocabulary")
+	}
+	eng, err := engine.New(path, engine.Options{MaxActive: 1})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	cfg := eng.Model().Config()
+	srv, err := New(eng, tok, Config{ModelName: cfg.Name, ContextLen: cfg.ContextLen})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const before, after = "def add(a, b):\n    ", "\n\ndef mul(a, b):\n    "
+	got := srv.fimPrompt(before, after, fim)
+	want := []int32{
+		151659, 750, 912, 2877, 11, 293, 982, 257, 151661, 271, 750, 15602, 2877, 11, 293, 982,
+		257, 151660,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("fimPrompt produced %d ids, llama.cpp produces %d\ngot  %v\nwant %v",
+			len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("id %d = %d, want %d\ngot  %v", i, got[i], want[i], got)
+			break
+		}
+	}
+}

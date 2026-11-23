@@ -3245,3 +3245,98 @@ func TestAFailedSequenceStillReportsDone(t *testing.T) {
 			s.PoolFree, s.PoolBlocks)
 	}
 }
+
+// TestCancellationLeavesThePoolWhole covers the cancellation paths that stress does not
+// distinguish: while queued, during prefill, and alongside sequences that must finish normally.
+//
+// The property is the same in all three -- the cancelled sequence reports cancel, every other
+// sequence finishes as it would have, and the pool returns to full -- but the code paths are not.
+// A queued request never allocates a block, one cancelled mid-prefill has allocated some, and one
+// cancelled beside two healthy sequences returns its blocks while they are still using theirs.
+// The last is where a reference-counting mistake shows up as another sequence's logits changing
+// rather than as a counter being wrong.
+//
+// The counter alone would not catch the interesting case: every one of these returned the pool to
+// full even before the Done fix two commits ago, while the caller was receiving no finish reason.
+func TestCancellationLeavesThePoolWhole(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+
+	type want struct {
+		index  int
+		reason string
+	}
+	for _, tc := range []struct {
+		name      string
+		maxActive int
+		cancel    func(cancel context.CancelFunc, pump func())
+		want      []want
+	}{
+		{
+			name:      "one of three, cancelled after the first round",
+			maxActive: 3,
+			cancel: func(cancel context.CancelFunc, pump func()) {
+				pump()
+				cancel()
+			},
+			want: []want{{0, "length"}, {1, "cancel"}, {2, "length"}},
+		},
+		{
+			name:      "cancelled before it is ever scheduled",
+			maxActive: 1,
+			cancel: func(cancel context.CancelFunc, pump func()) {
+				cancel() // the second request is still queued behind the first
+			},
+			want: []want{{0, "length"}, {1, "cancel"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, tok := loadModelAt(t, path, Options{
+				MaxActive: tc.maxActive, MaxQueued: 4, Workers: 1, BlockSize: 16, Blocks: 256,
+			})
+			_ = tok
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			n := len(tc.want)
+			chans := make([]<-chan Event, n)
+			for i := range chans {
+				req := Request{Prompt: []int32{1, 4, 5, 6, 7, 8}, MaxTokens: 6}
+				if tc.want[i].reason == "cancel" {
+					req.Cancel = ctx.Done()
+				}
+				ch, err := e.Submit(req)
+				if err != nil {
+					t.Fatalf("Submit %d: %v", i, err)
+				}
+				chans[i] = ch
+			}
+			tc.cancel(cancel, func() { e.Pump() })
+			for e.Pump() > 0 {
+			}
+
+			for i, ch := range chans {
+				var last Event
+				count := 0
+				for ev := range ch {
+					count++
+					last = ev
+				}
+				if count == 0 {
+					t.Errorf("sequence %d emitted nothing", i)
+					continue
+				}
+				if !last.Done {
+					t.Errorf("sequence %d ended without Done", i)
+				}
+				if last.FinishReason != tc.want[i].reason {
+					t.Errorf("sequence %d finished %q, want %q", i, last.FinishReason,
+						tc.want[i].reason)
+				}
+			}
+			if s := e.Stats(); s.Active != 0 || s.PoolFree != s.PoolBlocks {
+				t.Errorf("after cancellation: active %d, %d of %d blocks free", s.Active,
+					s.PoolFree, s.PoolBlocks)
+			}
+		})
+	}
+}

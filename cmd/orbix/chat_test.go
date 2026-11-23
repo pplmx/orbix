@@ -1573,3 +1573,53 @@ func TestChatSaysWhenClearCannotHelp(t *testing.T) {
 			"an overflow /clear cannot fix:\n%s", out)
 	}
 }
+
+// TestCfgForBlocksFallsBack covers the two branches that return the default instead of a number
+// read from the file.
+//
+// A file without llama.context_length is a real shape -- it is not required by the format -- and a
+// pool of zero would silently disable paging rather than fail loudly, so the fallback is what keeps
+// such a file usable. The other branch is a file with no general.architecture at all, which is
+// malformed but reaches this function through the same path: chat opens the file and sizes the pool
+// before anything else validates it.
+//
+// Both were unexecuted. TestChatSizesThePoolForAWholeContext only ever passes a file that states its
+// context, so the fallback could have been any number -- zero included -- and every test would still
+// pass.
+func TestCfgForBlocksFallsBack(t *testing.T) {
+	t.Run("no context_length", func(t *testing.T) {
+		path := gguftest.Model{NoEOS: true, OmitContextLen: true}.Write(t, t.TempDir())
+		gf, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if _, ok := gf.Get[int]("llama.context_length"); ok {
+			t.Fatal("the fixture still carries the key, so this is not testing the fallback")
+		}
+		// The literal rather than the constant: comparing against defaultBlockContext would
+		// pass for any value of it, including the zero that would silently disable paging --
+		// which the comment on that constant says is the thing being avoided.
+		if got := cfgForBlocks(gf); got != 2048 {
+			t.Errorf("cfgForBlocks = %d for a file with no context length, want 2048", got)
+		}
+	})
+
+	t.Run("no architecture", func(t *testing.T) {
+		// An empty file parses as far as a header with no metadata, which is enough for Arch to
+		// fail and for this function to be reached with nothing to derive a key from.
+		path := filepath.Join(t.TempDir(), "bare.gguf")
+		if err := os.WriteFile(path, []byte("GGUF\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gf, err := gguf.Open(path)
+		if err != nil {
+			t.Skipf("a header-only file is refused here rather than reaching the fallback: %v", err)
+		}
+		if _, err := gf.Arch(); err == nil {
+			t.Fatal("Arch succeeded on a file with no metadata, so this is not testing the fallback")
+		}
+		if got := cfgForBlocks(gf); got != 2048 {
+			t.Errorf("cfgForBlocks = %d for a file with no architecture, want 2048", got)
+		}
+	})
+}

@@ -32,6 +32,11 @@ type Model struct {
 	FFN     int
 	// ContextLen is llama.context_length. Zero means 64.
 	ContextLen int
+	// OmitContextLen leaves the key out entirely, which is a file shape that exists in the
+	// wild and that a reader has to fall back on rather than treat as an error. Distinct from a
+	// ContextLen of zero, which the fixture resolves to 64 and writes; an absent key and a
+	// present zero are different inputs and only one of them is what those files look like.
+	OmitContextLen bool
 	// Vocab is the token list. Empty means DefaultVocab.
 	Vocab []string
 	// BOSID and EOSID are the special token ids; the defaults point at the first two
@@ -461,9 +466,11 @@ func (m Model) kvs() []kv {
 		u32KV(a+".attention.head_count", m.Heads),
 		u32KV(a+".attention.head_count_kv", m.KVHeads),
 		u32KV(a+".feed_forward_length", m.FFN),
-		u32KV(a+".context_length", m.ContextLen),
 		u32KV(a+".rope.dimension_count", m.headDim()),
 		f32KV(a+".attention.layer_norm_rms_epsilon", 1e-5),
+	}
+	if !m.OmitContextLen {
+		out = append(out, u32KV(a+".context_length", m.ContextLen))
 	}
 	if m.Experts > 0 {
 		out = append(out,

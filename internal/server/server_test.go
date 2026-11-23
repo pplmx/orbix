@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -22,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pplmx/orbix/internal/chat"
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
@@ -7741,5 +7744,62 @@ func TestPoolRefusalNamesTheLargerSide(t *testing.T) {
 				t.Errorf("body does not name %s (%s):\n%s", c.want, c.why, body)
 			}
 		})
+	}
+}
+
+// TestGemma3RenderedPromptEncodesToReferenceIDs links the two halves of the prompt path.
+//
+// internal/chat renders a checkpoint's template and internal/tokenize turns the result into ids;
+// neither can check the other alone, which is why this lives in the layer that uses both. A prompt
+// that looks right in a string comparison can still encode differently -- a stray newline, a marker
+// spelled with an ordinary token instead of its special one -- and that difference is invisible in
+// the rendered text and expensive in the generated output.
+//
+// The expectation is llama.cpp tokenizing the same bytes, from llama-cpp-python 0.3.37. The
+// template is the 1654-byte asset under internal/chat/testdata, a byte copy of what the Gemma 3
+// checkpoint holds in tokenizer.chat_template.
+func TestGemma3RenderedPromptEncodesToReferenceIDs(t *testing.T) {
+	path := os.Getenv("GEMMA3_MODEL")
+	if path == "" {
+		t.Skip("set GEMMA3_MODEL to a Gemma 3 GGUF file")
+	}
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(f)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "chat", "testdata", "gemma3-it.jinja"))
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	tmpl, err := chat.Parse(string(raw))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	prompt, err := tmpl.Render(
+		[]chat.Message{{Role: "user", Content: "What is the capital of France?"}},
+		chat.Inputs{BOSToken: "<bos>", AddGenerationPrompt: true})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	got := tok.Encode(prompt, false)
+	want := []int32{
+		107, 236820, 46757, 1798, 3041, 236779, 1340, 236779, 887, 236813, 2364, 107,
+		3689, 563, 506, 5279, 529, 7001, 145912, 643, 236779, 1340, 236779, 887, 236813, 107,
+		236820, 3041, 236779, 1340, 236779, 887, 236813, 4368, 107,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rendered prompt encodes to %d tokens, llama.cpp says %d\ngot  %v\nwant %v",
+			len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("token %d = %d, want %d\ngot  %v", i, got[i], want[i], got)
+			break
+		}
 	}
 }

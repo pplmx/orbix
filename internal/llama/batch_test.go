@@ -1505,3 +1505,54 @@ func TestLogitsForCachedHonoursTheWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestPrefillWithPrefixMatchesPrefill is the contract for the paged prefill path: a prompt
+// prefilled through a block pool must produce the logits a contiguous cache produces.
+//
+// The two are separate code paths -- PrefillWithPrefix batches the whole prompt through
+// decodeBatch, while Prefill on a contiguous cache falls back to one Forward per token -- and only
+// the refusal of an empty prompt was tested for the paged one. A wrong span offset or a batch that
+// used one shared position would leave every prompt longer than a single token wrong, which is
+// every prompt.
+//
+// Byte equality rather than a tolerance: both paths run the same arithmetic in the same order on
+// the same values, so there is no accumulation difference to allow for. A tolerance here would
+// accept exactly the small per-position drift a shared-position bug produces.
+func TestPrefillWithPrefixMatchesPrefill(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	ids := fixtureTokens(cfg, 9)
+
+	contig, err := NewKVCache(cfg, 64)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	want, err := m.Prefill(contig, ids, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 4, Blocks: 16})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+	paged := pool.New()
+	got, err := m.PrefillWithPrefix(paged, ids, 0)
+	if err != nil {
+		t.Fatalf("PrefillWithPrefix: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the paged path produced %d logits, the contiguous one %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("logit[%d] = %v through the paged path, %v through the contiguous one",
+				i, got[i], want[i])
+		}
+	}
+}

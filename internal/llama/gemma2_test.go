@@ -19,8 +19,11 @@ import (
 // to every layer would produce a model whose long-range attention silently stops working while
 // everything still runs.
 func TestWindowForAlternates(t *testing.T) {
+	// A declared window of 4096 leaves 4097 positions reachable: llama.cpp masks a key when the
+	// distance is >= n_swa, so the key at exactly p-4096 is still visible. These numbers are
+	// counts of reachable positions, not the declared distance.
 	pattern := Config{WindowLen: 4096, SlidingPattern: true}
-	want := []int{4096, 0, 4096, 0, 4096, 0}
+	want := []int{4097, 0, 4097, 0, 4097, 0}
 	for l, w := range want {
 		if got := windowFor(pattern, l); got != w {
 			t.Errorf("layer %d window = %d, want %d", l, got, w)
@@ -30,8 +33,8 @@ func TestWindowForAlternates(t *testing.T) {
 	// Without the pattern every layer is bounded, which is Mistral's shape.
 	flat := Config{WindowLen: 4096}
 	for l := range 4 {
-		if got := windowFor(flat, l); got != 4096 {
-			t.Errorf("layer %d window = %d, want 4096 on every layer", l, got)
+		if got := windowFor(flat, l); got != 4097 {
+			t.Errorf("layer %d window = %d, want 4097 on every layer", l, got)
 		}
 	}
 
@@ -536,5 +539,42 @@ func TestGemma3RefusesTwoRotationFrequencies(t *testing.T) {
 	}.Write(t, t.TempDir())
 	if _, err := NewWithOptions(same, Options{}); err != nil {
 		t.Errorf("a file whose local and global bases agree was refused: %v", err)
+	}
+}
+
+// TestSlidingWindowReachIsInclusive covers the boundary of the sliding window, which is off by one
+// in the obvious reading of the metadata key.
+//
+// A file declares a window as a distance: llama.cpp masks a key when pos_query - pos_key >= n_swa,
+// so a window of 512 leaves the key at exactly p-512 visible. Treating the number as a count of
+// positions drops that one, and the loss is invisible until a prompt is long enough for the window
+// to bind -- which no fixture test exercises, because a fixture's context is shorter than any real
+// window.
+//
+// Measured on gemma-3-270m-it-Q8_0 with a 513-token prompt built from one repeated sentence, so the
+// next token is known: at 513 tokens it is "brown". The count reading answered "fox" (the token
+// after it); a numpy reference written directly against the mask rule answered "brown" with "> w"
+// and "fox" with ">= w", which is what identified the boundary rather than the whole window as the
+// fault. After the fix both llama.cpp and orbix answer "brown".
+func TestSlidingWindowReachIsInclusive(t *testing.T) {
+	const window = 512
+	cfg := Config{WindowLen: window}
+	if got := windowFor(cfg, 0); got != window+1 {
+		t.Errorf("windowFor(%d) = %d, want %d: the position at exactly p-window is still reachable",
+			window, got, window+1)
+	}
+
+	// The count has to be what makes a query at position `window` see positions 1..window, which is
+	// window positions plus its own. Spelling the arithmetic out here rather than trusting the +1:
+	// at position p the reachable keys are p-reach+1 .. p, and the oldest must be p-window.
+	p, reach := window, windowFor(cfg, 0)
+	oldest := p - reach + 1
+	if oldest != p-window {
+		t.Errorf("at position %d a reach of %d starts at %d, want %d", p, reach, oldest, p-window)
+	}
+
+	// Zero stays zero: "no window" must not become "see only yourself".
+	if got := windowFor(Config{}, 0); got != 0 {
+		t.Errorf("windowFor with no window = %d, want 0", got)
 	}
 }

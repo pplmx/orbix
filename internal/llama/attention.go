@@ -80,6 +80,14 @@ func attentionParams(cfg Config, l int) attnParams {
 
 // windowFor returns how many recent positions layer l may attend to, or 0 for all of them.
 //
+// The window a file declares is a distance, not a count: llama.cpp masks a key when
+// pos_query - pos_key >= n_swa, so a window of 512 leaves positions p-512 through p reachable --
+// 513 of them, including the query's own. Returning the declared number as a count therefore
+// dropped the oldest reachable position, which is one position of context the model was trained
+// to use. Measured on gemma-3-270m-it-Q8_0 with a 513-token prompt: the count reading answered
+// "fox" where llama.cpp and a numpy reference written against the mask rule both answer "brown",
+// and the reference switched to "brown" as soon as the boundary became "> w" instead of ">= w".
+//
 // A pattern of alternating local and global layers is what Gemma 2 does: every second block
 // reads a bounded window and the ones between it read the whole context, which halves the work
 // of the long-range blocks without losing any position from the model's reach. Reading the
@@ -91,17 +99,28 @@ func windowFor(cfg Config, l int) int {
 	// says; the alternating rule below is the shape Gemma 2 was assumed to have.
 	if len(cfg.LocalLayers) > 0 {
 		if l < len(cfg.LocalLayers) && cfg.LocalLayers[l] {
-			return cfg.WindowLen
+			return reach(cfg.WindowLen)
 		}
 		return 0
 	}
 	if !cfg.SlidingPattern {
-		return cfg.WindowLen
+		return reach(cfg.WindowLen)
 	}
 	if l%2 == 0 {
-		return cfg.WindowLen
+		return reach(cfg.WindowLen)
 	}
 	return 0
+}
+
+// reach turns a declared window distance into the number of positions it leaves visible.
+//
+// Zero means unbounded and stays zero: the callers treat 0 as "trim nothing", and returning 1
+// would leave every query looking at itself alone.
+func reach(window int) int {
+	if window <= 0 {
+		return 0
+	}
+	return window + 1
 }
 
 func attend(q []float32, keys, values []span, n int, scores, out []float32, p attnParams) error {

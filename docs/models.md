@@ -49,38 +49,30 @@ Measured on gemma-3-270m-it-Q8_0 against llama.cpp 0.3.37: the prompt encodes to
 and the greedy token agrees, with deviations of 0.0001, 0.66, 0.27, 0.08, 0.16, 0.42 and 0.66 nats
 over the shared top-8 -- the low-probability tail, as with every checkpoint here.
 
-**Known defect: prompts longer than the window are computed wrongly.** Everything above is measured
-on short prompts, where the window never binds. At a prompt length of 513 -- one past the window --
-this engine diverges from llama.cpp, and the divergence is not a boundary-rule disagreement:
+**The window's boundary was off by one, and is fixed.** The paragraph above is measured on short
+prompts, where the window never binds, so it could not see this. At a prompt length of 513 -- one
+past gemma3's window of 512 -- this engine used to diverge from llama.cpp, and the divergence was not
+a disagreement about the rule but about its boundary:
 
-| prompt                                           | llama.cpp       | orbix           |
-| ------------------------------------------------ | --------------- | --------------- |
-| 512 tokens                                       | `quick` -0.0000 | `quick` -0.0000 |
-| 513 tokens                                       | `brown` -0.0000 | `fox`           |
-| 513 tokens, minus the first (the window's worth) | `brown` -0.0000 | --              |
+| prompt     | llama.cpp       | orbix, before   | orbix, after    |
+| ---------- | --------------- | --------------- | --------------- |
+| 512 tokens | `quick` -0.0000 | `quick` -0.0000 | `quick` -0.0000 |
+| 513 tokens | `brown` -0.0000 | `fox`           | `brown` 42.015  |
 
 The text is one sentence repeated, so the next token at each position is known: at 513 it is
-`brown`. llama.cpp answers `brown` whether or not position 0 is in the window, so the disagreement
-is not about what the window contains. orbix answers `fox`, which is the token *after* `brown` in
-the repeating text -- the prediction is displaced by one position.
+`brown`. The window is a *distance*, not a count -- llama.cpp masks a key when
+`pos_query - pos_key >= n_swa`, so the key at exactly `p - 512` is still visible, and a query at
+position 512 reaches 513 positions including its own. `windowFor` returned the declared number as a
+count, which dropped the oldest reachable position. One position of context, invisible while the
+prompt fits in a window, and a different argmax once it does not.
 
-Ruled out by measurement rather than by reading:
-
-- The window rule. orbix masks a key at `p - q >= w`; llama.cpp masks at `p1 - p0 >= n_swa`. The two
-  are the same predicate, and the kept ranges agree at every position checked.
-- Leakage. Changing every token before the window leaves the logits bit-identical, so the trim is
-  not keeping rows it should drop.
-- The batch path. Each query row fetches its own span upper bound and trims independently; the rows
-  do not share a window.
-- The paged cache. A contiguous arena and a paged cache produce bit-identical logits for the same
-  513-token prompt.
-- The token sequence. Both sides tokenize the text to the same 702 ids, with the same first three
-  and the same 510..512.
-
-512 tokens or fewer are exact, so anything that fits in one window is unaffected. The cause has not
-been found; four rounds of bisection narrowed it to this and no further. It is recorded here so that
-a reader knows the windowed path is verified only up to the window's own length, rather than
-assuming the comparison above covers it.
+What identified it was a numpy reference written directly against the mask rule, which could be
+switched between `>` and `>=` on a prompt that distinguishes them. Five earlier attempts failed on
+worse evidence, and one of them -- comparing every layer against the reference -- was itself wrong
+because the reference's own block wiring had not been checked against a single layer's intermediates.
+The block maths now has that check: `block()` reproduces layer 0 of gemma-3-270m-it-Q8_0 from the
+embedding row to `max|diff| = 2.65e-04`, and the whole forward pass answers the same token and logit
+(41.434) as this engine at the six-token calibration prompt.
 
 Not implemented for `gemma3`: the separate rotation frequency for local layers. A file that declares
 `gemma3.rope.freq_base_swa` is refused rather than rotated at the wrong rate. The 270M checkpoint

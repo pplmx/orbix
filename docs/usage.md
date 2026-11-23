@@ -53,10 +53,18 @@ missing `code` as "this answer is about capacity, not about your fields", and br
 for the retryable case. Treating the absence as a malformed response would make a correctly
 shaped 503 look like a proxy error.
 
-Unsupported fields split by what a client does with the answer. Sampling knobs -- `logit_bias`,
-`presence_penalty`, `response_format` -- are ignored, because the SDKs send them regardless.
-Fields describing the *response* are refused with a 400 naming every one, since a client that
-sent `n: 3` indexes `choices[2]`.
+Unsupported fields split by what a client does with the answer, and the split is not the one this
+section originally drew. `logit_bias`, `presence_penalty` and `frequency_penalty` were listed as
+ignorable sampling knobs and are now honoured: a caller who bans a token or asks for less repetition
+is asking for different text, not expressing a tolerance, and all three measured byte-identical
+output with and without them. Fields describing the *response* are refused with a 400 naming every
+one, since a client that sent `n: 3` indexes `choices[2]`.
+
+`response_format` is refused for a third reason: `json_object` promises valid JSON, which needs
+constrained decoding this engine does not implement, and honouring the request without it is not
+possible. Measured on Gemma 3 270M, a reply asked for as JSON came back as a markdown fence, so a
+client calling `json.loads` on it fails somewhere far from the request that caused it. `{"type":
+"text"}` and an absent field are served, because they ask for what the server does anyway.
 
 Only two things are still refused this way. Chat's `echo` is one: OpenAI's chat schema does not
 define it, so there it describes a field the caller sent that the endpoint cannot use. Function

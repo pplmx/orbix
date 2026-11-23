@@ -322,8 +322,13 @@ func (s *Server) Shutdown() {
 //     working. `presence_penalty` and `frequency_penalty` were in this list and are now honoured:
 //     they still do not change the response's shape, but a caller who sets one is asking for
 //     different text rather than expressing a tolerance, and the two fields measured identical
-//     output with and without them. What remains in the list is `response_format`, which describes
-//     a constraint this server cannot check after the fact.
+//     output with and without them.
+//
+// `response_format` is the one field that moved the other way. It is not a sampling preference and
+// not a shape the server can produce either: json_object promises valid JSON, which needs
+// constrained decoding this engine does not have, and ignoring it returned a markdown fence where a
+// client expected parseable JSON. It is refused by name now, with the forms that ask for what the
+// server already does -- absent, or "text" -- still served.
 //
 // `logit_bias` used to be in that second list and does not belong there. OpenAI documents -100
 // and 100 as "a ban or exclusive selection", so a client that bans a token is relying on it not
@@ -352,6 +357,9 @@ type chatRequest struct {
 	// a plausible answer to a request the caller did not make.
 	PresencePenalty  *float64 `json:"presence_penalty"`
 	FrequencyPenalty *float64 `json:"frequency_penalty"`
+	// ResponseFormat is checked rather than ignored: json_object promises valid JSON, and this
+	// server cannot deliver that without constrained decoding. See checkResponseFormat.
+	ResponseFormat json.RawMessage `json:"response_format"`
 
 	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens, and it is honoured rather
 	// than refused: max_tokens is deprecated in favour of it, so a migrated client sends only
@@ -524,6 +532,9 @@ type completionRequest struct {
 	// setting can come from. See the class comment.
 	PresencePenalty  *float64 `json:"presence_penalty"`
 	FrequencyPenalty *float64 `json:"frequency_penalty"`
+	// ResponseFormat is checked rather than ignored: json_object promises valid JSON, and this
+	// server cannot deliver that without constrained decoding. See checkResponseFormat.
+	ResponseFormat json.RawMessage `json:"response_format"`
 
 	// MaxCompletionTokens is honoured here even though OpenAI defines it only for chat: the
 	// official SDK's completions parameters do not include it, so no SDK client can send it,
@@ -926,6 +937,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt := s.renderChat(req.Messages)
+	if err := checkResponseFormat(req.ResponseFormat); err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
 	bias, err := logitBias(req.LogitBias, s.eng.Model().Config().VocabSize)
 	if err != nil {
 		writeRequestError(w, http.StatusBadRequest, err)
@@ -1095,6 +1110,10 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fim = &markers
+	}
+	if err := checkResponseFormat(req.ResponseFormat); err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
 	}
 	bias, err := logitBias(req.LogitBias, s.eng.Model().Config().VocabSize)
 	if err != nil {
@@ -2993,4 +3012,51 @@ func checkPenalty(v *float64, name string) (float32, error) {
 			"%s is between -2 and 2, so %v is outside it", name, *v)
 	}
 	return float32(*v), nil
+}
+
+// checkResponseFormat refuses the formats this server cannot honour.
+//
+// OpenAI's json_object is a promise, not a hint: "ensures the message the model generates is valid
+// JSON". Delivering that needs constrained decoding -- every sampling step restricted to tokens that
+// keep the output a prefix of a valid JSON document -- and this engine has no grammar layer, only a
+// sampler over raw logits. Measured on Gemma 3 270M without one, the reply to "Name two colors as
+// JSON" was a markdown fence:
+//
+//	```json
+//	{ "color1": "red", "color2": "blue", ...
+//
+// which is not JSON, and a client that called json.loads on it fails somewhere far from the request.
+// Ignoring the field is what produced that; refusing it names the field and the way out.
+//
+// The values that describe batching rather than output -- an absent field, {"type": "text"} -- are
+// served, because they ask for what the server would do anyway. Same rule the tool fields follow.
+func checkResponseFormat(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var f struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return newParamError("response_format", "invalid_value",
+			"response_format must be an object with a \"type\", so %s is not one", raw)
+	}
+	switch f.Type {
+	case "text":
+		// What the server does already.
+		return nil
+	case "json_object":
+		return newParamError("response_format", "unsupported_parameter",
+			"response_format json_object promises valid JSON, which needs constrained decoding "+
+				"this engine does not implement; asking for JSON in the prompt works without the "+
+				"promise, or set response_format {\"type\": \"text\"} explicitly")
+	case "json_schema":
+		return newParamError("response_format", "unsupported_parameter",
+			"response_format json_schema needs constrained decoding this engine does not "+
+				"implement; asking for the shape in the prompt works without the promise")
+	default:
+		return newParamError("response_format", "invalid_value",
+			"response_format type %q is not one this server knows; the types are \"text\", "+
+				"\"json_object\" and \"json_schema\"", f.Type)
+	}
 }

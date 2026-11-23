@@ -4342,8 +4342,14 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 		})
 	}
 
-	// The sampling knobs must stay ignored. If refusing grows to cover these, an SDK that
-	// always sends them stops working, which is the outcome the ignore rule exists to prevent.
+	// The fields an SDK sends whether or not the caller asked for them have to keep working. Two of
+	// these used to be on this list because the server ignored them; they are honoured now, so the
+	// assertion is that a request setting them is still served -- which is the property this test
+	// has always been about, and the reason the ignore rule existed.
+	//
+	// response_format left the list in the other direction: json_object promises valid JSON that
+	// this engine cannot produce without constrained decoding, so it is refused. What has to stay
+	// served is the form an SDK sends by default, which is "text" or an absent field.
 	quiet := []struct{ name, path, body string }{
 		{"logit_bias", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "logit_bias": {"1": -100}}`},
@@ -4351,18 +4357,34 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 			`{"prompt": "hi", "max_tokens": 1, "presence_penalty": 0.5}`},
 		{"frequency_penalty", "/v1/completions",
 			`{"prompt": "hi", "max_tokens": 1, "frequency_penalty": 0.5}`},
-		{"response_format", "/v1/completions",
-			`{"prompt": "hi", "max_tokens": 1, "response_format": {"type": "json_object"}}`},
+		{"response_format text", "/v1/completions",
+			`{"prompt": "hi", "max_tokens": 1, "response_format": {"type": "text"}}`},
 		{"logit_bias on chat", "/v1/chat/completions",
 			`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "logit_bias": {"1": -100}}`},
 	}
 	for _, c := range quiet {
-		t.Run(c.name+" is ignored", func(t *testing.T) {
+		t.Run(c.name+" is served", func(t *testing.T) {
 			resp := post(t, srv.Handler(), c.path, c.body)
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusOK {
 				body := decodeBody[errorBody](t, resp)
 				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body.Error.Message)
+			}
+		})
+	}
+
+	// And the format that cannot be honoured is named rather than dropped.
+	for _, c := range []struct{ name, body string }{
+		{"json_object", `{"prompt": "hi", "max_tokens": 1, "response_format": {"type": "json_object"}}`},
+		{"json_schema", `{"prompt": "hi", "max_tokens": 1, "response_format": {"type": "json_schema"}}`},
+		{"unknown type", `{"prompt": "hi", "max_tokens": 1, "response_format": {"type": "xml"}}`},
+	} {
+		t.Run("response_format "+c.name+" is refused", func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/completions", c.body)
+			e := decodeBody[errorBody](t, resp)
+			if resp.StatusCode != 400 || e.Error.Param != "response_format" {
+				t.Fatalf("status = %d param %q, want a 400 naming response_format",
+					resp.StatusCode, e.Error.Param)
 			}
 		})
 	}

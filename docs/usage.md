@@ -250,6 +250,15 @@ chat endpoint are worth knowing before pointing a client at it:
   early.** A four-token string like `"中国的首都"` truncates correctly and still runs to its
   budget unread; `"\n"` encodes to one token and halts the sequence itself.
 
+  The truncation is exact across token boundaries, in streaming and not, and for text that is not
+  ASCII. Measured on Gemma 3 270M with a prompt whose reply continued `首都，也是世界最古老的城市之一。`:
+  `stop: ["世界最古老"]` returned `首都，也是` and `stop: ["城市"]` returned `首都，也是世界最古老的`, both with
+  `finish_reason: "stop"` and both valid UTF-8 -- the cut lands on a character boundary even when the
+  stop string straddles two tokens, because the cut is applied to decoded text rather than to a
+  byte offset into a token buffer. The prompt is never searched: `stop: ["colors"]` against a prompt
+  containing "colors" answered normally. Streaming agrees with the non-streaming body for the same
+  requests, including a stop string that spans two chunks.
+
 - **`stop` takes any number of strings, not OpenAI's four.** The documented limit there is
   `maxItems: 4`; this server accepts a hundred and honours all of them -- measured, a request
   whose only match was in the fifth slot stopped at it. A client that enforces four is not

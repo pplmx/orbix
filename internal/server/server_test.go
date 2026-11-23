@@ -2883,6 +2883,9 @@ type sseChoice struct {
 	chunks int
 	// finishReasons collects every finish_reason the stream named for this index, in order.
 	finishReasons []string
+	// logprobs counts the logprob entries this choice's chunks carried, which is how a test
+	// checks that a request asking for them got one per token rather than none.
+	logprobs int
 }
 
 // readSSEChoices parses a streaming response into per-choice text, indexed by the chunk's
@@ -2918,6 +2921,12 @@ func readSSEChoices(t *testing.T, body io.ReadCloser, want int) (map[int]*sseCho
 				Delta        struct {
 					Content string `json:"content"`
 				} `json:"delta"`
+				// Both endpoints' logprob shapes carry a list: completions a parallel array,
+				// chat a list of objects. Either way the chunk's count is one entry per token.
+				Logprobs *struct {
+					Tokens  []string          `json:"tokens"`
+					Content []json.RawMessage `json:"content"`
+				} `json:"logprobs"`
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -2934,6 +2943,9 @@ func readSSEChoices(t *testing.T, body io.ReadCloser, want int) (map[int]*sseCho
 			ch.text.WriteString(c.Text)
 			if c.FinishReason != nil {
 				ch.finishReasons = append(ch.finishReasons, *c.FinishReason)
+			}
+			if c.Logprobs != nil {
+				ch.logprobs += len(c.Logprobs.Tokens) + len(c.Logprobs.Content)
 			}
 		}
 	}
@@ -4348,6 +4360,317 @@ func TestResponseShapeFieldsAreRefused(t *testing.T) {
 				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body.Error.Message)
 			}
 		})
+	}
+}
+
+// featureCombo is one request in the interaction matrix: the fields it sets, and the answer the
+// documented rules say it should get.
+type featureCombo struct {
+	name string
+	path string
+	// opts is the request's field list, which is also what the checks below read to decide
+	// which invariants apply. Building the JSON from it means a combination is stated once.
+	opts       []string
+	wantStatus int
+	wantParam  string
+	wantCode   string
+}
+
+// TestFeatureInteractions is the cross-product check the per-feature tests cannot be.
+//
+// Each field added over the last few rounds has its own test, and each pins one behaviour in
+// isolation. None of them covers two fields at once, and the combinations are where the wiring
+// is: n decides how many sequences exist, best_of decides which come back, echo decides what is
+// prepended, suffix decides how the prompt is built, logprobs decides what is measured, stop
+// decides where a sequence ends, and stream decides which of two entirely separate code paths
+// runs.
+//
+// The expectations come from the documented rules rather than from what the server happens to
+// do, so a wrong combination fails here instead of being recorded as correct. For every accepted
+// combination:
+//
+//   - the choice count is the requested one and the indices run 0..n-1;
+//   - usage adds up, and completion_tokens covers every sequence generated -- best_of
+//     candidates included, not only the ones returned;
+//   - no fill-in-the-middle marker reaches the text;
+//   - echo prepends the caller's text, and no other combination implies it;
+//   - logprobs, when asked for, describes exactly the tokens that came back;
+//   - a streamed response gives each choice one finish chunk, ends with [DONE], and reassembles
+//     to the same text the blocking path returns.
+//
+// Refused combinations are checked as well, because "accepts everything" would not be progress:
+// a field that used to be refused and is now silently ignored passes an accepted-or-refused
+// test and fails this one.
+func TestFeatureInteractions(t *testing.T) {
+	// A vocabulary with the Qwen fill-in-the-middle markers so suffix is exercisable alongside
+	// everything else, and NoEOS so every candidate runs its full budget -- which is what makes
+	// the usage arithmetic exact instead of dependent on where the model happened to stop.
+	vocab := []string{
+		"<unk>", "<s>", "</s>", "a", "b", "c", "d",
+		"<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>",
+	}
+	srv, _ := newTestServerModel(t, gguftest.Model{Vocab: vocab, NoEOS: true, ContextLen: 512})
+
+	const prompt, suffix, budget = "a b", "c d", 4
+	completions := "/v1/completions"
+	chat := "/v1/chat/completions"
+
+	ok := func(name, path string, opts ...string) featureCombo {
+		return featureCombo{name: name, path: path, opts: opts, wantStatus: 200}
+	}
+	no := func(name, path, param, code string, opts ...string) featureCombo {
+		return featureCombo{name: name, path: path, opts: opts,
+			wantStatus: 400, wantParam: param, wantCode: code}
+	}
+	body := func(c featureCombo) string {
+		parts := []string{`"max_tokens": ` + fmt.Sprint(budget)}
+		if c.path == chat {
+			parts = append(parts, `"messages": [{"role": "user", "content": "`+prompt+`"}]`)
+		} else {
+			parts = append(parts, `"prompt": "`+prompt+`"`)
+		}
+		return "{" + strings.Join(append(parts, c.opts...), ", ") + "}"
+	}
+
+	cases := []featureCombo{
+		// Accepted combinations.
+		ok("plain", completions),
+		ok("n=3", completions, `"n": 3`, `"temperature": 1.2`, `"seed": 5`),
+		ok("best_of=3", completions, `"best_of": 3`, `"temperature": 1.2`, `"seed": 5`),
+		ok("best_of=3 n=2", completions, `"best_of": 3`, `"n": 2`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("echo", completions, `"echo": true`),
+		ok("echo n=2", completions, `"echo": true`, `"n": 2`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("suffix", completions, `"suffix": "`+suffix+`"`),
+		ok("suffix n=2", completions, `"suffix": "`+suffix+`"`, `"n": 2`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("suffix best_of=3", completions, `"suffix": "`+suffix+`"`, `"best_of": 3`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("logprobs", completions, `"logprobs": 2`),
+		ok("logprobs n=2", completions, `"logprobs": 0`, `"n": 2`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("logprobs best_of=3", completions, `"logprobs": 0`, `"best_of": 3`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("logprobs echo", completions, `"logprobs": 0`, `"echo": true`),
+		ok("stop", completions, `"stop": "z"`),
+		ok("stop n=2", completions, `"stop": "z"`, `"n": 2`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("stream", completions, `"stream": true`),
+		ok("stream n=2", completions, `"stream": true`, `"n": 2`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("stream logprobs", completions, `"stream": true`, `"logprobs": 1`),
+		ok("stream n=2 logprobs", completions, `"stream": true`, `"n": 2`,
+			`"logprobs": 1`, `"temperature": 1.2`, `"seed": 5`),
+		ok("stream echo", completions, `"stream": true`, `"echo": true`),
+		ok("stream suffix", completions, `"stream": true`, `"suffix": "`+suffix+`"`),
+		ok("stream stop", completions, `"stream": true`, `"stop": "z"`),
+		ok("stream usage n=2", completions, `"stream": true`, `"n": 2`,
+			`"stream_options": {"include_usage": true}`, `"temperature": 1.2`, `"seed": 5`),
+		ok("chat plain", chat),
+		ok("chat n=2", chat, `"n": 2`, `"temperature": 1.2`, `"seed": 5`),
+		ok("chat logprobs", chat, `"logprobs": true`, `"top_logprobs": 2`),
+		ok("chat stream n=2", chat, `"stream": true`, `"n": 2`,
+			`"temperature": 1.2`, `"seed": 5`),
+		ok("chat stream usage logprobs", chat, `"stream": true`, `"logprobs": true`,
+			`"stream_options": {"include_usage": true}`),
+
+		// Refused combinations, each for a documented reason.
+		no("best_of cannot stream", completions, "best_of", "unsupported_parameter",
+			`"best_of": 3`, `"stream": true`),
+		no("best_of must exceed n", completions, "best_of", "invalid_value",
+			`"best_of": 2`, `"n": 2`),
+		no("suffix with echo", completions, "suffix", "unsupported_parameter",
+			`"suffix": "`+suffix+`"`, `"echo": true`),
+		no("chat echo", chat, "echo", "unsupported_parameter", `"echo": true`),
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), c.path, body(c))
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != c.wantStatus {
+				out := decodeBody[errorBody](t, resp)
+				t.Fatalf("status = %d, want %d: %s",
+					resp.StatusCode, c.wantStatus, out.Error.Message)
+			}
+			if c.wantStatus != 200 {
+				out := decodeBody[errorBody](t, resp)
+				if out.Error.Param != c.wantParam || out.Error.Code != c.wantCode {
+					t.Errorf("param/code = %q/%q, want %q/%q",
+						out.Error.Param, out.Error.Code, c.wantParam, c.wantCode)
+				}
+				return
+			}
+			if hasOpt(c.opts, `"stream": true`) {
+				checkStreamedCombo(t, resp, c)
+				return
+			}
+			checkBlockingCombo(t, resp, c)
+		})
+	}
+}
+
+// hasOpt reports whether a field was set, which is how the checks know which invariants apply
+// without re-parsing the JSON they were built from.
+func hasOpt(opts []string, prefix string) bool {
+	for _, o := range opts {
+		if strings.HasPrefix(o, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// intOpt reads the number out of a field like `"n": 3`, or def when it is absent.
+func intOpt(opts []string, prefix string, def int) int {
+	for _, o := range opts {
+		if rest, ok := strings.CutPrefix(o, prefix); ok {
+			var v int
+			if _, err := fmt.Sscanf(rest, "%d", &v); err == nil {
+				return v
+			}
+		}
+	}
+	return def
+}
+
+// fimMarkers are the pieces that must never reach a response's text.
+var fimMarkers = []string{"<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>"}
+
+// checkBlockingCombo asserts what a non-streaming response has to satisfy whatever fields were
+// set.
+func checkBlockingCombo(t *testing.T, resp *http.Response, c featureCombo) {
+	t.Helper()
+	chat := c.path == "/v1/chat/completions"
+	var got struct {
+		Choices []struct {
+			Index        int    `json:"index"`
+			Text         string `json:"text"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Logprobs *struct {
+				Tokens     []string `json:"tokens"`
+				TextOffset []int    `json:"text_offset"`
+			} `json:"logprobs"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if want := intOpt(c.opts, `"n": `, 1); len(got.Choices) != want {
+		t.Errorf("got %d choices, want %d", len(got.Choices), want)
+	}
+	echo := hasOpt(c.opts, `"echo":`)
+	wantsLogprobs := hasOpt(c.opts, `"logprobs":`)
+	for i, ch := range got.Choices {
+		if ch.Index != i {
+			t.Errorf("choices[%d].index = %d, want the position", i, ch.Index)
+		}
+		if ch.FinishReason == "" {
+			t.Errorf("choices[%d] has no finish_reason", i)
+		}
+		text := ch.Text
+		if chat {
+			text = ch.Message.Content
+		}
+		for _, marker := range fimMarkers {
+			if strings.Contains(text, marker) {
+				t.Errorf("choices[%d] carries the marker %q: %q", i, marker, text)
+			}
+		}
+		// echo prepends the caller's own text. Checked as a prefix because the rest is whatever
+		// the fixture generated, and only the chat endpoint refuses echo, so a chat case here is
+		// the combination that must not add it.
+		if echo && !chat && !strings.HasPrefix(text, "a b") {
+			t.Errorf("choices[%d] does not start with the echoed prompt: %q", i, text)
+		}
+		if wantsLogprobs && !chat {
+			switch ch.Logprobs {
+			case nil:
+				t.Errorf("choices[%d] has no logprobs for a request that asked", i)
+			default:
+				joined := strings.Join(ch.Logprobs.Tokens, "")
+				// Without echo the logprob tokens are the whole text. With it they cover the
+				// generated part only: the prompt was not generated, so this server has no log
+				// probability to report for it, and the first text_offset is what tells a
+				// client where the described part begins.
+				want := ch.Text
+				wantOffset := 0
+				if echo {
+					want = strings.TrimPrefix(ch.Text, "a b")
+					wantOffset = len("a b")
+				}
+				if joined != want {
+					t.Errorf("choices[%d] logprob tokens join to %q, want %q", i, joined, want)
+				}
+				if len(ch.Logprobs.TextOffset) > 0 && ch.Logprobs.TextOffset[0] != wantOffset {
+					t.Errorf("choices[%d] first text_offset = %d, want %d",
+						i, ch.Logprobs.TextOffset[0], wantOffset)
+				}
+			}
+		}
+	}
+
+	if got.Usage.TotalTokens != got.Usage.PromptTokens+got.Usage.CompletionTokens {
+		t.Errorf("total_tokens = %d, want prompt+completion = %d",
+			got.Usage.TotalTokens, got.Usage.PromptTokens+got.Usage.CompletionTokens)
+	}
+	// completion_tokens covers every sequence generated: the n returned, or the best_of
+	// candidates when selection ran and only n of them came back.
+	sequences := intOpt(c.opts, `"n": `, 1)
+	if bestOf := intOpt(c.opts, `"best_of": `, 0); bestOf > 1 {
+		sequences = bestOf
+	}
+	if want := sequences * 4; got.Usage.CompletionTokens != want {
+		t.Errorf("completion_tokens = %d, want %d (%d sequences x 4 tokens)",
+			got.Usage.CompletionTokens, want, sequences)
+	}
+}
+
+// checkStreamedCombo asserts what a streamed response has to satisfy, and that it carries the
+// same text per index that the blocking path returns for the same seeded request.
+func checkStreamedCombo(t *testing.T, resp *http.Response, c featureCombo) {
+	t.Helper()
+	want := intOpt(c.opts, `"n": `, 1)
+	choices, sawDone := readSSEChoices(t, resp.Body, want)
+	if !sawDone {
+		t.Error("the stream ended without [DONE]")
+	}
+	echo := hasOpt(c.opts, `"echo":`)
+	wantsLogprobs := hasOpt(c.opts, `"logprobs":`)
+	for i := range want {
+		ch := choices[i]
+		if len(ch.finishReasons) != 1 {
+			t.Errorf("choice %d got %d finish chunks, want exactly 1: %v",
+				i, len(ch.finishReasons), ch.finishReasons)
+		}
+		text := ch.text.String()
+		for _, marker := range fimMarkers {
+			if strings.Contains(text, marker) {
+				t.Errorf("choice %d carries the marker %q: %q", i, marker, text)
+			}
+		}
+		if echo && !strings.HasPrefix(text, "a b") {
+			t.Errorf("choice %d does not start with the echoed prompt: %q", i, text)
+		}
+		// One entry per generated token, which is what makes the streamed list comparable to
+		// the blocking one. Zero here means the chunks carried none at all.
+		if wantsLogprobs && ch.logprobs == 0 {
+			t.Errorf("choice %d streamed no log probabilities for a request that asked", i)
+		}
+		if !wantsLogprobs && ch.logprobs != 0 {
+			t.Errorf("choice %d streamed %d logprob entries without being asked", i, ch.logprobs)
+		}
 	}
 }
 

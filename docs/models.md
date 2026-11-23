@@ -368,17 +368,31 @@ bytes begin is invisible to every test built on them -- the same code makes the 
 both directions. A second implementation written from the architecture description shares no code
 with this one, so a disagreement points at one of the two rather than at a shared premise.
 
-The expected values live in `internal/llama/testdata/reference/logits.json` and are checked
-against three fixtures: a plain `llama` shape, a `gemma2` sandwich-norm shape, and a `gemma3`
-fixture with a window of 4 and a twelve-token prompt, so the window actually binds. That third
-one is not redundant: the sliding window's off-by-one survived every fixture test in the
-repository for several rounds *because* every prompt was shorter than every window, and the
-fixture that exceeds its window is what makes the boundary observable.
+The expected values live in `internal/llama/testdata/reference/logits.json` and are checked against
+six fixtures, each pinning one thing a reference can get independently wrong:
 
-The three disagreements the test currently shows are 1.9e-06 to 3.1e-06 logits, against a
-tolerance of 1e-3. That gap is float64 accumulation on the numpy side against float32 here, not
-slack in the check: the injected faults measured while writing it were 0.154 (window reach) and
-0.219 (rope pairing), two orders of magnitude above the tolerance.
+| Fixture          | What it pins                                             |
+| ---------------- | -------------------------------------------------------- |
+| `llama`          | RMSNorm, adjacent-pair rope, GQA, SiLU gate              |
+| `gemma-sandwich` | scaled embeddings, sandwich norms, GeGLU                 |
+| `qwen3`          | per-head QK norm combined with NeoX rope                 |
+| `qwen2-bias`     | the q/k/v attention biases, which are tensors not shapes |
+| `windowed`       | a window of 4 against a twelve-token prompt              |
+| `window-edge`    | a window of 4 against five tokens -- the boundary itself |
+
+The two windowed ones are not redundant. The sliding window's off-by-one survived every fixture
+test in the repository for several rounds *because* every prompt was shorter than every window, so
+the fixture that exceeds its window is what makes the boundary observable at all; `window-edge`
+then puts the boundary on the last position, where the two readings differ by the largest fraction
+of the reachable set. Measured under the same injected fault, `windowed` disagrees by 0.154 logits
+and `window-edge` by 0.227.
+
+The six disagreements the test currently shows are 1.9e-06 to 5.7e-06 logits, against a tolerance
+of 1e-3. That gap is float64 accumulation on the numpy side against float32 here, not slack in the
+check: the faults injected while writing it measured 0.154 and 0.227 (window reach), 0.219 (rope
+pairing), and three that only the newer fixtures can see -- `qwen2`'s attention bias removed,
+`qwen3`'s QK norm removed, and `gemma2`'s GELU gate replaced with SiLU. Each fails its own fixture
+and no other.
 
 ## Regenerating the expected values
 

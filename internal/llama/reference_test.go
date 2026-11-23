@@ -136,4 +136,43 @@ var referenceSpecs = []struct {
 			}
 		},
 	},
+	{
+		// Qwen3's shape: NeoX rope, per-head QK norm, SiLU gate, no bias. Distinct from
+		// `gemma-sandwich` in the FFN activation and the absence of sandwich norms, so a
+		// reference that gets one right and the other wrong shows up here.
+		name:   "qwen3",
+		prompt: []int32{1, 4, 5, 6, 7},
+		model: func() gguftest.Model {
+			return gguftest.Model{
+				Arch: "qwen3", NoEOS: true, ContextLen: 128, QKNorm: true,
+			}
+		},
+	},
+	{
+		// Qwen2's distinguishing feature is the attention bias on q, k and v, which is a
+		// tensor the block adds rather than a shape it has. A reference that ignores biases is
+		// right on every other fixture and wrong here.
+		name:   "qwen2-bias",
+		prompt: []int32{1, 4, 5, 6, 7},
+		model: func() gguftest.Model {
+			return gguftest.Model{
+				Arch: "qwen2", NoEOS: true, ContextLen: 128, AttnBias: true,
+			}
+		},
+	},
+	{
+		// The boundary at its most sensitive point: five tokens against a window of 4. The last
+		// position can reach 0..4, so treating the window as a count leaves 1..4 -- one row of
+		// five, and the only row that distinguishes the two readings. The `windowed` spec binds
+		// too, but by position 11 the difference is one row out of five in a longer history, so
+		// this is the fixture that fails first when a count and a distance are confused.
+		name:   "window-edge",
+		prompt: []int32{1, 4, 5, 6, 7},
+		model: func() gguftest.Model {
+			return gguftest.Model{
+				Arch: "gemma3", NoEOS: true, ContextLen: 128,
+				PostNorms: true, QKNorm: true, WindowLen: 4,
+			}
+		},
+	},
 }

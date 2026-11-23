@@ -3037,6 +3037,120 @@ func TestStreamingSeveralChoices(t *testing.T) {
 	}
 }
 
+// TestStreamingSeveralChoicesWithStop covers the interaction of the two most delicate parts of
+// the streaming path: per-choice decoding and stop-string matching.
+//
+// A stop string is matched against decoded text, and a partially-matched tail has to be held
+// back until it can no longer become a match -- otherwise stop=["北京"] streams "北" where the
+// non-streaming body returns nothing. That hold-back state is per choice, and the interaction
+// is exactly where a shared buffer would go unnoticed by anything but a comparison against the
+// other transport: each choice would still get some text, just the wrong text, and the stop
+// character could leak into one choice while being cut from another.
+//
+// The stop string is derived from the output rather than hard-coded, because the fixture's
+// weights are random: a literal would make this test either depend on a checkpoint or assert
+// nothing. One never-matching stop is checked too, which is the path that releases the held
+// tail at the end instead of finding a match.
+func TestStreamingSeveralChoicesWithStop(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	const n = 2
+	// quoted renders a JSON string literal for a stop list.
+	quoted := func(s string) string {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("marshal stop: %v", err)
+		}
+		return string(b)
+	}
+	// texts asks for the same request both ways and returns (blocking, streamed) by index.
+	texts := func(t *testing.T, stopList []string) (map[int]string, map[int]string) {
+		t.Helper()
+		stops := "null"
+		if len(stopList) > 0 {
+			parts := make([]string, len(stopList))
+			for i, s := range stopList {
+				parts[i] = quoted(s)
+			}
+			stops = "[" + strings.Join(parts, ", ") + "]"
+		}
+		base := fmt.Sprintf(`{"prompt": "Once upon a time", "max_tokens": 12, "n": %d, `+
+			`"temperature": 1.2, "seed": 909, "stop": %s`, n, stops)
+
+		blocked := post(t, srv.Handler(), "/v1/completions", base+"}")
+		if blocked.StatusCode != http.StatusOK {
+			out := decodeBody[errorBody](t, blocked)
+			t.Fatalf("blocking status = %d: %s", blocked.StatusCode, out.Error.Message)
+		}
+		var whole struct {
+			Choices []struct {
+				Text string `json:"text"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(blocked.Body).Decode(&whole); err != nil {
+			_ = blocked.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = blocked.Body.Close()
+		byIndex := make(map[int]string, n)
+		for i, c := range whole.Choices {
+			byIndex[i] = c.Text
+		}
+
+		streamed := post(t, srv.Handler(), "/v1/completions", base+`, "stream": true}`)
+		if streamed.StatusCode != http.StatusOK {
+			out := decodeBody[errorBody](t, streamed)
+			t.Fatalf("stream status = %d: %s", streamed.StatusCode, out.Error.Message)
+		}
+		choices, sawDone := readSSEChoices(t, streamed.Body, n)
+		if !sawDone {
+			t.Error("the stream ended without [DONE]")
+		}
+		streamedByIndex := make(map[int]string, n)
+		for i, c := range choices {
+			streamedByIndex[i] = c.text.String()
+		}
+		return byIndex, streamedByIndex
+	}
+
+	// Phase 1: a stop that never matches. Both transports must return the whole text, which is
+	// the path that releases the held tail once the sequence ends.
+	blocking, streamed := texts(t, []string{"zzzznotpresentzzzz"})
+	for i := range n {
+		if blocking[i] == "" {
+			t.Fatalf("choice %d generated nothing, so the comparison proves nothing", i)
+		}
+		if blocking[i] != streamed[i] {
+			t.Errorf("no match, choice %d: streamed %q, blocking %q", i, streamed[i], blocking[i])
+		}
+	}
+
+	// Phase 2: a stop taken from choice 0's own output, so a match is guaranteed somewhere in
+	// a sequence rather than hoped for.
+	match := blocking[0]
+	if len(match) < 4 {
+		t.Skipf("choice 0 produced only %q; too short to take a stop from", match)
+	}
+	stop := match[2:5]
+	blockingCut, streamedCut := texts(t, []string{stop})
+	for i := range n {
+		if blockingCut[i] != streamedCut[i] {
+			t.Errorf("stop=%q, choice %d: streamed %q, blocking %q",
+				stop, i, streamedCut[i], blockingCut[i])
+		}
+		// Whatever each transport returned, the stop string must not be in it: a leak here is
+		// the failure the hold-back exists to prevent.
+		if strings.Contains(blockingCut[i], stop) {
+			t.Errorf("stop=%q, choice %d: the blocking body contains the stop string: %q",
+				stop, i, blockingCut[i])
+		}
+		if strings.Contains(streamedCut[i], stop) {
+			t.Errorf("stop=%q, choice %d: the stream contains the stop string: %q",
+				stop, i, streamedCut[i])
+		}
+	}
+}
+
 // TestStreamingSeveralChoicesUsage pins the usage chunk for n>1, which is where the two
 // paths most easily disagree.
 //

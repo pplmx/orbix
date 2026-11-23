@@ -77,6 +77,11 @@
 // numbers: they are alternatives, the values can disagree, and choosing one silently would answer
 // with a budget the caller may not have meant.
 //
+// OpenAI defines the field on chat only, so honouring it on completions is a deliberate superset.
+// The rule for a field this server does not define is to ignore it, and that rule is wrong for a
+// limit: a caller who reached for one and was ignored would get the default length with nothing
+// saying so, which is the silent omission this package keeps refusing to make.
+//
 // n is not refused any more: the server generates the choices it asks for, one sequence each,
 // all admitted to the same batch so they advance together. The response carries choices[i]
 // with index i, and usage counts completion_tokens across every choice while counting

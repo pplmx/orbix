@@ -71,6 +71,12 @@ both is refused with `invalid_value` naming both fields and both numbers, becaus
 alternatives rather than a pair and the two values can disagree; picking one silently would
 answer with a budget the caller may not have meant.
 
+OpenAI defines the field on chat only -- the official SDK's completions parameters do not include
+it, so no SDK client sends it there. This server honours it on completions as a deliberate
+superset: treating it as an unknown member and ignoring it, which is the rule for unknown fields,
+would generate the default length for a caller who reached for a limit, and nothing in the
+response would say so.
+
 `echo: true` on completions returns the prompt ahead of the generated text rather than refusing
 it. Two things about it are worth knowing. The stop list applies to the generated part only, so a
 stop string that appears in the prompt does not truncate the prompt; the echoed text is exactly

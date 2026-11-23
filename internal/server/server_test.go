@@ -3228,6 +3228,10 @@ func TestStreamingSeveralChoicesUsage(t *testing.T) {
 // request would generate the server's default length and still parse, so nothing in the
 // response would say the limit was missed.
 //
+// OpenAI defines the field on chat only, so honouring it on completions is this server's
+// deliberate superset -- see completionRequest.MaxCompletionTokens. Both endpoints are covered
+// because both accept it.
+//
 // Both names at once is refused rather than resolved. They are alternatives, so the two
 // numbers can disagree, and picking one silently answers with a budget the caller may not
 // have meant. The refusal names both fields and the values, which is the only answer that

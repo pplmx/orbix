@@ -483,8 +483,14 @@ type completionRequest struct {
 	Prompt    string `json:"prompt"`
 	MaxTokens int    `json:"max_tokens"`
 
-	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens and is honoured; see
-	// chatRequest.MaxCompletionTokens for why both at once is refused.
+	// MaxCompletionTokens is honoured here even though OpenAI defines it only for chat: the
+	// official SDK's completions parameters do not include it, so no SDK client can send it,
+	// and a raw request carrying it is reaching for a limit. Honouring it is a deliberate
+	// superset. The alternative -- treating it as an unknown member and ignoring it, which is
+	// what this server does with unknown fields -- would generate the default length for a
+	// caller who asked for less, and nothing in the response would say so. Ignoring a limit is
+	// the one silent omission this file keeps refusing to make. Both at once is refused; see
+	// chatRequest.MaxCompletionTokens.
 	MaxCompletionTokens *int `json:"max_completion_tokens"`
 
 	// The response-shape fields, refused rather than ignored; see chatRequest.

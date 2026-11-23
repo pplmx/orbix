@@ -57,7 +57,8 @@
 // body carried one.
 //
 // Unsupported request fields are handled by what a client does with the answer. A field
-// that only tunes sampling -- logit_bias, presence_penalty, response_format -- is ignored,
+// that only tunes sampling -- presence_penalty, response_format -- is ignored, and logit_bias is
+// honoured because -100 and 100 are bans rather than preferences,
 // because the SDKs send such fields whether or not the engine can use them; the text is not
 // what was asked for, but it is the shape the client reads. A field that describes the
 // response is refused with a 400 naming it. The examples that used to illustrate this -- n: 3

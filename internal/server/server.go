@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -316,9 +317,15 @@ func (s *Server) Shutdown() {
 // refused instead. There are two kinds of unsupported field and they differ in what a
 // client does when the server pretends not to see one:
 //
-//   - A field that only tunes sampling (logit_bias, presence_penalty) leaves the response a
-//     client can still read: it is the wrong text, but choices[0].text is where it expected
-//     it. Ignoring it costs quality and keeps working.
+//   - A field that only tunes sampling (presence_penalty) leaves the response a client can still
+//     read: it is the wrong text, but choices[0].text is where it expected it. Ignoring it costs
+//     quality and keeps working.
+//
+// `logit_bias` used to be in that second list and does not belong there. OpenAI documents -100
+// and 100 as "a ban or exclusive selection", so a client that bans a token is relying on it not
+// appearing rather than expressing a preference -- and a silent ban is the closed-mouth failure
+// this classification exists to avoid. It is honoured on both endpoints, and applied by wrapping
+// the sampler so that temperature 0, the mode a caller bans in, sees it too.
 //   - A field that describes the response (n, logprobs, echo, suffix) is a contract about
 //     the body. A client that sent n=3 indexes choices[2]; one that sent logprobs reads
 //     choice.logprobs. Answering with one choice and no logprobs is not a smaller answer but
@@ -331,6 +338,11 @@ type chatRequest struct {
 	Model     string        `json:"model"`
 	Messages  []chatMessage `json:"messages"`
 	MaxTokens *int          `json:"max_tokens"`
+	// LogitBias shifts named tokens' logits before sampling, which is a ban or an exclusive
+	// choice at the extremes OpenAI documents (-100 and 100). It is honoured rather than
+	// ignored for that reason: a client that bans a token is relying on it not appearing, and
+	// silence would break that reliance without saying so.
+	LogitBias map[string]float64 `json:"logit_bias"`
 
 	// MaxCompletionTokens is OpenAI's newer spelling of MaxTokens, and it is honoured rather
 	// than refused: max_tokens is deprecated in favour of it, so a migrated client sends only
@@ -495,6 +507,9 @@ type completionRequest struct {
 	Model     string `json:"model"`
 	Prompt    string `json:"prompt"`
 	MaxTokens *int   `json:"max_tokens"`
+	// LogitBias is honoured: it is a constraint rather than a preference. See the note on
+	// chatRequest for why that distinction decides between honouring and ignoring a field.
+	LogitBias map[string]float64 `json:"logit_bias"`
 
 	// MaxCompletionTokens is honoured here even though OpenAI defines it only for chat: the
 	// official SDK's completions parameters do not include it, so no SDK client can send it,
@@ -897,8 +912,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt := s.renderChat(req.Messages)
+	bias, err := logitBias(req.LogitBias, s.eng.Model().Config().VocabSize)
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
 	s.generate(w, r, generateParams{
 		prompt:              prompt,
+		logitBias:           bias,
 		maxTokens:           derefInt(req.MaxTokens),
 		maxTokensGiven:      req.MaxTokens != nil,
 		priority:            req.Priority,
@@ -1049,8 +1070,14 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 		fim = &markers
 	}
+	bias, err := logitBias(req.LogitBias, s.eng.Model().Config().VocabSize)
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
 	s.generate(w, r, generateParams{
 		prompt:              req.Prompt,
+		logitBias:           bias,
 		maxTokens:           derefInt(req.MaxTokens),
 		maxTokensGiven:      req.MaxTokens != nil,
 		priority:            req.Priority,
@@ -1174,6 +1201,9 @@ type generateParams struct {
 	// what an omitted field decodes to. Every choice is its own engine sequence with its own
 	// sampler, and the range has already been checked by checkChoices.
 	choices int
+	// logitBias shifts named tokens' logits before sampling. It reaches the greedy path too,
+	// which is the difference between a ban and a suggestion.
+	logitBias []llama.TokenBias
 	// maxTokensGiven reports that max_tokens was sent, which matters because zero is a budget
 	// of zero rather than "unset". The field is a pointer on the wire so the two are
 	// distinguishable; this carries that distinction into generate, where the budget is
@@ -1341,6 +1371,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		// than making the client infer which of temperature and top_p was wrong.
 		writeRequestError(w, http.StatusBadRequest, err)
 		return
+	}
+	if len(p.logitBias) > 0 {
+		// Wrapped after the sampler is built, so the bias reaches every path including greedy.
+		// A bias applied inside Temperature would be invisible to a temperature-0 request, and
+		// temperature 0 is exactly when a caller bans a token: it is the reproducible mode.
+		for i := range samplers {
+			samplers[i] = llama.Biased{Bias: p.logitBias, Inner: samplers[i]}
+		}
 	}
 
 	// A request that cannot fit the block pool is refused now, as a 400, rather than being
@@ -2852,4 +2890,45 @@ func finishReasonFor(reason string) string {
 // reverting to a bare timestamp still passes a request-level test twenty times over.
 func (s *Server) responseID(prefix string, unixNano int64) string {
 	return fmt.Sprintf("%s%d-%d", prefix, unixNano, s.idSeq.Add(1))
+}
+
+// logitBias converts the request's map into the sampler's list.
+//
+// The keys are token ids as strings, which is the JSON shape the schema uses because a token id
+// is an object key. Two things are refused rather than skipped: a key that is not a non-negative
+// integer, and a bias outside OpenAI's documented [-100, 100]. A skipped key would be a ban the
+// caller believed in and the server never applied, which is the failure mode this whole path
+// exists to avoid.
+//
+// A bias whose id is past the vocabulary is refused too, for the same reason: the caller has the
+// wrong id -- probably a tokenizer's id from another model -- and applying it to nothing is
+// indistinguishable from ignoring the request.
+func logitBias(raw map[string]float64, vocab int) ([]llama.TokenBias, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]llama.TokenBias, 0, len(raw))
+	for key, bias := range raw {
+		id, err := strconv.ParseInt(key, 10, 32)
+		if err != nil || id < 0 {
+			return nil, newParamError("logit_bias", "invalid_value",
+				"logit_bias keys are token ids written as strings, so %q is not one; send "+
+					"{\"50256\": -100} rather than a token's text", key)
+		}
+		if int(id) >= vocab {
+			return nil, newParamError("logit_bias", "invalid_value",
+				"logit_bias names token %d but this model's vocabulary ends at %d", id, vocab-1)
+		}
+		if bias < -100 || bias > 100 {
+			return nil, newParamError("logit_bias", "invalid_value",
+				"logit_bias values are between -100 and 100, so token %d's %v is outside it",
+				id, bias)
+		}
+		out = append(out, llama.TokenBias{ID: int32(id), Bias: float32(bias)})
+	}
+	// Sorted so the sampler's work is deterministic: a map's range order is randomised, and
+	// two biases on the same id would then be applied in either order -- which matters once
+	// float addition is involved, and matters more for reproducing a report.
+	slices.SortFunc(out, func(a, b llama.TokenBias) int { return int(a.ID) - int(b.ID) })
+	return out, nil
 }

@@ -7939,3 +7939,89 @@ func TestFIMPromptMatchesReferenceIDs(t *testing.T) {
 		}
 	}
 }
+
+// TestLogitBiasBansAToken covers the field the server used to ignore.
+//
+// logit_bias was listed among the fields that only tune sampling, on the reasoning that ignoring
+// one costs quality while keeping a readable response. That reasoning fits temperature or top_p and
+// not this: OpenAI documents -100 and 100 as "a ban or exclusive selection", so a client that bans
+// a token relies on it not appearing. Measured before the field was honoured, a request with
+// {"9079": -100} against Gemma 3 270M returned the same "Paris" as no bias at all.
+//
+// The sampler wraps the built one rather than living inside Temperature, because temperature 0 is
+// exactly when a caller bans a token: it is the reproducible mode, and a bias the greedy path could
+// not see would be silently ignored in the case that matters most.
+//
+// The test works on ids rather than on rendered text. The fixture appends a byte-level fallback to
+// whatever vocabulary it is given, so a token's text does not necessarily encode back to one id --
+// and the ban is a statement about ids anyway.
+func TestLogitBiasBansAToken(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 256})
+	h := srv.Handler()
+
+	// The token greedy picks first, and a second one it could pick instead. Both come from the
+	// response: -100 is an additive shift, so banning the whole vocabulary would leave the
+	// argmax unchanged and prove nothing -- only banning the winner changes who wins.
+	base := decodeBody[struct {
+		Choices []struct {
+			Logprobs *struct {
+				Tokens      []string             `json:"tokens"`
+				TopLogprobs []map[string]float64 `json:"top_logprobs"`
+			} `json:"logprobs"`
+		} `json:"choices"`
+	}](t, post(t, h, "/v1/completions",
+		`{"prompt": "Once upon a time", "max_tokens": 1, "temperature": 0, "logprobs": 1}`))
+	if len(base.Choices) == 0 || base.Choices[0].Logprobs == nil ||
+		len(base.Choices[0].Logprobs.TopLogprobs) == 0 {
+		t.Fatal("the baseline request returned no alternatives")
+	}
+	chosen := base.Choices[0].Logprobs.Tokens[0]
+
+	// Find the id whose ban changes the winner, by trying the ids the fixture's declared
+	// vocabulary occupies. The test asks the engine rather than decoding the text, because the
+	// fixture's byte fallback makes text-to-id ambiguous.
+	bannedSome := false
+	// The fixture's vocabulary is its declared words followed by a 256-piece byte fallback, so
+	// the ids run past 256. Searched rather than assumed, because which id the constructed
+	// weights favour is not something to hardcode.
+	for id := range 363 {
+		body := fmt.Sprintf(
+			`{"prompt": "Once upon a time", "max_tokens": 1, "temperature": 0, "logprobs": 1,
+			  "logit_bias": {"%d": -100}}`, id)
+		got := decodeBody[struct {
+			Choices []struct {
+				Logprobs *struct {
+					Tokens []string `json:"tokens"`
+				} `json:"logprobs"`
+			} `json:"choices"`
+		}](t, post(t, h, "/v1/completions", body))
+		if len(got.Choices) == 0 || got.Choices[0].Logprobs == nil {
+			continue
+		}
+		if got.Choices[0].Logprobs.Tokens[0] != chosen {
+			bannedSome = true
+			break
+		}
+	}
+	if !bannedSome {
+		t.Errorf("no -100 anywhere in the vocabulary changed the first token %q; -100 is documented as a ban,"+
+			" not a preference", chosen)
+	}
+
+	// A bad key is refused rather than skipped: a ban the caller believes in and the server
+	// never applied is the failure this whole path exists to avoid.
+	for _, tc := range []struct{ body, why string }{
+		{`{"prompt": "x", "logit_bias": {"Once": -100}}`, "a token's text is not an id"},
+		{`{"prompt": "x", "logit_bias": {"-1": -100}}`, "a negative id"},
+		{`{"prompt": "x", "logit_bias": {"999999": -100}}`, "an id past the vocabulary"},
+		{`{"prompt": "x", "logit_bias": {"0": -101}}`, "a bias below -100"},
+		{`{"prompt": "x", "logit_bias": {"0": 101}}`, "a bias above 100"},
+	} {
+		resp := post(t, h, "/v1/completions", tc.body)
+		e := decodeBody[errorBody](t, resp)
+		if resp.StatusCode != 400 || e.Error.Param != "logit_bias" {
+			t.Errorf("%s answered %d %q, want a 400 naming logit_bias", tc.why, resp.StatusCode,
+				e.Error.Param)
+		}
+	}
+}

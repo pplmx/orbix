@@ -6,6 +6,7 @@ Orbix targets the GGUF ecosystem. Initial support:
 | ----------------------- | -------------------- | ------------- |
 | **Llama / Llama 2 / 3** | `llama`              | v0.1          |
 | **Qwen 2 / 2.5**        | `qwen2`              | v0.2          |
+| **Qwen3**               | `qwen3`              | done          |
 | **Mistral**             | `mistral`            | v0.3          |
 | **Mixtral**             | `llama` with experts | v0.3          |
 | **Gemma**               | `gemma`              | done          |
@@ -23,9 +24,9 @@ Orbix targets the GGUF ecosystem. Initial support:
 
 GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally. Two ggml types are defined and sized but not decoded -- `Q8_1` and `Q8_K` -- and both are conversion-tool intermediates rather than formats a released checkpoint uses. A file carrying either is refused with `cannot decode <type>` at load, the same way an unrecognised type is.
 
-Four architectures are checked against real checkpoints: `llama` against llama.cpp's
-log-probabilities, `qwen2` against a converted official checkpoint, and `gemma` and `gemma2`
-against llama.cpp's log-probabilities on converted Gemma 2B files. The MoE path has its own real file.
+Five architectures are checked against real checkpoints: `llama` against llama.cpp's
+log-probabilities, `qwen2` against a converted official checkpoint, `gemma` and `gemma2` against
+llama.cpp's log-probabilities on converted Gemma 2B files, and `qwen3` the same way on Qwen3-0.6B. The MoE path has its own real file.
 `mistral` is not -- its configuration and sliding window are covered against constructed files.
 
 `gemma` differs from `llama` in three ways that no packet listing shows, and each one was found
@@ -45,6 +46,15 @@ The reference implementation's norm layer multiplies by `(1 + weight)`, which in
 add the 1 at load time. This format does not need it: using the stored values directly reproduces
 llama.cpp's log probabilities, while adding 1 puts them 26 nats away. The conversion was written,
 measured, and removed.
+
+`qwen3` is the smallest difference in the table and the easiest to get wrong: it keeps Qwen2's
+rotation, drops the attention bias Qwen2 carries, and RMS-normalises every head's query and key
+over the head width before rotating them. That step is invisible in the shapes -- the two norm
+vectors are exactly the size of the two bias vectors they replace -- and the keys are normalised
+where they are written, in four separate paths (single-token, batched prefill, batched decode, and
+the cached query a reused prompt recomputes). Measured against llama.cpp on Qwen3-0.6B: the same
+prompt ids, the same greedy token and the same top seven in the same order, with a worst deviation
+of 0.29 nats; skipping the normalisation puts the same token 21 nats away.
 
 `gemma2` adds four more, and one of them changes a shape rather than a number:
 

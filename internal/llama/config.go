@@ -139,6 +139,8 @@ type Config struct {
 	PostNorms bool
 	// SlidingPattern reports that only every second layer is bounded by WindowLen.
 	SlidingPattern bool
+	// QKNorm reports that each head's query and key are normalised before the rotation.
+	QKNorm bool
 }
 
 // activateGate applies the architecture's gated feed-forward activation in place.
@@ -220,6 +222,10 @@ type archSpec struct {
 	// context, layer by layer. The window length itself is a metadata key; this says whether it
 	// applies to every layer or to every second one.
 	slidingPattern bool
+	// qkNorm reports that each head's query and key are RMS-normalised over their own width
+	// before the rotation, which is what Qwen3 adds to Qwen2's layout. The weights are one
+	// vector of head-dim length per layer, shared by every head of that layer.
+	qkNorm bool
 }
 
 // archSpecs lists the architectures this package implements.
@@ -232,6 +238,11 @@ var archSpecs = map[string]archSpec{
 	"llama":   {rope: RopeNormal, attnBias: false},
 	"mistral": {rope: RopeNormal, attnBias: false},
 	"qwen2":   {rope: RopeNeox, attnBias: true},
+	// Qwen3 keeps Qwen2's rotation and drops its attention bias, but normalises every head's
+	// query and key over the head width before rotating them. That step is invisible in the
+	// tensor shapes -- the two bias vectors it replaces are the same size as its two norm
+	// vectors -- so loading a Qwen3 file as qwen2 would run and answer from the wrong numbers.
+	"qwen3": {rope: RopeNeox, attnBias: false, qkNorm: true},
 	// Gemma differs from Llama in three ways that no packet listing shows: its rotary
 	// embeddings pair dimension i with i+d/2, its token embeddings are scaled on the way in,
 	// and its feed-forward gate is GELU. Loading one with Llama's settings produces fluent
@@ -291,7 +302,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		AttnBias:   spec.attnBias,
 		FFNAct:     spec.ffn,
 		EmbedScale: 1,
-		PostNorms:  spec.postNorms, SlidingPattern: spec.slidingPattern,
+		PostNorms:  spec.postNorms, SlidingPattern: spec.slidingPattern, QKNorm: spec.qkNorm,
 	}
 	if name, ok := f.Get[string]("general.name"); ok {
 		cfg.Name = name
@@ -561,6 +572,12 @@ func (c Config) validate(f *gguf.File) error {
 			want{p + "attn_output.weight", []uint64{uint64(c.Heads * c.HeadDim), uint64(c.Hidden)}},
 			want{p + "ffn_norm.weight", []uint64{uint64(c.Hidden)}},
 		)
+		if c.QKNorm {
+			wants = append(wants,
+				want{p + "attn_q_norm.weight", []uint64{uint64(c.HeadDim)}},
+				want{p + "attn_k_norm.weight", []uint64{uint64(c.HeadDim)}},
+			)
+		}
 		if c.Experts > 0 {
 			// The expert tensors stack one matrix per expert in the outermost
 			// dimension, which is why their shapes carry the expert count as a third
@@ -631,6 +648,9 @@ func (c Config) String() string {
 	}
 	if c.AttnSoftcap != 0 || c.FinalSoftcap != 0 {
 		extra += fmt.Sprintf(", softcaps %g/%g", c.AttnSoftcap, c.FinalSoftcap)
+	}
+	if c.QKNorm {
+		extra += ", qk norm"
 	}
 	if c.PostNorms {
 		extra += ", sandwich norms"

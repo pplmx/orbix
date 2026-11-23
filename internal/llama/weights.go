@@ -35,9 +35,14 @@ type layer struct {
 	vBias []float32 // [kvHeads*headDim]
 
 	ffnNorm []float32 // [hidden]
-	wGate   []float32 // [hidden, ffn]
-	wUp     []float32 // [hidden, ffn]
-	wDown   []float32 // [ffn, hidden]
+	// qNorm and kNorm are [head dim]: one vector per layer, applied to every head's query and
+	// key before the rotation. Nil on architectures that do not normalise them, which is why
+	// the forward pass branches on Config.QKNorm rather than on these being present.
+	qNorm []float32
+	kNorm []float32
+	wGate []float32 // [hidden, ffn]
+	wUp   []float32 // [hidden, ffn]
+	wDown []float32 // [ffn, hidden]
 
 	// MoE fields. Those experts are nil for a dense layer, which is what the forward
 	// pass branches on: the presence of a router is the difference between running one
@@ -140,6 +145,9 @@ func LoadWeights(path string) (*Weights, error) {
 		if cfg.PostNorms {
 			names = append(names, p+"post_attention_norm.weight", p+"post_ffw_norm.weight")
 		}
+		if cfg.QKNorm {
+			names = append(names, p+"attn_q_norm.weight", p+"attn_k_norm.weight")
+		}
 		if cfg.Experts > 0 {
 			names = append(names,
 				p+"ffn_gate_inp.weight", p+"ffn_gate_exps.weight",
@@ -190,6 +198,8 @@ func LoadWeights(path string) (*Weights, error) {
 			wv:           tensors[p+"attn_v.weight"],
 			wo:           tensors[p+"attn_output.weight"],
 			ffnNorm:      tensors[p+"ffn_norm.weight"],
+			qNorm:        tensors[p+"attn_q_norm.weight"],
+			kNorm:        tensors[p+"attn_k_norm.weight"],
 			attnPostNorm: tensors[p+"post_attention_norm.weight"],
 			ffnPostNorm:  tensors[p+"post_ffw_norm.weight"],
 			qBias:        tensors[p+"attn_q.bias"],

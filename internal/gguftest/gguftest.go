@@ -65,6 +65,9 @@ type Model struct {
 	// sub-layer outputs before the residual add. The architecture still has to ask for them:
 	// the tensors alone do not change what the forward pass does.
 	PostNorms bool
+	// QKNorm writes the per-layer query and key norm vectors a QK-normalising architecture
+	// applies to every head, which is what Qwen3 has where Qwen2 has attention bias.
+	QKNorm bool
 	// ChatTemplate, when set, is written to tokenizer.chat_template.
 	ChatTemplate string
 
@@ -268,6 +271,13 @@ func (m Model) tensors() []tensorSpec {
 			tensorSpec{p + "attn_output.weight", []uint64{h, h}},
 			tensorSpec{p + "ffn_norm.weight", []uint64{h}},
 		)
+		// The per-head query and key norms a Qwen3 block carries instead of attention bias.
+		if m.QKNorm {
+			out = append(out,
+				tensorSpec{p + "attn_q_norm.weight", []uint64{uint64(m.headDim())}},
+				tensorSpec{p + "attn_k_norm.weight", []uint64{uint64(m.headDim())}},
+			)
+		}
 		// The sandwich norms a Gemma 2 block carries in addition to the pre-norms.
 		if m.PostNorms {
 			out = append(out,
@@ -431,6 +441,7 @@ func isNorm(name string) bool {
 	for _, suffix := range []string{
 		"attn_norm.weight", "ffn_norm.weight", "output_norm.weight",
 		"post_attention_norm.weight", "post_ffw_norm.weight",
+		"attn_q_norm.weight", "attn_k_norm.weight",
 	} {
 		if len(name) >= len(suffix) && name[len(name)-len(suffix):] == suffix {
 			return true

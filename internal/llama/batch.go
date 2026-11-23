@@ -319,6 +319,11 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	// a row may only attend to positions up to and including itself. Writing the
 	// whole batch into the cache first would let every row see the future, which
 	// is exactly the mask a decoder is supposed to enforce.
+	// Per head, before the rotation, for every row at once: the batch lays heads out
+	// contiguously within each row, so one call covers n rows of Heads heads each.
+	if err := m.normQK(layer, b.q[:n*qdim], b.k[:n*kvdim], n*cfg.Heads, n*cfg.KVHeads); err != nil {
+		return err
+	}
 	for i := range n {
 		pos := startPos + i
 		for h := range cfg.Heads {
@@ -687,6 +692,9 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 		kRow := b.k[r*kvdim : (r+1)*kvdim]
 		vRow := b.v[r*kvdim : (r+1)*kvdim]
 
+		if err := m.normQK(layer, qRow, kRow, cfg.Heads, cfg.KVHeads); err != nil {
+			return err
+		}
 		for h := range cfg.Heads {
 			if err := m.rope.apply(qRow[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
 				return err

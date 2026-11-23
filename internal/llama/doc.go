@@ -20,6 +20,13 @@
 // that a genuine structural difference has no home here, which is the point at which a second
 // implementation is cheaper than more flags.
 //
+// One architecture changes arithmetic without changing a shape, which is the case the table is
+// least able to help with. Qwen3 normalises each head's query and key over the head width before
+// rotating it, where Qwen2 carries bias vectors of exactly the same size; a file loaded with the
+// wrong one runs and answers from the wrong numbers. The norm is applied in four places -- the
+// single-token pass, the batched prefill, the batched decode, and the cached query a reused prompt
+// recomputes -- and each has a test that compares that path against a reference it must agree with.
+//
 // Some architectures need more than a flag: Gemma 2 bounds its attention scores and its output
 // logits with a softcap, normalises each sub-layer output before the residual add, and applies its
 // sliding window to every second block rather than to all of them. Those live in the same forward

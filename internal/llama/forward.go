@@ -232,6 +232,11 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 		return err
 	}
 
+	// Normalise each head, then rotate it. The order matters: Qwen3 normalises the projections
+	// as produced and rotates the result.
+	if err := m.normQK(layer, m.q, m.k, cfg.Heads, cfg.KVHeads); err != nil {
+		return err
+	}
 	// Rotate each head's query and the corresponding key at this position.
 	for h := range cfg.Heads {
 		if err := m.rope.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {

@@ -152,6 +152,47 @@ func spanRows(spans []span) int {
 	return n
 }
 
+// normQK normalises each head's query and key over the head width, in place.
+//
+// Qwen3 does this where Qwen2 puts a bias: the vectors are the same length, so the two
+// architectures differ in arithmetic rather than in shape, and a file loaded with the wrong one
+// runs cleanly and answers from the wrong numbers. A nil k slice normalises only the query, which
+// is the cached-decode case -- the keys at those positions were normalised when they were written.
+//
+// The weight is one vector per layer, not per head: every head of a layer shares it, which is why
+// the loop indexes heads but not the weight.
+func (m *Model) normQK(layer *layer, q, k []float32, qHeads, kHeads int) error {
+	if !m.W.Config.QKNorm {
+		return nil
+	}
+	d, eps := m.W.Config.HeadDim, m.W.Config.RMSNormEps
+	if err := m.normHeads(q, qHeads, layer.qNorm, d, eps); err != nil {
+		return err
+	}
+	if k == nil {
+		return nil
+	}
+	return m.normHeads(k, kHeads, layer.kNorm, d, eps)
+}
+
+// normHeads applies one RMSNorm per head across heads slices of width d.
+func (m *Model) normHeads(v []float32, heads int, weight []float32, d int, eps float32) error {
+	if len(weight) < d {
+		return fmt.Errorf("llama: qk-norm weight holds %d values, need %d", len(weight), d)
+	}
+	if len(v) < heads*d {
+		return fmt.Errorf("llama: qk-norm over %d heads of %d needs %d values, got %d",
+			heads, d, heads*d, len(v))
+	}
+	for h := range heads {
+		head := v[h*d : (h+1)*d]
+		if err := kernel.RMSNorm(head, head, weight, eps); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // attentionCached runs one block's self-attention for a position whose keys and
 // values are already in the cache.
 //
@@ -173,7 +214,11 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 	if err := kernel.AddBias(m.q, layer.qBias, 1, cfg.Heads*cfg.HeadDim); err != nil {
 		return err
 	}
-	// Only the query is needed: the key and value at this position are stored.
+	// Only the query is needed: the key and value at this position are stored, and their
+	// normalisation happened when they were written.
+	if err := m.normQK(layer, m.q, nil, cfg.Heads, 0); err != nil {
+		return err
+	}
 	for h := range cfg.Heads {
 		if err := m.rope.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
 			return err

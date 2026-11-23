@@ -51,14 +51,14 @@ func checkBestOf(bestOf, n int) (string, bool) {
 // A candidate with no per-token score -- no log probabilities, or none generated -- sorts last
 // rather than being dropped. Dropping it would let a shorter response come back than the
 // caller asked for, which is the failure the candidate generation exists to avoid.
-func rankCandidates(results []choiceResult, keep int) []int {
+func rankCandidates(results []choiceResult, shown []int, keep int) []int {
 	order := make([]int, len(results))
 	for i := range order {
 		order[i] = i
 	}
 	scores := make([]float64, len(results))
 	for i := range results {
-		scores[i] = results[i].score()
+		scores[i] = results[i].scoreShown(shown[i])
 	}
 	slices.SortStableFunc(order, func(a, b int) int {
 		switch {
@@ -73,4 +73,19 @@ func rankCandidates(results []choiceResult, keep int) []int {
 		keep = len(order)
 	}
 	return order[:keep]
+}
+
+// shownTokens is how many of a candidate's tokens the response will report.
+//
+// It exists because a stop string cuts the reported log probabilities to the text that survived,
+// and the ranking has to use the same set. Without it a candidate that generated thirty tokens
+// after its stop string is ranked on all of them while the caller sees only the first few.
+func (s *Server) shownTokens(c *choiceResult, p generateParams) int {
+	text := s.tok.DecodeCompletion(c.out)
+	if cut, found := cutAtStop(text, p.stop); found {
+		text = cut
+	}
+	described := s.describeTokens(c.samples)
+	keep, _ := keptTokens(described, len(text))
+	return keep
 }

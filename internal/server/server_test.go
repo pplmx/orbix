@@ -3964,7 +3964,7 @@ func TestCandidateScoreIsPerToken(t *testing.T) {
 		t.Errorf("four tokens at -0.6 each scored %v, want -0.6", got)
 	}
 	// The sum would put short (-2) ahead of long (-2.4); the average puts long ahead.
-	if got := rankCandidates([]choiceResult{short, long}, 2); got[0] != 1 {
+	if got := rankCandidates([]choiceResult{short, long}, []int{2, 4}, 2); got[0] != 1 {
 		t.Errorf("ranked %v first; the longer, less surprising candidate should win on a"+
 			" per-token score", got[0])
 	}
@@ -3972,7 +3972,7 @@ func TestCandidateScoreIsPerToken(t *testing.T) {
 	// A candidate that generated nothing has no per-token figure and must never win: ranking it
 	// first on an empty sum would return an empty completion as the best one.
 	empty := choiceResult{reason: "stop"}
-	if got := rankCandidates([]choiceResult{empty, short}, 2); got[0] != 1 {
+	if got := rankCandidates([]choiceResult{empty, short}, []int{0, 2}, 2); got[0] != 1 {
 		t.Errorf("ranked the empty candidate first: %v", got)
 	}
 
@@ -3980,7 +3980,7 @@ func TestCandidateScoreIsPerToken(t *testing.T) {
 	// back to the collection order. Returning a different order would make the response depend
 	// on something the caller cannot see.
 	unscored := []choiceResult{{out: []int32{1}}, {out: []int32{2}}, {out: []int32{3}}}
-	if got := rankCandidates(unscored, 3); fmt.Sprint(got) != "[0 1 2]" {
+	if got := rankCandidates(unscored, []int{0, 0, 0}, 3); fmt.Sprint(got) != "[0 1 2]" {
 		t.Errorf("unscored candidates ranked %v, want their collection order", got)
 	}
 }
@@ -8165,5 +8165,47 @@ func TestPrefixCacheUnderN(t *testing.T) {
 			t.Errorf("choice %d = %q with prefix reuse and %q without; the cache changed the answer",
 				i, cached[i], without[i])
 		}
+	}
+}
+
+// TestBestOfRanksOnTheTokensItReports covers the interaction between best_of and stop.
+//
+// A stop string cuts the reported log probabilities to the text that survived, and the ranking used
+// to run on the untrimmed run. A candidate that kept generating after its stop string was therefore
+// scored on tokens the caller never sees, and the returned choices were not in descending order of
+// the numbers the response carried. Measured on Gemma 3 270M with n=7, best_of=8 and stop ".",
+// four seeds out of four returned a list that rose and fell -- -10.772 before -10.626 -- where
+// every pair should have been ordered.
+//
+// The two candidates are built so the two scorings disagree about the winner. A has the better
+// visible run; B has the better whole run because four unlikely tokens after its stop string drag
+// its mean down only a little while A's two at -1.5 drag its mean down a lot. Ranking on the whole
+// run puts B first, ranking on what is reported puts A first, so a test that accepted either
+// ordering would be checking nothing.
+func TestBestOfRanksOnTheTokensItReports(t *testing.T) {
+	a := choiceResult{
+		out:     []int32{1, 2},
+		samples: []sampledToken{{logprob: -1.5}, {logprob: -1.5}},
+		reason:  "stop",
+	}
+	b := choiceResult{
+		out: []int32{1, 2, 3, 4, 5, 6},
+		samples: []sampledToken{
+			{logprob: -2}, {logprob: -2},
+			{logprob: -0.1}, {logprob: -0.1}, {logprob: -0.1}, {logprob: -0.1},
+		},
+		reason: "stop",
+	}
+
+	// The whole-run means prefer B (-0.733) to A (-1.5), so a.score() is the lower of the two.
+	if !(a.score() < b.score()) {
+		t.Fatalf("the fixture no longer separates the scorings: whole-run means %v and %v",
+			a.score(), b.score())
+	}
+	// The visible means prefer A (-1.5) to B (-2.0), so A has to come first.
+	got := rankCandidates([]choiceResult{a, b}, []int{2, 2}, 2)
+	if got[0] != 0 {
+		t.Errorf("ranked candidate %d first on the reported tokens; A's visible run (-1.5) beats"+
+			" B's (-2.0), and B only wins if the four tokens past its stop are counted", got[0])
 	}
 }

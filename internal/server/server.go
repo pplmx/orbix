@@ -1710,7 +1710,18 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 		selected[i] = i
 	}
 	if p.bestOf > 1 {
-		selected = rankCandidates(results, p.choiceCount())
+		// Rank on the tokens the response will actually show. A stop string cuts the
+		// reported log probabilities to the surviving text, and ranking on the untrimmed run
+		// meant a candidate could be selected for a mean the caller never sees: measured on
+		// Gemma 3 270M with n=7 best_of=8 and stop ".", the returned choices were not in
+		// descending order of the log probabilities the response carried -- -10.772 came
+		// before -10.626 -- because the first of those two had generated further tokens after
+		// its stop string than the second.
+		trimmed := make([]int, len(results))
+		for i := range results {
+			trimmed[i] = s.shownTokens(&results[i], p)
+		}
+		selected = rankCandidates(results, trimmed, p.choiceCount())
 	}
 
 	// completion_tokens counts every sequence generated, discarded candidates included.
@@ -3059,4 +3070,20 @@ func checkResponseFormat(raw json.RawMessage) error {
 			"response_format type %q is not one this server knows; the types are \"text\", "+
 				"\"json_object\" and \"json_schema\"", f.Type)
 	}
+}
+
+// scoreShown is the candidate's mean log probability over the tokens the response reports.
+//
+// The same correction score makes -- mean rather than sum -- applied to the run after a stop string
+// has cut it. A candidate that generated a hundred tokens past its stop is not a better answer than
+// one that stopped on the same string after two, and the caller can only see the two.
+func (c *choiceResult) scoreShown(shown int) float64 {
+	if shown <= 0 || shown > len(c.samples) {
+		return math.Inf(-1)
+	}
+	var sum float64
+	for _, s := range c.samples[:shown] {
+		sum += float64(s.logprob)
+	}
+	return sum / float64(shown)
 }

@@ -683,9 +683,9 @@ type shapeField struct {
 	//
 	// Sending such a value is not hypothetical. The official SDKs serialise a keyword
 	// argument the caller passed even when it equals the API's default, so
-	// completions.create(n=1) puts "n": 1 on the wire. Refusing that told a caller
-	// "n>1 needs several sequences" about n=1, and the request was one this server answers
-	// correctly.
+	// completions.create(best_of=1) puts "best_of": 1 on the wire. Refusing that told a
+	// caller "best_of needs several candidates" about best_of=1, and the request was one
+	// this server answers correctly.
 	//
 	// It takes the request by pointer through any because the two endpoints have different
 	// structs and the field names do not line up exactly (chat has top_logprobs,
@@ -696,9 +696,10 @@ type shapeField struct {
 	// asked accepts, which is why the ranges are narrowed in asked rather than here.
 	why string
 	// invalid reports a value the API does not define at all, and the message to answer
-	// with. It runs before asked so a negative count is reported as the malformed number it
-	// is rather than as an unimplemented feature -- "n>1 needs several sequences" is a lie
-	// about n=-1, and a caller who reads it changes the wrong thing.
+	// with. It runs before asked so a malformed count is reported as the malformed number it
+	// is rather than as an unimplemented feature. best_of carries both: -1 is a number the
+	// API does not define, while 2 is a ranking this server cannot compute, and answering -1
+	// with the reason for 2 sends the caller to change the wrong thing.
 	invalid func(any) (string, bool)
 }
 

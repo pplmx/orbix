@@ -1169,6 +1169,38 @@ func (t *Tokenizer) Decode(ids []int32) string {
 	return out
 }
 
+// PieceBytes returns the bytes one token contributes to the decoded text.
+//
+// It is the unit the OpenAI response schema calls a token's "bytes", and it exists because a
+// token's text is not always valid UTF-8. A SentencePiece vocabulary spells an arbitrary byte
+// as "<0xNN>", and a byte-level vocabulary spells each byte as an escaped rune, so one
+// character can span several tokens and only the bytes are authoritative. Concatenating this
+// method over a sequence reproduces Decode's output, minus the single leading space
+// DecodeCompletion removes.
+//
+// Control tokens contribute nothing, which is what Decode does with them: they are markup
+// rather than text. A token outside the vocabulary returns nil rather than panicking, because
+// the caller is describing a sequence that came out of the engine and a hostile id should not
+// take the response down.
+func (t *Tokenizer) PieceBytes(id int32) []byte {
+	if id < 0 || int(id) >= len(t.tokens) {
+		return nil
+	}
+	if t.types[id] == Control {
+		return nil
+	}
+	if b, ok := parseByteToken(t.tokens[id]); ok {
+		return []byte{b}
+	}
+	if t.types[id] == Unknown {
+		return []byte(unknownSurface)
+	}
+	if t.byteLevel {
+		return bpeUnescapeBytes(t.tokens[id])
+	}
+	return []byte(t.renderPiece(t.tokens[id]))
+}
+
 // DecodeCompletion renders generated tokens as text to show a user.
 //
 // It differs from Decode in one respect: a byte-level vocabulary spells a word two ways

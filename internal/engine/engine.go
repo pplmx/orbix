@@ -48,6 +48,18 @@ type Event struct {
 	// with no Done at all, while the engine had generated 68. A consumer that needs a total
 	// for a request it stopped reading has to take it from somewhere other than this event.
 	Generated int
+	// Logprob is the natural logarithm of the probability the model gave Token, and
+	// HasLogprob says whether it is meaningful. It is set only when the request asked for
+	// log probabilities, because computing one costs two passes over the vocabulary.
+	//
+	// Zero is a real log probability (a token the model considered certain), which is why the
+	// absence needs its own flag rather than a sentinel value.
+	Logprob    float32
+	HasLogprob bool
+	// Top holds the most likely alternatives at this position, descending, when the request
+	// asked for them. It is nil when only the chosen token's log probability was wanted.
+	Top []llama.Alternative
+
 	// Round is the engine round that produced this event.
 	//
 	// It is stamped here rather than read from Engine.Round() by the consumer because a
@@ -109,6 +121,26 @@ type Request struct {
 	// pay for a tracer it never asked for. The exporter's own lifetime belongs to the
 	// caller.
 	Trace *otel.Exporter
+
+	// Logprobs asks for the distribution each generated token was drawn from. False -- the
+	// default -- computes nothing, which keeps the sampling path exactly as it was for a
+	// caller that did not ask; the cost when it is set is two passes over the vocabulary row
+	// per token.
+	//
+	// It is a separate switch from TopLogprobs because OpenAI's completions endpoint spells
+	// "the chosen token's log probability and no alternatives" as logprobs: 0, so zero
+	// alternatives is a request rather than an absence.
+	//
+	// The rows are described from the full-vocabulary log-softmax at the request's
+	// temperature, not from the truncated set a top-k or top-p sampler draws from; see
+	// llama.TokenLogprobs for why that is the honest number to report.
+	Logprobs bool
+	// TopLogprobs is how many of the most likely alternatives to describe alongside the
+	// chosen token. It has no effect unless Logprobs is set.
+	TopLogprobs int
+	// Temperature is the sampling temperature, needed only to describe the distribution that
+	// TopLogprobs asks for. It is not otherwise consulted here -- the sampler already has it.
+	Temperature float32
 
 	// Priority ranks this request against others waiting for a slot: a higher value
 	// advances first. Zero is the default and means "with the rest".
@@ -657,7 +689,20 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 	// Counting at the forward pass instead would over-count a batched round, which is the
 	// other direction and equally wrong; counting after the send is the only point where the
 	// number means what the field says.
-	if !s.emit(Event{Token: tok, HasToken: true, Round: s.round}) {
+	// The distribution is described from the same row the sampler just drew on, before the
+	// event goes out. It is computed here rather than inside the sampler so that a request
+	// without logprobs costs nothing: the sampling path is untouched, and this branch is the
+	// only thing that changes.
+	ev := Event{Token: tok, HasToken: true, Round: s.round}
+	if s.req.Logprobs {
+		// Exactly the alternatives asked for, not one more: OpenAI describes top_logprobs as
+		// the most likely tokens at the position, so a sampler that drew a surprising token
+		// correctly leaves it out of that list. The chosen token's own value is reported
+		// separately, which is why the two can cover different sets.
+		lp, alts := llama.TokenLogprobs(s.logits, tok, s.req.Temperature, s.req.TopLogprobs)
+		ev.Logprob, ev.HasLogprob, ev.Top = lp, true, alts
+	}
+	if !s.emit(ev) {
 		return 0, false
 	}
 	e.mu.Lock()

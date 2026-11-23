@@ -445,3 +445,36 @@ the prompt length for no additional signal.
 When every layer agrees the message says so, which is itself informative: a disagreement that
 appears only in the final logits is in the output norm or the vocabulary projection, and those are
 two places rather than the whole model.
+
+## The same comparison on real weights
+
+`TestMatchesNumPyReferenceOnRealWeights` runs the comparison on a checkpoint instead of a fixture.
+It is gated on `GEMMA3_MODEL` and `GEMMA3_REFERENCE`:
+
+```bash
+GEMMA3_MODEL=/tmp/gemma3-q8.gguf GEMMA3_REFERENCE=gemma3-270m.json \
+  go test -run TestMatchesNumPyReferenceOnRealWeights -v ./internal/llama/
+```
+
+`GEMMA3_REFERENCE` is a file name under `testdata/reference`, not a path: the expected values are
+part of the repository and a path would let a run compare against something outside it.
+
+Fixtures carry small pseudo-random weights, so two implementations that agree on them agree on the
+shape of the arithmetic and little else. A checkpoint brings the numerical range they cannot:
+residual streams in the thousands rather than below ten, norms whose weights were trained rather
+than set to one, and a 262144-wide vocabulary whose projection dominates the error budget. That is
+also why this test compares relative error against a tolerance of 1e-3 while the fixture test uses
+absolute logits -- 1e-3 absolute against a residual of 5109 would be asking float32 for twelve
+significant figures.
+
+Measured: the three sampled layer residuals agree, the top eight logits agree to within 1e-3
+relative, and the argmax is the same. Injected faults that this test does catch include a 1% error in
+the embedding scale (6.7e-03 relative, reported against the specific logits that exceed the
+tolerance). One it does not catch, by construction: the sliding window's off-by-one, because six
+tokens is far shorter than a window of 512. That case belongs to the `window-edge` fixture, and the
+two tests are complementary rather than redundant -- one covers the numerical range, the other the
+boundary.
+
+Only the top eight logits and three layer residuals are stored, 37 KiB rather than 5 MiB. The
+informative part of a 262144-wide distribution is its head, and the first, middle and last blocks are
+enough to say where a divergence starts.

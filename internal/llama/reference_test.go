@@ -223,7 +223,11 @@ func reportFirstDivergentLayer(t *testing.T, got [][]float32, want [][]float64) 
 				worst, at = d, i
 			}
 		}
-		if worst > referenceTolerance {
+		// Relative, because a real checkpoint's residual stream reaches into the thousands while a
+		// fixture's stays below ten. An absolute tolerance that fits one is meaningless for the
+		// other: 1e-3 against a residual of 5109 is asking for agreement to twelve significant
+		// figures, which float32 does not have.
+		if worst > referenceTolerance*math.Max(1, math.Abs(want[l][at])) {
 			t.Errorf("the divergence begins at layer %d: worst %.6f at dimension %d"+
 				" (engine %.6f, reference %.6f)", l, worst, at, got[l][at], want[l][at])
 			if l == 0 {

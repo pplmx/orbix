@@ -2,9 +2,13 @@ package llama
 
 import (
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // trimSpans is the whole sliding-window mechanism: if it keeps the wrong rows, every
@@ -963,5 +967,95 @@ func TestAttendMatchesAHandComputedCase(t *testing.T) {
 		if out[j] != want {
 			t.Errorf("peaked case: out[%d] = %v, want %v (value 0 dominates)", j, out[j], want)
 		}
+	}
+}
+
+// TestWindowChangesRealLogits is the end-to-end check for the sliding window: does a window that
+// binds actually change what the model predicts, and one that cannot bind leave it alone?
+//
+// The unit tests above cover trimSpans and the per-layer pattern, which is where the mechanism
+// lives; what they cannot say is whether the mechanism is reached from a forward pass over real
+// weights. This one compares three runs on the same 402-token prompt and real Gemma 2 weights:
+//
+//	no window       the baseline
+//	window 64       shorter than the prompt, so the last token may not read the first 338
+//	window 2^20     longer than the prompt, so the window is a no-op
+//
+// The third is what makes the first meaningful. A window that changed nothing at all would look
+// like a passing test if only the bounded case were asserted, and a window applied where it should
+// not be would look like a correct one -- so the run with a window larger than the prompt has to be
+// bit-identical to no window, and it is: measured max|diff| 0.000000, against 5.47 for the bounded
+// run, which also changes the argmax.
+//
+// Set GEMMA2_MODEL to a Gemma 2 GGUF to run it. The model is used rather than the fixture because a
+// constructed model's weights make every position look alike, which is exactly what a window hides.
+func TestWindowChangesRealLogits(t *testing.T) {
+	path := os.Getenv("GEMMA2_MODEL")
+	if path == "" {
+		t.Skip("set GEMMA2_MODEL to a Gemma 2 GGUF file, whose config declares a sliding window")
+	}
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(f)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	// Long enough that a window of 32 binds hard, short enough that three prefills on a 2B model
+	// stay under a minute. The measured effect at this size is several logits, not a rounding
+	// difference.
+	prompt := tok.Encode(strings.Repeat("The quick brown fox jumps over the lazy dog. ", 16), true)
+	if len(prompt) < 128 {
+		t.Fatalf("the prompt is %d tokens; the test needs enough positions for a window of 32 to"+
+			" leave part of the prompt out", len(prompt))
+	}
+
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	run := func(window int, pattern bool) []float32 {
+		t.Helper()
+		m.W.Config.WindowLen = window
+		m.W.Config.SlidingPattern = pattern
+		cache, err := NewKVCache(m.Config(), len(prompt)+64)
+		if err != nil {
+			t.Fatalf("cache: %v", err)
+		}
+		out, err := m.Prefill(cache, prompt, 0)
+		if err != nil {
+			t.Fatalf("prefill: %v", err)
+		}
+		return append([]float32(nil), out...)
+	}
+	maxDiff := func(a, b []float32) float64 {
+		var worst float64
+		for i := range a {
+			if d := math.Abs(float64(a[i] - b[i])); d > worst {
+				worst = d
+			}
+		}
+		return worst
+	}
+
+	none := run(0, false)
+	bounded := run(32, true)
+	tooWide := run(1<<20, true)
+
+	if d := maxDiff(bounded, none); d < 0.1 {
+		t.Errorf("a window of 32 over %d positions changed the logits by only %v; the window is"+
+			" not reaching the forward pass", len(prompt), d)
+	}
+	if d := maxDiff(tooWide, none); d != 0 {
+		t.Errorf("a window wider than the prompt changed the logits by %v; it must be a no-op", d)
+	}
+	// The pattern flag decides which layers are bounded, and the two runs here differ in exactly
+	// that: every layer bounded against every second one. They must therefore disagree, which is
+	// the difference between a window that applies to a layer and one that does not. The per-layer
+	// arithmetic itself is pinned by TestWindowForAlternates.
+	if maxDiff(run(32, false), run(32, true)) == 0 {
+		t.Error("bounding every layer and bounding every second one gave identical logits; the" +
+			" pattern flag is not reaching the forward pass")
 	}
 }

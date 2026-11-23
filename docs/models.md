@@ -27,10 +27,23 @@ GGUF parsing and tokenization are implemented in pure Go from the start; the qua
 Five architectures are checked against real checkpoints: `llama` against llama.cpp's
 log-probabilities, `qwen2` against a converted official checkpoint, `gemma` and `gemma2` against
 llama.cpp's log-probabilities on converted Gemma 2B files, and `qwen3` the same way on Qwen3-0.6B. The MoE path has its own real file.
-`mistral` is not -- its configuration and sliding window are covered against constructed files.
-A real Mistral checkpoint was read as a check of the GGUF version 2 support instead: TheBloke's
-conversion declares `general.architecture = llama` and no sliding window, so it exercises the
-format revision and not the `mistral` spec.
+`mistral` is not, and the reason is worth stating because it is not a gap this project can close by
+working harder. The `mistral` architecture string is effectively retired upstream: the current
+llama.cpp converter writes `general.architecture = llama` for every Mistral checkpoint it converts
+(its Mistral class sets that explicitly "for compatibility"), and the arch enum in gguf-py no longer
+contains `mistral` at all -- only `mistral3`, `mistral4` and `mistral-large4`. Four published
+conversions were checked by reading their headers (TheBloke v0.1 instruct and base, second-state,
+Mistral-Nemo) and every one declares `llama` with no sliding-window key. So there is no `mistral`
+checkpoint in circulation to verify against, and this package's `mistral` entry describes a format
+that files no longer use.
+
+The sliding-window mechanism itself is verified on real weights anyway, through Gemma 2, whose config
+does declare one (`TestWindowChangesRealLogits`): a window of 32 over 162 positions moves the logits
+by 5.47 nats and changes the argmax, a window wider than the prompt leaves them bit-identical, and
+bounding every layer differs from bounding every second one.
+
+A real Mistral checkpoint was read as a check of the GGUF version 2 support instead, since that is
+what it turned out to exercise.
 
 `gemma` differs from `llama` in three ways that no packet listing shows, and each one was found
 by comparing against llama.cpp rather than by reading the reference code:

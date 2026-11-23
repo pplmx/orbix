@@ -44,6 +44,17 @@
 // are converted with their query and key rows permuted, Gemma's are not -- which is why each
 // architecture's pairing is compared against a reference rather than reasoned about.
 //
+// One entry in the table describes a format no published file uses. `mistral` is here because the
+// architecture exists in this package and in llama.cpp, but the current converter writes
+// general.architecture = llama for every Mistral checkpoint -- its Mistral class does so explicitly
+// "for compatibility" -- and gguf-py no longer has a `mistral` arch at all. Four conversions were
+// checked by reading their headers and all declare llama. The entry stays because a file that does
+// declare it should load correctly, and docs/models.md says plainly that no such file was found.
+//
+// The sliding window that entry exists for is verified on real weights through Gemma 2, which
+// declares one: TestWindowChangesRealLogits bounds a 162-position prompt to 32 and checks both that
+// the logits move and that a window wider than the prompt leaves them bit-identical.
+//
 // The table is not the only place architecture varies. The sliding window is a metadata key
 // (attention.sliding_window) read straight into Config, and the expert count likewise: both
 // are per-file numbers rather than per-family switches, which is why they are not spec

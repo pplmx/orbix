@@ -8,7 +8,7 @@ Orbix targets the GGUF ecosystem. Initial support:
 | **Qwen 2 / 2.5**        | `qwen2`              | v0.2          |
 | **Mistral**             | `mistral`            | v0.3          |
 | **Mixtral**             | `llama` with experts | v0.3          |
-| **Gemma**               | `gemma`              | v0.5          |
+| **Gemma**               | `gemma`              | done          |
 
 | Quantization                   | Status |
 | ------------------------------ | ------ |
@@ -22,21 +22,28 @@ Orbix targets the GGUF ecosystem. Initial support:
 
 GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally. Two ggml types are defined and sized but not decoded -- `Q8_1` and `Q8_K` -- and both are conversion-tool intermediates rather than formats a released checkpoint uses. A file carrying either is refused with `cannot decode <type>` at load, the same way an unrecognised type is.
 
-Two architectures are checked against real checkpoints: `llama` against llama.cpp's
-log-probabilities, `qwen2` against a converted official checkpoint. The MoE path has its own real
-file. `mistral` and `gemma` are not yet -- their configuration, architecture switches and forward
-pass are covered against constructed files, and the cross-checks against a converted checkpoint
-are the next step for both.
+Three architectures are checked against real checkpoints: `llama` against llama.cpp's
+log-probabilities, `qwen2` against a converted official checkpoint, and `gemma` against
+llama.cpp's log-probabilities on a converted Gemma 2B. The MoE path has its own real file.
+`mistral` is not -- its configuration and sliding window are covered against constructed files.
 
-`gemma` differs from `llama` in three ways that no packet listing shows, so all three are read
-from the architecture rather than guessed: the checkpoint stores its RMSNorm weights as `w-1`
-(the loader adds the 1 back once, at load, which leaves every norm site in the package
-unchanged), token embeddings are multiplied by `sqrt(hidden)` on the way in, and the
-feed-forward gate is GELU rather than SiLU. The scale is applied at the lookup instead of being
-folded into the matrix, because that matrix is usually the tied output projection and the
-projection has to see the unscaled weights. Loading a Gemma file with Llama's settings produces
-coherent English with the wrong distribution, which is the failure the architecture table exists
-to prevent.
+`gemma` differs from `llama` in three ways that no packet listing shows, and each one was found
+by comparing against llama.cpp rather than by reading the reference code:
+
+- The rotary embeddings pair dimension `i` with `i + d/2`. Llama's files are converted with
+  their query and key rows permuted so that the adjacent-pair rotation reproduces the original
+  model, and Gemma's are not, so the pairing that looks right for Llama is wrong here. Measured
+  on the same prefix, the adjacent pairing put the top-8 log probabilities 1.96 nats away and
+  this one 0.19.
+- Token embeddings are multiplied by `sqrt(hidden)` on the way in. The factor is applied at the
+  lookup rather than folded into the matrix, because that matrix is usually the tied output
+  projection and the projection has to see the unscaled weights.
+- The feed-forward gate is GELU, not SiLU.
+
+The reference implementation's norm layer multiplies by `(1 + weight)`, which invites a loader to
+add the 1 at load time. This format does not need it: using the stored values directly reproduces
+llama.cpp's log probabilities, while adding 1 puts them 26 nats away. The conversion was written,
+measured, and removed.
 
 Quantization is checked at the block level rather than by comparing generations across formats:
 exact-value tests on constructed blocks for the 32-weight formats, a round-trip error bound for

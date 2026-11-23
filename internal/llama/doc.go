@@ -14,20 +14,21 @@
 //
 // Architecture differences are a table, not a type hierarchy. archSpecs maps an
 // architecture name to the handful of properties that actually differ -- the RoPE pairing
-// convention, whether attention carries a bias, how the checkpoint stores its normalisation
-// weights, whether embeddings are scaled on the way in, and which activation gates the
-// feed-forward network. A Go type per family would duplicate the forward pass per family; the
+// convention, whether attention carries a bias, whether embeddings are scaled on the way in, and
+// which activation gates the feed-forward network. A Go type per family would duplicate the forward pass per family; the
 // table keeps one forward pass and makes the differences enumerable at a glance. The cost is
 // that a genuine structural difference has no home here, which is the point at which a second
 // implementation is cheaper than more flags.
 //
-// The five are not equally visible, which is why they are all in the table rather than three
-// of them being inferred. Gemma shares every shape and every tensor name with Llama and differs
-// in three numbers, so a loader that fell back to Llama's settings would run cleanly and
-// generate fluent English with the wrong distribution. The norm offset is folded into the
-// weights once at load, so nothing downstream sees it; the embedding scale is applied at the
-// lookup, because the matrix it scales is usually also the tied output projection and the
-// projection has to see the unscaled weights; the gate is dispatched per matrix multiply.
+// They are not equally visible, which is why they are all in the table rather than inferred.
+// Gemma shares every shape and every tensor name with Llama and differs in three of them, so a
+// loader that fell back to Llama's settings runs cleanly and generates fluent English with the
+// wrong distribution. Only one of the three is visible in the config: the embedding scale is
+// applied at the lookup, because the matrix it scales is usually also the tied output projection
+// and the projection has to see the unscaled weights, and the gate is dispatched per matrix
+// multiply. The rotary pairing is the one that looks right for the wrong model -- Llama's files
+// are converted with their query and key rows permuted, Gemma's are not -- which is why each
+// architecture's pairing is compared against a reference rather than reasoned about.
 //
 // The table is not the only place architecture varies. The sliding window is a metadata key
 // (attention.sliding_window) read straight into Config, and the expert count likewise: both
@@ -36,7 +37,7 @@
 //
 // Two RoPE layouts, because the models disagree on how dimensions pair. RopeNormal
 // pairs dimension i with i+1, as Llama does; RopeNeox pairs i with i+dims/2, as the
-// Qwen family does. Getting this wrong rotates the wrong pairs, which is silent: nothing
+// Qwen family and Gemma do. Getting this wrong rotates the wrong pairs, which is silent: nothing
 // errors, the run completes, and every id it produces is a valid id. What comes out is
 // not plausible text, though -- measured on Qwen2.5 with the layout swapped, "The capital
 // of France is" continued as "1000000000000000000" where the right layout gives "Paris. It

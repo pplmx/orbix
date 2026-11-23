@@ -2,6 +2,7 @@ package llama
 
 import (
 	"math"
+	"os"
 	"strings"
 	"testing"
 
@@ -9,8 +10,9 @@ import (
 	"github.com/pplmx/orbix/internal/kernel"
 )
 
-// TestGemmaConfigRecordsItsDifferences pins what the architecture table says about Gemma, and
-// in particular the two derived values a checkpoint cannot state directly.
+// TestGemmaConfigRecordsItsDifferences pins what the architecture table says about Gemma,
+// including the value a checkpoint cannot state: the embedding scale is derived from the hidden
+// size.
 //
 // The flags are not decoration: each one changes a number in the forward pass, and a model
 // loaded with the wrong ones generates fluent text with the wrong distribution. Asserting them
@@ -26,9 +28,7 @@ func TestGemmaConfigRecordsItsDifferences(t *testing.T) {
 	if cfg.Arch != "gemma" {
 		t.Errorf("Arch = %q", cfg.Arch)
 	}
-	if !cfg.NormOnes {
-		t.Error("NormOnes is false; Gemma's checkpoint stores its norms one off")
-	}
+
 	if cfg.FFNAct != ffnGELU {
 		t.Errorf("FFNAct = %v, want GELU", cfg.FFNAct)
 	}
@@ -36,18 +36,24 @@ func TestGemmaConfigRecordsItsDifferences(t *testing.T) {
 	if want := float32(math.Sqrt(32)); math.Abs(float64(cfg.EmbedScale-want)) > 1e-6 {
 		t.Errorf("EmbedScale = %v, want sqrt(32) = %v", cfg.EmbedScale, want)
 	}
-	// The other architectures must be untouched by the new fields.
-	if cfg.RopeLayout != RopeNormal || cfg.AttnBias {
-		t.Errorf("gemma rope/bias = %v/%v, want the normal rotation without bias",
-			cfg.RopeLayout, cfg.AttnBias)
+	// The adjacent pairing is what Llama's converted files want, and applying it here is the
+	// mistake that looks correct: measured against llama.cpp on Gemma 2B, it put the top-8 log
+	// probabilities 1.96 away where this pairing is 0.19.
+	if cfg.RopeLayout != RopeNeox {
+		t.Errorf("RopeLayout = %v, want the half-split pairing Gemma was trained with",
+			cfg.RopeLayout)
+	}
+	if cfg.AttnBias {
+		t.Error("AttnBias is true; Gemma has no attention bias")
 	}
 }
 
-// TestGemmaSummaryNamesItsDifferences checks that the three numbers a reader cannot see are
+// TestGemmaSummaryNamesItsDifferences checks that the differences a reader cannot see are
 // printed.
 //
 // The summary is what an operator has when a Gemma file generates something odd, and "gemma: 18
-// layers ..." alone does not distinguish a correct load from one that skipped the norm offset.
+// layers, 2048 hidden" alone does not distinguish a correct load from one that used Llama's
+// rotary pairing.
 func TestGemmaSummaryNamesItsDifferences(t *testing.T) {
 	path := gguftest.Model{Arch: "gemma", Layers: 2, Hidden: 32, Heads: 4, FFN: 64}.Write(t, t.TempDir())
 	m, err := NewWithOptions(path, Options{})
@@ -55,7 +61,7 @@ func TestGemmaSummaryNamesItsDifferences(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	got := m.Config().String()
-	for _, want := range []string{"norms stored as w-1", "embeddings scaled by", "gelu gate"} {
+	for _, want := range []string{"embeddings scaled by", "gelu gate"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary %q does not mention %q", got, want)
 		}
@@ -69,49 +75,43 @@ func TestGemmaSummaryNamesItsDifferences(t *testing.T) {
 		t.Fatalf("load llama: %v", err)
 	}
 	plain := lm.Config().String()
-	for _, unwanted := range []string{"w-1", "embeddings scaled", "gelu"} {
+	for _, unwanted := range []string{"embeddings scaled", "gelu"} {
 		if strings.Contains(plain, unwanted) {
 			t.Errorf("llama summary %q mentions %q", plain, unwanted)
 		}
 	}
 }
 
-// TestGemmaNormWeightsAreBroughtToIdentity pins the load-time conversion.
+// TestGemmaNormWeightsAreUsedAsStored records the convention the whole of the above depends on.
 //
-// Gemma saves (w-1) so that random initialisation starts at the identity; the loader adds the 1
-// back. The fixture writes the identity the way each architecture stores it, so both loads must
-// end with norm weights of exactly 1 -- an assertion about the conversion rather than about the
-// number the file held. Without the conversion a Gemma model loads with every norm doubled,
-// which still generates text, so nothing else would notice.
-func TestGemmaNormWeightsAreBroughtToIdentity(t *testing.T) {
-	load := func(arch string) *Model {
-		t.Helper()
-		path := gguftest.Model{Arch: arch, Layers: 2, Hidden: 32, Heads: 4, FFN: 64}.Write(t, t.TempDir())
-		m, err := NewWithOptions(path, Options{})
-		if err != nil {
-			t.Fatalf("%s: load: %v", arch, err)
-		}
-		return m
+// Gemma's reference implementation multiplies by (1 + weight), which invites a loader to add the
+// 1 at load time. This checkpoint does not need that: measured against llama.cpp, using the
+// stored values directly reproduces its log probabilities to within 0.19, while adding 1 puts
+// them 26 away. The conversion was written, measured, and removed -- this test is what is left
+// of it, so that the next reader does not re-add it on the strength of the reference code.
+func TestGemmaNormWeightsAreUsedAsStored(t *testing.T) {
+	path := gguftest.Model{Arch: "gemma", Layers: 2, Hidden: 32, Heads: 4, FFN: 64}.Write(t, t.TempDir())
+	m, err := NewWithOptions(path, Options{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
 	}
-
-	for _, arch := range []string{"llama", "gemma"} {
-		m := load(arch)
-		check := func(what string, w []float32) {
-			t.Helper()
-			if len(w) == 0 {
-				t.Fatalf("%s: %s is empty", arch, what)
-			}
-			for i, v := range w {
-				if v != 1 {
-					t.Fatalf("%s: %s[%d] = %v, want the identity 1", arch, what, i, v)
-				}
+	// The fixture writes 1 into every norm tensor, so a loader that left them alone reports 1
+	// and one that added the 1 would report 2.
+	check := func(what string, w []float32) {
+		t.Helper()
+		if len(w) == 0 {
+			t.Fatalf("%s is empty", what)
+		}
+		for i, v := range w {
+			if v != 1 {
+				t.Fatalf("%s[%d] = %v, want 1 as stored", what, i, v)
 			}
 		}
-		check("output_norm", m.W.OutputNorm)
-		for l := range m.W.Config.Layers {
-			check("attn_norm", m.W.Layers[l].attnNorm)
-			check("ffn_norm", m.W.Layers[l].ffnNorm)
-		}
+	}
+	check("output_norm", m.W.OutputNorm)
+	for l := range m.W.Config.Layers {
+		check("attn_norm", m.W.Layers[l].attnNorm)
+		check("ffn_norm", m.W.Layers[l].ffnNorm)
 	}
 }
 
@@ -285,4 +285,102 @@ func TestGemmaGenerates(t *testing.T) {
 			t.Errorf("token %d is %d, outside the vocabulary of %d", i, id, m.Config().VocabSize)
 		}
 	}
+}
+
+// TestGemmaMatchesReferenceLogprobs is the decisive check: the architecture is right if the
+// real checkpoint's distribution over the vocabulary matches llama.cpp's for the same prefix.
+//
+// Set GEMMA_MODEL to a Gemma 2B GGUF to run it. The expected values come from llama.cpp 0.3.37
+// (llama-cpp-python, n_gpu_layers 0, default cache types) on gemma-2b.Q4_K_M, prompt "The
+// capital of France is", top-8 at the first generated position. The token ids are llama.cpp's
+// own, and this tokenizer encodes the same prompt to the same six ids.
+//
+// Measured deviations: 0.100, 0.176, 0.150, 0.047, 0.015, 0.185, 0.055, 0.185 nats, so the
+// tolerance is about twice the largest. They are not systematic -- some are positive and some
+// negative, and the same 8 tokens come back in nearly the same order -- which is what
+// accumulated fp32-versus-fp16 rounding looks like rather than a wrong rotation.
+//
+// The comparison earns its place because the three mistakes it can see are all invisible in the
+// shapes: the adjacent rotary pairing puts these values 1.96 away, adding one to the stored norm
+// weights puts them 26 away, and using SiLU instead of GELU puts them 12 away. Every one of
+// those still produces fluent English, which is exactly why a shape-only test would not do.
+func TestGemmaMatchesReferenceLogprobs(t *testing.T) {
+	path := os.Getenv("GEMMA_MODEL")
+	if path == "" {
+		t.Skip("set GEMMA_MODEL to a Gemma 2B GGUF file")
+	}
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	// The expected values are Gemma 2B's. Another checkpoint gives different log probabilities
+	// for reasons that have nothing to do with the architecture, so pointing this at the wrong
+	// file reports a broken implementation instead of a wrong input.
+	if cfg.VocabSize != 256000 || cfg.Layers != 18 {
+		t.Skipf("the expected values are Gemma 2B's (vocab 256000, 18 layers); this file has vocab %d and %d layers",
+			cfg.VocabSize, cfg.Layers)
+	}
+
+	cache, err := NewKVCache(cfg, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logits []float32
+	for pos, id := range []int{2, 651, 6037, 576, 6081, 603} {
+		logits, err = m.Forward(cache, id, pos)
+		if err != nil {
+			t.Fatalf("Forward: %v", err)
+		}
+	}
+
+	// llama.cpp's top 8, keyed by token id.
+	want := []struct {
+		id   int32
+		text string
+		lp   float64
+	}{
+		{7127, " Paris", -1.3771851},
+		{476, " a", -2.1534102},
+		{573, " the", -3.0621370},
+		{235248, " ", -3.0660899},
+		{780, " not", -3.3337958},
+		{1170, " also", -3.4196637},
+		{7023, " located", -3.4358027},
+		{3836, " known", -3.4994786},
+	}
+	const tolerance = 0.35
+	for _, w := range want {
+		got := logSoftmax(logits, w.id)
+		if d := math.Abs(got - w.lp); d > tolerance {
+			t.Errorf("logprob of %q (id %d) = %.4f, llama.cpp says %.4f, off by %.4f",
+				w.text, w.id, got, w.lp, d)
+		}
+	}
+	// The same token has to win, or the numbers above could agree while the model preferred
+	// something else entirely.
+	argmax := int32(0)
+	for i, v := range logits {
+		if v > logits[argmax] {
+			argmax = int32(i)
+		}
+	}
+	if argmax != 7127 {
+		t.Errorf("greedy token is %d, want 7127 (\" Paris\")", argmax)
+	}
+}
+
+// logSoftmax returns one token's log probability under the distribution logits describes.
+func logSoftmax(logits []float32, id int32) float64 {
+	maxv := logits[0]
+	for _, v := range logits {
+		if v > maxv {
+			maxv = v
+		}
+	}
+	var sum float64
+	for _, v := range logits {
+		sum += math.Exp(float64(v - maxv))
+	}
+	return float64(logits[id]-maxv) - math.Log(sum)
 }

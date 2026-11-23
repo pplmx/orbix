@@ -841,7 +841,10 @@ func (m *Model) feedForwardMoERows(r moeRows, layer *layer, cfg Config) error {
 		if err := m.run.MatMulTransposed(r.proj, r.up, layer.expertUp[e], len(rows), ffn, hidden); err != nil {
 			return err
 		}
-		kernel.SiLU(r.gate[:len(rows)*ffn])
+		// Through the dispatch rather than SiLU directly: no Gemma mixture exists today, but a
+		// hardcoded activation here would silently ignore the architecture flag the day one
+		// does, and the four dense sites would already be correct.
+		cfg.activateGate(r.gate[:len(rows)*ffn])
 		if err := kernel.MulInPlace(r.proj[:len(rows)*ffn], r.gate[:len(rows)*ffn]); err != nil {
 			return err
 		}

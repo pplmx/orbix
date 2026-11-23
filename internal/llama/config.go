@@ -119,11 +119,6 @@ type Config struct {
 	// BOSID is the beginning-of-sequence token, or -1 when undefined.
 	BOSID int
 
-	// NormOnes reports that the checkpoint stored its RMSNorm weights as (w-1). Weights() has
-	// already added the 1 back by the time a Model exists, so nothing below this line has to
-	// know: the flag is kept for the summary and for tests that check the conversion happened.
-	NormOnes bool
-
 	// EmbedScale is the factor token embeddings are multiplied by on the way into the network.
 	// It is 1 for architectures that do not scale them.
 	//
@@ -197,10 +192,6 @@ type archSpec struct {
 	rope RopeLayout
 	// attnBias reports whether the attention projections carry bias vectors.
 	attnBias bool
-	// normOnes reports that the RMSNorm weights are stored as (w-1) rather than w. Gemma
-	// saves them that way so that a randomly initialised checkpoint starts at the identity.
-	// Loading adds the 1 back, which keeps every norm site in this package ordinary.
-	normOnes bool
 	// embedScale reports that token embeddings are multiplied by sqrt(hidden) on the way in.
 	//
 	// It cannot be folded into the embedding matrix the way normOnes is folded into the norm
@@ -221,13 +212,20 @@ var archSpecs = map[string]archSpec{
 	"llama":   {rope: RopeNormal, attnBias: false},
 	"mistral": {rope: RopeNormal, attnBias: false},
 	"qwen2":   {rope: RopeNeox, attnBias: true},
-	// Gemma differs from Llama in three ways that are invisible in a packet listing: its
-	// norms are stored one off, its embeddings are scaled on the way in, and its feed-forward
-	// gate is GELU. Loading one with Llama's settings produces coherent English with the wrong
-	// numbers, which is exactly the failure this table exists to prevent.
+	// Gemma differs from Llama in three ways that no packet listing shows: its rotary
+	// embeddings pair dimension i with i+d/2, its token embeddings are scaled on the way in,
+	// and its feed-forward gate is GELU. Loading one with Llama's settings produces fluent
+	// English with the wrong distribution instead of an error, which is the failure this table
+	// exists to prevent.
+	//
+	// The pairing is the one that looks like a mistake. Llama's files are converted with their
+	// query and key rows permuted so that the adjacent-pair rotation reproduces the original
+	// model, and Gemma's are not, so the same rotation applied to both gets one of them wrong.
+	// Measured on Gemma 2B against llama.cpp: adjacent pairing put the top-8 log probabilities
+	// 1.96 away, this pairing 0.19.
 	"gemma": {
-		rope: RopeNormal, attnBias: false,
-		normOnes: true, embedScale: true, ffn: ffnGELU,
+		rope: RopeNeox, attnBias: false,
+		embedScale: true, ffn: ffnGELU,
 	},
 }
 
@@ -261,7 +259,6 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		Arch:       arch,
 		RopeLayout: spec.rope,
 		AttnBias:   spec.attnBias,
-		NormOnes:   spec.normOnes,
 		FFNAct:     spec.ffn,
 		EmbedScale: 1,
 	}
@@ -556,9 +553,6 @@ func (c Config) String() string {
 	// same shapes and the same tensor names describe a Llama block and a Gemma block that
 	// differ in three numbers.
 	extra := ""
-	if c.NormOnes {
-		extra += ", norms stored as w-1"
-	}
 	if c.EmbedScale != 1 && c.EmbedScale != 0 {
 		extra += fmt.Sprintf(", embeddings scaled by %g", c.EmbedScale)
 	}

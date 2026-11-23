@@ -167,27 +167,6 @@ func LoadWeights(path string) (*Weights, error) {
 		return nil, err
 	}
 
-	// Gemma stores its norm weights as (w-1); adding the 1 back here means every norm site in
-	// this package keeps calling RMSNorm on an ordinary weight vector. Done once, on the
-	// vectors the loader just dequantized, so it costs one pass over a few thousand values.
-	//
-	// Only the norms are touched. The same trick does not work for the embedding scale: that
-	// matrix is usually also the tied output projection, and the projection has to see the
-	// unscaled weights, which is why Config.EmbedScale is applied at the lookup instead.
-	if cfg.NormOnes {
-		for _, name := range normTensorNames(cfg) {
-			w0, ok := tensors[name]
-			if !ok {
-				// A missing norm is reported by the required-tensor check, which names every
-				// absent tensor at once rather than one per loop iteration.
-				continue
-			}
-			for i := range w0 {
-				w0[i] += 1
-			}
-		}
-	}
-
 	w := &Weights{
 		Config:         cfg,
 		TokenEmbedding: tensors["token_embd.weight"],
@@ -241,20 +220,6 @@ func embedInto(dst, row []float32, scale float32) {
 	for i, v := range row {
 		dst[i] = v * scale
 	}
-}
-
-// normTensorNames lists every tensor that holds RMSNorm weights.
-//
-// Derived from Config rather than from the map, so a checkpoint carrying an extra norm tensor
-// from another architecture cannot be adjusted by accident.
-func normTensorNames(cfg Config) []string {
-	names := make([]string, 0, 2*cfg.Layers+1)
-	names = append(names, "output_norm.weight")
-	for i := range cfg.Layers {
-		names = append(names, fmt.Sprintf("blk.%d.attn_norm.weight", i))
-		names = append(names, fmt.Sprintf("blk.%d.ffn_norm.weight", i))
-	}
-	return names
 }
 
 func checkFinite(tensors map[string][]float32) error {

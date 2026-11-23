@@ -528,6 +528,27 @@ func evalExpr(e expr, sc *scope) (value, error) {
 			return value{}, err
 		}
 		return boolValue(v.isMap), nil
+	case condExpr:
+		// Jinja tests the condition's truthiness the same way an {% if %} does, so this reuses
+		// evalCond rather than inventing a second rule.
+		cond, err := evalCond(t.cond, sc)
+		if err != nil {
+			return value{}, err
+		}
+		if cond.truthy() {
+			return evalExpr(t.then, sc)
+		}
+		return evalExpr(t.otherwise, sc)
+	case isStringExpr:
+		// A string is a value that is neither a sequence nor a dictionary nor a boolean. The
+		// distinction the templates draw is exactly that coarse -- Gemma 3 asks whether content is
+		// a string to decide between a plain turn and a list of parts -- so testing the flags is
+		// the faithful answer rather than inferring from the text.
+		v, err := evalExpr(t.operand, sc)
+		if err != nil {
+			return value{}, err
+		}
+		return boolValue(!v.isList && !v.isMap && !v.isBool), nil
 	case isIterableExpr:
 		v, err := evalExpr(t.operand, sc)
 		if err != nil {
@@ -537,6 +558,29 @@ func evalExpr(e expr, sc *scope) (value, error) {
 	case definedExpr:
 		_, ok := sc.lookup(t.name)
 		return boolValue(ok), nil
+	case indexDefinedExpr:
+		base, err := evalExpr(t.index.base, sc)
+		if err != nil {
+			return value{}, err
+		}
+		key, err := evalExpr(t.index.index, sc)
+		if err != nil {
+			return value{}, err
+		}
+		if base.isMap {
+			_, ok := base.fields[key.text]
+			return boolValue(ok), nil
+		}
+		// A sequence subscript is defined only when the element exists; an out-of-range index
+		// is the absent case, not an error, because that is what the template is asking about.
+		if base.isList {
+			n, err := strconv.Atoi(key.text)
+			if err != nil {
+				return boolValue(false), nil
+			}
+			return boolValue(n >= 0 && n < len(base.list)), nil
+		}
+		return boolValue(false), nil
 	case attrDefinedExpr:
 		base, err := evalExpr(t.base, sc)
 		if err != nil {

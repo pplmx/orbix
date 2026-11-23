@@ -252,7 +252,6 @@ func TestParseRejectsUnsupportedConstructs(t *testing.T) {
 		// rather than a bare "syntax error": the point of refusing at parse time is that the
 		// caller learns which construct and can decide, so the five below are pinned here as
 		// well as in scripts/jinja_diff.py.
-		`{{ 'a' if x else 'b' }}`,                       // inline if-expression
 		`{% filter upper %}x{% endfilter %}`,            // filter block
 		`{% set ns = namespace(x=1) %}`,                 // namespace()
 		`{% for m in messages %}{% else %}{% endfor %}`, // for-else
@@ -329,13 +328,10 @@ func TestParseRejectsUnsupportedJinja2(t *testing.T) {
 		`{% raw %}{{ x }}{% endraw %}`,
 		`{% filter upper %}x{% endfilter %}`,
 		`{% with a = 1 %}{{ a }}{% endwith %}`,
-		`{% set x = y if z else w %}`,
-		`{{ x if y else z }}`,
 		`{% for k, v in d.items() %}{{ k }}{% endfor %}`,
 		`{% for x in y %}{% else %}none{% endfor %}`,
 		`{{ loop.cycle('a', 'b') }}`,
 		`{{ 'a' ~ 'b' }}`,
-		`{{ x is string }}`,
 		`{{ x is not defined }}`,
 	}
 	for _, src := range cases {
@@ -3176,5 +3172,101 @@ func TestRaiseExceptionCarriesTheTemplatesMessage(t *testing.T) {
 		t.Error("an unimplemented call other than raise_exception rendered instead of failing")
 	} else if !strings.Contains(err.Error(), "no function is implemented") {
 		t.Errorf("error = %v, want it to name the missing function", err)
+	}
+}
+
+// TestInlineConditionalAndStringTest covers the three constructs Gemma 3's template needs.
+//
+// Each was refused before this round, so the whole template fell back to the neutral transcript and
+// every Gemma 3 conversation lost its <start_of_turn> markers. They are tested together because
+// that is how they appeared: the template needs "is string" to tell a plain content string from a
+// list of multimodal parts, "x if c else y" to emit the system prefix only on the first turn, and a
+// parenthesised conditional inside a concatenation to combine the two.
+func TestInlineConditionalAndStringTest(t *testing.T) {
+	cases := []struct {
+		src, want string
+		msgs      []Message
+		vars      map[string]value
+		why       string
+	}{
+		{
+			src:  `{{ 'yes' if flag else 'no' }}`,
+			want: "yes",
+			vars: map[string]value{"flag": boolValue(true)},
+			why:  "the then arm is chosen when the condition holds",
+		},
+		{
+			src:  `{{ 'yes' if flag else 'no' }}`,
+			want: "no",
+			vars: map[string]value{"flag": boolValue(false)},
+			why:  "and the else arm when it does not",
+		},
+		{
+			// The parenthesised form is what Gemma 3 writes, and it failed separately: the
+			// grouping parser stopped at "if" and reported a missing parenthesis.
+			src:  `{{ 'a' + (p if flag else '') }}`,
+			want: "aZ",
+			vars: map[string]value{"flag": boolValue(true), "p": strValue("Z")},
+			why:  "a conditional inside parentheses concatenates like any other value",
+		},
+		{
+			src:  `{{ (p if flag else '') + 'a' }}`,
+			want: "a",
+			vars: map[string]value{"flag": boolValue(false), "p": strValue("Z")},
+			why:  "and the empty arm contributes nothing",
+		},
+		{
+			src:  `{%- if messages[0]['content'] is string -%}plain{%- else -%}parts{%- endif -%}`,
+			want: "plain",
+			msgs: []Message{{Role: "user", Content: "hello"}},
+			why:  "a string content takes the string branch",
+		},
+		{
+			src:  `{%- if 'x' is string -%}y{%- endif -%}`,
+			want: "y",
+			why:  "a literal is a string too",
+		},
+		{
+			// The branch Gemma 3 takes for multimodal content: a list is not a string, so the
+			// template enters its per-part loop instead of emitting the value directly.
+			src:  `{%- if v is string -%}str{%- else -%}not{%- endif -%}`,
+			want: "not",
+			vars: map[string]value{"v": listValue([]value{strValue("a")})},
+			why:  "a sequence is not a string",
+		},
+	}
+	for _, tc := range cases {
+		// The whole template is parsed, so the src is exercised through the same path a checkpoint's
+		// template takes, but it is evaluated against a hand-built scope: Inputs exposes only the
+		// four names a checkpoint's template is given, and the cases need their own bindings.
+		if _, err := Parse(tc.src); err != nil {
+			t.Errorf("%q: Parse: %v (%s)", tc.src, err, tc.why)
+			continue
+		}
+		vars := make(map[string]value, len(tc.vars)+1)
+		for k, v := range tc.vars {
+			vars[k] = v
+		}
+		if len(tc.msgs) > 0 {
+			vars["messages"] = messagesValue(tc.msgs)
+		}
+		sc := newScope(vars)
+		var r renderer
+		parsed, _ := Parse(tc.src)
+		if err := r.renderNodes(parsed.nodes, sc); err != nil {
+			t.Errorf("%q: render: %v (%s)", tc.src, err, tc.why)
+			continue
+		}
+		got := r.buf.String()
+		if got != tc.want {
+			t.Errorf("%q = %q, want %q (%s)", tc.src, got, tc.want, tc.why)
+		}
+	}
+
+	// The shorter Jinja form has no else arm and yields undefined; this package cannot express
+	// that, so it is refused rather than guessed at.
+	if _, err := Parse(`{{ 'a' if flag }}`); err == nil {
+		t.Error("a conditional without else parsed; Jinja's shorter form yields an undefined " +
+			"value and no template here relies on one")
 	}
 }

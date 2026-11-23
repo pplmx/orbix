@@ -157,6 +157,7 @@ func TestTemplateAssetsAreExact(t *testing.T) {
 		sha  string
 	}{
 		"gemma2-it.jinja":        {591, "ecd6ae513fe103f0eb62e8ab5bfa8d0fe45c1074fa398b089c93a7e70c15cfd6"},
+		"gemma3-it.jinja":        {1654, "af95fbef33b76a50e5f463ff9766f85ce84f5849d915c4bd6c1619d852ac3231"},
 		"llama32-instruct.jinja": {3827, "5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4"},
 	}
 	for name, w := range want {
@@ -383,5 +384,74 @@ func TestGemma2Template(t *testing.T) {
 	// raise_exception: no function is implemented" said neither.
 	if !strings.Contains(err.Error(), "roles must alternate") {
 		t.Errorf("error = %v, want it to carry the template's own reason", err)
+	}
+}
+
+// TestGemma3TemplateRendersTurnMarkers covers the third checkpoint template this package carries.
+//
+// The template is the reason three constructs exist: it asks "is string" to tell a plain content
+// string from a list of multimodal parts, writes "x if c else y" to emit its system prefix only on
+// the first turn, and needs a parenthesised conditional to concatenate the result. Each was refused
+// before, so the whole template fell back to the neutral transcript and every Gemma 3 conversation
+// lost the <start_of_turn> markers the model was trained on -- visible as "using a neutral
+// transcript" at startup and as worse answers, not as an error.
+//
+// The expectations come from the template's own text rather than from a reference implementation:
+// Gemma 3's format is literal markers around the turn, so what the render produces can be read
+// against the template directly.
+func TestGemma3TemplateRendersTurnMarkers(t *testing.T) {
+	tmpl, err := Parse(loadTestTemplate(t, "gemma3-it.jinja"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	const addGen = true
+
+	got, rerr := tmpl.Render([]Message{{Role: "user", Content: "hello"}},
+		Inputs{BOSToken: "<bos>", AddGenerationPrompt: addGen})
+	if rerr != nil {
+		t.Fatalf("Render: %v", rerr)
+	}
+	// The leading newline is the asset's: the template's first line is {{ bos_token }} and the
+	// line before it is blank in the checkpoint. Trimming it would emit a prompt the model was
+	// not trained on, and it is exactly the kind of byte this package's assets are pinned for.
+	want := "\n<bos><start_of_turn>user\nhello<end_of_turn>\n<start_of_turn>model\n"
+	if got != want {
+		t.Errorf("Render =\n%q\nwant\n%q", got, want)
+	}
+
+	// A system turn becomes the prefix on the first user turn, which is the branch the inline
+	// conditional guards: emitting it every turn would repeat the system prompt in the history.
+	got, err = tmpl.Render([]Message{
+		{Role: "system", Content: "be brief"},
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "ok"},
+		{Role: "user", Content: "more"},
+	}, Inputs{BOSToken: "<bos>", AddGenerationPrompt: addGen})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want = "\n<bos><start_of_turn>user\nbe brief\n\nhi<end_of_turn>\n" +
+		"<start_of_turn>model\nok<end_of_turn>\n" +
+		"<start_of_turn>user\nmore<end_of_turn>\n" +
+		"<start_of_turn>model\n"
+	if got != want {
+		t.Errorf("Render =\n%q\nwant\n%q", got, want)
+	}
+	if strings.Count(got, "be brief") != 1 {
+		t.Errorf("the system prompt appears %d times; it belongs on the first user turn only",
+			strings.Count(got, "be brief"))
+	}
+
+	// A non-alternating history reaches the template's raise_exception, and the reason it gives is
+	// the template's own sentence.
+	_, err = tmpl.Render([]Message{
+		{Role: "user", Content: "one"},
+		{Role: "user", Content: "two"},
+	}, Inputs{BOSToken: "<bos>"})
+	if err == nil {
+		t.Fatal("a history with two user turns rendered instead of raising")
+	}
+	if !strings.Contains(err.Error(), "roles must alternate") {
+		t.Errorf("error = %v, want the template's own reason", err)
 	}
 }

@@ -42,6 +42,15 @@ type isMappingExpr struct{ operand expr }
 // isIterableExpr tests whether a value is a sequence.
 type isIterableExpr struct{ operand expr }
 
+// isStringExpr is "x is string": true for a value that is not a sequence, a dictionary or a bool.
+type isStringExpr struct{ operand expr }
+
+// condExpr is an inline "a if cond else b".
+type condExpr struct{ cond, then, otherwise expr }
+
+// indexDefinedExpr is "x[key] is defined": the key is present in a mapping.
+type indexDefinedExpr struct{ index indexExpr }
+
 // boolLitExpr is a true or false literal, kept distinct from a string because a condition
 // has to see the boolean rather than a non-empty text.
 type boolLitExpr struct{ val bool }
@@ -163,7 +172,7 @@ func parseExpr(src string) (expr, error) {
 		return nil, err
 	}
 	p := &exprParser{toks: toks}
-	e, err := p.parseOr()
+	e, err := p.parseConditional()
 	if err != nil {
 		return nil, err
 	}
@@ -302,6 +311,44 @@ func (p *exprParser) accept(tok string) bool {
 }
 
 // parseOr handles "or", the lowest-precedence operator.
+// parseConditional handles Jinja's inline conditional, "a if cond else b".
+//
+// It sits outside the operator precedence chain because it binds loosest: the whole "a if cond
+// else b" is one expression, and both arms are full expressions themselves. Gemma 3's template
+// uses it to emit its system prefix only on the first turn,
+//
+//	{{ '<start_of_turn>' + role + '\n' + (first_user_prefix if loop.first else "") }}
+//
+// which is the difference between one system prompt in the conversation and one before every
+// turn. Without it the template does not parse and the whole thing falls back to the neutral
+// transcript.
+//
+// The else arm is required: Jinja allows "a if cond" alone, which yields undefined otherwise, and
+// no template here relies on an undefined result, so the shorter form is reported rather than
+// guessed at.
+func (p *exprParser) parseConditional() (expr, error) {
+	then, err := p.parseOr()
+	if err != nil {
+		return nil, err
+	}
+	if !p.accept("if") {
+		return then, nil
+	}
+	cond, err := p.parseOr()
+	if err != nil {
+		return nil, err
+	}
+	if !p.accept("else") {
+		return nil, fmt.Errorf("chat: an inline 'if' needs 'else': Jinja's shorter form yields an " +
+			"undefined value, which no template here relies on")
+	}
+	otherwise, err := p.parseConditional()
+	if err != nil {
+		return nil, err
+	}
+	return condExpr{cond: cond, then: then, otherwise: otherwise}, nil
+}
+
 func (p *exprParser) parseOr() (expr, error) {
 	left, err := p.parseAnd()
 	if err != nil {
@@ -388,12 +435,20 @@ func (p *exprParser) parseCompare() (expr, error) {
 				left = isIterableExpr{operand: left}
 				continue
 			}
+			// "is string" is how the Gemma 3 template tells a plain content string from the
+			// multimodal list of parts. Without it the whole template falls back to the neutral
+			// transcript, so every Gemma 3 conversation loses the turn markers the model was
+			// trained on.
+			if !negate && p.accept("string") {
+				left = isStringExpr{operand: left}
+				continue
+			}
 			if negate {
 				return nil, fmt.Errorf("chat: only 'is not none' is supported after 'is not'")
 			}
 			if !p.accept("defined") {
-				return nil, fmt.Errorf("chat: only 'is defined', 'is none', 'is mapping' and " +
-					"'is iterable' are supported after 'is'")
+				return nil, fmt.Errorf("chat: only 'is defined', 'is none', 'is mapping', " +
+					"'is iterable' and 'is string' are supported after 'is'")
 			}
 			// "x is defined" and "x.y is defined" are both used: the first asks
 			// whether a name is bound, the second whether a mapping has a key.
@@ -402,8 +457,12 @@ func (p *exprParser) parseCompare() (expr, error) {
 				left = definedExpr(v)
 			case attrExpr:
 				left = attrDefinedExpr(v)
+			case indexExpr:
+				// message['content'] is defined, which Gemma 3's template uses after the string
+				// and iterable branches to reject a content value that is neither.
+				left = indexDefinedExpr{index: v}
 			default:
-				return nil, fmt.Errorf("chat: 'is defined' needs a variable or field name")
+				return nil, fmt.Errorf("chat: 'is defined' needs a variable, field or subscript name")
 			}
 		default:
 			return left, nil
@@ -593,7 +652,10 @@ func (p *exprParser) parsePrimary() (expr, error) {
 	}
 	if tok == "(" {
 		p.pos++
-		inner, err := p.parseOr()
+		// The grouping parses a whole expression, conditional included: Gemma 3 writes
+		// (first_user_prefix if loop.first else ""), and parseOr alone stops at "if" and then
+		// reports a missing parenthesis.
+		inner, err := p.parseConditional()
 		if err != nil {
 			return nil, err
 		}

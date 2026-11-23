@@ -18,7 +18,12 @@
 //   - {% set %}, including assigning to a name another statement reads
 //   - {{ expression }} with string and variable operands, + concatenation, - subtraction and
 //     % modulo between integers, and the trim, tojson and length filters
-//   - raise_exception, which is the one global implemented: its job is to abort with the
+//   - raise_exception, which is the one global implemented
+//   - "x is string", alongside the is tests above, because Gemma 3's template uses it to tell a
+//     plain content string from the multimodal list of parts
+//   - "a if cond else b", Jinja's inline conditional, which Gemma 3 writes inside parentheses to
+//     emit its system prefix on the first turn only. The shorter "a if cond" yields an undefined
+//     value and is refused rather than guessed at: its job is to abort with the
 //     message the template wrote, and templates use it to assert what a conversation may be
 //   - whitespace control ({%- and -%}), which templates use to keep output tight
 //

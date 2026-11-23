@@ -300,11 +300,16 @@ chat endpoint are worth knowing before pointing a client at it:
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "local",
     "messages": [{"role": "user", "content": "Explain continuous batching."}],
     "stream": true
   }'
 ```
+
+`model` is left out on purpose, and it has to be: a server serves exactly one checkpoint and refuses
+any other name with `model_not_found` naming the one it does serve. An absent field means "the only
+one there is", which is what a single-model server should do with a request that does not name it.
+This example used to send `"model": "local"`, which was a name no server had -- copying it produced
+a 404 that said so, from a command written to be copied.
 
 ## Behind a reverse proxy
 

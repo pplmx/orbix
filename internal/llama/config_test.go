@@ -1734,3 +1734,42 @@ func TestHugeHeadCountCannotReachTheArithmetic(t *testing.T) {
 		}
 	})
 }
+
+// TestMissingEpsilonTakesTheDefault covers the one metadata key LoadConfig supplies rather than
+// requires.
+//
+// Every fixture writes attention.layer_norm_rms_epsilon, so the branch that falls back to 1e-5
+// when the key is absent was never taken: changing the default to 1e-9 left the whole package
+// green. A checkpoint without the key is unusual but legal -- llama.cpp treats it as optional too
+// -- and the value decides how a division guards against a zero RMS, so a wrong default is a
+// silent numerical difference rather than a visible failure.
+//
+// Written as a literal rather than against a constant: the assertion is that the file's absence
+// means 1e-5 specifically, which is what llama.cpp's own default is. Comparing against a constant
+// renamed from the same place would move with the code and prove nothing.
+func TestMissingEpsilonTakesTheDefault(t *testing.T) {
+	c := tinyConfig{hidden: 8, layers: 1, heads: 2, kvHeads: 2, ffn: 16, ctx: 64, vocab: 8}
+	// Drop the key rather than rewriting it: the branch under test is the absent case, and a
+	// zero would take the range check instead.
+	var without []kv
+	for _, x := range c.kvs() {
+		if x.key != "llama.attention.layer_norm_rms_epsilon" {
+			without = append(without, x)
+		}
+	}
+	if len(without) != len(c.kvs())-1 {
+		t.Fatalf("expected to remove exactly one key, removed %d", len(c.kvs())-len(without))
+	}
+
+	f, err := gguf.Read(bytes.NewReader(buildFile(without, c.tensors(), nil)))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if want := float32(1e-5); cfg.RMSNormEps != want {
+		t.Errorf("RMSNormEps = %v with the key absent, want %v", cfg.RMSNormEps, want)
+	}
+}

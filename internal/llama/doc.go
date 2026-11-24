@@ -87,4 +87,17 @@
 // reachable by walking from block k. Recording the link is what lets eviction give up the
 // end of a chain instead of its middle, which would strand the rest while still holding
 // memory for it.
+//
+// # Checking the rotation against its definition
+//
+// rope.go builds a cos/sin table and rotates pairs, and the tests pin both against values
+// computed from the same reading. scripts/rope_xcheck.py rotates the same heads with numpy from
+// the RoFormer definition -- pair k turns by pos*base^(-2k/d), with the normal layout pairing
+// (2k, 2k+1) and NEOX pairing (k, half+k) -- and compares bit patterns. Six cases across both
+// layouts, partial rotation and a non-default base and scale: 2048 values, all agreeing.
+//
+// The angle is built as a running product there too, and truncated to float32 once. Rounding the
+// angle before the cosine, which is what an obvious numpy version does, moves about a tenth of
+// the values by one or two units in the last place and reads as a disagreement when it is only a
+// different order of the same arithmetic.
 package llama

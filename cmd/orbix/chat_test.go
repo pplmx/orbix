@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1668,5 +1669,64 @@ func TestChatRefusesAFileWithoutAContextLength(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "context_length") {
 		t.Errorf("error %q does not name the missing key", err)
+	}
+}
+
+// TestChatStatsDistinguishesTheConversationFromTheSession covers the labels /stats prints.
+//
+// The three counters answer different questions on purpose: turns counts the live conversation
+// while tokens and reused are totals for the whole session. The comment beside the format says
+// why that distinction is printed rather than implied -- before the labels existed, /clear reset
+// turns to 0 while tokens and reused stayed put, which read as stale numbers rather than as a
+// different question being answered.
+//
+// The existing test asserts the reuse line only. These assertions are about the two labels that
+// carry the distinction, so a change that dropped "in this conversation" or "this session" fails
+// here rather than reading as a miscount.
+func TestChatStatsDistinguishesTheConversationFromTheSession(t *testing.T) {
+	model := chatModel(t)
+
+	// One turn, then /stats: turns is 1 and tokens is positive.
+	out := runChat(t, chatOptions{model: model, maxTokens: 2, prefixCache: true},
+		"hello\n/stats\n/exit\n")
+	if !strings.Contains(out, "turns:") || strings.Contains(out, "turns:      0 ") {
+		// The exact spacing is not asserted -- it is alignment in a format string -- but the
+		// zero would mean the turn was not counted.
+		t.Errorf("after one turn /stats did not report a nonzero turns count:\n%s", out)
+	}
+	if !strings.Contains(out, "in this conversation") {
+		t.Errorf("/stats does not say which counter is per-conversation:\n%s", out)
+	}
+	if !strings.Contains(out, "generated this session") {
+		t.Errorf("/stats does not say which counter is per-session:\n%s", out)
+	}
+	if !strings.Contains(out, "from shared prefixes this session") {
+		t.Errorf("/stats does not label the reuse counter as per-session:\n%s", out)
+	}
+}
+
+// TestChatClearResetsTurnsButNotSessionTotals is the behaviour the labels exist to explain.
+//
+// /clear starts a fresh conversation, so turns must go back to zero while the session totals
+// stay -- that is not a bug, and the labels are what make it read that way. Asserting it here
+// means a change that also reset the totals would fail, as would one that left turns at its old
+// value.
+func TestChatClearResetsTurnsButNotSessionTotals(t *testing.T) {
+	model := chatModel(t)
+
+	out := runChat(t, chatOptions{model: model, maxTokens: 2, prefixCache: true},
+		"hello there\n/clear\n/stats\n/exit\n")
+	if !strings.Contains(out, "turns:") {
+		t.Fatalf("/stats printed no turns line:\n%s", out)
+	}
+	// After /clear the conversation is empty, so turns is zero. The line is matched with its
+	// label rather than by position, because the label is what the assertion is about.
+	if !regexp.MustCompile(`turns:\s+0 in this conversation`).MatchString(out) {
+		t.Errorf("after /clear, turns was not reported as 0:\n%s", out)
+	}
+	// The session total is not zero: a token was generated before the clear.
+	if regexp.MustCompile(`tokens:\s+0 generated this session`).MatchString(out) {
+		t.Errorf("after /clear, the session token total was reset too -- it is a session "+
+			"counter, not a conversation one:\n%s", out)
 	}
 }

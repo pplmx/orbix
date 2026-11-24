@@ -695,6 +695,11 @@ func TestNewRejectsParallelArraysOfTheWrongLength(t *testing.T) {
 		if err == nil {
 			t.Fatal("New accepted one score for three tokens")
 		}
+		// The whole sentence, for the same reason as the token types case below: an
+		// assertion on the numbers alone survives a refactor that mangles the words.
+		if want := "tokenize: 1 scores for 3 tokens"; err.Error() != want {
+			t.Errorf("error = %q, want %q", err, want)
+		}
 		// Both counts belong in the message: the reader has to know which array is short.
 		for _, want := range []string{"1", "3"} {
 			if !strings.Contains(err.Error(), want) {
@@ -713,10 +718,12 @@ func TestNewRejectsParallelArraysOfTheWrongLength(t *testing.T) {
 		if err == nil {
 			t.Fatal("New accepted two token types for three tokens")
 		}
-		for _, want := range []string{"2", "3"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not state %s", err, want)
-			}
+		// The whole sentence, not just the two numbers. A refactor that rewrote an
+		// identifier inside this message -- replacing "tokens" with "t.tokens" while
+		// moving the code that builds it -- produced "2 token types for 3 t.tokens",
+		// which every assertion on the numbers alone passes.
+		if want := "tokenize: 2 token types for 3 tokens"; err.Error() != want {
+			t.Errorf("error = %q, want %q", err, want)
 		}
 	})
 

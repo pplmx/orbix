@@ -415,20 +415,31 @@ func New(f *gguf.File) (*Tokenizer, error) {
 	for i, tok := range tokens {
 		t.index[tok] = int32(i)
 	}
+	if err := loadTokenMetadata(f, t); err != nil {
+		return nil, err
+	}
+	if err := loadPreTokenization(f, t); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// loadTokenMetadata reads the per-token arrays and the special-token ids.
+func loadTokenMetadata(f *gguf.File, t *Tokenizer) error {
 	// Scores are optional: a vocabulary without them still encodes, using
 	// insertion order as the tie-break, which is what llama.cpp does.
 	if scores, ok := f.Float32s("tokenizer.ggml.scores"); ok {
-		if len(scores) != len(tokens) {
-			return nil, fmt.Errorf("tokenize: %d scores for %d tokens", len(scores), len(tokens))
+		if len(scores) != len(t.tokens) {
+			return fmt.Errorf("tokenize: %d scores for %d tokens", len(scores), len(t.tokens))
 		}
 		t.scores = scores
 	} else {
-		t.scores = make([]float32, len(tokens))
+		t.scores = make([]float32, len(t.tokens))
 	}
 
 	if types, ok := f.Int32s("tokenizer.ggml.token_type"); ok {
-		if len(types) != len(tokens) {
-			return nil, fmt.Errorf("tokenize: %d token types for %d tokens", len(types), len(tokens))
+		if len(types) != len(t.tokens) {
+			return fmt.Errorf("tokenize: %d token types for %d tokens", len(types), len(t.tokens))
 		}
 		t.types = make([]TokenType, len(types))
 		for i, v := range types {
@@ -440,20 +451,20 @@ func New(f *gguf.File) (*Tokenizer, error) {
 				// being suppressed. Measured before this check: a vocabulary whose types were
 				// all 99 encoded and decoded like all-Normal, and one whose types were all 3
 				// (Control) decoded to the empty string.
-				return nil, fmt.Errorf("tokenize: token %d has type %d, outside the 0-%d range the format defines",
+				return fmt.Errorf("tokenize: token %d has type %d, outside the 0-%d range the format defines",
 					i, v, int32(Byte))
 			}
 			t.types[i] = TokenType(v)
 		}
 	} else {
-		t.types = make([]TokenType, len(tokens))
+		t.types = make([]TokenType, len(t.tokens))
 		for i := range t.types {
 			t.types[i] = Normal
 		}
 	}
 
-	// Index the byte tokens so encoding can fall back to them.
-	for i, tok := range tokens {
+	// Index the byte t.tokens so encoding can fall back to them.
+	for i, tok := range t.tokens {
 		if b, ok := parseByteToken(tok); ok {
 			t.byteID[b] = int32(i)
 		}
@@ -462,7 +473,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 	// Index the control and user-defined pieces so encoding can match them whole.
 	// User-defined is included because that is what a chat template's markers are in
 	// most checkpoints; control covers the ones a model marks as its own.
-	for i, tok := range tokens {
+	for i, tok := range t.tokens {
 		if t.types[i] == Control || t.types[i] == UserDefined {
 			t.specials = append(t.specials, specialToken{text: tok, id: int32(i)})
 		}
@@ -497,9 +508,9 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		case "llama":
 			// SentencePiece; the default below applies.
 		default:
-			return nil, fmt.Errorf("tokenize: unsupported tokenizer.ggml.model %q (want llama or gpt2)", model)
+			return fmt.Errorf("tokenize: unsupported tokenizer.ggml.model %q (want llama or gpt2)", model)
 		}
-	} else if looksByteLevel(tokens) {
+	} else if looksByteLevel(t.tokens) {
 		// The key is optional in the format, and a file that omits it is not necessarily
 		// SentencePiece. Treating it as such is what llama.cpp does, and for a byte-level
 		// vocabulary it silently produces mojibake: the pieces are spelled with the escaped
@@ -510,6 +521,11 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		t.byteLevel = true
 	}
 
+	return nil
+}
+
+// loadPreTokenization reads the pre-tokenizer family and the merge table.
+func loadPreTokenization(f *gguf.File, t *Tokenizer) error {
 	if name, ok := f.Get[string]("tokenizer.ggml.pre"); ok {
 		t.preName = name
 		switch name {
@@ -648,7 +664,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 				// Reported rather than skipped: a vocabulary missing one rule tokenizes
 				// differently, and ignoring the entry would make the model produce subtly
 				// wrong text with no error anywhere.
-				return nil, fmt.Errorf("tokenize: merge %d is not a pair: %q", rank, entry)
+				return fmt.Errorf("tokenize: merge %d is not a pair: %q", rank, entry)
 			}
 			t.merges[left+"\x00"+right] = rank
 		}
@@ -664,7 +680,7 @@ func New(f *gguf.File) (*Tokenizer, error) {
 		t.addSpacePrefix = !t.byteLevel
 	}
 
-	return t, nil
+	return nil
 }
 
 func fillNeg1() (out [256]int32) {

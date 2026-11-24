@@ -1484,9 +1484,15 @@ func TestRunStatsReport(t *testing.T) {
 	// The cache size is a byte figure in a report where every other number carries a unit.
 	// It printed the raw count -- "1769472 bytes" on the fixture, "8589934592 bytes" on a
 	// 128k-window checkpoint -- while serve's banner rendered the same quantity as MiB.
-	if !regexp.MustCompile(`cache:\s+\d+/\d+ positions, \d+(\.\d+)? (KiB|MiB|GiB)`).
+	//
+	// The trailing "reserved" is what makes the figure mean what it is: cache.Bytes() covers
+	// the whole window, not the positions in use, so on this fixture "10/128 positions,
+	// 1.7 MiB" reads as 1.7 MiB spent on ten positions when the ten cost 50 KiB. Naming the
+	// quantity is the difference between a reader sizing a deployment from the line and a
+	// reader dividing by the wrong denominator.
+	if !regexp.MustCompile(`cache:\s+\d+/\d+ positions, \d+(\.\d+)? (KiB|MiB|GiB) reserved`).
 		MatchString(stderr) {
-		t.Errorf("the cache line does not report a human-readable size:\n%s", stderr)
+		t.Errorf("the cache line does not report a human-readable size marked reserved:\n%s", stderr)
 	}
 	if strings.Contains(stderr, "bytes\n") {
 		t.Errorf("the cache line still prints a raw byte count:\n%s", stderr)

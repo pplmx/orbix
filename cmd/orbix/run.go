@@ -170,7 +170,7 @@ func cmdRun(args []string) error {
 		n := len(generated)
 		fmt.Fprintf(os.Stderr,
 			"\nmodel:  %s\nparams: %d\nload:   %v\nprompt: %d tokens\n"+
-				"gen:    %d tokens in %v (%.1f tok/s)\ncache:  %d/%d positions, %s\n",
+				"gen:    %d tokens in %v (%.1f tok/s)\ncache:  %d/%d positions, %s reserved\n",
 			cfg, m.W.Params(), loadTime.Round(time.Millisecond), promptLen,
 			n, genTime.Round(time.Millisecond), float64(n)/genTime.Seconds(),
 			cache.Len(), cache.Cap(), humanBytes(int64(cache.Bytes())))

@@ -1150,7 +1150,7 @@ func TestMetricsDocListsEveryMetric(t *testing.T) {
 		}
 	}
 	// One metric needs --otlp-endpoint to appear, which this server does not set.
-	// TestMetricsCountRejectedSpans covers it under a collector that accepts and never answers,
+	// TestMetricsExportDroppedSpans covers it under a collector that accepts and never answers,
 	// so it is excluded here rather than left to make the whole comparison unusable.
 	for name := range documented {
 		if name == "orbix_trace_spans_dropped_total" {

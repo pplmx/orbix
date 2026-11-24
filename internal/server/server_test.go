@@ -8987,7 +8987,7 @@ func TestServerDefaultsAreUsedWhenTheRequestOmitsThem(t *testing.T) {
 // TestTheHonouredSamplingFieldsChangeTheOutput covers the half of "honoured" that the existing
 // test does not.
 //
-// TestRefusesTheFieldsItCannotHonour asserts that a request setting logit_bias,
+// TestTheHonouredSamplingFieldsChangeTheOutput asserts that a request setting logit_bias,
 // presence_penalty or frequency_penalty is served with 200, and its comment says those three are
 // honoured now because "a caller who bans a token or asks for less repetition is asking for
 // different text". A field that is parsed and then dropped also returns 200, so that test cannot

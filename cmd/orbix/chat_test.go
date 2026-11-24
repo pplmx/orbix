@@ -1632,18 +1632,7 @@ func TestChatSaysWhenClearCannotHelp(t *testing.T) {
 	}
 }
 
-// TestCfgForBlocksFallsBack covers the two branches that return the default instead of a number
-// read from the file.
-//
-// A file without llama.context_length is a real shape -- it is not required by the format -- and a
-// pool of zero would silently disable paging rather than fail loudly, so the fallback is what keeps
-// such a file usable. The other branch is a file with no general.architecture at all, which is
-// malformed but reaches this function through the same path: chat opens the file and sizes the pool
-// before anything else validates it.
-//
-// Both were unexecuted. TestChatSizesThePoolForAWholeContext only ever passes a file that states its
-// context, so the fallback could have been any number -- zero included -- and every test would still
-// / TestChatRefusesAFileWithoutAContextLength replaces a test of an unreachable fallback.
+// TestChatRefusesAFileWithoutAContextLength replaces a test of an unreachable fallback.
 //
 // chat used to size its pool through a local cfgForBlocks helper that answered 2048 when the
 // file stated no context length. That branch could not run: chatSession calls openModel, which

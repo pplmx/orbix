@@ -3147,7 +3147,7 @@ func TestRenderModuloRejects(t *testing.T) {
 	}
 }
 
-// TestRaiseExceptionCarriesTheTemplate'sMessage covers the one global this package implements.
+// TestRaiseExceptionCarriesTheTemplatesMessage covers the one global this package implements.
 //
 // raise_exception is not a filter or a value-producing function: its semantics are to abort with
 // the text the template wrote, and templates use it as an assertion about the conversation --

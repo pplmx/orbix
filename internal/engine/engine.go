@@ -1056,6 +1056,8 @@ func (e *Engine) finish(s *sequence, last Event) {
 // finishes, so with MaxActive 1 and three requests submitted before any Pump, Active is 3.
 // Measured. What is running at this instant is not exposed -- a round advances at most
 // MaxActive of them, and which ones is a scheduling decision no caller acts on.
+// TestMaxActiveQueuesExcessRequests asserts the counting rule with five requests against
+// MaxActive 2.
 func (e *Engine) Active() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()

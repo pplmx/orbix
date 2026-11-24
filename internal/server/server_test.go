@@ -9151,3 +9151,55 @@ func TestBothEndpointsHonourTheSameSamplingFields(t *testing.T) {
 		}
 	}
 }
+
+// TestChatHonoursStop covers the chat endpoint's stop strings, which every stop test skipped.
+//
+// TestStopStringStops and its neighbours all post to /v1/completions. The chat handler sets
+// stop from its own request field, and injection shows the difference: replacing `stop:
+// req.Stop` with `stop: nil` at the chat call site left the whole package green.
+//
+// Measured against a running server before writing this: the fixture repeats one character, so
+// stop "h" on the chat endpoint returns an empty message and finish_reason "stop", which is the
+// same shape the completions endpoint produces and is not something a request that ignored the
+// field could return.
+func TestChatHonoursStop(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	finishAndText := func(t *testing.T, stopField string) (string, string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"model": %q, "messages": [{"role": "user", "content": "Once"}],
+			"max_tokens": 20, "temperature": 0%s}`, srv.cfg.ModelName, stopField)
+		resp := post(t, h, "/v1/chat/completions", body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		got := decodeBody[chatResponse](t, resp)
+		if len(got.Choices) == 0 {
+			t.Fatal("no choices")
+		}
+		return got.Choices[0].FinishReason, got.Choices[0].Message.Content
+	}
+
+	// Without a stop the reply runs to the budget, and the text is not empty -- otherwise the
+	// assertion below would hold for a server that always returned nothing.
+	reason, text := finishAndText(t, "")
+	if reason != "length" {
+		t.Fatalf("without stop, finish_reason = %q, want length", reason)
+	}
+	if text == "" {
+		t.Fatal("without stop the reply was empty, so this fixture cannot show a stop taking effect")
+	}
+
+	// A stop string the fixture's output contains must cut it, and the reason must say so.
+	reason, text = finishAndText(t, `, "stop": "h"`)
+	if reason != "stop" {
+		t.Errorf("with a matching stop, finish_reason = %q, want stop", reason)
+	}
+	// The stopped text must not carry the stop string: leaving it in is the mistake that looks
+	// like a successful truncation.
+	if strings.Contains(text, "h") {
+		t.Errorf("the stopped text still contains the stop string: %q", text)
+	}
+}

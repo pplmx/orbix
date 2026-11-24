@@ -290,6 +290,13 @@ chat endpoint are worth knowing before pointing a client at it:
   banner reads `chat: neutral transcript (chat: render: index 99 outside a sequence of 1)`
   rather than claiming the model's template is in use.
 
+  A template's own variables are a third case, and it is not an error: `chat_template_kwargs`
+  is not read, so a field like Qwen3's `enable_thinking` has no effect. It is an unknown member
+  of the request and is ignored, which is what the API says to do with one, but the consequence
+  is worth stating because there is no way to tell from the reply. Measured on Qwen3-0.6B, whose
+  template does test `enable_thinking`: the same prompt with and without
+  `"chat_template_kwargs": {"enable_thinking": false}` returned the same twelve tokens.
+
   A template that survives the probe and then fails on a real conversation still exists, and
   only `serve` can see it, so it reports one `WARN` record on the first such conversation,
   carrying the same reason. It is logged once rather than per request, since such a template

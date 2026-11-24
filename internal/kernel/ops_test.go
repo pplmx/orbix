@@ -1243,3 +1243,31 @@ func TestSoftcapValue(t *testing.T) {
 		}
 	}
 }
+
+// TestMatVecRejectsOverflowingShape covers the shape whose product wraps.
+//
+// n*k overflows int when both are large, so the guard `len(a) < n*k` would compare against a
+// negative number and pass. Found while writing FuzzMatVecShapes: with n = MaxInt and k = 2,
+// n*k is -2.
+//
+// What stops it is the order of the checks rather than a dedicated overflow guard: the dst check
+// is `len(dst) < n`, and n is a single dimension, so a shape large enough to overflow also demands
+// a dst that cannot exist. Measured, checkMatVec(nil, nil, make([]float32, 2), MaxInt, 2) fails on
+// dst rather than on a. That is a real property and a fragile one -- moving the dst comparison
+// below the a comparison would open the hole -- so it is asserted here rather than left implicit.
+func TestMatVecRejectsOverflowingShape(t *testing.T) {
+	n, k := math.MaxInt, 2
+	if got := n * k; got >= 0 {
+		t.Fatalf("n*k did not overflow (%d), so this test no longer tests what it says", got)
+	}
+	// Every buffer long enough to pass the checks that come before the overflowing one, which is
+	// the combination that would reach a write if the ordering changed.
+	err := MatVec(make([]float32, 2), make([]float32, 2), make([]float32, k), n, k)
+	if err == nil {
+		t.Fatal("MatVec accepted a shape whose product overflows int")
+	}
+	// The refusal names a dimension, so the message is usable rather than a bare failure.
+	if !strings.Contains(err.Error(), "kernel:") {
+		t.Errorf("error = %q, want it prefixed like the package's other shape errors", err)
+	}
+}

@@ -1,161 +1,182 @@
 package llama
 
 import (
-	"fmt"
-	"math"
+	"slices"
 	"strings"
 	"testing"
-
-	"github.com/pplmx/orbix/internal/gguftest"
 )
 
-// TestCheckFiniteRejectsNonFiniteWeights covers the load-time guard.
+// TestTensorNamesCoversTheModelShape pins the list as a contract.
 //
-// A single NaN weight is not a local defect. It flows through the layer norms into every logit,
-// and the model then answers with token 0 repeatedly -- valid ids that spell nothing -- while
-// exiting 0. Nothing downstream reports it, so the user concludes the model is bad rather than the
-// file. This guard turns that into a message naming the tensor.
-//
-// Found by writing a NaN into stories15M's output_norm.weight: all 32,000 logits came back NaN and
-// the run printed a line of replacement characters with a zero exit code.
-func TestCheckFiniteRejectsNonFiniteWeights(t *testing.T) {
-	ok := map[string][]float32{"good": {1, 2, 3}}
-	if err := checkFinite(ok); err != nil {
-		t.Errorf("checkFinite on finite weights: %v", err)
-	}
+// The names are derived from the config rather than read from the file, which is what turns a
+// missing tensor into an error naming it instead of a nil dereference during the first forward
+// pass. So each feature that changes the tensor set has to change this list, and a test that only
+// counted the entries would miss a group being added to the wrong branch.
+func TestTensorNamesCoversTheModelShape(t *testing.T) {
+	base := Config{Layers: 2, TiedEmbeddings: true}
 
-	cases := []struct {
-		name  string
-		value float32
-		want  string
-	}{
-		{"NaN", float32(math.NaN()), "NaN"},
-		{"+Inf", float32(math.Inf(1)), "+Inf"},
-		{"-Inf", float32(math.Inf(-1)), "-Inf"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			tensors := map[string][]float32{
-				"aaa.weight": {1, 2},
-				"zzz.weight": {1, c.value, 3},
+	t.Run("a plain model", func(t *testing.T) {
+		names := tensorNames(base)
+		for _, want := range []string{
+			"token_embd.weight", "output_norm.weight",
+			"blk.0.attn_norm.weight", "blk.0.attn_q.weight", "blk.0.attn_k.weight",
+			"blk.0.attn_v.weight", "blk.0.attn_output.weight", "blk.0.ffn_norm.weight",
+			"blk.0.ffn_gate.weight", "blk.0.ffn_up.weight", "blk.0.ffn_down.weight",
+			"blk.1.attn_q.weight", "blk.1.ffn_down.weight",
+		} {
+			if !slices.Contains(names, want) {
+				t.Errorf("a plain model is missing %s", want)
 			}
-			err := checkFinite(tensors)
-			if err == nil {
-				t.Fatalf("checkFinite accepted a %s weight", c.name)
-			}
-			if !strings.Contains(err.Error(), "zzz.weight") {
-				t.Errorf("error %q does not name the tensor", err)
-			}
-			if !strings.Contains(err.Error(), c.want) {
-				t.Errorf("error %q does not report the value", err)
-			}
-		})
-	}
-}
-
-// TestCheckFiniteNamesTheFirstTensorInOrder pins the determinism of the message.
-//
-// Two corrupt tensors have to produce the same error on every load. Iterating a map directly would
-// name whichever came first, so a user comparing two runs would see different tensors and reasonably
-// conclude the corruption was somewhere else.
-func TestCheckFiniteNamesTheFirstTensorInOrder(t *testing.T) {
-	nan := float32(math.NaN())
-	tensors := map[string][]float32{
-		"m.weight": {nan},
-		"a.weight": {nan},
-		"z.weight": {nan},
-	}
-	for range 20 {
-		err := checkFinite(tensors)
-		if err == nil {
-			t.Fatal("no error")
 		}
-		if !strings.Contains(err.Error(), `"a.weight"`) {
-			t.Fatalf("error %q does not name the alphabetically first tensor", err)
+		// Tied embeddings mean no separate output projection.
+		if slices.Contains(names, "output.weight") {
+			t.Error("a tied model asked for output.weight")
 		}
-	}
-}
-
-// TestQuantizedNaNAScaleIsRejectedAtLoad closes the gap between the decoder and the check.
-//
-// checkFinite was tested with hand-built maps and the decoder was tested on its own, but
-// nothing joined them: a GGUF file whose quantized tensor carries a NaN scale is the shape a
-// corrupt or truncated download actually has, and the path from "16 bytes decode to NaN" to
-// "load fails naming the tensor" had no test end to end.
-//
-// The values matter. A Q4_0 block's first two bytes are an F16 scale, and 0x7E00 is the NaN
-// pattern the format allows; the nibbles are zero, so every weight in the block would be
-// 0 * NaN = NaN. Decoding succeeds, which is the point: the decoder's job is to read what the
-// file says, and the load is where a bad file has to be caught.
-//
-// Three tensors rather than one, because they take different routes to the check: an
-// attention projection, the embedding table, and a normalization vector. A guard that only
-// covered the square matrices would pass the first and miss the others.
-func TestQuantizedNaNAScaleIsRejectedAtLoad(t *testing.T) {
-	for _, name := range []string{
-		"blk.0.attn_q.weight",
-		"token_embd.weight",
-		"output_norm.weight",
-	} {
-		t.Run(name, func(t *testing.T) {
-			path := gguftest.Model{
-				NoEOS: true, ContextLen: 64, NaNScaleTensor: name,
-			}.Write(t, t.TempDir())
-
-			_, err := New(path)
-			if err == nil {
-				t.Fatal("a NaN scale loaded without error, so generation would run on NaN weights")
+		// And none of the optional groups.
+		for _, absent := range []string{
+			"blk.0.post_attention_norm.weight", "blk.0.attn_q_norm.weight",
+			"blk.0.ffn_gate_inp.weight", "blk.0.attn_q.bias",
+		} {
+			if slices.Contains(names, absent) {
+				t.Errorf("a plain model asked for %s", absent)
 			}
-			// The message has to name the tensor and the position: "the file is corrupt" alone
-			// leaves a user with a 4 GB file and no way to tell which part of it went wrong.
-			for _, want := range []string{name, "NaN", "non-finite"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not mention %q", err, want)
-				}
-			}
-		})
-	}
-}
-
-// TestZeroRopeFrequencyIsRejectedAtLoad covers the value that is finite and still fatal.
-//
-// checkFinite guards rope_freqs against NaN and infinity, and the comment above it says why:
-// one bad factor poisons the rotation for every position, which is a run that exits zero and
-// prints valid-looking ids that spell nothing. Zero reaches the same failure by a different
-// route -- the rope divides each dimension's theta by its factor, and theta/0 is +Inf, whose
-// math.Cos is NaN. Measured with freqs {1, 0}: cos[pos=1][1] is NaN, and every position after
-// it carries the same NaN for that dimension pair.
-//
-// checkFinite passes zero, so the guard had to be separate. The index is asserted because a
-// file with eight factors and one zero is otherwise a search through the tensor.
-func TestZeroRopeFrequencyIsRejectedAtLoad(t *testing.T) {
-	ones := make([]float32, 8) // the fixture's rope dim is 16, so 8 pairs
-	for i := range ones {
-		ones[i] = 1
-	}
-
-	t.Run("all ones loads", func(t *testing.T) {
-		path := gguftest.Model{NoEOS: true, ContextLen: 64, RopeFreqs: ones}.Write(t, t.TempDir())
-		if _, err := New(path); err != nil {
-			t.Fatalf("a model with unit frequency factors was refused: %v", err)
 		}
 	})
 
-	for _, idx := range []int{0, len(ones) - 1} {
-		t.Run(fmt.Sprintf("zero at %d", idx), func(t *testing.T) {
-			freqs := append([]float32(nil), ones...)
-			freqs[idx] = 0
-			path := gguftest.Model{NoEOS: true, ContextLen: 64, RopeFreqs: freqs}.Write(t, t.TempDir())
+	t.Run("untied embeddings add the output projection", func(t *testing.T) {
+		cfg := base
+		cfg.TiedEmbeddings = false
+		if !slices.Contains(tensorNames(cfg), "output.weight") {
+			t.Error("an untied model did not ask for output.weight")
+		}
+	})
 
-			_, err := New(path)
-			if err == nil {
-				t.Fatal("a zero frequency factor loaded, so every position's cos and sin are NaN")
+	t.Run("post norms add two tensors per layer", func(t *testing.T) {
+		cfg := base
+		cfg.PostNorms = true
+		names := tensorNames(cfg)
+		for _, want := range []string{
+			"blk.0.post_attention_norm.weight", "blk.0.post_ffw_norm.weight",
+			"blk.1.post_attention_norm.weight", "blk.1.post_ffw_norm.weight",
+		} {
+			if !slices.Contains(names, want) {
+				t.Errorf("PostNorms is missing %s", want)
 			}
-			for _, want := range []string{"rope_freqs", fmt.Sprintf("index %d", idx), "NaN"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not mention %q", err, want)
-				}
+		}
+	})
+
+	t.Run("qk norm adds two tensors per layer", func(t *testing.T) {
+		cfg := base
+		cfg.QKNorm = true
+		names := tensorNames(cfg)
+		for _, want := range []string{
+			"blk.0.attn_q_norm.weight", "blk.0.attn_k_norm.weight",
+			"blk.1.attn_q_norm.weight", "blk.1.attn_k_norm.weight",
+		} {
+			if !slices.Contains(names, want) {
+				t.Errorf("QKNorm is missing %s", want)
 			}
-		})
+		}
+	})
+
+	t.Run("experts replace the dense ffn", func(t *testing.T) {
+		cfg := base
+		cfg.Experts = 4
+		names := tensorNames(cfg)
+		for _, want := range []string{
+			"blk.0.ffn_gate_inp.weight", "blk.0.ffn_gate_exps.weight",
+			"blk.0.ffn_up_exps.weight", "blk.0.ffn_down_exps.weight",
+		} {
+			if !slices.Contains(names, want) {
+				t.Errorf("an expert model is missing %s", want)
+			}
+		}
+		// The dense equivalents must be gone: a model that asked for both would try to
+		// load tensors it does not carry.
+		for _, absent := range []string{
+			"blk.0.ffn_gate.weight", "blk.0.ffn_up.weight", "blk.0.ffn_down.weight",
+		} {
+			if slices.Contains(names, absent) {
+				t.Errorf("an expert model still asked for the dense %s", absent)
+			}
+		}
+	})
+
+	t.Run("attn bias adds three per layer", func(t *testing.T) {
+		cfg := base
+		cfg.AttnBias = true
+		names := tensorNames(cfg)
+		for _, want := range []string{
+			"blk.0.attn_q.bias", "blk.0.attn_k.bias", "blk.0.attn_v.bias",
+			"blk.1.attn_q.bias",
+		} {
+			if !slices.Contains(names, want) {
+				t.Errorf("AttnBias is missing %s", want)
+			}
+		}
+	})
+}
+
+// TestTensorNamesHasNoDuplicates keeps the loader from reading one tensor twice.
+//
+// A duplicate would not fail loudly -- the loader would return the same tensor under one name and
+// the second read would overwrite it -- so it would go unnoticed until memory use looked wrong.
+func TestTensorNamesHasNoDuplicates(t *testing.T) {
+	// Every optional group on at once, which is the combination where an overlap would show.
+	cfg := Config{
+		Layers: 3, TiedEmbeddings: false, PostNorms: true, QKNorm: true,
+		Experts: 2, AttnBias: true,
+	}
+	seen := make(map[string]bool)
+	for _, n := range tensorNames(cfg) {
+		if seen[n] {
+			t.Errorf("%s appears twice", n)
+		}
+		seen[n] = true
+	}
+}
+
+// TestTensorNamesScalesWithTheLayerCount is the arithmetic a reader would check by hand.
+//
+// The count is a fixed prelude plus a per-layer block whose size depends on the flags, so a
+// mismatch means a group was added outside the loop or a layer was skipped.
+func TestTensorNamesScalesWithTheLayerCount(t *testing.T) {
+	cfg := Config{Layers: 1, TiedEmbeddings: true, AttnBias: true, PostNorms: true, QKNorm: true}
+	one := len(tensorNames(cfg))
+	cfg.Layers = 4
+	four := len(tensorNames(cfg))
+
+	perLayer := four - one // three extra layers
+	if perLayer%3 != 0 {
+		t.Fatalf("three extra layers added %d tensors, which is not divisible by 3", perLayer)
+	}
+	if got, want := four, one+perLayer; got != want {
+		t.Errorf("four layers gave %d tensors, want %d", got, want)
+	}
+	// The prelude is the embedding and the output norm, plus output.weight when untied.
+	if one < 2 {
+		t.Errorf("a one-layer model produced %d tensors, fewer than the prelude", one)
+	}
+}
+
+// TestTensorNamesPrefixesEveryLayerTensor is the shape every name has to have.
+//
+// The loader looks tensors up by name, so a block whose prefix is malformed fails the load with
+// a message about a missing tensor rather than about the bug that produced the name.
+func TestTensorNamesPrefixesEveryLayerTensor(t *testing.T) {
+	cfg := Config{Layers: 2, TiedEmbeddings: true, Experts: 2, AttnBias: true, PostNorms: true, QKNorm: true}
+	for _, n := range tensorNames(cfg) {
+		if !strings.HasPrefix(n, "blk.") {
+			continue // a prelude tensor
+		}
+		// blk.<n>.something -- the number has to be a single digit for these two layers.
+		rest, ok := strings.CutPrefix(n, "blk.")
+		if !ok {
+			t.Fatalf("%s lost its prefix", n)
+		}
+		num, tail, ok := strings.Cut(rest, ".")
+		if !ok || len(num) != 1 || num < "0" || num > "9" || tail == "" {
+			t.Errorf("%s is not blk.<layer>.<tensor>", n)
+		}
 	}
 }

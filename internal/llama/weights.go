@@ -133,36 +133,7 @@ func LoadWeights(path string) (*Weights, error) {
 		cfg.RopeFreqs = freqs
 	}
 
-	names := []string{"token_embd.weight", "output_norm.weight"}
-	if !cfg.TiedEmbeddings {
-		names = append(names, "output.weight")
-	}
-	for i := range cfg.Layers {
-		p := fmt.Sprintf("blk.%d.", i)
-		names = append(names,
-			p+"attn_norm.weight", p+"attn_q.weight", p+"attn_k.weight",
-			p+"attn_v.weight", p+"attn_output.weight", p+"ffn_norm.weight",
-		)
-		if cfg.PostNorms {
-			names = append(names, p+"post_attention_norm.weight", p+"post_ffw_norm.weight")
-		}
-		if cfg.QKNorm {
-			names = append(names, p+"attn_q_norm.weight", p+"attn_k_norm.weight")
-		}
-		if cfg.Experts > 0 {
-			names = append(names,
-				p+"ffn_gate_inp.weight", p+"ffn_gate_exps.weight",
-				p+"ffn_up_exps.weight", p+"ffn_down_exps.weight",
-			)
-		} else {
-			names = append(names,
-				p+"ffn_gate.weight", p+"ffn_up.weight", p+"ffn_down.weight",
-			)
-		}
-		if cfg.AttnBias {
-			names = append(names, p+"attn_q.bias", p+"attn_k.bias", p+"attn_v.bias")
-		}
-	}
+	names := tensorNames(cfg)
 
 	// Decoding is bandwidth bound and the tensors are independent, so fan it
 	// out. Four workers is enough to keep the disk and the integer decoding
@@ -355,4 +326,50 @@ func (m *Model) outputWeight() []float32 {
 // prefill path has one row of logits, the decode path has n.
 func (m *Model) capLogits(logits []float32) {
 	kernel.Softcap(logits, m.W.Config.FinalSoftcap)
+}
+
+// tensorNames lists every tensor the weights need, in the order the loader reads them.
+//
+// The list is derived from the config rather than read from the file, which is what makes a
+// missing tensor a named error instead of a nil dereference later: the loader is asked for
+// exactly these, and any one it cannot find is reported with its name.
+//
+// The conditional groups are the model features, and each changes the tensor set rather than
+// just a flag: PostNorms adds the two post-normalisation weights Gemma 2 uses, QKNorm adds the
+// per-head query/key norms Qwen3 uses, Experts replaces one dense FFN with a router and three
+// stacked expert tensors, and AttnBias adds the three projection biases Qwen2 uses. A model whose
+// config sets one of these and whose file does not carry the tensors is corrupt, so the list is
+// the contract between LoadConfig and the file.
+func tensorNames(cfg Config) []string {
+	names := []string{"token_embd.weight", "output_norm.weight"}
+	if !cfg.TiedEmbeddings {
+		names = append(names, "output.weight")
+	}
+	for i := range cfg.Layers {
+		p := fmt.Sprintf("blk.%d.", i)
+		names = append(names,
+			p+"attn_norm.weight", p+"attn_q.weight", p+"attn_k.weight",
+			p+"attn_v.weight", p+"attn_output.weight", p+"ffn_norm.weight",
+		)
+		if cfg.PostNorms {
+			names = append(names, p+"post_attention_norm.weight", p+"post_ffw_norm.weight")
+		}
+		if cfg.QKNorm {
+			names = append(names, p+"attn_q_norm.weight", p+"attn_k_norm.weight")
+		}
+		if cfg.Experts > 0 {
+			names = append(names,
+				p+"ffn_gate_inp.weight", p+"ffn_gate_exps.weight",
+				p+"ffn_up_exps.weight", p+"ffn_down_exps.weight",
+			)
+		} else {
+			names = append(names,
+				p+"ffn_gate.weight", p+"ffn_up.weight", p+"ffn_down.weight",
+			)
+		}
+		if cfg.AttnBias {
+			names = append(names, p+"attn_q.bias", p+"attn_k.bias", p+"attn_v.bias")
+		}
+	}
+	return names
 }

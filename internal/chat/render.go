@@ -3,6 +3,10 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"math"
+	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -34,6 +38,10 @@ type Template struct {
 	// source is the original template text, kept for error messages so a failure
 	// names the template that produced it rather than only the construct.
 	source string
+	// reads is every name the template can look up, collected once at parse time so Reads is a
+	// map lookup rather than a tree walk per request. Read-only after Parse, like the rest of
+	// the type, which is what keeps Render safe to call from many goroutines.
+	reads map[string]bool
 }
 
 // Parse compiles a template.
@@ -51,7 +59,9 @@ func Parse(source string) (*Template, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Template{nodes: nodes, source: source}, nil
+	reads := make(map[string]bool)
+	collectReads(nodes, reads)
+	return &Template{nodes: nodes, source: source, reads: reads}, nil
 }
 
 // Inputs is what a chat template reads from its environment beyond the message list.
@@ -71,6 +81,24 @@ type Inputs struct {
 	// Tools is the tool list, or nil. Present so a template's tools branch can be
 	// taken; this package does not implement tool calling itself.
 	Tools []Tool
+	// Variables are extra names the caller wants the template to see.
+	//
+	// This is where a checkpoint's own switches live. Qwen3's template branches its prompt on
+	// enable_thinking, and a template that reads a name nobody bound takes its else branch
+	// without saying so -- so a caller with no way to set one gets a prompt for the default
+	// mode only. Before this field existed, /v1/chat/completions accepted the OpenAI-compatible
+	// (vLLM-spelled) chat_template_kwargs member and ignored it: the reply was well formed and
+	// nothing distinguished it from the one that was asked for.
+	//
+	// The values are what a JSON body decodes to -- string, bool, nil, float64, json.Number,
+	// int, int64, []any, map[string]any -- because a request's variables come from JSON. See
+	// variableValue for how each becomes a renderable value.
+	//
+	// A name this package binds itself is refused rather than shadowed; see reservedVariables.
+	// A name the template never reads is not an error here, because whether that is a problem
+	// depends on the caller: Template.Reads answers the question, and internal/server turns it
+	// into a refusal with the field name a client can act on.
+	Variables map[string]any
 }
 
 // Tool is one entry of the tools list.
@@ -100,6 +128,25 @@ func (t *Template) Render(msgs []Message, in Inputs) (string, error) {
 	}
 	if len(in.Tools) > 0 {
 		vars["tools"] = toolsValue(in.Tools)
+	}
+	// The caller's variables are bound last, and the names the map above holds are refused
+	// rather than overwritten: a variable named messages would replace the conversation with
+	// whatever else the caller put in the same request, and one named add_generation_prompt
+	// would close the assistant turn the template exists to open. Both produce a plausible
+	// prompt for a request nobody made, which is the failure this package is written against.
+	//
+	// Iterated in sorted order so a request carrying two bad names always reports the same one:
+	// an error that changes between identical requests is one a client cannot reproduce.
+	for _, name := range slices.Sorted(maps.Keys(in.Variables)) {
+		if reservedVariables[name] {
+			return "", fmt.Errorf("chat: variable %q is bound by the renderer and cannot be set "+
+				"as a template variable", name)
+		}
+		v, err := variableValue(in.Variables[name])
+		if err != nil {
+			return "", fmt.Errorf("chat: variable %q: %w", name, err)
+		}
+		vars[name] = v
 	}
 	sc := newScope(vars)
 	var r renderer
@@ -300,5 +347,214 @@ func sortStrings(s []string) {
 		for j := i; j > 0 && s[j] < s[j-1]; j-- {
 			s[j], s[j-1] = s[j-1], s[j]
 		}
+	}
+}
+
+// reservedVariables are the names Render binds itself, and a caller may not supply.
+//
+// Refused rather than merged, because each one would change something the request already
+// states: messages is the conversation the client sent, add_generation_prompt opens the
+// assistant turn, and bos_token/eos_token are the vocabulary's own pieces. A variable of any of
+// those names produces a prompt for a request nobody made -- well formed, and wrong.
+//
+// tools is on the list for a narrower reason: it is bound from Inputs.Tools, and a variable of
+// that name would let a caller take a template's tool-calling branch without sending a tool list
+// anything could act on.
+var reservedVariables = map[string]bool{
+	"messages":              true,
+	"bos_token":             true,
+	"eos_token":             true,
+	"add_generation_prompt": true,
+	"tools":                 true,
+}
+
+// variableValue converts one caller-supplied variable into a renderable value.
+//
+// The accepted types are the ones a JSON body decodes to, plus the string and integer shapes a
+// Go caller reaches for first. Numbers keep their spelling: templates compare and print
+// integers, and a 3 that became "3.0" would change the prompt.
+//
+// A type outside that set is an error rather than a string conversion. A struct or a pointer
+// reaching a template means the caller expected the renderer to know something about it, and
+// fmt's %v of it is not that thing.
+func variableValue(v any) (value, error) {
+	switch x := v.(type) {
+	case nil:
+		// An explicit null prints as nothing and is false in a condition. It is still bound,
+		// so `x is defined` is true for it and `x is none` is true as well -- which is the same
+		// pair of answers Jinja2 gives a None value, and a template that guards a switch with
+		// both gets the same branch here.
+		return strValue(""), nil
+	case string:
+		return strValue(x), nil
+	case bool:
+		return boolValue(x), nil
+	case json.Number:
+		return strValue(x.String()), nil
+	case int:
+		return strValue(strconv.Itoa(x)), nil
+	case int64:
+		return strValue(strconv.FormatInt(x, 10)), nil
+	case float64:
+		return strValue(formatFloat(x)), nil
+	case []any:
+		items := make([]value, len(x))
+		for i, item := range x {
+			iv, err := variableValue(item)
+			if err != nil {
+				return value{}, fmt.Errorf("element %d: %w", i, err)
+			}
+			items[i] = iv
+		}
+		return listValue(items), nil
+	case map[string]any:
+		fields := make(map[string]value, len(x))
+		for k, item := range x {
+			iv, err := variableValue(item)
+			if err != nil {
+				return value{}, fmt.Errorf("field %q: %w", k, err)
+			}
+			fields[k] = iv
+		}
+		return value{fields: fields, isMap: true}, nil
+	default:
+		return value{}, fmt.Errorf("a %T cannot be a template variable; use a string, a "+
+			"boolean, a number, null, or a list or object of those", v)
+	}
+}
+
+// formatFloat prints a number the way Jinja2 would print the value the same JSON produces.
+//
+// That is not obvious, and it is measured rather than assumed. encoding/json gives this package
+// a float64 for every number in the request body, but Jinja2 receives what json.loads produced
+// in Python: 3 becomes an int and prints "3", while 3.0 becomes a float and prints "3.0". So the
+// formatting has to look at the value rather than at the Go type, or every integer-valued kwarg
+// reaches the prompt with a spurious decimal point.
+//
+// Measured against jinja2 3.1.6: `{{ n }}` renders "3" for n=3, "3.0" for n=3.0, and "True" for
+// n=True. The bool case never reaches here -- variableValue maps it to boolValue, which print()
+// renders as Jinja does.
+func formatFloat(f float64) string {
+	if f == math.Trunc(f) && math.Abs(f) < 1e15 {
+		// Whole and inside the range where float64 represents integers exactly, so it came from
+		// a JSON integer and Jinja2 would have held an int.
+		return strconv.FormatInt(int64(f), 10)
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// Reads reports whether the template can look the name up anywhere -- in output, in a
+// condition, or inside a branch this conversation does not take.
+//
+// Callers use it to refuse a variable that would do nothing. The alternative is silence: a
+// template that never names enable_thinking renders the identical prompt whether the caller sent
+// it or not, and nothing in the response says which happened.
+//
+// The answer is static, so it covers every branch: a name read only inside the tools branch
+// counts as read even when no tools were passed, because the question is about the template
+// rather than about one conversation.
+func (t *Template) Reads(name string) bool {
+	if t == nil {
+		return false
+	}
+	return t.reads[name]
+}
+
+// collectReads records every name the node tree can look up.
+//
+// Three node forms read a name -- varExpr for output and conditions, definedExpr for `x is
+// defined`, and isNoneExpr's variable operand -- and everything else reaches one of them through
+// a base expression. A name only written by {% set %} is not collected: it is the template's own
+// variable, and reporting it would let a caller think a value it never set reached the prompt.
+func collectReads(nodes []node, into map[string]bool) {
+	// bound holds the names the template binds for itself: a for loop's variable and anything
+	// {% set %} assigns. They are removed at the end, because a caller cannot set them -- the
+	// template overwrites the value -- so reporting one as read would tell a caller its value
+	// reached the prompt when the template replaced it.
+	bound := make(map[string]bool)
+	var walkExpr func(e expr)
+	var walkNodes func(ns []node)
+	walkExpr = func(e expr) {
+		switch x := e.(type) {
+		case varExpr:
+			into[x.name] = true
+		case definedExpr:
+			into[x.name] = true
+		case isNoneExpr:
+			walkExpr(x.operand)
+		case attrExpr:
+			walkExpr(x.base)
+		case attrDefinedExpr:
+			walkExpr(x.base)
+		case indexExpr:
+			walkExpr(x.base)
+			walkExpr(x.index)
+		case indexDefinedExpr:
+			walkExpr(x.index.base)
+			walkExpr(x.index.index)
+		case sliceExpr:
+			walkExpr(x.base)
+			walkExpr(x.from)
+		case concatExpr:
+			for _, part := range x.parts {
+				walkExpr(part)
+			}
+		case arithExpr:
+			walkExpr(x.left)
+			walkExpr(x.right)
+		case binaryExpr:
+			walkExpr(x.left)
+			walkExpr(x.right)
+		case notExpr:
+			walkExpr(x.inner)
+		case condExpr:
+			walkExpr(x.cond)
+			walkExpr(x.then)
+			walkExpr(x.otherwise)
+		case isMappingExpr:
+			walkExpr(x.operand)
+		case isIterableExpr:
+			walkExpr(x.operand)
+		case isStringExpr:
+			walkExpr(x.operand)
+		case callExpr:
+			for _, arg := range x.args {
+				walkExpr(arg)
+			}
+		case filterExpr:
+			walkExpr(x.operand)
+			if x.arg != nil {
+				walkExpr(x.arg)
+			}
+			for _, kw := range x.kwargs {
+				walkExpr(kw)
+			}
+		}
+	}
+	walkNodes = func(ns []node) {
+		for _, n := range ns {
+			switch x := n.(type) {
+			case exprNode:
+				walkExpr(x.expr)
+			case setNode:
+				// The expression side reads; the name side writes.
+				walkExpr(x.expr)
+				bound[x.name] = true
+			case ifNode:
+				for _, br := range x.branches {
+					walkExpr(br.cond)
+					walkNodes(br.body)
+				}
+				walkNodes(x.elseBody)
+			case forNode:
+				walkExpr(x.iter)
+				bound[x.varName] = true
+				walkNodes(x.body)
+			}
+		}
+	}
+	walkNodes(nodes)
+	for name := range bound {
+		delete(into, name)
 	}
 }

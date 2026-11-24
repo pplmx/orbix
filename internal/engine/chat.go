@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -161,8 +164,41 @@ func (r *ChatRenderer) FallbackReason() string {
 // prompt. An error that is always nil reads as a case the caller has to handle, and both
 // callers either checked it or discarded it with _, neither of which could ever matter.
 func (r *ChatRenderer) Render(turns []Turn) string {
+	out, _ := r.RenderWith(turns, nil)
+	return out
+}
+
+// RenderWith renders a conversation with extra template variables, returning an error for a
+// variable this model cannot honour.
+//
+// Unlike a render failure, which falls back inside this call, an unusable variable is reported:
+// falling back would answer with a prompt that silently ignored what the caller asked for, which
+// is the one outcome a caller cannot detect from the reply. The three ways a variable is
+// unusable are all decidable before rendering:
+//
+//   - the model declares no template this project can evaluate, so no variable reaches anything;
+//   - the name is one the renderer binds itself (messages, bos_token, ...) -- chat refuses it;
+//   - the template never names it, so binding it changes nothing.
+//
+// The third is a judgement rather than a fact, and it is the reason this lives here instead of
+// in internal/chat: a caller rendering for its own purposes may well pass a variable on the
+// chance that a template reads it, while a network endpoint has to answer for every field it
+// accepts. internal/server refuses; the REPL passes none.
+func (r *ChatRenderer) RenderWith(turns []Turn, vars map[string]any) (string, error) {
+	if len(vars) > 0 {
+		if r == nil || r.tmpl == nil {
+			return "", fmt.Errorf("engine: cannot set template variables (%s), because this model "+
+				"declares no chat template this project can evaluate", strings.Join(slices.Sorted(maps.Keys(vars)), ", "))
+		}
+		for _, name := range slices.Sorted(maps.Keys(vars)) {
+			if !r.tmpl.Reads(name) {
+				return "", fmt.Errorf("engine: this model's chat template never reads %q, so "+
+					"setting it would change nothing about the prompt", name)
+			}
+		}
+	}
 	if r == nil || r.tmpl == nil {
-		return RenderChatPrompt(turns)
+		return RenderChatPrompt(turns), nil
 	}
 	msgs := make([]chat.Message, len(turns))
 	for i, t := range turns {
@@ -176,6 +212,7 @@ func (r *ChatRenderer) Render(turns []Turn) string {
 		BOSToken:            r.bos,
 		EOSToken:            r.eos,
 		AddGenerationPrompt: true,
+		Variables:           vars,
 	})
 	if err != nil {
 		// The template parsed but cannot render this conversation. Falling back keeps the
@@ -186,9 +223,9 @@ func (r *ChatRenderer) Render(turns []Turn) string {
 		r.mu.Lock()
 		r.renderReason = err.Error()
 		r.mu.Unlock()
-		return RenderChatPrompt(turns)
+		return RenderChatPrompt(turns), nil
 	}
-	return out
+	return out, nil
 }
 
 // specialPieceText returns the surface text of a token id, or the empty string.

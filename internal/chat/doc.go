@@ -13,19 +13,35 @@
 //
 //   - {% if %} / {% elif %} / {% else %} / {% endif %} with ==, !=, not, and, or,
 //     in, and the is-tests defined, none, mapping and iterable
+//
 //   - {% for %} with loop.index0, loop.index, loop.first, loop.last, loop.length,
 //     loop.revindex, and loop.revindex0
+//
 //   - {% set %}, including assigning to a name another statement reads
+//
 //   - {{ expression }} with string and variable operands, + concatenation, - subtraction and
 //     % modulo between integers, and the trim, tojson and length filters
+//
 //   - raise_exception, which is the one global implemented
+//
 //   - "x is string", alongside the is tests above, because Gemma 3's template uses it to tell a
 //     plain content string from the multimodal list of parts
+//
 //   - "a if cond else b", Jinja's inline conditional, which Gemma 3 writes inside parentheses to
 //     emit its system prefix on the first turn only. The shorter "a if cond" yields an undefined
 //     value and is refused rather than guessed at: its job is to abort with the
 //     message the template wrote, and templates use it to assert what a conversation may be
+//
 //   - whitespace control ({%- and -%}), which templates use to keep output tight
+//
+//   - the variables a caller passes in Inputs.Variables, which is how a checkpoint's own
+//     switches reach its template: Qwen3 branches on enable_thinking, and a name nobody binds
+//     takes the else branch without saying so. The values are what a JSON body carries, and
+//     they render as Jinja2 would render what json.loads makes of the same bytes -- including
+//     the detail that an integer prints "3" while a fraction prints "2.5", which this package
+//     decides from the value because encoding/json hands it a float64 for both. Template.Reads
+//     answers whether a name is read anywhere in the tree, so a caller can refuse a variable
+//     that would do nothing.
 //
 // Anything outside that set makes Parse report an error naming the construct it does
 // not understand. That is the important property: a partial evaluator that quietly

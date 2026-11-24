@@ -37,6 +37,19 @@ import (
 // contract, but the tokens that flow through them have to be real to see a
 // streaming or template bug. Set MODEL to a GGUF file to run them.
 
+// mustRender renders a conversation with no template variables, failing the test on an error.
+//
+// Variables are the one thing renderChat can refuse, so a caller that has none cannot get one;
+// this keeps the ordinary assertions readable instead of threading an error through each.
+func mustRender(t *testing.T, srv *Server, msgs []chatMessage) string {
+	t.Helper()
+	out, err := srv.renderChat(msgs, nil)
+	if err != nil {
+		t.Fatalf("renderChat: %v", err)
+	}
+	return out
+}
+
 func newTestServer(t *testing.T) (*Server, *tokenize.Tokenizer) {
 	t.Helper()
 	return newTestServerModel(t, gguftest.Default())
@@ -950,16 +963,22 @@ func TestConcurrentRequestsAllComplete(t *testing.T) {
 
 func TestRenderChatTemplate(t *testing.T) {
 	srv, _ := newTestServer(t)
-	got := srv.renderChat([]chatMessage{
+	got, err := srv.renderChat([]chatMessage{
 		{Role: "system", Content: "You are helpful."},
 		{Role: "user", Content: "Hi"},
-	})
+	}, nil)
+	if err != nil {
+		t.Fatalf("renderChat: %v", err)
+	}
 	want := "System: You are helpful.\nUser: Hi\nAssistant:"
 	if got != want {
 		t.Errorf("renderChat = %q, want %q", got, want)
 	}
 	// An empty role defaults to user rather than producing a bare ": ".
-	got = srv.renderChat([]chatMessage{{Content: "Hi"}})
+	got, err = srv.renderChat([]chatMessage{{Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("renderChat: %v", err)
+	}
 	if !strings.HasPrefix(got, "User: Hi") {
 		t.Errorf("renderChat with no role = %q", got)
 	}
@@ -1011,7 +1030,7 @@ func TestChatAcceptsContentParts(t *testing.T) {
 		{"type":"text","text":"Hello "},{"type":"text","text":"there"}]}]}`), &decoded); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got, want := srv.renderChat(decoded.Messages), "User: Hello there\nAssistant:"; got != want {
+	if got, want := mustRender(t, srv, decoded.Messages), "User: Hello there\nAssistant:"; got != want {
 		t.Errorf("renderChat = %q, want %q", got, want)
 	}
 
@@ -1031,7 +1050,7 @@ func TestChatAcceptsContentParts(t *testing.T) {
 		&nullDecoded); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got, want := srv.renderChat(nullDecoded.Messages), "Assistant: \nAssistant:"; got != want {
+	if got, want := mustRender(t, srv, nullDecoded.Messages), "Assistant: \nAssistant:"; got != want {
 		t.Errorf("renderChat of a null content = %q, want %q", got, want)
 	}
 
@@ -5652,7 +5671,7 @@ func TestChatAndCompletionsEncodePromptsDifferently(t *testing.T) {
 	// used. Asserting only that the endpoints differ is not enough: the chat side is longer either
 	// way -- 25 ids against 36 under the wrong encoder, measured -- because the neutral transcript
 	// adds text around the message.
-	rendered := srv.renderChat([]chatMessage{{Role: "user", Content: marker + "hi"}})
+	rendered := mustRender(t, srv, []chatMessage{{Role: "user", Content: marker + "hi"}})
 	withBOS := cfgBOS(t, srv)
 	wantMarkup := len(tok.EncodeWithSpecials(rendered, withBOS))
 	wantText := len(tok.Encode(rendered, withBOS))
@@ -8208,4 +8227,155 @@ func TestBestOfRanksOnTheTokensItReports(t *testing.T) {
 		t.Errorf("ranked candidate %d first on the reported tokens; A's visible run (-1.5) beats"+
 			" B's (-2.0), and B only wins if the four tokens past its stop are counted", got[0])
 	}
+}
+
+// TestChatTemplateKwargsReachTheTemplate is the end-to-end case for a checkpoint switch.
+//
+// Qwen3's template branches its prompt on enable_thinking, and before this field was honoured
+// the member was an unknown one: the request decoded, the template rendered its default branch,
+// and nothing in the response said the switch had been ignored. The prompt_tokens comparison is
+// what makes that visible -- two requests that differ only in the kwarg must encode to different
+// prompts, or the variable never reached the renderer.
+func TestChatTemplateKwargsReachTheTemplate(t *testing.T) {
+	// A template that reads a name the way a checkpoint does: a branch on the value, emitting
+	// something recognisable so the difference is in the prompt rather than in the logits.
+	const tmpl = `{% if enable_thinking is defined and not enable_thinking %}NO-THINK:{% endif %}{% for m in messages %}{{ m.role }}={{ m.content }};{% endfor %}`
+	srv, _ := newTemplateServer(t, tmpl)
+
+	base := decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	off := decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages":[{"role":"user","content":"hi"}],"max_tokens":1,
+		  "chat_template_kwargs":{"enable_thinking":false}}`))
+
+	if off.Usage.PromptTokens <= base.Usage.PromptTokens {
+		t.Errorf("the kwarg did not change the prompt: %d tokens with it, %d without",
+			off.Usage.PromptTokens, base.Usage.PromptTokens)
+	}
+	// The rendered text itself, which is what the branch is for. Reaching it through the
+	// session rather than the response body keeps the assertion about the prompt.
+	withVar, err := srv.renderChat([]chatMessage{{Role: "user", Content: "hi"}},
+		map[string]any{"enable_thinking": false})
+	if err != nil {
+		t.Fatalf("renderChat with the variable: %v", err)
+	}
+	if !strings.HasPrefix(withVar, "NO-THINK:") {
+		t.Errorf("the template did not take its branch: %q", withVar)
+	}
+	without, err := srv.renderChat([]chatMessage{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("renderChat without the variable: %v", err)
+	}
+	if strings.HasPrefix(without, "NO-THINK:") {
+		t.Errorf("the branch was taken without the variable: %q", without)
+	}
+}
+
+// newTemplateServer builds a server whose fixture declares tmpl as its chat template.
+func newTemplateServer(t *testing.T, tmpl string) (*Server, *tokenize.Tokenizer) {
+	t.Helper()
+	model := gguftest.Model{NoEOS: true, ContextLen: 256, ChatTemplate: tmpl}
+	path := model.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	renderer, err := engine.NewChatRenderer(gf)
+	if err != nil {
+		t.Fatalf("NewChatRenderer: %v", err)
+	}
+	if !renderer.HasTemplate() {
+		t.Fatal("the template did not compile, so this test would exercise the fallback")
+	}
+	return newTestServerConfig(t, model, Config{ChatRenderer: renderer})
+}
+
+// TestChatTemplateKwargsRefusedWhenUnusable covers the two ways a variable cannot do anything.
+//
+// Both are refused rather than ignored, and that is the whole point of the field being declared:
+// an unknown member asks for nothing the server claims to provide, while a variable this model
+// cannot act on is a request whose effect the caller will look for in the reply and not find.
+// The status is 400 with param naming the field, so an SDK surfaces it at the call site.
+func TestChatTemplateKwargsRefusedWhenUnusable(t *testing.T) {
+	t.Run("the template does not read the name", func(t *testing.T) {
+		// A template that reads enable_thinking but not this.
+		srv, _ := newTemplateServer(t, `{{ enable_thinking }}{% for m in messages %}{{ m.content }}{% endfor %}`)
+		resp := post(t, srv.Handler(), "/v1/chat/completions",
+			`{"messages":[{"role":"user","content":"hi"}],"max_tokens":1,
+			  "chat_template_kwargs":{"temperature_mode":"hot"}}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := readBody(t, resp)
+		if !strings.Contains(body, "chat_template_kwargs") {
+			t.Errorf("the refusal does not name the field: %s", body)
+		}
+		// The variable that could not be used, by name, so the caller knows which one.
+		if !strings.Contains(body, "temperature_mode") {
+			t.Errorf("the refusal does not name the variable: %s", body)
+		}
+	})
+
+	t.Run("the model has no template", func(t *testing.T) {
+		// The default fixture declares none, so no variable can reach anything.
+		srv, _ := newTestServer(t)
+		resp := post(t, srv.Handler(), "/v1/chat/completions",
+			`{"messages":[{"role":"user","content":"hi"}],"max_tokens":1,
+			  "chat_template_kwargs":{"enable_thinking":false}}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: a model with no template cannot honour a variable",
+				resp.StatusCode)
+		}
+	})
+}
+
+// TestChatTemplateKwargsAcceptsTheShapesJSONProduces covers the value types a client can send.
+//
+// The map is decoded by encoding/json, so a client's false arrives as a bool and its 3 as a
+// float64. A template compares against a bool and prints a number, so the conversion has to keep
+// both distinguishable -- and it has to accept each without a 400, or the field is only usable
+// for strings.
+func TestChatTemplateKwargsAcceptsTheShapesJSONProduces(t *testing.T) {
+	const tmpl = `{% if flag %}F{% endif %}{% if not flag %}N{% endif %}[{{ count }}][{{ name }}][{{ list|length }}]`
+	srv, _ := newTemplateServer(t, tmpl)
+
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		// 3 prints as "3", not "3.0": json.loads gives Jinja2 an int, and this package gets a
+		// float64 for the same bytes. The value is what decides, not the Go type.
+		{"bool true", `{"flag":true,"count":3,"name":"x","list":[1,2]}`,
+			"F[3][x][2]"},
+		{"bool false", `{"flag":false,"count":3,"name":"x","list":[1,2]}`,
+			"N[3][x][2]"},
+		// A genuine fraction keeps its decimal point, which is the other half of the rule.
+		{"fraction", `{"flag":true,"count":2.5,"name":"x","list":[1]}`,
+			"F[2.5][x][1]"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := srv.renderChat([]chatMessage{{Role: "user", Content: "hi"}},
+				mustVars(t, c.body))
+			if err != nil {
+				t.Fatalf("renderChat: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("rendered %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// mustVars decodes a JSON object into the map a request would produce.
+func mustVars(t *testing.T, body string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	return m
 }

@@ -27,7 +27,13 @@
 // at parse time and the endpoint falls back to a neutral "Role: content" transcript,
 // which the server prints at startup so the choice is visible. A caller who wants to
 // control the prompt exactly sends it to the completions endpoint, which passes text
-// through verbatim.
+// through verbatim. A caller who needs to set a variable the template itself reads --
+// Qwen3's enable_thinking is the published example -- sends chat_template_kwargs, an
+// object of JSON values. It is honoured when the model's template reads the name and
+// refused with unsupported_parameter when it cannot: a model whose template this project
+// cannot evaluate, a name the template never mentions, and a name the renderer binds
+// itself. Ignoring the member instead would answer the default branch of a request the
+// caller did not make, with nothing in the reply to say so.
 //
 // A request-validation error carries a "code": invalid_json, unsupported_encoding and
 // body_too_large for a body the decoder rejected, invalid_type for a field whose JSON type

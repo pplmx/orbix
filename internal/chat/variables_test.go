@@ -1,0 +1,210 @@
+package chat
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// renderVars is the common shape: one template, one message, some variables.
+func renderVars(t *testing.T, src string, vars map[string]any) string {
+	t.Helper()
+	tmpl, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", src, err)
+	}
+	out, err := tmpl.Render([]Message{{Role: "user", Content: "hi"}}, Inputs{Variables: vars})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	return out
+}
+
+// TestVariablesRenderLikeJinja2 pins the values a request body can carry.
+//
+// The expectation is jinja2 3.1.6 rendering what json.loads makes of the same bytes, because a
+// checkpoint's template was written and tested against that. The two disagree in a way that is
+// easy to get wrong: this package receives every JSON number as a float64, while Python keeps 3
+// an int and 3.0 a float, so the printed text differs unless the value decides rather than the
+// Go type. Measured there: `{{ n }}` gives "3" for int and "3.0" for float.
+func TestVariablesRenderLikeJinja2(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		vars map[string]any
+		want string
+	}{
+		{"json integer", `{{ n }}`, map[string]any{"n": float64(3)}, "3"},
+		{"json fraction", `{{ n }}`, map[string]any{"n": 2.5}, "2.5"},
+		{"large integer", `{{ n }}`, map[string]any{"n": float64(1234567)}, "1234567"},
+		{"string", `{{ s }}`, map[string]any{"s": "a b"}, "a b"},
+		{"true prints capitalised", `{{ b }}`, map[string]any{"b": true}, "True"},
+		{"false prints capitalised", `{{ b }}`, map[string]any{"b": false}, "False"},
+		// A boolean is not the string "true", so a comparison against one must not match.
+		{"bool is not a string", `{% if b == 'true' %}eq{% else %}ne{% endif %}`,
+			map[string]any{"b": true}, "ne"},
+		{"a list is iterable", `{% for x in xs %}{{ x }}{% endfor %}`,
+			map[string]any{"xs": []any{float64(1), float64(2)}}, "12"},
+		{"a list has a length", `{{ xs|length }}`,
+			map[string]any{"xs": []any{"a", "b"}}, "2"},
+		{"a mapping reads by field", `{{ m.k }}`,
+			map[string]any{"m": map[string]any{"k": "v"}}, "v"},
+		{"a mapping serialises", `{{ m|tojson }}`,
+			map[string]any{"m": map[string]any{"k": "v"}}, `{"k": "v"}`},
+		// null prints nothing and is false in a condition, which is what jinja2 does with a
+		// None that is bound rather than absent.
+		{"null prints nothing", `[{{ z }}]`, map[string]any{"z": nil}, "[]"},
+		{"null is falsy", `{% if z %}T{% else %}F{% endif %}`, map[string]any{"z": nil}, "F"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := renderVars(t, c.src, c.vars); got != c.want {
+				t.Errorf("rendered %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestVariablesFromJSONBodies covers the path a request actually takes.
+//
+// A caller handing Go values directly could pass a float64 for an integer and never notice the
+// formatting rule; a request cannot, because encoding/json produces a float64 for every number.
+// This decodes a body the way the server does and renders it, so the rule is exercised where it
+// matters.
+func TestVariablesFromJSONBodies(t *testing.T) {
+	const body = `{"enable_thinking": false, "budget": 3, "ratio": 0.5, "labels": ["a","b"]}`
+	var vars map[string]any
+	if err := json.Unmarshal([]byte(body), &vars); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	got := renderVars(t,
+		`{% if not enable_thinking %}no-think {% endif %}{{ budget }}/{{ ratio }}/{{ labels|length }}`,
+		vars)
+	if want := "no-think 3/0.5/2"; got != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
+}
+
+// TestVariableRefusedWhenTheRendererBindsIt covers the names a caller may not set.
+//
+// Each would change something the request already states: messages is the conversation, and
+// add_generation_prompt opens the assistant's turn. Refused rather than merged, because a merged
+// one produces a well-formed prompt for a request nobody made.
+func TestVariableRefusedWhenTheRendererBindsIt(t *testing.T) {
+	tmpl, err := Parse(`{{ messages|length }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, name := range []string{"messages", "bos_token", "eos_token", "add_generation_prompt", "tools"} {
+		_, err := tmpl.Render([]Message{{Role: "user", Content: "hi"}},
+			Inputs{Variables: map[string]any{name: "x"}})
+		if err == nil {
+			t.Errorf("%q was accepted as a template variable", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the refusal for %q does not name it: %v", name, err)
+		}
+	}
+}
+
+// TestVariableRefusalIsStableAcrossRequests pins the ordering.
+//
+// Two bad names have to report the same one every time, or a client that retries after fixing
+// the first sees an error it cannot reproduce.
+func TestVariableRefusalIsStableAcrossRequests(t *testing.T) {
+	tmpl, err := Parse(`{{ x }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	vars := map[string]any{"messages": 1, "bos_token": 2, "add_generation_prompt": 3}
+	var first string
+	for range 20 {
+		_, err := tmpl.Render(nil, Inputs{Variables: vars})
+		if err == nil {
+			t.Fatal("two reserved names were accepted")
+		}
+		if first == "" {
+			first = err.Error()
+			continue
+		}
+		if err.Error() != first {
+			t.Fatalf("the refusal changed between identical calls:\n%s\n%s", first, err.Error())
+		}
+	}
+}
+
+// TestVariableValueRejectsUnrenderableTypes covers the arm that exists so a caller learns.
+//
+// A struct reaching a template means the caller expected the renderer to know about it, and
+// printing it with %v is not that. The error names the type, because "cannot be a template
+// variable" alone leaves a reader guessing what would be accepted.
+func TestVariableValueRejectsUnrenderableTypes(t *testing.T) {
+	tmpl, err := Parse(`{{ x }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	type notRenderable struct{ A int }
+	_, err = tmpl.Render(nil, Inputs{Variables: map[string]any{"x": notRenderable{1}}})
+	if err == nil {
+		t.Fatal("a struct was accepted as a template variable")
+	}
+	if !strings.Contains(err.Error(), "notRenderable") {
+		t.Errorf("the error does not name the type: %v", err)
+	}
+	if !strings.Contains(err.Error(), "x") {
+		t.Errorf("the error does not name the variable: %v", err)
+	}
+}
+
+// TestReadsCoversEveryBranch is the property internal/server depends on to refuse a variable.
+//
+// The answer is static: a name read only in a branch this conversation does not take still
+// counts, because the question is about the template rather than about one render.
+func TestReadsCoversEveryBranch(t *testing.T) {
+	tmpl, err := Parse(`{% if tools %}{{ inside_tools }}{% endif %}{% for m in messages %}{{ m.role }}{% endfor %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !tmpl.Reads("inside_tools") {
+		t.Error("a name read in a branch this render does not take was reported as unread")
+	}
+	if !tmpl.Reads("messages") {
+		t.Error("messages is read by the for loop and was reported as unread")
+	}
+	if !tmpl.Reads("tools") {
+		t.Error("tools is tested by the condition and was reported as unread")
+	}
+	for _, absent := range []string{"enable_thinking", "loop", "m"} {
+		// loop and m are bound by constructs rather than supplied, and a name nothing names is
+		// not read. Reporting either as read would let a caller think its value arrived.
+		if tmpl.Reads(absent) {
+			t.Errorf("%q is not supplied by a caller but Reads reported it", absent)
+		}
+	}
+}
+
+// TestReadsSeesSetExpressions covers the case a naive walk would miss.
+//
+// {% set x = other %} reads other, even though it writes x. A collector that skipped set nodes
+// entirely would report other as unread and a caller's value would be refused for no reason.
+func TestReadsSeesSetExpressions(t *testing.T) {
+	tmpl, err := Parse(`{% set greeting = prefix + '!' %}{{ greeting }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !tmpl.Reads("prefix") {
+		t.Error("a name read on the right of {% set %} was reported as unread")
+	}
+	if tmpl.Reads("greeting") {
+		t.Error("a name the template assigns to itself was reported as a caller variable")
+	}
+}
+
+// TestReadsIsFalseForANilTemplate keeps the accessor safe to call through a nil renderer.
+func TestReadsIsFalseForANilTemplate(t *testing.T) {
+	var tmpl *Template
+	if tmpl.Reads("anything") {
+		t.Error("a nil Template reported reading a name")
+	}
+}

@@ -290,12 +290,23 @@ chat endpoint are worth knowing before pointing a client at it:
   banner reads `chat: neutral transcript (chat: render: index 99 outside a sequence of 1)`
   rather than claiming the model's template is in use.
 
-  A template's own variables are a third case, and it is not an error: `chat_template_kwargs`
-  is not read, so a field like Qwen3's `enable_thinking` has no effect. It is an unknown member
-  of the request and is ignored, which is what the API says to do with one, but the consequence
-  is worth stating because there is no way to tell from the reply. Measured on Qwen3-0.6B, whose
-  template does test `enable_thinking`: the same prompt with and without
-  `"chat_template_kwargs": {"enable_thinking": false}` returned the same twelve tokens.
+  A template's own variables are a third case, and they are honoured: `chat_template_kwargs` is
+  the vLLM-spelled member that sets them, so a field like Qwen3's `enable_thinking` reaches the
+  template. Values are the ones JSON carries -- booleans, numbers, strings, null, and lists or
+  objects of those -- and they render as Jinja2 would render what `json.loads` gives it, so an
+  integer prints `3` and a fraction `2.5` rather than every number printing as a float.
+
+  Two things are refused with a 400 naming `chat_template_kwargs`, because either would
+  otherwise produce a prompt that ignored what the caller sent:
+
+    - a model whose template this project cannot evaluate, where no variable can reach anything;
+    - a name the template never reads, and a name the renderer binds itself (`messages`,
+      `bos_token`, `eos_token`, `add_generation_prompt`, `tools`).
+
+  This is the opposite of how an unknown member is treated, and the distinction is the one the
+  rest of this page draws: an unknown member asks for nothing the server claims to provide, while
+  a variable this model cannot act on is a request whose effect the caller will look for in the
+  reply and not find. The refusal names the variable, so a client learns which one to drop.
 
   A template that survives the probe and then fails on a real conversation still exists, and
   only `serve` can see it, so it reports one `WARN` record on the first such conversation,

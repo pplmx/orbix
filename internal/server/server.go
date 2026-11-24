@@ -385,6 +385,20 @@ type chatRequest struct {
 	TopLogprobs  *int            `json:"top_logprobs"`
 	Echo         *bool           `json:"echo"`
 
+	// ChatTemplateKwargs sets variables in the model's own chat template, which is where a
+	// checkpoint's switches live: Qwen3's template branches on enable_thinking, and without a
+	// way to set it every request gets the default mode.
+	//
+	// The name is the one vLLM introduced and the OpenAI-compatible ecosystem uses. It is
+	// refused rather than ignored when this model cannot act on it, which is the opposite of
+	// how an unknown member is treated: an unknown member asks for nothing the server claims
+	// to provide, while a variable this model's template does not read is a request whose
+	// effect the caller will otherwise look for in the reply and not find.
+	//
+	// Decoded as a map of JSON values. Anything other than an object is refused by
+	// decodeJSON naming this field.
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs"`
+
 	// Priority ranks this request against others waiting for a slot; higher advances
 	// first, and an omitted value means "with the rest". It is Orbix's own extension:
 	// OpenAI's API has no equivalent, so a client that never sends it is unaffected.
@@ -935,7 +949,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeErrorParam(w, http.StatusBadRequest, "messages is required", "messages", "missing_required_parameter")
 		return
 	}
-	prompt := s.renderChat(req.Messages)
+	vars, err := chatTemplateVars(req.ChatTemplateKwargs)
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+	prompt, err := s.renderChat(req.Messages, vars)
+	if err != nil {
+		// The model cannot honour a variable the caller sent, so answering would produce a
+		// prompt that ignored it. Naming the field and the variable is what lets a client fix
+		// the request rather than wonder why the reply did not change.
+		writeRequestError(w, http.StatusBadRequest, &paramError{
+			message: err.Error(), param: "chat_template_kwargs", code: "unsupported_parameter"})
+		return
+	}
 	if err := checkResponseFormat(req.ResponseFormat); err != nil {
 		writeRequestError(w, http.StatusBadRequest, err)
 		return
@@ -1162,15 +1189,17 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 // The rendering itself lives in engine.RenderChatPrompt so the HTTP server and the REPL
 // cannot drift apart: the same conversation must produce the same tokens however it was
 // asked. See that function for why the template is neutral rather than a model's own.
-func (s *Server) renderChat(msgs []chatMessage) string {
+func (s *Server) renderChat(msgs []chatMessage, vars map[string]any) (string, error) {
 	turns := make([]engine.Turn, len(msgs))
 	for i, m := range msgs {
 		turns[i] = engine.Turn{Role: m.Role, Text: string(m.Content)}
 	}
-	// Render always returns a usable prompt: a model template that fails at render time
-	// falls back to the neutral transcript inside the renderer, so this call cannot
-	// leave the request without a prompt.
-	prompt := s.cfg.ChatRenderer.Render(turns)
+	// RenderWith reports a variable the model cannot honour and falls back for a template that
+	// fails at render time. The two are different: a render failure still produces a usable
+	// prompt, while a variable this model does not read would produce one that silently ignored
+	// what the caller asked for. vars is nil for every request that sends none, which is the
+	// ordinary case.
+	prompt, err := s.cfg.ChatRenderer.RenderWith(turns, vars)
 	// The fallback is silent otherwise, and the startup banner cannot catch this case: it
 	// reads UsesModelTemplate before any request has rendered, and renderReason is only
 	// written when a render fails. Measured with a template of "{{ messages[99].content }}":
@@ -1193,7 +1222,33 @@ func (s *Server) renderChat(msgs []chatMessage) string {
 			}
 		})
 	}
-	return prompt
+	return prompt, err
+}
+
+// chatTemplateVars normalises the request's chat_template_kwargs into the map the renderer
+// takes, refusing the forms that cannot mean anything.
+//
+// The two refusals here are about shape, not about the model: a null value, or an empty object,
+// says nothing to set. Whether the model's template reads a name is decided by the renderer,
+// which is the only place that knows -- see engine.ChatRenderer.RenderWith.
+//
+// Nothing is silently dropped. That is the difference between this field and an unknown member:
+// a client that sends {"enable_thinking": false} expects the prompt to change, and a server that
+// accepted it and rendered the other mode would answer a different request than the one made.
+func chatTemplateVars(raw map[string]any) (map[string]any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]any, len(raw))
+	for name, v := range raw {
+		if v == nil {
+			return nil, newParamError("chat_template_kwargs", "invalid_value",
+				"chat_template_kwargs.%s is null, which sets nothing; send a value or omit the "+
+					"variable", name)
+		}
+		out[name] = v
+	}
+	return out, nil
 }
 
 // suffixOf reads an optional suffix as a string, treating absent as empty.

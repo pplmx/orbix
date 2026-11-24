@@ -112,11 +112,21 @@ the concepts arrive in the order a request travels through them.
 | 2   | [`internal/f16`](../internal/f16/doc.go), [`internal/quant`](../internal/quant/doc.go) | Half precision and block quantization            |
 | 3   | [`internal/kernel`](../internal/kernel/doc.go)                                         | Matmul, RMSNorm, softmax, SiLU                   |
 | 4   | [`internal/tokenize`](../internal/tokenize/doc.go)                                     | Text to ids: byte-level and SentencePiece        |
-| 5   | [`internal/llama`](../internal/llama/doc.go)                                           | Attention, RoPE, KV cache, paged blocks, MoE     |
-| 6   | [`internal/engine`](../internal/engine/doc.go)                                         | Continuous batching, admission, a round          |
-| 7   | [`internal/chat`](../internal/chat/doc.go)                                             | The Jinja2 subset a template needs               |
+| 5   | [`internal/chat`](../internal/chat/doc.go)                                             | The Jinja2 subset a template needs               |
+| 6   | [`internal/llama`](../internal/llama/doc.go)                                           | Attention, RoPE, KV cache, paged blocks, MoE     |
+| 7   | [`internal/engine`](../internal/engine/doc.go)                                         | Continuous batching, admission, a round          |
 | 8   | [`internal/server`](../internal/server/doc.go)                                         | OpenAI API, SSE, `/metrics`, access log          |
+
+The order is a dependency order, not just a reading suggestion: `internal/chat` comes before
+`internal/engine` because the engine calls the renderer, and before `internal/llama` because
+nothing in the forward pass needs it. A package placed above something it imports would send a
+reader into code they have not met yet. `internal/arch/layers_test.go` holds the same order as a
+table and fails if an import disagrees with it, so the two cannot drift apart.
 
 Two layers are off that path because nothing in the forward pass goes through them:
 [`internal/otel`](../internal/otel/doc.go) exports traces, and
 [`internal/gguftest`](../internal/gguftest/doc.go) builds the test fixtures.
+
+[`internal/arch`](../internal/arch/doc.go) holds no code either: it is the gate that keeps the
+order above from drifting, both by refusing a backward import and by checking that this table
+still agrees with it.

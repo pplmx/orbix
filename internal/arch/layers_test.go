@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -162,4 +163,115 @@ func TestTheGuardSeesRealImports(t *testing.T) {
 	if got["server"] {
 		t.Error("internal/engine reported an import of internal/server, which it does not have")
 	}
+}
+
+// TestArchitectureDocAgreesWithTheLayerTable keeps the two copies of the order from drifting.
+//
+// docs/architecture.md lists the packages in the order a reader should meet them, with the
+// comment that the concepts "arrive in the order a request travels through them". That is a
+// dependency order, so it has to agree with the table above: a package listed before something it
+// imports sends a reader into code they have not met yet.
+//
+// It disagreed once. The document had engine at 6 and chat at 7, while internal/engine imports
+// internal/chat -- so a reader following the list reached the scheduler before the renderer it
+// calls. Nothing noticed, because the list was prose.
+//
+// Only the relative order is checked, not the rank numbers: the document puts f16 and quant on one
+// row because a reader meets them together, and a check that demanded a distinct rank per package
+// would reject a table that is correct.
+func TestArchitectureDocAgreesWithTheLayerTable(t *testing.T) {
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	doc, err := os.ReadFile(filepath.Join(root, "..", "..", "docs", "architecture.md"))
+	if err != nil {
+		t.Fatalf("reading architecture.md: %v", err)
+	}
+
+	// docPos is each package's row number, the smallest for a package named on two rows.
+	docPos := make(map[string]int)
+	for line := range strings.SplitSeq(string(doc), "\n") {
+		fields := strings.Split(line, "|")
+		if len(fields) < 3 {
+			continue
+		}
+		rank, err := strconv.Atoi(strings.TrimSpace(fields[1]))
+		if err != nil {
+			continue // the header or the divider
+		}
+		for _, m := range internalLink.FindAllStringSubmatch(fields[2], -1) {
+			name := m[1]
+			if prev, seen := docPos[name]; seen && prev <= rank {
+				continue
+			}
+			docPos[name] = rank
+		}
+	}
+	if len(docPos) < 9 {
+		t.Fatalf("read %d packages from the document's table, too few to be the real one -- "+
+			"the parser probably stopped matching", len(docPos))
+	}
+
+	// Every pair the document orders must be ordered the same way by the layer table, unless the
+	// document puts them on the same row.
+	for up, upPos := range docPos {
+		for down, downPos := range docPos {
+			if upPos >= downPos {
+				continue // only the document's own ordering
+			}
+			upLayer, ok1 := layer[up]
+			downLayer, ok2 := layer[down]
+			if !ok1 || !ok2 {
+				t.Errorf("the document lists internal/%s and internal/%s, and the layer table is "+
+					"missing one of them", up, down)
+				continue
+			}
+			if upLayer > downLayer {
+				t.Errorf("the document lists internal/%s (#%d) before internal/%s (#%d), but the "+
+					"layer table has them the other way round", up, upPos, down, downPos)
+			}
+			// And the import direction: the later package may import the earlier one, never the
+			// reverse, or a reader following the list meets the caller before the callee.
+			if imports(t, root, up, down) {
+				t.Errorf("the document lists internal/%s (#%d) before internal/%s (#%d), but "+
+					"internal/%s imports internal/%s -- a reader meets the caller first",
+					up, upPos, down, downPos, up, down)
+			}
+		}
+	}
+}
+
+// internalLink matches an internal package link in a Markdown table cell.
+var internalLink = regexp.MustCompile(`internal/([a-z0-9]+)/doc\.go`)
+
+// imports reports whether package up imports package down, reading production files only.
+func imports(t *testing.T, root, up, down string) bool {
+	t.Helper()
+	dir := filepath.Join(root, "..", up)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	want := module + "internal/" + down
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("ParseFile(%s): %v", name, err)
+		}
+		for _, spec := range f.Imports {
+			p, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				continue
+			}
+			if p == want {
+				return true
+			}
+		}
+	}
+	return false
 }

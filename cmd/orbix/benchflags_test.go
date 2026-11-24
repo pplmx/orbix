@@ -122,3 +122,31 @@ func TestValidateBenchFlagsRefusesPrefixCacheWithoutAPool(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateBenchFlagsRefusesAZeroBudget covers the one flag check in this function that had
+// no test.
+//
+// The message is worth asserting in full because its reason is the one that differs from serve's
+// and chat's: their zero-token requests are observable as empty replies, while bench's would
+// produce a throughput figure of 0.0 from a run that generated nothing. A benchmark reporting 0.0
+// looks like a slow server rather than like a request to measure nothing, which is why the value
+// is refused instead of measured.
+func TestValidateBenchFlagsRefusesAZeroBudget(t *testing.T) {
+	v := benchFlags{concurrency: 1, maxTokens: 0, cache: newCacheFlags(0, 0), visit: flagsFor()}
+	err := validateBenchFlags(v)
+	if err == nil {
+		t.Fatal("--max-tokens 0 was accepted")
+	}
+	for _, want := range []string{"--max-tokens", "at least 1", "0.0 tok/s"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	// A negative value takes the same path, since the check is < 1 rather than == 0. Asserted
+	// separately because a change to <= 0 would let -1 through and the zero case alone would
+	// not notice.
+	v.maxTokens = -1
+	if err := validateBenchFlags(v); err == nil {
+		t.Error("--max-tokens -1 was accepted")
+	}
+}

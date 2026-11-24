@@ -286,7 +286,14 @@ func validateBenchFlags(v benchFlags) error {
 		return fmt.Errorf("bench: --concurrency must be at least 1")
 	}
 	if v.maxTokens < 1 {
-		return fmt.Errorf("bench: --max-tokens must be at least 1")
+		// The reason differs from serve's and chat's, which is why the sentence is not shared:
+		// here the value is the measurement's workload. A zero would not fail -- throughput is
+		// generated/elapsed, so the figure would be 0.0 tok/s rather than a division by zero --
+		// and that is the problem. A benchmark reporting 0.0 looks like a measurement that found
+		// a slow server, not like one that was asked to measure nothing.
+		return fmt.Errorf("bench: --max-tokens must be at least 1; it is the workload each " +
+			"request generates, and a run of zero-token requests reports 0.0 tok/s rather than " +
+			"an error")
 	}
 	// Zero has a documented meaning here -- one request per concurrency slot -- and the code
 	// reaches it with "total <= 0", so a negative value was silently the same as zero. The

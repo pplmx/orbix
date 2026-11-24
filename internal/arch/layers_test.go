@@ -44,6 +44,11 @@ var allowed = map[[2]string]string{}
 //
 // Test files are excluded deliberately: a package's tests may reach for anything they need to
 // build a fixture, and internal/gguftest exists for exactly that. The rule is about what ships.
+//
+// One package checks its own tests as well -- internal/server/imports_test.go refuses an import of
+// internal/llama in any file including tests, because a test that reaches for the model package is
+// how a production import creeps back. That is a stricter rule than this one and it applies to one
+// package; this check covers the whole tree, production code only.
 func packageImports(t *testing.T, dir string) map[string]bool {
 	t.Helper()
 	entries, err := os.ReadDir(dir)

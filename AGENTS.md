@@ -6,7 +6,7 @@
 
 - **NEVER** 引入 CGo。`CGO_ENABLED=0` 是唯一支持的构建方式，`import "C"` 直接拒绝。
 - **NEVER** 为了对齐 llama.cpp 的数值而引入 C 依赖；参考实现必须能在纯 Go 下读懂。
-- 依赖方向只能向下：kernel 不 import scheduler，scheduler 不 import server。
+- 依赖方向只能向下：kernel 不 import scheduler，scheduler 不 import server。这条由 `internal/arch/layers_test.go` 强制——它遍历每个 internal 包的**非测试**文件，遇到层级表判定为反向或同层的边就失败。新包必须加进 `layer` 表，否则守卫报「not in the layer table」而不是静默跳过；某个边确实需要例外时写进 `allowed` 并给出理由。
 - 模型文件（`*.gguf`）不进仓库，测试用合成 fixture。
 
 ## 入口

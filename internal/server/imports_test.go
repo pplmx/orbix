@@ -26,6 +26,11 @@ import (
 // A comment saying "do not import llama" would not survive a refactor; this does. It is the
 // same reasoning as the dependency-direction rule in docs/architecture.md, except that rule was
 // prose and this one fails a build.
+//
+// internal/arch/layers_test.go enforces the same edge from the other side -- it walks every
+// package and refuses a backward dependency. The two are not duplicates: that one covers the whole
+// tree and reads production files only, while this one covers this package and counts tests, which
+// is stricter because a test is the first place a forbidden import appears.
 var forbiddenImports = map[string]string{
 	"internal/llama": "the HTTP layer decides sampling and protocol, not cache or tensor layout; " +
 		"engine owns the types for both (see internal/engine/sampler.go)",

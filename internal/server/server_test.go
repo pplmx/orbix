@@ -9084,17 +9084,17 @@ func TestTopKIsHonoured(t *testing.T) {
 	}
 }
 
-// TestBothEndpointsHonourTheSameSamplingFields checks that a sampling parameter reaches the
-// sampler on /v1/chat/completions and not only on /v1/completions.
+// TestBothEndpointsHonourTheSameSamplingFields checks the chat endpoint for every sampling
+// field the completions endpoint has an effect test for.
 //
-// The two handlers build generateParams separately -- completionParams and chatParams -- and only
-// the completions path had an effect test for any sampling field. They do share the struct and
-// the engine call, so a field wired once is wired for both; what the test covers is precisely
-// that the chat side does not set it to a zero on the way through, which is the shape a copy of
-// the parameter list invites.
+// The two handlers build generateParams in separate places -- one after chatRequest is decoded,
+// one after completionRequest -- and every effect test for a sampling field went through
+// /v1/completions. Sharing the struct and the engine call means a field wired once is wired for
+// both, but the parameter list is written twice, and setting one to a zero is what a copy invites.
 //
-// top_k: 1 is again the sharpest form: one candidate per step makes the result independent of the
-// seed, so two seeds returning different text means the value did not arrive.
+// Measured before writing this: for each field below, the chat call site was changed to pass the
+// zero value, and every one of them left the whole package green -- none had a test that would
+// have noticed.
 func TestBothEndpointsHonourTheSameSamplingFields(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()
@@ -9116,7 +9116,25 @@ func TestBothEndpointsHonourTheSameSamplingFields(t *testing.T) {
 		return got.Choices[0].Message.Content
 	}
 
-	// The fixture has to vary without the limit, or the equality below proves nothing.
+	// Each field must move the text on its own, so one that became a no-op while its
+	// neighbours still worked fails by itself rather than being masked.
+	baseline := chatText(7, "")
+	for _, tc := range []struct{ field, extra string }{
+		{"logit_bias", `, "logit_bias": {"1": -100, "2": -100, "3": -100}`},
+		{"presence_penalty", `, "presence_penalty": 2.0`},
+		{"frequency_penalty", `, "frequency_penalty": 2.0`},
+	} {
+		t.Run(tc.field+" changes the chat output", func(t *testing.T) {
+			if got := chatText(7, tc.extra); got == baseline {
+				t.Errorf("with %s the text is unchanged (%q), so the value is dropped on the "+
+					"chat path", tc.field, got)
+			}
+		})
+	}
+
+	// top_k is checked by its effect on reproducibility rather than on the text: "different from
+	// the baseline" is not the property it promises. One candidate per step makes the result
+	// independent of the seed.
 	seen := make(map[string]bool)
 	for seed := 1; seed <= 12; seed++ {
 		seen[chatText(seed, "")] = true
@@ -9125,7 +9143,6 @@ func TestBothEndpointsHonourTheSameSamplingFields(t *testing.T) {
 		t.Skipf("all twelve chat seeds produced the same text, so this fixture cannot tell a "+
 			"working top_k from an ignored one; saw %d distinct", len(seen))
 	}
-
 	first := chatText(1, `, "top_k": 1`)
 	for seed := 2; seed <= 12; seed++ {
 		if got := chatText(seed, `, "top_k": 1`); got != first {

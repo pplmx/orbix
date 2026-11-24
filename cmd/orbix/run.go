@@ -39,44 +39,16 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Both of these are compared with "> 0" to decide whether sampling applies at all, so a
-	// negative value silently means the same as zero: greedy decoding, and a top-k that is
-	// never applied. A flag that reads as "turn sampling down" and turns it off is worth
-	// refusing rather than interpreting.
-	// NaN and Inf pass every comparison below, so each is named rather than left to a range
-	// check: a NaN temperature reached the sampler, made sum NaN, failed every `r < acc`
-	// and returned the last candidate -- the least likely token in the set.
-	if math.IsNaN(*temp) || math.IsInf(*temp, 0) || *temp < 0 {
-		return fmt.Errorf("run: --temp must be a finite, non-negative number (0 means greedy)")
+	if err := validateRunFlags(runFlags{
+		temp:       *temp,
+		topK:       *topK,
+		topP:       *topP,
+		workers:    *workers,
+		maxTokens:  *maxTokens,
+		contextLen: *contextLen,
+	}); err != nil {
+		return err
 	}
-	if *workers < 0 {
-		return fmt.Errorf("run: --workers must not be negative")
-	}
-	if *topK < 0 {
-		return fmt.Errorf("run: --top-k must not be negative (0 disables it)")
-	}
-	// A probability outside [0, 1] is refused rather than clamped, for the same reason as
-	// --top-k. Zero and one both mean "no limit" to the sampler, and the flag documents 0 as
-	// the value that disables the cutoff, so accepting them is the point rather than a
-	// guess. What is refused is a value with no reading at all: clamping -0.1 up to 0 would
-	// silently turn a typo into "off", and lowering 1.5 would apply a cutoff the caller did
-	// not ask for.
-	if math.IsNaN(*topP) || *topP < 0 || *topP > 1 {
-		return fmt.Errorf("run: --top-p must be between 0 and 1 (0 disables it)")
-	}
-	// The library rejects this too, but only once the model is loaded and Generate is
-	// reached. Reporting it here means a typo costs nothing and does not depend on which
-	// generation path the command happens to use.
-	if *maxTokens < 0 {
-		return fmt.Errorf("run: --max-tokens must not be negative")
-	}
-	// Zero means "use the model's trained context", and the code reaches it with "<= 0", so
-	// a negative length asked for the default and got it without comment. A context length
-	// is the size of the arena being allocated, which is the last place to guess.
-	if *contextLen < 0 {
-		return fmt.Errorf("run: --ctx must not be negative (0 uses the model's trained amount)")
-	}
-
 	// Open the file twice: once for metadata and the tokenizer, once for the
 	// weights. The directory parse keeps the two concerns from sharing a handle
 	// that the weight loader closes -- but it is not cheap, which is why the load
@@ -244,4 +216,66 @@ func promptFromArgs(fs *flag.FlagSet, args []string) (string, error) {
 		return "", fmt.Errorf("run: missing prompt")
 	}
 	return strings.Join(words, " "), nil
+}
+
+// runFlags is what cmdRun read from its flags, before validation.
+type runFlags struct {
+	temp       float64
+	topK       int
+	topP       float64
+	workers    int
+	maxTokens  int
+	contextLen int
+}
+
+// validateRunFlags refuses every flag value run cannot honour.
+//
+// The two kinds of check here read differently and both matter. Values the sampler compares
+// against "> 0" are refused when negative, because a negative one silently means the same as
+// zero -- greedy decoding and a top-k never applied -- which is the opposite of what "turn
+// sampling down" reads as. Values that are NaN or infinite pass every range comparison, so each
+// is named rather than left to one: a NaN temperature reached the sampler, made sum NaN, failed
+// every `r < acc`, and returned the last candidate, the least likely token in the set.
+//
+// Checked before the model is opened, so a typo costs nothing.
+func validateRunFlags(v runFlags) error {
+	// Both of these are compared with "> 0" to decide whether sampling applies at all, so a
+	// negative value silently means the same as zero: greedy decoding, and a top-k that is
+	// never applied. A flag that reads as "turn sampling down" and turns it off is worth
+	// refusing rather than interpreting.
+	// NaN and Inf pass every comparison below, so each is named rather than left to a range
+	// check: a NaN temperature reached the sampler, made sum NaN, failed every `r < acc`
+	// and returned the last candidate -- the least likely token in the set.
+	if math.IsNaN(v.temp) || math.IsInf(v.temp, 0) || v.temp < 0 {
+		return fmt.Errorf("run: --temp must be a finite, non-negative number (0 means greedy)")
+	}
+	if v.workers < 0 {
+		return fmt.Errorf("run: --workers must not be negative")
+	}
+	if v.topK < 0 {
+		return fmt.Errorf("run: --top-k must not be negative (0 disables it)")
+	}
+	// A probability outside [0, 1] is refused rather than clamped, for the same reason as
+	// --top-k. Zero and one both mean "no limit" to the sampler, and the flag documents 0 as
+	// the value that disables the cutoff, so accepting them is the point rather than a
+	// guess. What is refused is a value with no reading at all: clamping -0.1 up to 0 would
+	// silently turn a typo into "off", and lowering 1.5 would apply a cutoff the caller did
+	// not ask for.
+	if math.IsNaN(v.topP) || v.topP < 0 || v.topP > 1 {
+		return fmt.Errorf("run: --top-p must be between 0 and 1 (0 disables it)")
+	}
+	// The library rejects this too, but only once the model is loaded and Generate is
+	// reached. Reporting it here means a typo costs nothing and does not depend on which
+	// generation path the command happens to use.
+	if v.maxTokens < 0 {
+		return fmt.Errorf("run: --max-tokens must not be negative")
+	}
+	// Zero means "use the model's trained context", and the code reaches it with "<= 0", so
+	// a negative length asked for the default and got it without comment. A context length
+	// is the size of the arena being allocated, which is the last place to guess.
+	if v.contextLen < 0 {
+		return fmt.Errorf("run: --ctx must not be negative (0 uses the model's trained amount)")
+	}
+
+	return nil
 }

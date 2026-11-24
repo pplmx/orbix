@@ -13,6 +13,7 @@ import (
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -516,11 +517,18 @@ func TestChatStatsCommand(t *testing.T) {
 func TestChatRefusesABlockBiggerThanTheContext(t *testing.T) {
 	var out bytes.Buffer
 	// The fixture's default window is 64 positions, so 1000 cannot fit.
+	// prefixCache is set explicitly. The zero value is false, and the CLI's default is true
+	// (`--no-prefix-cache` turns it off), so a test that left it unset exercised a
+	// configuration no user reaches -- and once the oversized-block guard started keying off
+	// whether reuse was actually on, that test asserted the wrong thing: it failed because chat
+	// accepted a block it should accept when reuse is off, where a block wider than the context
+	// is just a pool with one block in practice.
 	err := chatSession(strings.NewReader("/exit\n"), &out, chatOptions{
-		model:     gguftest.Model{NoEOS: true}.Write(t, t.TempDir()),
-		blockSize: 1000,
-		maxTokens: 4,
-		topK:      40,
+		model:       gguftest.Model{NoEOS: true}.Write(t, t.TempDir()),
+		blockSize:   1000,
+		prefixCache: true,
+		maxTokens:   4,
+		topK:        40,
 	})
 	if err == nil {
 		t.Fatal("chat accepted a block larger than the context")
@@ -770,12 +778,11 @@ func TestChatBannerNamesTheFallback(t *testing.T) {
 // prefix index hands back whole blocks. Rounding the context down to a block loses the last
 // partial one, so a conversation that exactly fills the window fails on its final turn.
 //
-// What this asserts is the ceiling division and cfgForBlocks, not the wiring: the pool size is
-// not reported anywhere a session prints, so the connection from these numbers to the engine's
-// block count is still read rather than measured. Reaching it through behaviour needs a
-// conversation that fills the window exactly, which the fixture's 64-position default makes
-// cheap to construct but the assertion would then be about the engine's pool-exhaustion error
-// rather than about this arithmetic.
+// This drives planCache, which is where chat's pool size is now decided. It used to call a
+// chat-local cfgForBlocks helper whose fallback -- 2048 positions when the file states no
+// context length -- could never run: openModel calls llama.LoadConfig first, and that refuses a
+// file without the key. A test of an unreachable branch is a test of nothing, so the helper is
+// gone and this asserts the arithmetic that actually decides the pool.
 func TestChatSizesThePoolForAWholeContext(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -792,22 +799,45 @@ func TestChatSizesThePoolForAWholeContext(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			path := gguftest.Model{ContextLen: c.ctx, NoEOS: true}.Write(t, t.TempDir())
-			gf, err := gguf.Open(path)
+			blockSize, blocks := c.blockSz, 0
+			// prefixCache is false for these: the point is the block-count arithmetic, and the
+			// "smaller than a block" case deliberately asks for a block wider than the window.
+			// With reuse on that is refused, which is a different test -- see
+			// TestChatRefusesABlockBiggerThanTheContext.
+			plan, err := planCache("chat", llama.Config{ContextLen: c.ctx},
+				cacheFlags{blockSize: &blockSize, blocks: &blocks}, true, false)
 			if err != nil {
-				t.Fatalf("Open: %v", err)
+				t.Fatalf("planCache: %v", err)
 			}
-			if got := cfgForBlocks(gf); got != c.ctx {
-				t.Fatalf("cfgForBlocks = %d, want the file's %d", got, c.ctx)
-			}
-			// The ceiling division chatSession applies to it.
-			got := (cfgForBlocks(gf) + c.blockSz - 1) / c.blockSz
-			if got != c.want {
+			if plan.blocks != c.want {
 				t.Errorf("a %d-position context at block size %d needs %d blocks, got %d",
-					c.ctx, c.blockSz, c.want, got)
+					c.ctx, c.blockSz, c.want, plan.blocks)
+			}
+			// The block size the caller asked for is the one the plan reports: a default
+			// substituted here would silently change what the engine was configured with.
+			if plan.blockSize != c.blockSz {
+				t.Errorf("plan block size = %d, want the caller's %d", plan.blockSize, c.blockSz)
 			}
 		})
 	}
+
+	// The default block size has to come from llama rather than from a literal here. chat
+	// hardcoded 16 while llama.BlockPool's own default was also 16, so the two agreed by
+	// coincidence; this asserts the single source is actually used.
+	t.Run("default block size comes from llama", func(t *testing.T) {
+		blockSize, blocks := 0, 0
+		plan, err := planCache("chat", llama.Config{ContextLen: 256},
+			cacheFlags{blockSize: &blockSize, blocks: &blocks}, true, true)
+		if err != nil {
+			t.Fatalf("planCache: %v", err)
+		}
+		if want := llama.DefaultBlockSize(); plan.blockSize != want {
+			t.Errorf("default block size = %d, want llama's %d", plan.blockSize, want)
+		}
+		if want := (256 + plan.blockSize - 1) / plan.blockSize; plan.blocks != want {
+			t.Errorf("blocks = %d, want %d for a 256-position context", plan.blocks, want)
+		}
+	})
 }
 
 // TestChatRefusesAConversationThatFillsTheContext covers the boundary the REPL checks before
@@ -999,8 +1029,13 @@ func TestChatRefusesABadModelBeforePrompting(t *testing.T) {
 		if err == nil {
 			t.Fatal("chatSession accepted a file with no tokenizer")
 		}
-		if !strings.Contains(err.Error(), "tokenizer") {
-			t.Errorf("error %q does not name the tokenizer", err)
+		// A file with no metadata is missing several required keys, and which one is named
+		// depends on the order the loader checks them. openModel derives the config before it
+		// builds the tokenizer, so this reports the missing architecture. The property is that
+		// the command refuses a bare file and names a key rather than failing obscurely --
+		// asserting "tokenizer" pinned the old order and nothing else.
+		if !strings.Contains(err.Error(), "missing") {
+			t.Errorf("error %q names no missing key", err)
 		}
 		if out.Len() != 0 {
 			t.Errorf("the session printed %q before failing", out.String())
@@ -1607,41 +1642,31 @@ func TestChatSaysWhenClearCannotHelp(t *testing.T) {
 //
 // Both were unexecuted. TestChatSizesThePoolForAWholeContext only ever passes a file that states its
 // context, so the fallback could have been any number -- zero included -- and every test would still
-// pass.
-func TestCfgForBlocksFallsBack(t *testing.T) {
-	t.Run("no context_length", func(t *testing.T) {
-		path := gguftest.Model{NoEOS: true, OmitContextLen: true}.Write(t, t.TempDir())
-		gf, err := gguf.Open(path)
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		if _, ok := gf.Get[int]("llama.context_length"); ok {
-			t.Fatal("the fixture still carries the key, so this is not testing the fallback")
-		}
-		// The literal rather than the constant: comparing against defaultBlockContext would
-		// pass for any value of it, including the zero that would silently disable paging --
-		// which the comment on that constant says is the thing being avoided.
-		if got := cfgForBlocks(gf); got != 2048 {
-			t.Errorf("cfgForBlocks = %d for a file with no context length, want 2048", got)
-		}
-	})
+// / TestChatRefusesAFileWithoutAContextLength replaces a test of an unreachable fallback.
+//
+// chat used to size its pool through a local cfgForBlocks helper that answered 2048 when the
+// file stated no context length. That branch could not run: chatSession calls openModel, which
+// calls llama.LoadConfig, and LoadConfig treats llama.context_length as required -- it returns
+// "llama: missing llama.context_length" before any pool exists. The test exercised the helper
+// directly, so it passed while describing a path no session could take.
+//
+// What a user can actually observe is the refusal, and it has to name the key: a file missing
+// the window is why the command exits, and "missing llama.context_length" is what tells them so.
+func TestChatRefusesAFileWithoutAContextLength(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, OmitContextLen: true}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, ok := gf.Get[int]("llama.context_length"); ok {
+		t.Fatal("the fixture still carries the key, so this is not testing the missing-key path")
+	}
 
-	t.Run("no architecture", func(t *testing.T) {
-		// An empty file parses as far as a header with no metadata, which is enough for Arch to
-		// fail and for this function to be reached with nothing to derive a key from.
-		path := filepath.Join(t.TempDir(), "bare.gguf")
-		if err := os.WriteFile(path, []byte("GGUF\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		gf, err := gguf.Open(path)
-		if err != nil {
-			t.Skipf("a header-only file is refused here rather than reaching the fallback: %v", err)
-		}
-		if _, err := gf.Arch(); err == nil {
-			t.Fatal("Arch succeeded on a file with no metadata, so this is not testing the fallback")
-		}
-		if got := cfgForBlocks(gf); got != 2048 {
-			t.Errorf("cfgForBlocks = %d for a file with no architecture, want 2048", got)
-		}
-	})
+	m, err := openModel(path)
+	if err == nil {
+		t.Fatalf("openModel accepted a file with no context length and produced %+v", m)
+	}
+	if !strings.Contains(err.Error(), "context_length") {
+		t.Errorf("error %q does not name the missing key", err)
+	}
 }

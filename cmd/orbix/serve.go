@@ -16,11 +16,9 @@ import (
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
-	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/server"
-	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // cmdServe implements "orbix serve": the OpenAI-compatible HTTP server.
@@ -225,69 +223,38 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
 			"optionally --block-size), or drop --prefix-cache")
 	}
-	// The prefix index stores and matches whole blocks, so a block larger than the model's
-	// context can never be filled and never published: reuse is impossible however much
-	// traffic arrives. Measured against the 128-position stories model with --blocks 8
-	// --block-size 1000 --prefix-cache and three identical prompts,
-	// orbix_prefix_positions_reused_total stayed at 0 while the startup line said "prefix
-	// cache: on"; the same run at --block-size 16 reported 32.
+	// One open for the metadata, the tokenizer, the template and the config. This used to open
+	// the file twice -- once here to check --block-size against the context, once below for the
+	// tokenizer -- and engine.New reached into the loader for a third parse.
 	//
-	// Refused rather than warned about, like the --blocks check above: both configurations
-	// start a server that serves text, so the only signal is the line claiming a feature the
-	// operator asked for, and a warning under it can be read as advice rather than as "this
-	// did not happen". The context length is needed before the pool is built, which is why the
-	// model is opened first.
-	if *prefixCache && *cache.blocks > 0 && *cache.blockSize > 0 {
-		gf, err := gguf.Open(*model)
-		if err != nil {
-			return err
-		}
-		cfg, err := llama.LoadConfig(gf)
-		if err != nil {
-			return err
-		}
-		if *cache.blockSize > cfg.ContextLen {
-			return fmt.Errorf("serve: --block-size %d is larger than this model's %d-position "+
-				"context, so no block ever fills and --prefix-cache could never reuse anything; "+
-				"use --block-size %d or less", *cache.blockSize, cfg.ContextLen, cfg.ContextLen)
-		}
+	// The context length is needed before the pool is built, which is why the model is opened
+	// before the engine: a --block-size wider than the window is refused rather than warned
+	// about, like the --blocks check above. Both configurations start a server that serves text,
+	// so the only signal would be the line claiming a feature the operator asked for, and a
+	// warning under it reads as advice rather than as "this did not happen".
+	m, err := openModel(*model)
+	if err != nil {
+		return err
 	}
+	plan, err := planCache("serve", m.cfg, cache, false, *prefixCache)
+	if err != nil {
+		return err
+	}
+	tok, renderer := m.tok, m.renderer
 
-	gf, err := gguf.Open(*model)
-	if err != nil {
-		return err
-	}
-	tok, err := tokenize.New(gf)
-	if err != nil {
-		return err
-	}
 	eng, err := engine.New(*model, engine.Options{
 		MaxActive:   *maxActive,
 		MaxQueued:   *maxQueued,
 		Policy:      schedPolicy,
 		Workers:     *cache.workers,
-		BlockSize:   *cache.blockSize,
-		Blocks:      *cache.blocks,
+		BlockSize:   plan.blockSize,
+		Blocks:      plan.blocks,
 		PrefixCache: *prefixCache,
 	})
 	if err != nil {
 		return err
 	}
 	cfg := eng.Model().Config()
-
-	renderer, err := engine.NewChatRenderer(gf)
-	if err != nil {
-		return err
-	}
-	// Probe the template with a one-turn conversation so the banner below can be right the
-	// first time. UsesModelTemplate reads renderReason, which only a failed render writes, so
-	// before this line a template that compiles but cannot render printed "chat: model
-	// template" -- the banner said one thing and every request did another. chat does the same
-	// probe for the same reason; see chatSession.
-	//
-	// The request-time warning in internal/server stays: it is what catches a template that
-	// renders some conversations and not others, which a single probe cannot know about.
-	renderer.Render([]engine.Turn{{Role: "user", Text: "hi"}})
 
 	// Tracing is opt-in and off by default: a collector is one more thing that can be
 	// down, and a server whose traces have nowhere to go should not behave differently.

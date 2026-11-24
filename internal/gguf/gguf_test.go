@@ -2132,3 +2132,33 @@ func TestReadAcceptsVersionTwo(t *testing.T) {
 		t.Errorf("llama.block_count = %d, %v", n, ok)
 	}
 }
+
+// TestOpenCountCountsParsesNotAttempts pins what the counter means.
+//
+// cmd/orbix asserts its commands parse the metadata once, and that assertion is only as good as
+// this counter: one that counted attempts would make a failed open look like a parse, and one
+// that counted nothing would make every such assertion pass whatever the code did.
+func TestOpenCountCountsParsesNotAttempts(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.gguf")
+	if err := os.WriteFile(good, buildSample(nil), 0o644); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	missing := filepath.Join(dir, "missing.gguf")
+
+	before := OpenCount()
+	// A failed open is not a parse.
+	if _, err := Open(missing); err == nil {
+		t.Fatal("Open accepted a path that does not exist")
+	}
+	if got := OpenCount() - before; got != 0 {
+		t.Errorf("a failed open moved the counter by %d, want 0", got)
+	}
+	// A successful one is.
+	if _, err := Open(good); err != nil {
+		t.Fatalf("Open(%q): %v", good, err)
+	}
+	if got := OpenCount() - before; got != 1 {
+		t.Errorf("one successful open moved the counter by %d, want 1", got)
+	}
+}

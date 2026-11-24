@@ -131,6 +131,15 @@ type BlockPoolOptions struct {
 // block table cheap.
 const defaultBlockSize = 16
 
+// DefaultBlockSize is the block size NewBlockPool uses when BlockPoolOptions.BlockSize is zero.
+//
+// Exported because a caller that has to reason about block sizes before it builds the pool needs
+// the same number: cmd/orbix's `chat` sizes a pool from the model's context, and it had 16
+// written out locally while this constant also said 16 -- agreement by coincidence, which would
+// have broken the moment either side changed. A caller deciding "how many blocks do I need" and
+// the pool deciding "how big is a block" have to start from one value.
+func DefaultBlockSize() int { return defaultBlockSize }
+
 // NewBlockPool allocates a pool of blocks.
 func NewBlockPool(cfg Config, opts BlockPoolOptions) (*BlockPool, error) {
 	block := opts.BlockSize

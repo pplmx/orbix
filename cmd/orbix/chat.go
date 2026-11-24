@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
-	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
@@ -115,86 +114,36 @@ type chatOptions struct {
 // whole conversation without a subprocess. The loop's contract is small on purpose:
 // one line in, one reply out, and history that only grows when a turn succeeds.
 func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
-	gf, err := gguf.Open(opts.model)
+	// One open for the metadata, the config, the tokenizer and the template; see openModel.
+	m, err := openModel(opts.model)
 	if err != nil {
 		return err
 	}
-	tok, err := tokenize.New(gf)
-	if err != nil {
-		return err
-	}
-	// The model's own chat format when this project can evaluate it, the neutral
-	// transcript otherwise. Built once per session: compiling a template per turn
-	// would reparse the same few hundred bytes every time.
-	renderer, err := engine.NewChatRenderer(gf)
-	if err != nil {
-		return err
-	}
-	opts.renderer = renderer
-	// Probe the template with a one-turn conversation before choosing the banner.
-	//
-	// UsesModelTemplate reads renderReason, which is only written when a render fails, so
-	// before this probe the banner said "the model's own chat template" for a template that
-	// could never render -- and then printed the correction after the first answer, leaving
-	// two lines that disagreed. Measured with a template of "{{ messages[99].content }}":
-	// banner first, correction after the reply.
-	//
-	// The probe is a real render rather than a check, because that is what the renderer
-	// records: it costs one template evaluation at startup, which a REPL can afford, and it
-	// leaves the renderer in the state every later turn will be in anyway.
-	renderer.Render([]engine.Turn{{Role: "user", Text: "hi"}})
+	opts.renderer = m.renderer
 	// Say which format is in use. It is worth one line: a model whose template was
 	// not applied answers in a shape the caller did not expect, and knowing that from
 	// the start is the difference between a bug report and a mystery.
-	banner := "(using the model's own chat template)"
-	if !renderer.UsesModelTemplate() {
-		banner = fmt.Sprintf("(using a neutral transcript: %s)", renderer.FallbackReason())
-	}
-	if _, err := fmt.Fprintln(out, banner); err != nil {
+	if _, err := fmt.Fprintf(out, "(using %s)\n", m.ChatFormat()); err != nil {
 		return err
 	}
 
-	// A paged cache with prefix reuse is the default for a REPL, and it is sized
-	// from the model's own context: a conversation longer than the window cannot be
-	// remembered anyway, so the pool only has to hold one.
-	blockSize := opts.blockSize
-	if blockSize <= 0 {
-		blockSize = 16
-	}
-	// Size a paged pool for one full context unless the caller asked for something
-	// else. A REPL is exactly the workload paging plus prefix reuse exists for: every
-	// turn re-sends the history, so the pool must hold one conversation and the
-	// prefix index must be able to hand back the previous turn's blocks.
-	blocks := opts.blocks
-	if blocks <= 0 {
-		blocks = (cfgForBlocks(gf) + blockSize - 1) / blockSize
-	}
-	// The prefix index stores and matches whole blocks, so a block larger than the context can
-	// never be filled and the default-on prefix reuse would silently never fire. Same check as
-	// serve's and bench's, made here because chat enables reuse by default rather than on
-	// request: an oversized --block-size arrives without the operator asking for the feature
-	// that breaks.
-	//
-	// The window comes from llama.LoadConfig, the same source serve and bench use, rather than
-	// from cfgForBlocks: that helper answers a different question -- how big to make the pool --
-	// and falls back to a constant when the file states no context. A file with no context_length
-	// fails inside engine.New anyway, but reading two sources for one concept is how the two
-	// checks would drift apart.
-	bcfg, err := llama.LoadConfig(gf)
+	// A paged cache with prefix reuse is the default for a REPL, so this command sizes a pool
+	// itself when --blocks is unset -- and, because reuse is on by default here, the
+	// oversized-block guard always applies rather than only under --prefix-cache.
+	plan, err := planCache("chat", m.cfg, cacheFlags{
+		blockSize: &opts.blockSize,
+		blocks:    &opts.blocks,
+		workers:   &opts.workers,
+	}, true, opts.prefixCache)
 	if err != nil {
 		return err
-	}
-	if blockSize > bcfg.ContextLen {
-		return fmt.Errorf("chat: --block-size %d is larger than this model's %d-position "+
-			"context, so no block ever fills and prefix reuse could never fire; use "+
-			"--block-size %d or less", blockSize, bcfg.ContextLen, bcfg.ContextLen)
 	}
 
 	eng, err := engine.New(opts.model, engine.Options{
 		MaxActive: 1, // a REPL has one request at a time
 		Workers:   opts.workers,
-		BlockSize: blockSize,
-		Blocks:    blocks,
+		BlockSize: plan.blockSize,
+		Blocks:    plan.blocks,
 	})
 	if err != nil {
 		return err
@@ -279,7 +228,7 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 			continue
 		}
 
-		turn, err := chatTurnOnce(out, eng, tok, systemTurn, history, line, opts)
+		turn, err := chatTurnOnce(out, eng, m.tok, systemTurn, history, line, opts)
 		if err != nil {
 			// A failed turn leaves the history untouched, so the next question is
 			// asked against the same context rather than against a broken one.
@@ -357,27 +306,6 @@ func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
 func windowCutTheBudget(turn chatTurnResult, budget int) bool {
 	return turn.finishReason == "length" && turn.generated < budget
 }
-
-// cfgForBlocks returns the context length the pool has to cover.
-//
-// The key is derived from general.architecture rather than listed per architecture, so
-// adding a third one does not mean adding a line here -- a list would be a second
-// place to forget.
-func cfgForBlocks(f *gguf.File) int {
-	arch, err := f.Arch()
-	if err != nil {
-		return defaultBlockContext
-	}
-	if v, ok := f.Get[int](arch + ".context_length"); ok && v > 0 {
-		return v
-	}
-	return defaultBlockContext
-}
-
-// defaultBlockContext is the pool size used when a file does not state its context
-// length. It matches llama's smallest common window rather than being zero, because a
-// zero pool would silently disable paging.
-const defaultBlockContext = 2048
 
 // chatTurn is one exchanged message.
 type chatTurn struct {

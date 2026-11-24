@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // File is a parsed GGUF file.
@@ -80,7 +81,35 @@ func (t TensorInfo) Bytes() (int64, bool) {
 
 // Open parses the GGUF file at path and closes it immediately after reading
 // the directory. Tensor data must be requested through TensorData.
+//
+// Each call parses the whole directory again, and on a large checkpoint that is not cheap:
+// measured on the 553 MiB Llama 3.2 file, one Open takes 1.47 s. A caller that needs metadata
+// for two purposes should Open once and share the *File -- cmd/orbix derived a config, a
+// tokenizer and a chat template from three separate parses until it was given one entry point
+// for the job. OpenCount exists so that property can be asserted rather than read.
 func Open(path string) (*File, error) {
+	file, err := open(path)
+	if err == nil {
+		opened.Add(1)
+	}
+	return file, err
+}
+
+// opened counts successful Open calls, so a test can assert how many parses a command does.
+//
+// Process-wide rather than per-caller: the property "chat opens the model once" is about a
+// command's behaviour rather than about one *File, and threading a counter through every caller
+// to observe it would be more machinery than the property is worth. A test reads it before and
+// after, and the tests that use it are the only writers in practice.
+var opened atomic.Int64
+
+// OpenCount reports how many times Open has succeeded in this process.
+//
+// It is exported for tests. Nothing in the engine consults it: a number that could change what
+// is served would make the same file behave differently depending on what ran before it.
+func OpenCount() int64 { return opened.Load() }
+
+func open(path string) (*File, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

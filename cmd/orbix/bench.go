@@ -11,9 +11,7 @@ import (
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
-	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/llama"
-	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // cmdBench implements "orbix bench": measure generation throughput.
@@ -124,25 +122,20 @@ func cmdBench(args []string) error {
 			"optionally --block-size), or drop --prefix-cache")
 	}
 
-	gf, err := gguf.Open(*model)
+	// Same trap as serve and chat -- a block the context cannot fill is never published to the
+	// prefix index, so --prefix-cache would measure a run that reused nothing while claiming the
+	// flag was on -- and the same guard, from the same place. bench used to run it under a
+	// weaker condition than serve (it did not require --blocks), so one command line could be
+	// refused by serve and accepted here.
+	m, err := openModel(*model)
 	if err != nil {
 		return err
 	}
-	// Same trap as serve and chat: a block the context cannot fill is never published to the
-	// prefix index, so --prefix-cache would measure a run that reused nothing while claiming
-	// the flag was on. The row that reports reused positions is what the reader compares
-	// against, and a zero there for this reason reads as "reuse does not pay".
-	if *prefixCache && *cache.blockSize > 0 {
-		if bcfg, err := llama.LoadConfig(gf); err == nil && *cache.blockSize > bcfg.ContextLen {
-			return fmt.Errorf("bench: --block-size %d is larger than this model's %d-position "+
-				"context, so no block ever fills and --prefix-cache could never reuse anything; "+
-				"use --block-size %d or less", *cache.blockSize, bcfg.ContextLen, bcfg.ContextLen)
-		}
-	}
-	tok, err := tokenize.New(gf)
+	plan, err := planCache("bench", m.cfg, cache, false, *prefixCache)
 	if err != nil {
 		return err
 	}
+	tok := m.tok
 	schedPolicy, err := engine.ParsePriority(*policy)
 	if err != nil {
 		return err
@@ -151,8 +144,8 @@ func cmdBench(args []string) error {
 		MaxActive:   *concurrency,
 		Policy:      schedPolicy,
 		Workers:     *cache.workers,
-		BlockSize:   *cache.blockSize,
-		Blocks:      *cache.blocks,
+		BlockSize:   plan.blockSize,
+		Blocks:      plan.blocks,
 		PrefixCache: *prefixCache,
 	})
 	if err != nil {

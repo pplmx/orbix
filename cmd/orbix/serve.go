@@ -123,105 +123,32 @@ func cmdServe(args []string) error {
 	if err := resolveModel(fs, model); err != nil {
 		return err
 	}
-	if err := cache.validate("serve", false); err != nil {
-		return err
-	}
-	if *maxActive < 1 {
-		return fmt.Errorf("serve: --max-active must be at least 1")
-	}
-	// Prefix reuse lives in the paged cache: a contiguous arena has no block index to
-	// attach a previous request's KV to. Accepting the flag without --blocks silently ran a
-	// contiguous server with no reuse, and the startup log said "kv cache: contiguous" with
-	// no mention of the flag at all -- so an operator who passed it believed reuse was on.
-	// A malformed endpoint does not fail the exporter: it is built, every send fails, and the
-	// spans are dropped into the counter. That is the right behaviour for a collector that is
-	// down -- the server must keep serving -- but not for a typo, which would silently disable
-	// the tracing the operator just asked for. Checked here with the other flags, before the
-	// model is opened, so a bad value is reported without loading 8 GB first.
-	if *otlpEndpoint != "" {
-		if u, uerr := url.Parse(*otlpEndpoint); uerr != nil || u.Host == "" ||
-			(u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("serve: --otlp-endpoint %q is not an http(s) URL with a host",
-				*otlpEndpoint)
-		}
-	}
-	// A negative grace cannot be a bounded drain: context.WithTimeout with a negative duration
-	// is already expired, so every shutdown would cut every response while claiming to drain.
-	// Zero is allowed and means "do not wait", which is a real choice for a process whose
-	// requests are already being retried elsewhere.
-	if *shutdownGraceFlag < 0 {
-		return fmt.Errorf("serve: --shutdown-grace must not be negative (0 means do not wait)")
-	}
-	// Resolved once and used by both the banner and the drain. Reading *shutdownGraceFlag at each
-	// site instead let a mutation of one pass every test: the banner would still report the
-	// configured value while the drain used the default. One variable makes that disagreement
-	// impossible to write.
-	grace := *shutdownGraceFlag
-	// The listen address is checked here, with the other flags, for the reason --otlp-endpoint
-	// is: net.Listen runs after engine.New, so a typo in --addr used to cost a full model load
-	// before it was reported. Measured on the 2 GB Qwen2 file, `--addr not-an-addr` spent 3.2
-	// seconds loading before failing.
-	//
-	// Only the syntax is checked, not availability: whether the port is free is a fact that can
-	// change between this check and the listen, and binding early to find out would hold the
-	// socket through the load. A malformed value is a different thing -- it cannot become valid
-	// by waiting.
-	//
-	// The same ordering has a second consequence worth stating, because docs/usage.md promises
-	// it: because nothing listens until the engine exists, a successful connection to /healthz
-	// means the weights are resident. A readiness probe can rely on that. Measured on the
-	// 553 MiB Llama 3.2 checkpoint: 6.3 s from process start to the first 200. It also means a
-	// model that fails to load exits before any socket exists, rather than serving an unhealthy
-	// instance -- measured, a missing file and a bad magic both exit 1 with the port still
-	// closed.
-	// ResolveTCPAddr alone is not enough: it accepts a service name, so "127.0.0.1:http"
-	// resolves to port 80 and passes, then fails at net.Listen after the load. A port this
-	// server binds is a number, and requiring one is what makes the check cover the whole
-	// flag rather than the part Go's parser happens to reject.
-	if _, err := net.ResolveTCPAddr("tcp", *addr); err != nil {
-		return fmt.Errorf("serve: --addr %q is not a host:port to listen on: %w", *addr, err)
-	}
-	if _, port, err := net.SplitHostPort(*addr); err == nil {
-		if _, perr := strconv.Atoi(port); perr != nil {
-			return fmt.Errorf("serve: --addr %q has a port that is not a number (%q); "+
-				"a service name would be resolved before the listen, which is not what this "+
-				"flag says", *addr, port)
-		}
-	}
-	// A negative backlog is not a smaller backlog: the reporting below treats anything <= 0
-	// as "unset" and falls back to 8x --max-active, so -1 silently became 64 here. A typo
-	// that produces a valid-looking server is worse than one that stops at the flag.
-	if *maxQueued < 0 {
-		return fmt.Errorf("serve: --max-queued must not be negative (0 means 8x --max-active)")
-	}
-	// The budget reaches server.Config, which replaces anything <= 0 with 256. So a negative
-	// value here is not "generate nothing" -- it is a server that hands every request which
-	// omits max_tokens the 256-token default, and reports the reply as ordinary. Measured
-	// against the 256-position fixture: `serve --max-tokens -5` started, answered a request
-	// with no max_tokens field, and returned 253 tokens with finish_reason "length".
-	//
-	// Zero is refused for the same reason, and this is where serve's meaning of zero differs
-	// from run's. run accepts 0 because it generates once into its own output, where "prefill
-	// only" is observable; the server cannot express a zero-token request, because max_tokens
-	// is an int in the request body and 0 is indistinguishable from the field being absent.
-	// Accepting the flag at 0 therefore configures a default no client can observe, which is
-	// the silent substitution this check exists to prevent rather than a budget of zero.
-	if *maxTokens < 1 {
-		return fmt.Errorf("serve: --max-tokens must be at least 1; it is the default for " +
-			"requests that send no max_tokens, and the server cannot express a zero-token " +
-			"request (a request's 0 is indistinguishable from an absent field)")
-	}
-	// The policy name is parsed here rather than after the model is opened, where it used to
-	// be: a typo cost a full checkpoint load first, and the error then arrived from
-	// engine.New rather than naming the flag. ParsePriority has no dependency on the model, so
-	// there is nothing to gain by checking it late; schedPolicy below is reused as-is.
+	// The policy is parsed here rather than after the model is opened: a typo used to cost a
+	// full checkpoint load first, and the error then arrived from engine.New instead of naming
+	// the flag. ParsePriority does not depend on the model, so there is nothing to gain by
+	// checking it late.
 	schedPolicy, err := engine.ParsePriority(*policy)
 	if err != nil {
 		return err
 	}
-	if *prefixCache && *cache.blocks == 0 {
-		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
-			"optionally --block-size), or drop --prefix-cache")
+	// Resolved once and used by both the banner and the drain. Reading *shutdownGraceFlag at
+	// each site let a mutation of one pass every test: the banner would report the configured
+	// value while the drain used the default, and nothing would notice.
+	grace := *shutdownGraceFlag
+	if err := validateServeFlags(serveFlags{
+		model:         *model,
+		addr:          *addr,
+		maxTokens:     *maxTokens,
+		maxActive:     *maxActive,
+		maxQueued:     *maxQueued,
+		cache:         cache,
+		prefixCache:   *prefixCache,
+		otlpEndpoint:  *otlpEndpoint,
+		logFormat:     *logFormat,
+		shutdownGrace: grace,
+		policy:        schedPolicy,
+	}); err != nil {
+		return err
 	}
 	// One open for the metadata, the tokenizer, the template and the config. This used to open
 	// the file twice -- once here to check --block-size against the context, once below for the
@@ -629,4 +556,124 @@ func defaultQueued(maxQueued, maxActive int) int {
 		return maxQueued
 	}
 	return 8 * maxActive
+}
+
+// serveFlags is what cmdServe assembled from its flags, before anything is loaded.
+//
+// It exists so the checks and the assembly are separate: a reader following what serve does with
+// a request no longer steps over a hundred lines of flag validation, and the checks have one exit
+// point instead of eight.
+type serveFlags struct {
+	model         string
+	addr          string
+	maxTokens     int
+	maxActive     int
+	maxQueued     int
+	cache         cacheFlags
+	prefixCache   bool
+	otlpEndpoint  string
+	logFormat     string
+	shutdownGrace time.Duration
+	policy        engine.Priority
+}
+
+// validateServeFlags checks every flag that can be wrong before anything is loaded.
+//
+// Every check is deliberately ahead of openModel. A typo in --addr or --otlp-endpoint used to
+// cost a full checkpoint load first -- measured at 3.2 seconds on a 2 GB Qwen2 file -- and the
+// error then arrived from net.Listen rather than naming the flag. Each comment below records
+// what the check was measured doing before it existed.
+func validateServeFlags(v serveFlags) error {
+	if err := v.cache.validate("serve", false); err != nil {
+		return err
+	}
+	if v.maxActive < 1 {
+		return fmt.Errorf("serve: --max-active must be at least 1")
+	}
+	// Prefix reuse lives in the paged cache: a contiguous arena has no block index to
+	// attach a previous request's KV to. Accepting the flag without --blocks silently ran a
+	// contiguous server with no reuse, and the startup log said "kv cache: contiguous" with
+	// no mention of the flag at all -- so an operator who passed it believed reuse was on.
+	// A malformed endpoint does not fail the exporter: it is built, every send fails, and the
+	// spans are dropped into the counter. That is the right behaviour for a collector that is
+	// down -- the server must keep serving -- but not for a typo, which would silently disable
+	// the tracing the operator just asked for. Checked here with the other flags, before the
+	// model is opened, so a bad value is reported without loading 8 GB first.
+	if v.otlpEndpoint != "" {
+		if u, uerr := url.Parse(v.otlpEndpoint); uerr != nil || u.Host == "" ||
+			(u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("serve: --otlp-endpoint %q is not an http(s) URL with a host",
+				v.otlpEndpoint)
+		}
+	}
+	// A negative grace cannot be a bounded drain: context.WithTimeout with a negative duration
+	// is already expired, so every shutdown would cut every response while claiming to drain.
+	// Zero is allowed and means "do not wait", which is a real choice for a process whose
+	// requests are already being retried elsewhere.
+	if v.shutdownGrace < 0 {
+		return fmt.Errorf("serve: --shutdown-grace must not be negative (0 means do not wait)")
+	}
+	// The listen address is checked here, with the other flags, for the reason --otlp-endpoint
+	// is: net.Listen runs after engine.New, so a typo in --addr used to cost a full model load
+	// before it was reported. Measured on the 2 GB Qwen2 file, `--addr not-an-addr` spent 3.2
+	// seconds loading before failing.
+	//
+	// Only the syntax is checked, not availability: whether the port is free is a fact that can
+	// change between this check and the listen, and binding early to find out would hold the
+	// socket through the load. A malformed value is a different thing -- it cannot become valid
+	// by waiting.
+	//
+	// The same ordering has a second consequence worth stating, because docs/usage.md promises
+	// it: because nothing listens until the engine exists, a successful connection to /healthz
+	// means the weights are resident. A readiness probe can rely on that. Measured on the
+	// 553 MiB Llama 3.2 checkpoint: 6.3 s from process start to the first 200. It also means a
+	// model that fails to load exits before any socket exists, rather than serving an unhealthy
+	// instance -- measured, a missing file and a bad magic both exit 1 with the port still
+	// closed.
+	// ResolveTCPAddr alone is not enough: it accepts a service name, so "127.0.0.1:http"
+	// resolves to port 80 and passes, then fails at net.Listen after the load. A port this
+	// server binds is a number, and requiring one is what makes the check cover the whole
+	// flag rather than the part Go's parser happens to reject.
+	if _, err := net.ResolveTCPAddr("tcp", v.addr); err != nil {
+		return fmt.Errorf("serve: --addr %q is not a host:port to listen on: %w", v.addr, err)
+	}
+	if _, port, err := net.SplitHostPort(v.addr); err == nil {
+		if _, perr := strconv.Atoi(port); perr != nil {
+			return fmt.Errorf("serve: --addr %q has a port that is not a number (%q); "+
+				"a service name would be resolved before the listen, which is not what this "+
+				"flag says", v.addr, port)
+		}
+	}
+	// A negative backlog is not a smaller backlog: the reporting below treats anything <= 0
+	// as "unset" and falls back to 8x --max-active, so -1 silently became 64 here. A typo
+	// that produces a valid-looking server is worse than one that stops at the flag.
+	if v.maxQueued < 0 {
+		return fmt.Errorf("serve: --max-queued must not be negative (0 means 8x --max-active)")
+	}
+	// The budget reaches server.Config, which replaces anything <= 0 with 256. So a negative
+	// value here is not "generate nothing" -- it is a server that hands every request which
+	// omits max_tokens the 256-token default, and reports the reply as ordinary. Measured
+	// against the 256-position fixture: `serve --max-tokens -5` started, answered a request
+	// with no max_tokens field, and returned 253 tokens with finish_reason "length".
+	//
+	// Zero is refused for the same reason, and this is where serve's meaning of zero differs
+	// from run's. run accepts 0 because it generates once into its own output, where "prefill
+	// only" is observable; the server cannot express a zero-token request, because max_tokens
+	// is an int in the request body and 0 is indistinguishable from the field being absent.
+	// Accepting the flag at 0 therefore configures a default no client can observe, which is
+	// the silent substitution this check exists to prevent rather than a budget of zero.
+	if v.maxTokens < 1 {
+		return fmt.Errorf("serve: --max-tokens must be at least 1; it is the default for " +
+			"requests that send no max_tokens, and the server cannot express a zero-token " +
+			"request (a request's 0 is indistinguishable from an absent field)")
+	}
+	// The policy name is parsed here rather than after the model is opened, where it used to
+	// be: a typo cost a full checkpoint load first, and the error then arrived from
+	// engine.New rather than naming the flag. ParsePriority has no dependency on the model, so
+	// there is nothing to gain by checking it late; schedPolicy below is reused as-is.
+	if v.prefixCache && (*v.cache.blocks) == 0 {
+		return fmt.Errorf("serve: --prefix-cache needs a paged cache; add --blocks (and " +
+			"optionally --block-size), or drop --prefix-cache")
+	}
+	return nil
 }

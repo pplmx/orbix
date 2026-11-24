@@ -319,14 +319,7 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	// buffers than that allocates ones nothing can ever index: a deliberately large
 	// --workers on a long-context model reserved gigabytes of score buffers per layer and
 	// made a single request tens of times slower.
-	slots := min(m.run.Workers(), n)
-	if slots < 1 {
-		slots = 1
-	}
-	scorers := make([][]float32, slots)
-	for i := range scorers {
-		scorers[i] = make([]float32, cfg.ContextLen)
-	}
+	scorers := m.scoreBuffers(n)
 	// attErr is written by whichever worker fails first and read after the group joins, so
 	// the write needs a lock: several workers can fail at once, and an unsynchronised shared
 	// error is a data race the detector reports rather than a value anyone reads wrong. The
@@ -873,4 +866,29 @@ func distinctExperts(assigned []expertAssignment) []int {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// scoreBuffers rents one score buffer per worker this round will actually use.
+//
+// One buffer per position would be correct but allocate a few megabytes per layer into the
+// garbage collector's hands; one per configured worker is wrong the other way. Parallel splits n
+// positions across min(workers, n) goroutines, so a buffer count above that allocates ones nothing
+// can index -- measured, a deliberately large --workers on a long-context model reserved gigabytes
+// of score buffers per layer and made a single request tens of times slower. The bug is invisible
+// in the output: the request is correct, just slow, and the cost scales with a flag the operator
+// set for a different reason.
+//
+// Each buffer is ContextLen wide because one position can attend to the whole window, and it is
+// per slot rather than per position because two workers sharing one would interleave writes into
+// the same slice.
+func (m *Model) scoreBuffers(n int) [][]float32 {
+	slots := min(m.run.Workers(), n)
+	if slots < 1 {
+		slots = 1
+	}
+	scorers := make([][]float32, slots)
+	for i := range scorers {
+		scorers[i] = make([]float32, m.W.Config.ContextLen)
+	}
+	return scorers
 }

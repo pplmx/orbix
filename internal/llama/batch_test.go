@@ -1556,3 +1556,92 @@ func TestPrefillWithPrefixMatchesPrefill(t *testing.T) {
 		}
 	}
 }
+
+// TestScoreBuffersRentsOnePerUsedSlot covers the allocation whose size a flag controls.
+//
+// Parallel splits n positions across min(workers, n) goroutines, so a buffer count above that
+// allocates ones nothing can index. Measured before the min was there: a deliberately large
+// --workers on a long-context model reserved gigabytes of score buffers per layer and made a
+// single request tens of times slower. The request stayed correct, which is what made it hard to
+// notice -- the only symptom was time.
+func TestScoreBuffersRentsOnePerUsedSlot(t *testing.T) {
+	// ContextLen is what decides each buffer's width, so it has to be set for the size check.
+	newModel := func(workers int) *Model {
+		return &Model{
+			run: kernel.NewRunner(workers),
+			W:   &Weights{Config: Config{ContextLen: 64}},
+		}
+	}
+
+	cases := []struct {
+		name    string
+		workers int
+		rows    int
+		want    int
+	}{
+		{"one row uses one slot whatever the worker count", 8, 1, 1},
+		{"between the two", 8, 3, 3},
+		{"exactly the worker count", 4, 4, 4},
+		// The case that used to allocate thousands: more workers than positions.
+		{"more workers than rows", 64, 2, 2},
+		{"workers and rows both large", 64, 64, 64},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := newModel(c.workers).scoreBuffers(c.rows)
+			if len(got) != c.want {
+				t.Errorf("scoreBuffers(%d rows, %d workers) rented %d buffers, want %d",
+					c.rows, c.workers, len(got), c.want)
+			}
+		})
+	}
+}
+
+// TestScoreBuffersNeverRentsNone is the degenerate case that would index a nil slice.
+//
+// Parallel with zero rows should not run any worker, but the buffer slice is built before that
+// decision, and a zero-length slice would panic if anything took scorers[slot]. One is the floor
+// the call site's slots check exists for.
+func TestScoreBuffersNeverRentsNone(t *testing.T) {
+	m := &Model{run: kernel.NewRunner(4), W: &Weights{Config: Config{ContextLen: 16}}}
+	if got := m.scoreBuffers(0); len(got) != 1 {
+		t.Errorf("scoreBuffers(0) rented %d buffers, want 1", len(got))
+	}
+}
+
+// TestScoreBuffersAreWideEnoughForTheWindow pins the width.
+//
+// One position can attend to the whole context, so a buffer narrower than ContextLen would be an
+// out-of-range write on the first long prompt. The width comes from the config rather than a
+// constant, so a model with a larger window gets larger buffers.
+func TestScoreBuffersAreWideEnoughForTheWindow(t *testing.T) {
+	for _, ctxLen := range []int{16, 128, 2048} {
+		m := &Model{run: kernel.NewRunner(2), W: &Weights{Config: Config{ContextLen: ctxLen}}}
+		scorers := m.scoreBuffers(2)
+		for i, sc := range scorers {
+			if len(sc) != ctxLen {
+				t.Errorf("context %d: buffer %d is %d wide, want %d", ctxLen, i, len(sc), ctxLen)
+			}
+		}
+	}
+}
+
+// TestScoreBuffersAreDistinctSlices is the property that makes them per-slot.
+//
+// Two workers sharing one buffer would interleave writes into the same slice, which is a data
+// race the detector would report and a wrong result it might not. A test that only counted the
+// buffers would pass with every entry aliasing the first.
+func TestScoreBuffersAreDistinctSlices(t *testing.T) {
+	m := &Model{run: kernel.NewRunner(3), W: &Weights{Config: Config{ContextLen: 8}}}
+	scorers := m.scoreBuffers(3)
+	if len(scorers) != 3 {
+		t.Fatalf("got %d buffers", len(scorers))
+	}
+	// Writing one must not change another.
+	scorers[0][0] = 7
+	for i := 1; i < len(scorers); i++ {
+		if scorers[i][0] != 0 {
+			t.Errorf("buffer %d saw buffer 0's write: the slices alias", i)
+		}
+	}
+}

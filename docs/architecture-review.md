@@ -368,11 +368,16 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**仍未处理、>=100 行的十二个**（2026-11 末 AST 实测，731 个函数）：`tokenize.preFamilyOf` 271、
+**仍未处理、>=100 行的十七个**（2026-11 末 AST 实测，731 个函数）：`tokenize.preFamilyOf` 271、
 `chat.evalExpr` 242、`cli.cmdServe` 238、`cli.cmdBench` 234、`server.generate` 189、
 `server.streamOneChoice` 157、`tokenize.loadPreTokenization` 157、`cli.cmdRun` 147、
-`cli.chatSession` 135、`llama.attentionBatch` 133、`server.blockingResponse` 131、
-`tokenize.splitKimiK2` 123。
+`cli.chatSession` 135、`server.blockingResponse` 131、`llama.attentionBatch` 126、
+`tokenize.splitKimiK2` 123、`engine.Submit` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、
+`gguf.Read` 107、`chat.lex` 103。
+
+这份清单原先写的是"十二个"，因为生成它的脚本只打印前 12 行（`if i >= 12 { break }`），
+而总数行写的是真实值 17。两个数字都在同一份输出里，被截断的那个进到了文档。补上的五个是
+`Submit`、`kvs`、`resolvePrompt`、`Read`、`lex`。
 
 逐个判断如下，而不是笼统地"改动面大"：
 
@@ -383,9 +388,14 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 - **`evalExpr`（242）的骨架是分派。** 20 个 case 里 15 个只有 2–20 行"求子节点再合并"，拆成 20 个
   方法只增加间接层。有独立规则的那一个已经拆出去了（`evalArithmetic`，见下节）。
 - **`cmdServe`/`cmdBench`/`cmdRun`/`chatSession`** 剩下的都是连续装配流程，只跑一次、只失败一次。
-- **`LoadWeights`（134）与 `attentionBatch`（133）** 我在第三节判断过不该合。
+- **`attentionBatch`（126）** 我在第三节判断过不该合。`LoadWeights` 当时还是 134 行，现在是 78，
+  已经不在本表里了。
 - **`generate`/`streamOneChoice`/`blockingResponse`/`loadPreTokenization`** 是前几轮拆到一半的产物，
   再拆一层会把一步分成两半而不减少要同时握住的东西。
+- **补上的五个**：`engine.Submit`（122）与 `server.resolvePrompt`（108）都是"校验 + 组装"的连续
+  流程，每一步的失败要带自己的参数名，拆开会让那个名字离校验两跳远；`gguf.Read`（107）与
+  `chat.lex`（103）是各自格式的单一状态机，分段的边界只在函数内成立；`gguftest.kvs`（119）是
+  测试夹具的元数据表，和数据一样不可压缩（同 `preFamilyOf`）。
 
 这一轮只处理了"拆开后能给出一个可命名的单元"的那种。
 

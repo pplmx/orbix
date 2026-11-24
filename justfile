@@ -308,6 +308,17 @@ cross:
         fi
     done
 
+# A skip is not a failure, and a rising count is how coverage disappears without anything going
+# red: every one of these needs a checkpoint or a fixture the runner does not have. The gate cannot
+# show it -- `just test` runs without -v, and a second -v pass inside check would double the
+# suite's time -- so it is its own recipe, for when the question is "what am I not testing"
+# rather than "does it pass".
+#
+# Counts the tests this tree skips, which is the number CI prints on every run.
+skips:
+    @go test ./... -count=1 -v 2>&1 | grep -c '^--- SKIP' || true
+
+
 # Prints the version cz would bump to and the changelog section it would write, then stops. The
 # real bump is a person's decision: it writes a tag, and a tag is what `git describe` turns into
 # the version a binary reports.

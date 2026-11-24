@@ -466,40 +466,7 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		if err != nil {
 			return value{}, err
 		}
-		a, aerr := strconv.Atoi(left.text)
-		b, berr := strconv.Atoi(right.text)
-		if aerr != nil || berr != nil {
-			return value{}, fmt.Errorf("chat: arithmetic on non-numeric %q and %q", left.text, right.text)
-		}
-		switch t.op {
-		case "-":
-			// Overflow is checked rather than wrapped. A template that indexes with
-			// loop.index - 1 never comes near a limit, but the operands are arbitrary text from
-			// the message list, so a value near MinInt64 can reach here -- measured, "-9223372036854775808"
-			// minus 1 rendered "9223372036854775807", and MaxInt64 minus -1 wrapped the other
-			// way. Wrapping turns a number the template did not ask for into output, while an
-			// error names the operands; the alternative is silent wrong text in a prompt.
-			if (b > 0 && a < math.MinInt64+b) || (b < 0 && a > math.MaxInt64+b) {
-				return value{}, fmt.Errorf("chat: arithmetic overflow: %d - %d", a, b)
-			}
-			return strValue(strconv.Itoa(a - b)), nil
-		case "%":
-			// Modulo by zero is an error rather than a panic or a zero, and the sign follows
-			// Go's truncating division, which is what Jinja (and Python's %) do not do for
-			// negative operands. Templates only use this for parity tests on non-negative loop
-			// indices, so the difference is unreachable from the ones this package renders;
-			// the error below is what keeps it from becoming reachable by accident.
-			if b == 0 {
-				return value{}, fmt.Errorf("chat: modulo by zero")
-			}
-			if a < 0 || b < 0 {
-				return value{}, fmt.Errorf("chat: modulo of a negative operand (%d %% %d) is not "+
-					"supported; Jinja's result differs from Go's for those operands", a, b)
-			}
-			return strValue(strconv.Itoa(a % b)), nil
-		default:
-			return value{}, fmt.Errorf("chat: unsupported arithmetic operator %q", t.op)
-		}
+		return evalArithmetic(t.op, left.text, right.text)
 	case filterExpr:
 		return evalFilter(t, sc)
 	case isNoneExpr:
@@ -761,4 +728,45 @@ func checkIndent(n int) (int, error) {
 			"because the indent is repeated at every nesting level", n, maxJSONIndent)
 	}
 	return n, nil
+}
+
+// evalArithmetic applies one of the two arithmetic operators this package implements.
+//
+// It works on the operands' text because that is what a template produces: a number in a
+// template is a string until something asks it to be arithmetic.
+//
+// Subtraction checks for overflow rather than wrapping. A template that indexes with
+// loop.index - 1 never comes near a limit, but the operands are arbitrary text from the message
+// list, so a value near MinInt64 can reach here -- measured, "-9223372036854775808" minus 1
+// rendered "9223372036854775807", and MaxInt64 minus -1 wrapped the other way. Wrapping turns a
+// number the template did not ask for into output, while an error names the operands.
+func evalArithmetic(op, left, right string) (value, error) {
+	a, aerr := strconv.Atoi(left)
+	b, berr := strconv.Atoi(right)
+	if aerr != nil || berr != nil {
+		return value{}, fmt.Errorf("chat: arithmetic on non-numeric %q and %q", left, right)
+	}
+	switch op {
+	case "-":
+		if (b > 0 && a < math.MinInt64+b) || (b < 0 && a > math.MaxInt64+b) {
+			return value{}, fmt.Errorf("chat: arithmetic overflow: %d - %d", a, b)
+		}
+		return strValue(strconv.Itoa(a - b)), nil
+	case "%":
+		// Modulo by zero is an error rather than a panic or a zero, and the sign follows Go's
+		// truncating division, which is not what Jinja (and Python's %) do for negative
+		// operands. Templates only use this for parity tests on non-negative loop indices, so
+		// the difference is unreachable from the ones this package renders; the error below is
+		// what keeps it from becoming reachable by accident.
+		if b == 0 {
+			return value{}, fmt.Errorf("chat: modulo by zero")
+		}
+		if a < 0 || b < 0 {
+			return value{}, fmt.Errorf("chat: modulo of a negative operand (%d %% %d) is not "+
+				"supported; Jinja's result differs from Go's for those operands", a, b)
+		}
+		return strValue(strconv.Itoa(a % b)), nil
+	default:
+		return value{}, fmt.Errorf("chat: unsupported arithmetic operator %q", op)
+	}
 }

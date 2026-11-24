@@ -176,6 +176,25 @@ order, as the round each got its first token. Three runs each, because the exact
 stable to the round: a token that arrives in the same round as the submit returns can be counted
 either side of it.
 
+Re-measured 2026-11 with `go test -run
+TestShortestServesTheShortestFirstWhateverTheSubmissionOrder -v ./internal/engine/`, three runs, all
+three identical:
+
+| Policy     | First-token rounds |
+| ---------- | ------------------ |
+| `fifo`     | `2, 19, 28, 33`    |
+| `shortest` | `19, 10, 5, 2`     |
+| `fair`     | `5, 6, 7, 8`       |
+
+Those are one round earlier than the table above at every position except the third, which matches,
+and the same three runs on this host give the same numbers each time rather than drifting. What
+changed between the two measurements is not recorded -- a different host, or an engine change since
+-- so treat the offset as a reminder that these are counts of rounds rather than a figure to match.
+
+What the table is for holds either way. `fifo` increases, `shortest` reverses that order so the
+two-token request moves from round 33 to round 2, and `fair` gives each request exactly one turn
+before anyone gets a second.
+
 | Policy     | First-token rounds                | What it did                                           |
 | ---------- | --------------------------------- | ----------------------------------------------------- |
 | `fifo`     | `3, 20, 28, 34` / `2, 20, 29, 34` | served in submission order                            |

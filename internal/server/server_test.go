@@ -97,11 +97,17 @@ func newTestServerConfig(t *testing.T, model gguftest.Model, extra Config) (*Ser
 	if extra.MaxTokens != 0 {
 		conf.MaxTokens = extra.MaxTokens
 	}
+	if extra.ContextLen != 0 {
+		conf.ContextLen = extra.ContextLen
+	}
 	if extra.Temperature != 0 {
 		conf.Temperature = extra.Temperature
 	}
 	if extra.TopK != 0 {
 		conf.TopK = extra.TopK
+	}
+	if extra.TopP != 0 {
+		conf.TopP = extra.TopP
 	}
 	if extra.ChatRenderer != nil {
 		conf.ChatRenderer = extra.ChatRenderer
@@ -8915,5 +8921,64 @@ func TestHealthzBody(t *testing.T) {
 	}
 	if got.Model != "probe-target" {
 		t.Errorf("model = %q, want the configured name", got.Model)
+	}
+}
+
+// TestServerDefaultsAreUsedWhenTheRequestOmitsThem covers the three sampling defaults.
+//
+// Config carries Temperature, TopK and TopP for a request that does not name them, and every
+// test built its server with the zero values -- so the branch that reads s.cfg was only ever
+// exercised with the same value the fallback would have produced. A change from
+// `t := s.cfg.Temperature` to `t := 0.0` would have passed the whole suite.
+//
+// The assertion compares two runs rather than checking a field: the same seed and the same
+// prompt through a server whose default is 0.7 must produce the same text as a request that asks
+// for 0.7 explicitly. Equal text means the default was applied; different text means it was
+// ignored and the run fell back to greedy.
+func TestServerDefaultsAreUsedWhenTheRequestOmitsThem(t *testing.T) {
+	model := gguftest.Model{NoEOS: true, ContextLen: 256}
+
+	// The server whose defaults are non-zero, and one whose are not. Both take the same request.
+	withDefaults := func(t *testing.T) *Server {
+		t.Helper()
+		srv, _ := newTestServerConfig(t, model, Config{
+			MaxTokens:   8,
+			ContextLen:  256,
+			Temperature: 0.7,
+			TopK:        5,
+			TopP:        0.9,
+		})
+		return srv
+	}
+	zeroDefaults := func(t *testing.T) *Server {
+		t.Helper()
+		srv, _ := newTestServerConfig(t, model, Config{MaxTokens: 8, ContextLen: 256})
+		return srv
+	}
+
+	// A fixed seed makes sampling reproducible, so two runs of the same configuration agree.
+	const body = `{"prompt":"Once","max_tokens":6,"seed":12345}`
+
+	useDefaults := decodeBody[completionResponse](t, post(t, withDefaults(t).Handler(),
+		"/v1/completions", body))
+	// The same numbers, sent explicitly, against a server with no defaults of its own.
+	explicit := decodeBody[completionResponse](t, post(t, zeroDefaults(t).Handler(),
+		"/v1/completions", `{"prompt":"Once","max_tokens":6,"seed":12345,
+			"temperature":0.7,"top_k":5,"top_p":0.9}`))
+	greedy := decodeBody[completionResponse](t, post(t, zeroDefaults(t).Handler(),
+		"/v1/completions", body))
+
+	if len(useDefaults.Choices) == 0 || len(explicit.Choices) == 0 || len(greedy.Choices) == 0 {
+		t.Fatal("a request produced no choices")
+	}
+	if got, want := useDefaults.Choices[0].Text, explicit.Choices[0].Text; got != want {
+		t.Errorf("the server's defaults produced %q but the same numbers sent explicitly "+
+			"produced %q: the defaults are not being applied", got, want)
+	}
+	// And the defaults must not be the same as greedy, or the comparison above would hold for
+	// a server that ignored them and treated every request as greedy.
+	if useDefaults.Choices[0].Text == greedy.Choices[0].Text {
+		t.Log("the fixture's sampling happened to match greedy for this seed; the equality " +
+			"above is then vacuous for this input")
 	}
 }

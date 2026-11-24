@@ -130,6 +130,15 @@ func (s *Server) describeStreamedToken(id int32, shown string, logprob float32, 
 // It returns the number of leading entries to keep and the retained text's length in bytes,
 // which is what the completions schema's text_offset needs.
 func keptTokens(described []logprobText, retained int) (keep, used int) {
+	// Nothing retained means nothing is shown, so no entry describes it. Without this the loop
+	// below keeps every entry whose text is empty -- including the leading one when the whole
+	// response was cut away -- because their length adds nothing and so never exceeds the
+	// budget. Measured on a six-token choice with a stop string equal to its entire text:
+	// shownTokens returned 6 where the response shows nothing, and the same call feeds
+	// choiceObject's logprob list, so both reported entries for text the caller never sees.
+	if retained == 0 {
+		return 0, 0
+	}
 	for keep < len(described) {
 		// Counted over the rendered text rather than the raw bytes: retained is the length of
 		// the text the caller receives, which renders an invalid byte run as replacement

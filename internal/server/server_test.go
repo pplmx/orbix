@@ -8731,3 +8731,89 @@ func TestCompletionsRefusesTheFieldsItValidates(t *testing.T) {
 		})
 	}
 }
+
+// TestShownTokensAppliesTheStopCut covers the branch the ranking tests step around.
+//
+// TestBestOfRanksOnTheTokensItReports calls rankCandidates directly with hand-written counts, so
+// shownTokens itself was never exercised with a stop list: the line that reassigns text after a
+// cut had no test. That line is the whole reason the function exists -- without it a candidate
+// generating thirty tokens past its stop string is ranked on all thirty while the caller sees
+// only the first few.
+func TestShownTokensAppliesTheStopCut(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// A result whose decoded text is long enough to cut, with one sample per token so the
+	// kept count is comparable to the text length.
+	c := &choiceResult{
+		out: []int32{1, 2, 3, 4, 5, 6},
+	}
+	for range c.out {
+		c.samples = append(c.samples, sampledToken{logprob: -1})
+	}
+	full := srv.tok.DecodeCompletion(c.out)
+	if len(full) < 3 {
+		t.Skipf("the fixture decoded %q, too short to cut", full)
+	}
+
+	// No stop list: every token is reported.
+	all := srv.shownTokens(c, generateParams{})
+	if all == 0 {
+		t.Fatal("shownTokens returned nothing with no stop list")
+	}
+
+	// A stop string that is the whole text: nothing survives, so nothing is reported. The
+	// assertion is the zero rather than a comparison, because the point is that the cut
+	// propagates into the count.
+	if got := srv.shownTokens(c, generateParams{stop: []string{full}}); got != 0 {
+		t.Errorf("shownTokens = %d with a stop string matching the whole text, want 0", got)
+	}
+
+	// A stop string absent from the text changes nothing.
+	if got := srv.shownTokens(c, generateParams{stop: []string{"\u0000not-present"}}); got != all {
+		t.Errorf("shownTokens = %d with an unmatched stop string, want %d", got, all)
+	}
+}
+
+// TestKeptTokens covers the cut that decides what a logprob list describes.
+//
+// It had no direct test: the two callers were exercised only through endpoints whose generated
+// text a fixture controls, so the boundaries were untested. The zero case is the one that broke.
+func TestKeptTokens(t *testing.T) {
+	describe := func(texts ...string) []logprobText {
+		out := make([]logprobText, len(texts))
+		for i, s := range texts {
+			out[i] = logprobText{text: s, logprob: -1}
+		}
+		return out
+	}
+	cases := []struct {
+		name      string
+		described []logprobText
+		retained  int
+		keep      int
+		used      int
+	}{
+		// Nothing retained: nothing shown, so nothing described. This is the case that
+		// returned every entry before the fix.
+		{"zero retention", describe("a", "b"), 0, 0, 0},
+		{"zero retention with empty texts", describe("", "", ""), 0, 0, 0},
+		{"everything fits", describe("a", "b"), 2, 2, 2},
+		{"cut mid-way", describe("a", "b", "c"), 2, 2, 2},
+		// A token that straddles the cut goes too: half its text survived, and neither
+		// including nor truncating it describes the logprob of what the caller sees.
+		{"straddling token dropped", describe("ab", "cd"), 3, 1, 2},
+		{"first token alone too long", describe("abc"), 2, 0, 0},
+		// An empty entry costs nothing, so it is kept while the budget allows.
+		{"empty entry is free", describe("", "ab"), 2, 2, 2},
+		{"no entries", nil, 5, 0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			keep, used := keptTokens(c.described, c.retained)
+			if keep != c.keep || used != c.used {
+				t.Errorf("keptTokens(%v, %d) = (%d, %d), want (%d, %d)",
+					c.described, c.retained, keep, used, c.keep, c.used)
+			}
+		})
+	}
+}

@@ -103,7 +103,19 @@ MatMulTransposed(gate, xn, wGate) → MatMulTransposed(up, xn, wUp)
 
 两处注入验证证明这个合并不是只在行数上有益：把 `capLogits` 从 prefill 路径删掉，`TestFinalSoftcapBoundsTheLogits` 立刻红——复现的正是 `docs/models.md` 记录的那个历史缺陷；把 `embedRow` 的边界从 `token < 0 || token >= VocabSize` 放松成只查上界，`TestEmbedRejectsNegativeToken` 以 `slice bounds out of range [-32:]` panic——正是那条注释解释了三遍的失败。
 
-剩下的部分（`attention`、`feedForward` 各三份）**没有合并，这是判断而不是遗漏**：它们的差别不在算术而在驱动方式——单 token 用 `MatVec` 逐头、prefill 按位置并行、decode 按序列各自 cache 串行。合并需要一个能同时表达三种循环的抽象，收益是消掉两份约 100 行的函数，风险是动到三条都有独立参考测试的核心路径。四份真正逐字重复的东西合并后，剩下的重复已经降到"结构相似但循环不同"，继续合并的性价比明显下降。
+`feedForward` 的三份里，**两个批量版已经合并**（`6d554da`）。它们原本是同一段 25 行写了两遍：`batch` 与 `decodeBatch` 的字段名和布局完全一致，差别只是哪个结构体装着切片。`ffnRows`（原本叫 `moeRows`，MoE 路径已经在用它做同一件事）现在是两者共同的参数，`feedForwardRows` 是唯一实现，两个调用点各变成三行。
+
+这次合并没有牺牲对齐保证：`TestDecodeStepMatchesForward` 与 `TestBatchMatchesSequential` 都用 `!=` 直接比对逐 token 参考，不是容差。把 gate 激活从共享实现里删掉，**15 个测试同时变红并横跨两条路径**——合并前，prefill 那份里的同一个缺陷会让所有 decode 测试保持绿色，那正是 `docs/models.md` 记录的 Gemma 2 softcap 缺陷的形状。
+
+`attention` 的三份仍然**没有合并，这是判断而不是遗漏**：
+
+- `attentionBatch` 写一个 cache、按位置顺序、**并行**处理位置；
+- `decodeBatch.attention` 读每个序列自己的 cache、在自己的末尾、因每序列只有一个位置而**串行**；
+- `attentionCached` 是第三种形状——它只为 cache 已有内容的提示词重算 query，连 key 和 value 都不投影。
+
+把三种压进一个函数需要把 mask、cache 归属和并行性都变成参数，而结果会比现在任何一份都更难与参考核对。单 token 的 `feedForward` 同理保持独立：它是另外两条路径的参考。
+
+顺带合并的一处：attention 与 feed-forward 的子层归一化本来是四份（prefill 一份、decode 两份），现在统一走 `normRowWise`（`bceb10c`）。注入错误的 epsilon 会让 11 个测试变红。
 
 **更正（当轮复查时发现，上一轮的建议是错的）。** 这里原本写着"单 token 路径只剩 `run` 一个用户，把 `run` 迁到 engine 就能删掉这条腿约 190 行，把扇出从 3 降到 2"。前半句关于**生产**调用点是事实，结论却错了：单 token 路径不是遗留物，而是整个包唯一的**独立参考实现**。
 
@@ -272,9 +284,10 @@ CLI 层 3429 行里有大量不属于"解析参数并打印"的内容：
 
 **没做的，以及为什么。**
 
-- `attention` 与 `feedForward` 的三份没有合并。它们的差别在驱动方式而不是算术：单 token 用 `MatVec` 逐头、prefill 按位置并行、decode 按序列各自 cache 串行。合并要设计一个同时表达三种循环的抽象，代价是动三条都有独立参考测试的核心路径。逐字重复的部分已经合并后，剩下的重复是"结构相似、循环不同"，性价比明显下降。
+- `attention` 的三份没有合并，`feedForward` 的单 token 版也没有并入批量实现。前者的差别是驱动方式（写一个 cache 并行 / 读各自 cache 串行 / 只重算 query），后者是参考实现必须保持独立。`feedForward` 的两个批量版**已合并**，见第三节。
 - `run` 仍走 `llama.Model` + contiguous cache，没有迁到 engine。这不是被排除，而是**待定**：迁过去会改变它测的东西（它现在直接测 `llama` 的生成路径），也可能改变 `--stats` 里那几个数字的含义。要做的话应当先明确它到底该测什么。
-- `internal/server` 仍导入 `internal/llama`，用于采样器与 logprob 类型（7 个符号）。要把这条边也切掉，需要 engine 提供自己的采样器构造函数与 logprob 类型，是一次真正的 API 扩张，不是清理。
+- ~~`internal/server` 仍导入 `internal/llama`~~ — **已切掉**（`5619da2`）。`Sampler`、`Alternative`、`TokenBias` 现在声明在 `internal/engine`；`llama` 的实现结构化地满足 `Sampler`，所以没有牺牲能力。三个构造函数（`NewBiased`/`Greedy`/`NewTemperature`/`TokenLogprob`）转调 `llama`，没有重新实现——第一版我给 `Biased` 写了个拷贝 logits 的版本，那会改变一个原实现用整段注释解释过的每 token 成本。
+  这条边现在由 `internal/server/imports_test.go` 强制：它解析包内每个 `.go` 文件（含测试），命中 `internal/llama` 就失败并给出原因。用 grep 不行——那个包里有好几处注释引用 `llama.cpp` 作为 FIM 与模板分词的对拍参考，那些应当留下。
 
 ## 复算清单
 

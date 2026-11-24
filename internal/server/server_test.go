@@ -9313,3 +9313,41 @@ func TestEveryErrorCodeIsDocumented(t *testing.T) {
 		}
 	}
 }
+
+// TestZeroBudgetIsNotAnAbsentBudget covers the field a pointer type exists for.
+//
+// max_tokens is *int on the wire so that 0 and "not sent" stay distinguishable: the field's
+// comment says zero is "a budget of zero rather than unset". Nothing tested that, and an
+// implementation that used the zero value to mean unset would look correct in every other case
+// -- it would answer a request for no tokens with the default 256.
+//
+// Measured before it was asserted: max_tokens 0 gives completion_tokens 0 with finish_reason
+// "length", and an absent max_tokens gives 256.
+func TestZeroBudgetIsNotAnAbsentBudget(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	srv := serverWithPolicy(t, path, engine.PriorityFIFO)
+
+	zero := decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 0}`))
+	if zero.Usage.CompletionTokens != 0 {
+		t.Errorf("max_tokens 0 produced %d completion tokens, want 0",
+			zero.Usage.CompletionTokens)
+	}
+	if len(zero.Choices) != 1 {
+		t.Fatalf("got %d choices, want 1", len(zero.Choices))
+	}
+	if got := zero.Choices[0].FinishReason; got != "length" {
+		t.Errorf("finish_reason = %q with no budget to spend, want length", got)
+	}
+	if got := zero.Choices[0].Message.Content; got != "" {
+		t.Errorf("max_tokens 0 produced the text %q, want none", got)
+	}
+
+	// And the distinction is real: the same request without the field gets a budget.
+	absent := decodeBody[chatResponse](t, post(t, srv.Handler(), "/v1/chat/completions",
+		`{"messages": [{"role": "user", "content": "hi"}]}`))
+	if absent.Usage.CompletionTokens == 0 {
+		t.Error("an absent max_tokens also produced 0 tokens, so this test cannot tell the " +
+			"two apart and the pointer on the wire is not doing its job")
+	}
+}

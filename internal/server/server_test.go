@@ -9203,3 +9203,61 @@ func TestChatHonoursStop(t *testing.T) {
 		t.Errorf("the stopped text still contains the stop string: %q", text)
 	}
 }
+
+// TestSuffixReachesTheEngineWhenTheModelSupportsFIM covers the line that passes suffix to
+// generate -- the one after the refusal, which no fixture could reach until now.
+//
+// The refusal path is tested: a model declaring no FIM markers answers 400 with
+// unsupported_parameter, which is what every fixture used to produce. The line that actually
+// forwards the suffix was therefore unreachable, and injection confirms it was uncovered:
+// replacing `suffix: suffixOf(req.Suffix)` with the empty string left the whole package green.
+//
+// A vocabulary containing the marker names is all FIMTokens looks for -- it scans the pieces, not
+// the metadata -- so a fixture can declare them.
+//
+// Two assertions were tried before this one and both passed under injection. Comparing the reply
+// text failed because greedy decoding on this fixture produced the same characters from two
+// different prompts. Comparing a suffix against no suffix failed because the FIM form is applied
+// whenever a suffix is present at all -- p.fim adds its markers around an empty suffix too, so
+// both prompts came out the same length. What only a forwarded suffix can change is the tokens
+// between the markers, which is what the comparison below measures.
+func TestSuffixReachesTheEngineWhenTheModelSupportsFIM(t *testing.T) {
+	// The Qwen2.5-Coder set; FIMTokens accepts any of the sets it knows.
+	vocab := []string{
+		"<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>",
+		"a", "b", "c", "d", "e", "f",
+	}
+	srv, tok := newTestServerModel(t, gguftest.Model{
+		NoEOS: true, ContextLen: 512, Vocab: vocab,
+	})
+	if _, ok := tok.FIMTokens(); !ok {
+		t.Fatal("the fixture's vocabulary does not declare FIM markers, so this test would only " +
+			"exercise the refusal path")
+	}
+
+	promptTokens := func(t *testing.T, body string) int {
+		t.Helper()
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d: %s", resp.StatusCode, body)
+		}
+		got := decodeBody[completionResponse](t, resp)
+		if len(got.Choices) == 0 {
+			t.Fatalf("no choices for %s", body)
+		}
+		return got.Usage.PromptTokens
+	}
+
+	// Compare two suffix lengths rather than suffix against no suffix. With a suffix present the
+	// prompt is rendered in FIM form via p.fim, which adds its markers whether or not the suffix
+	// text is empty -- so an empty suffix and a filled one produce the same marker overhead, and
+	// the first version of this test passed under injection because of it. What only a forwarded
+	// suffix can change is the number of tokens between the markers.
+	short := promptTokens(t, `{"prompt": "a", "suffix": "b", "max_tokens": 2, "temperature": 0}`)
+	long := promptTokens(t, `{"prompt": "a", "suffix": "bcde", "max_tokens": 2, "temperature": 0}`)
+	if long <= short {
+		t.Errorf("a four-piece suffix produced a %d-token prompt and a one-piece suffix %d: the "+
+			"suffix text is not reaching the engine", long, short)
+	}
+}

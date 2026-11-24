@@ -20,7 +20,11 @@
 //   - {% set %}, including assigning to a name another statement reads
 //
 //   - {{ expression }} with string and variable operands, + concatenation, - subtraction and
-//     % modulo between integers, and the trim, tojson and length filters
+//     % modulo between integers, and the trim, tojson and length filters. + always concatenates,
+//     including when both operands are integers: {{ 1 + 2 }} renders "12" here and "3" in
+//     Jinja2. No template this package renders adds numbers, and the alternative -- deciding at
+//     render time whether a value came from a literal or a field -- would make + mean two
+//     things depending on where its operands came from.
 //
 //   - raise_exception, which is the one global implemented
 //

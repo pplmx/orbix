@@ -27,6 +27,11 @@ type value struct {
 	boolean bool
 	// isList marks a sequence even when empty, so `for` can tell [] from a string.
 	isList bool
+	// isNone marks the none literal. Empty text is not enough: Jinja2 renders none as "" but
+	// `none is none` is True while `"" is none` is False.
+	isNone bool
+	// isNumber marks an integer, so the is tests can answer the way Jinja2 does for a number.
+	isNumber bool
 	// isMap marks a dictionary, so attribute access on a missing key errors rather
 	// than silently yielding the empty string.
 	isMap bool
@@ -331,7 +336,10 @@ func loopValue(i, n int) value {
 func evalExpr(e expr, sc *scope) (value, error) {
 	switch t := e.(type) {
 	case litExpr:
-		return strValue(t.val), nil
+		v := strValue(t.val)
+		v.isNone = t.isNone
+		v.isNumber = t.isNumber
+		return v, nil
 	case boolLitExpr:
 		return boolValue(t.val), nil
 	case varExpr:
@@ -377,7 +385,11 @@ func evalExpr(e expr, sc *scope) (value, error) {
 			// field is genuinely absent. Both read the same conversation, so a missing
 			// field has to be empty for the first and absent for the second -- which is
 			// what an empty value plus a key test give.
-			return value{}, nil
+			//
+			// isNone is set because that is what the value is: `message.nosuchfield is none`
+			// is True in Jinja2, while `"" is none` is False. Rendering is unaffected --
+			// both print nothing.
+			return value{isNone: true}, nil
 		}
 		return v, nil
 	case indexExpr:
@@ -484,7 +496,7 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		if err != nil {
 			return value{}, err
 		}
-		isNone := !v.isBool && !v.isList && !v.isMap && v.text == ""
+		isNone := v.isNone
 		if t.negate {
 			return boolValue(!isNone), nil
 		}
@@ -515,12 +527,21 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		if err != nil {
 			return value{}, err
 		}
-		return boolValue(!v.isList && !v.isMap && !v.isBool), nil
+		// A number is not a string: `42 is string` is False in Jinja2.
+		return boolValue(!v.isList && !v.isMap && !v.isBool && !v.isNumber), nil
 	case isIterableExpr:
 		v, err := evalExpr(t.operand, sc)
 		if err != nil {
 			return value{}, err
 		}
+		// Only a list. Jinja2 answers True for a string and for a dict as well, and the
+		// difference is deliberate here: both real templates that use this test depend on a
+		// string answering False. Llama 3.2 writes
+		// `if message.content is mapping or message.content is iterable` to mean "content is a
+		// list of parts, so JSON-encode it", and Gemma 3 reaches this branch only after
+		// `is string` has already excluded strings. Under Jinja2's rule a plain string takes
+		// the encode-it path and comes out quoted -- which is what
+		// TestLlama32ToolMessageContentIsNotQuoted catches. See doc.go.
 		return boolValue(v.isList), nil
 	case definedExpr:
 		_, ok := sc.lookup(t.name)

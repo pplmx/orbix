@@ -29,7 +29,13 @@
 //   - raise_exception, which is the one global implemented
 //
 //   - "x is string", alongside the is tests above, because Gemma 3's template uses it to tell a
-//     plain content string from the multimodal list of parts
+//     plain content string from the multimodal list of parts. "x is iterable" answers True only
+//     for a list, which is narrower than Jinja2 (where a string and a dict count too) and is what
+//     the two real templates that use it depend on: Llama 3.2 writes
+//     `content is mapping or content is iterable` to mean "encode this as JSON", and a string
+//     matching there would come out quoted. "x is none" answers True for the none literal and for
+//     a missing field, and False for the empty string -- Jinja2's rule too, and the two are easy
+//     to conflate because both render as nothing.
 //
 //   - "a if cond else b", Jinja's inline conditional, which Gemma 3 writes inside parentheses to
 //     emit its system prefix on the first turn only. The shorter "a if cond" yields an undefined

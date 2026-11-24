@@ -10,7 +10,17 @@ import (
 type expr interface{}
 
 // litExpr is a constant: a string or a number, already decoded.
-type litExpr struct{ val string }
+type litExpr struct {
+	val string
+	// isNone marks Jinja's none literal, which renders as "" and is otherwise
+	// indistinguishable from the empty string -- except by the is none test, where Jinja2
+	// answers True for one and False for the other.
+	isNone bool
+	// isNumber marks an integer literal. The is tests need it: `42 is iterable` is False and
+	// `42 is string` is False in Jinja2, and without the marker this subset cannot tell 42
+	// from "42".
+	isNumber bool
+}
 
 // varExpr reads a variable from scope.
 type varExpr struct{ name string }
@@ -678,7 +688,7 @@ func (p *exprParser) parsePrimary() (expr, error) {
 			return nil, fmt.Errorf("chat: expression ends after '-'")
 		}
 		p.pos++
-		return litExpr{val: "-" + next.text}, nil
+		return litExpr{val: "-" + next.text, isNumber: true}, nil
 	}
 	switch tok {
 	case "true", "True":
@@ -689,10 +699,10 @@ func (p *exprParser) parsePrimary() (expr, error) {
 	case "false", "False":
 		return boolLitExpr{val: false}, nil
 	case "none", "None":
-		return litExpr{val: ""}, nil
+		return litExpr{val: "", isNone: true}, nil
 	}
 	if n, err := strconv.Atoi(tok); err == nil {
-		return litExpr{val: strconv.Itoa(n)}, nil
+		return litExpr{val: strconv.Itoa(n), isNumber: true}, nil
 	}
 	if !isIdentifier(tok) {
 		return nil, fmt.Errorf("chat: unexpected %q in expression", tok)

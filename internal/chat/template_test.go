@@ -569,6 +569,35 @@ func TestIsTests(t *testing.T) {
 		if got, _ := tpl.Render(nil, Inputs{}); got != "Y" {
 			t.Errorf("unbound name is none rendered %q, want Y", got)
 		}
+		// The none literal and a missing field are also none; the empty string is not. All
+		// three render as nothing, so the is test is the only place the difference shows --
+		// and until it was measured against Jinja2, the empty string answered True.
+		for _, c := range []struct {
+			src     string
+			content string
+			want    string
+			why     string
+		}{
+			{`{% if messages[0].content is none %}Y{% else %}N{% endif %}`, "u", "N",
+				"a non-empty string is not none"},
+			// The case that was wrong: an empty string renders as nothing, like none does, and
+			// the implementation tested the rendered text rather than the value's kind.
+			{`{% if messages[0].content is none %}Y{% else %}N{% endif %}`, "", "N",
+				"an empty string is not none either"},
+			{`{% if messages[0].nosuchfield is none %}Y{% else %}N{% endif %}`, "u", "Y",
+				"a missing field is none"},
+		} {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Errorf("Parse(%q): %v", c.src, err)
+				continue
+			}
+			got, _ := tpl.Render([]Message{{Role: "user", Content: c.content}}, Inputs{})
+			if got != c.want {
+				t.Errorf("%q with content %q rendered %q, want %q (%s)",
+					c.src, c.content, got, c.want, c.why)
+			}
+		}
 	})
 	t.Run("is not none", func(t *testing.T) {
 		tpl, err := Parse(`{%- if messages is not none %}Y{%- else %}N{%- endif %}`)

@@ -129,6 +129,22 @@ SUBSET = {
     "for_index0": """{% for m in messages %}{{ loop.index0 }}{% endfor %}""",
     "for_first_last": """{% for m in messages %}{{ loop.first }}{{ loop.last }};{% endfor %}""",
     "for_bool_tojson": """{% for m in messages %}{{ loop.first|tojson }};{% endfor %}""",
+    # The loop attributes doc.go lists beside first/last. They were implemented and asserted
+    # against hand-written expectations, but nothing compared them with Jinja2, so a rule that
+    # agreed with the Go tests and not with the reference would have gone unnoticed.
+    "for_length": """{% for m in messages %}{{ loop.length }};{% endfor %}""",
+    "for_revindex": """{% for m in messages %}{{ loop.revindex }};{% endfor %}""",
+    "for_revindex0": """{% for m in messages %}{{ loop.revindex0 }};{% endfor %}""",
+    # is mapping / iterable / none / string are the four doc.go names explicitly. Real templates
+    # branch on them: "x is string" is how Gemma 3 tells a plain content string from the
+    # multimodal list of parts, and the other three appear in Qwen's tool templates.
+    "is_mapping": """{{ messages[0] is mapping }}""",
+    "is_mapping_false": """{{ messages is mapping }}""",
+    "is_iterable": """{{ messages is iterable }}""",
+    "is_none": """{{ none is none }}""",
+    "is_none_false": """{{ messages[0]['content'] is none }}""",
+    "is_string": """{{ messages[0]['content'] is string }}""",
+    "is_string_false": """{{ messages[0] is string }}""",
     "set_var": """{% set x = 'hello' %}{{ x }}""",
     "set_concat": """{% set x = 'a' + 'b' %}{{ x }}""",
     "set_reassign": """{% set x = 'a' %}{% set x = 'b' %}{{ x }}""",

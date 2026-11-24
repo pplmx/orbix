@@ -287,6 +287,11 @@ func TestParserRejectsStructuralCorruption(t *testing.T) {
 			t.Fatal("TensorData(absent) succeeded")
 		} else if !strings.Contains(err.Error(), "no tensor named") {
 			t.Errorf("error %q does not say the name is not in the file", err)
+		} else if !strings.Contains(err.Error(), `"absent"`) {
+			// The name is what the caller has to check against their own lookup, and the
+			// message quoting it is the difference between "your name is not here" and a
+			// message that would read the same for every miss.
+			t.Errorf("error %q does not quote the name that was asked for", err)
 		}
 	})
 

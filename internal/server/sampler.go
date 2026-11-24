@@ -3,23 +3,23 @@ package server
 import (
 	"math/rand/v2"
 
-	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/engine"
 )
 
 // greedySampler always takes the most likely token.
 //
-// It is a local type rather than llama.Greedy so the server's default cannot be
+// It is a local type rather than engine.Greedy so the server's default cannot be
 // changed by an edit to the sampler package: a local engine whose output stops
 // being reproducible is a debugging trap, and Options.Temperature documents greedy
 // as the server's default.
 type greedySampler struct{}
 
 // Next returns the argmax of logits.
-func (greedySampler) Next(logits []float32) int32 { return llama.Greedy{}.Next(logits) }
+func (greedySampler) Next(logits []float32) int32 { return engine.Greedy().Next(logits) }
 
 // temperatureSampler samples from the logits after dividing by temp.
 //
-// llama.Temperature needs a NextFloat func, which is a field rather than global
+// engine.NewTemperature needs a NextFloat func, which is a field rather than global
 // state so a seed and a test can control the draw. The generator lives here
 // because a server has no other use for it.
 type temperatureSampler struct {
@@ -31,12 +31,7 @@ type temperatureSampler struct {
 
 // Next samples one token.
 func (t temperatureSampler) Next(logits []float32) int32 {
-	return llama.Temperature{
-		Temp:      t.temp,
-		TopK:      t.topK,
-		TopP:      t.topP,
-		NextFloat: t.src.Float64,
-	}.Next(logits)
+	return engine.NewTemperature(t.temp, t.topK, t.topP, t.src.Float64).Next(logits)
 }
 
 // newRand returns a deterministic generator from a seed.

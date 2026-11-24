@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/engine"
 )
 
 // sampledToken is one generated token with the distribution it came from.
@@ -18,7 +18,7 @@ import (
 type sampledToken struct {
 	id      int32
 	logprob float32
-	top     []llama.Alternative
+	top     []engine.Alternative
 }
 
 // logprobText is one entry of a response's logprob list.
@@ -95,7 +95,7 @@ func (s *Server) describeTokens(tokens []sampledToken) []logprobText {
 // state a token's text depends on; a fresh one would render a continuation byte as "". The
 // alternatives get their own fresh decoder for the opposite reason: they were not emitted, so
 // they never took part in that state.
-func (s *Server) describeStreamedToken(id int32, shown string, logprob float32, top []llama.Alternative, first bool) []logprobText {
+func (s *Server) describeStreamedToken(id int32, shown string, logprob float32, top []engine.Alternative, first bool) []logprobText {
 	raw := s.tok.PieceBytes(id)
 	text := strings.ToValidUTF8(string(raw), "\uFFFD")
 	// With logprobs the schema still wants the chunk's own text, which the stream decoder has

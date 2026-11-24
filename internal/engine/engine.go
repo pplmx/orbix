@@ -73,7 +73,7 @@ type Event struct {
 	HasLogprob bool
 	// Top holds the most likely alternatives at this position, descending, when the request
 	// asked for them. It is nil when only the chosen token's log probability was wanted.
-	Top []llama.Alternative
+	Top []Alternative
 
 	// Round is the engine round that produced this event.
 	//
@@ -95,7 +95,7 @@ type Request struct {
 	// Stop adds token ids that end generation beyond the model's EOS.
 	Stop []int32
 	// Sampler picks each next token. Nil means greedy.
-	Sampler llama.Sampler
+	Sampler Sampler
 	// PresencePenalty and FrequencyPenalty are OpenAI's repetition controls, in [-2, 2].
 	// Positive values discourage tokens that have already appeared: presence adds a flat
 	// penalty per distinct token seen, frequency adds one proportionally to how often.
@@ -194,7 +194,7 @@ type sequence struct {
 	pos     int     // positions written; also the prompt index while prefilling
 	out     []int32 // generated tokens
 	events  chan Event
-	sampler llama.Sampler
+	sampler Sampler
 
 	// logits is this sequence's own copy of the last forward pass output. The
 	// model owns a single scratch buffer, so interleaving sequences would
@@ -790,7 +790,7 @@ func (e *Engine) sample(s *sequence, eos int32) (int32, bool) {
 		// the most likely tokens at the position, so a sampler that drew a surprising token
 		// correctly leaves it out of that list. The chosen token's own value is reported
 		// separately, which is why the two can cover different sets.
-		lp, alts := llama.TokenLogprobs(s.logits, tok, s.req.Temperature, s.req.TopLogprobs)
+		lp, alts := TokenLogprob(s.logits, tok, s.req.Temperature, s.req.TopLogprobs)
 		ev.Logprob, ev.HasLogprob, ev.Top = lp, true, alts
 	}
 	if !s.emit(ev) {

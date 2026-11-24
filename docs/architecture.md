@@ -38,7 +38,12 @@ architecture: `expert_count` replaces the single gated FFN with one per expert p
 and `expert_used_count` run per token. **Compute kernels** are the pure-Go work, written to be
 read, with no SIMD fast paths.
 
-Dependencies point downward only. Kernels never import the scheduler; the scheduler never imports the server.
+Dependencies point downward only. Kernels never import the scheduler; the scheduler never
+imports the server. The serving layer likewise does not import the model package: the sampler,
+log-probability and bias types it works with are declared in `internal/engine`, and
+`internal/llama`'s implementations satisfy them structurally. `internal/server/imports_test.go`
+enforces that edge, because a rule kept only in this sentence did not hold — four server files
+imported `internal/llama` before the types moved.
 
 ## Core interfaces
 

@@ -37,7 +37,6 @@ import (
 	"time"
 
 	"github.com/pplmx/orbix/internal/engine"
-	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/otel"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
@@ -1260,7 +1259,7 @@ type generateParams struct {
 	choices int
 	// logitBias shifts named tokens' logits before sampling. It reaches the greedy path too,
 	// which is the difference between a ban and a suggestion.
-	logitBias []llama.TokenBias
+	logitBias []engine.TokenBias
 	// presencePenalty and frequencyPenalty discourage tokens already seen. They reach the
 	// engine rather than a sampler because they need the generated run, which a sampler does not
 	// receive.
@@ -1439,7 +1438,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		// A bias applied inside Temperature would be invisible to a temperature-0 request, and
 		// temperature 0 is exactly when a caller bans a token: it is the reproducible mode.
 		for i := range samplers {
-			samplers[i] = llama.Biased{Bias: p.logitBias, Inner: samplers[i]}
+			samplers[i] = engine.NewBiased(p.logitBias, samplers[i])
 		}
 	}
 
@@ -2359,13 +2358,13 @@ func finalChoice(chat bool, index int, reason string) map[string]any {
 // once and offsetting it gives n distinct seeds, while letting each choice read the clock for
 // itself is a race that two calls in the same nanosecond can lose -- the sampler would then
 // return the same text for both, which is exactly the case n>1 exists to avoid.
-func (s *Server) samplers(temp *float64, topK int, topP *float64, seed int64, n int) ([]llama.Sampler, float32, error) {
+func (s *Server) samplers(temp *float64, topK int, topP *float64, seed int64, n int) ([]engine.Sampler, float32, error) {
 	reproducible := seed != 0
 	base := seed
 	if !reproducible {
 		base = time.Now().UnixNano()
 	}
-	out := make([]llama.Sampler, n)
+	out := make([]engine.Sampler, n)
 	// The temperature the samplers actually use is reported back because the engine needs it
 	// to describe the distribution when log probabilities are requested, and re-deriving it
 	// there would be a second copy of the default-and-validate rule.
@@ -2386,7 +2385,7 @@ func (s *Server) samplers(temp *float64, topK int, topP *float64, seed int64, n 
 }
 
 // sampler builds the sampler a request asked for, or the server default.
-func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, seeded bool) (llama.Sampler, float32, error) {
+func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, seeded bool) (engine.Sampler, float32, error) {
 	t := s.cfg.Temperature
 	if temp != nil {
 		t = *temp
@@ -2411,7 +2410,7 @@ func (s *Server) sampler(temp *float64, topK int, topP *float64, seed int64, see
 	}
 	// TopP defaults to the server's own value when the request omits it. A value outside
 	// [0, 1] is refused rather than clamped. Zero is accepted and means "no nucleus": it is
-	// the documented "disabled" value on the CLI's --top-p, and llama.Temperature treats a
+	// the documented "disabled" value on the CLI's --top-p, and engine.NewTemperature treats a
 	// value at or below zero the same way as one at or above 1 -- measured, top_p: 0 and
 	// top_p: 1 returned identical text for the same seed. What is refused is a value with no
 	// reading at all, since clamping -0.1 to 0 would let a typo through as "off".
@@ -2983,11 +2982,11 @@ func (s *Server) responseID(prefix string, unixNano int64) string {
 // A bias whose id is past the vocabulary is refused too, for the same reason: the caller has the
 // wrong id -- probably a tokenizer's id from another model -- and applying it to nothing is
 // indistinguishable from ignoring the request.
-func logitBias(raw map[string]float64, vocab int) ([]llama.TokenBias, error) {
+func logitBias(raw map[string]float64, vocab int) ([]engine.TokenBias, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	out := make([]llama.TokenBias, 0, len(raw))
+	out := make([]engine.TokenBias, 0, len(raw))
 	for key, bias := range raw {
 		id, err := strconv.ParseInt(key, 10, 32)
 		if err != nil || id < 0 {
@@ -3004,12 +3003,12 @@ func logitBias(raw map[string]float64, vocab int) ([]llama.TokenBias, error) {
 				"logit_bias values are between -100 and 100, so token %d's %v is outside it",
 				id, bias)
 		}
-		out = append(out, llama.TokenBias{ID: int32(id), Bias: float32(bias)})
+		out = append(out, engine.TokenBias{ID: int32(id), Bias: float32(bias)})
 	}
 	// Sorted so the sampler's work is deterministic: a map's range order is randomised, and
 	// two biases on the same id would then be applied in either order -- which matters once
 	// float addition is involved, and matters more for reproducing a report.
-	slices.SortFunc(out, func(a, b llama.TokenBias) int { return int(a.ID) - int(b.ID) })
+	slices.SortFunc(out, func(a, b engine.TokenBias) int { return int(a.ID) - int(b.ID) })
 	return out, nil
 }
 

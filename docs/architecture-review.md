@@ -299,7 +299,9 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 2. **`scripts/jinja_diff.py` 的期望表过期**：`inline_if` 被列在"应当拒绝"里，而 `internal/chat` 在 `6da2e26` 之后已经支持内联条件（Gemma 3 模板需要它）。门槛因此长期出口 1，报的是一个**已经实现**的构造——一个不随功能更新的期望表，会把真实的回归藏在它后面。
    现在 `inline_if` 移入 SUBSET 并扩成五个用例（两个分支、字段条件、与比较/连接的优先级、嵌套），空出的"应拒绝"位置换成文档确实承诺拒绝的短式 `a if cond`。结果：**598 例，588 与 Jinja2 一致，10 例按设计拒绝，exit 0**（此后补齐 `is none`、`is string` 的缺陷与 `-`、`%` 的对照，现已扩到 710 例、700 一致，数字见第十节后的复算清单）。
 
-覆盖率与 checkpoint 门禁：65 处 `t.Skip` 分布在 24 个测试文件里，由 11 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`CODER_MODEL`、`ORBIX_REFERENCE_DIR`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+覆盖率与 checkpoint 门禁：73 处 `t.Skip` 分布在 28 个测试文件里（2026-11 复算；写下时是 65 和 24，新增的对照脚本和 fixture 测试各带了几处），由 11 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`CODER_MODEL`、`ORBIX_REFERENCE_DIR`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+`ORBIX_PREDUMP`、`ORBIX_QUANTDUMP`、`ORBIX_ROPEDUMP` 不算在这 11 个里：它们不是 checkpoint
+门禁，而是让跨实现对照脚本拿到 Go 侧输出的开关，没有它们时那几个 dump 测试自己跳过。
 
 ## 九、结论与建议的下一步
 

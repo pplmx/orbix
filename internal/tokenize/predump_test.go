@@ -31,6 +31,11 @@ func TestDumpPreSplit(t *testing.T) {
 		"  leading", "trailing  ", "multi   spaces", "\t\ttabs",
 		"a\nb", "line1\nline2\n", "!!!", "...", "@#$%",
 		"'s", "'re", "x'y", "O'Brien", "café", "naïve",
+		// Boundary shapes the rules are written to disagree about: a letter run taking a
+		// non-letter prefix, digits meeting letters, combining marks, and CR next to LF.
+		"abc123def", "123abc", "(a)", "-x", "'94", "a'b'c",
+		"x\u0301", "e\u0308", "   \n   ", "a\r\nb", "\r\n", "\r",
+		"x\r\ny", "!?", "?!", "...", "end.", ".start", "a.b.c", "12 34 56",
 	}
 	got := make(map[string]map[string][]string, len(families))
 	for name, pre := range families {

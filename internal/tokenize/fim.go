@@ -63,19 +63,14 @@ var fimMarkerSets = []fimMarkerSet{
 	},
 }
 
-// fimMarkerSetNames returns the family spellings, for a caller that has to name them.
-func fimMarkerSetNames() [][3]string {
+// FIMMarkerNames lists the framing marker sets FIMTokens looks for, so a caller refusing a
+// request can say what the served checkpoint would have needed to declare.
+func FIMMarkerNames() [][3]string {
 	out := make([][3]string, len(fimMarkerSets))
 	for i, set := range fimMarkerSets {
 		out[i] = [3]string{set.prefix, set.suffix, set.middle}
 	}
 	return out
-}
-
-// FIMMarkerNames lists the framing marker sets FIMTokens looks for, so a caller refusing a
-// request can say what the served checkpoint would have needed to declare.
-func FIMMarkerNames() [][3]string {
-	return fimMarkerSetNames()
 }
 
 // FIMTokens reports the fill-in-the-middle markers this vocabulary declares, and whether it

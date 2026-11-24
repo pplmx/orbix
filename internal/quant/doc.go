@@ -90,12 +90,14 @@
 // plausible-looking but completely scrambled matrix" that any same-source assertion would accept.
 //
 // scripts/quant_xcheck.py decodes the same bytes from ggml's published layout in Python and
-// compares bit patterns. Nine formats are covered, including the two whose super-block layout is
-// easiest to misread: Q4_K's nibble halves are separated by 32 positions rather than interleaved
-// per byte, and Q6_K's super-scale is the block's last field. Writing the Python side from ggml
-// rather than from this package found one mistake -- in the Python -- and none in the Go.
+// compares bit patterns. Ten formats are covered, including the three whose layout or constants
+// are easiest to misread: Q4_K's nibble halves are separated by 32 positions rather than
+// interleaved per byte, Q6_K's super-scale is the block's last field, and IQ4_NL's nibble indexes
+// a codebook instead of reading as a signed offset. Writing the Python side from ggml rather than
+// from this package found one mistake -- in the Python -- and none in the Go.
 //
-// Measured both ways: changing Q4_0's interleaving to sequential pairs makes 58 of its 64 values
-// differ, and giving Q4_K's second nibble half the wrong sub-block scale makes exactly its upper
-// 256 of 512 differ. Neither touches the other formats.
+// Measured: changing Q4_0's interleaving to sequential pairs makes 58 of its 64 values differ,
+// giving Q4_K's second nibble half the wrong sub-block scale makes exactly its upper 256 of 512
+// differ, and replacing IQ4_NL's codebook with a plain offset makes all 64 differ. None of the
+// three touches the other formats.
 package quant

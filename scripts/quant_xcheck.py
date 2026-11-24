@@ -175,6 +175,26 @@ def dequant_q6_k(src: bytes) -> list[float]:
     return out
 
 
+# ggml's kvalues_iq4nl. A nibble indexes this table rather than being read as a signed offset,
+# which is what separates IQ4_NL from Q4_0 -- and reading it as an offset produces output of the
+# right shape and entirely the wrong values.
+KVALUES_IQ4NL = [
+    -127, -104, -83, -65, -49, -35, -22, -10,
+    1, 13, 25, 38, 53, 69, 89, 113,
+]
+
+
+def dequant_iq4_nl(src: bytes) -> list[float]:
+    """IQ4_NL: 2-byte f16 scale, then 16 packed nibbles in Q4_0's split-half order."""
+    d = f16(src[0:2])
+    qs = src[2:18]
+    out = [0.0] * 32
+    for j in range(16):
+        out[j] = d * KVALUES_IQ4NL[qs[j] & 0x0F]
+        out[j + 16] = d * KVALUES_IQ4NL[qs[j] >> 4]
+    return out
+
+
 DECODERS = {
     "Q4_0": dequant_q4_0,
     "Q4_1": dequant_q4_1,
@@ -185,6 +205,7 @@ DECODERS = {
     "F16": dequant_f16,
     "Q4_K": dequant_q4_k,
     "Q6_K": dequant_q6_k,
+    "IQ4_NL": dequant_iq4_nl,
 }
 
 
@@ -205,7 +226,11 @@ def main() -> int:
         src = base64.b64decode(case["src"])
         # A block is 32 weights for the quantized formats and one for the wide ones; decode
         # whatever the encoded length covers rather than assuming a count.
-        block = 256 if name.endswith("_K") else (32 if name.startswith("Q") else 1)
+        # Sub-block count per encoded block. Named rather than inferred from the format name:
+        # IQ4_NL is 32 weights but does not start with "Q".
+        BLOCKS = {"Q4_0": 32, "Q4_1": 32, "Q5_0": 32, "Q5_1": 32, "Q8_0": 32, "IQ4_NL": 32,
+                  "BF16": 1, "F16": 1, "Q4_K": 256, "Q6_K": 256}
+        block = BLOCKS[name]
         want = case["bits"]
         size = len(src) // (len(want) // block)
         got = []

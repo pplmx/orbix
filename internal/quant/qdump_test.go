@@ -46,6 +46,7 @@ func TestDumpDequant(t *testing.T) {
 		// arithmetic repeats per sub-block.
 		{"Q4_K", gguf.Q4_K, 256, 144},
 		{"Q6_K", gguf.Q6_K, 256, 210},
+		{"IQ4_NL", gguf.IQ4_NL, 32, 18},
 	}
 
 	type block struct {

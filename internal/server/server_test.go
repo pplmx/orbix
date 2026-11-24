@@ -8636,3 +8636,98 @@ func TestStopGateEmptyListReleasesEverythingImmediately(t *testing.T) {
 		t.Errorf("flush() = %q, want nothing left", rest)
 	}
 }
+
+// TestChatRefusesTheFieldsItValidates covers handleChat's refusals, which had no test.
+//
+// Measured before this: five lines in handleChat were never executed -- the error returns for
+// chat_template_kwargs, response_format, logit_bias and the two penalties. They are the whole
+// reason those checks exist, and each is reachable from a request a client could send.
+//
+// The assertion is the parameter name in the error, because that is what a client branches on: a
+// 400 that does not say which field was wrong leaves the caller diffing their request against the
+// schema.
+func TestChatRefusesTheFieldsItValidates(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	cases := []struct {
+		name  string
+		body  string
+		param string
+	}{
+		{
+			// A response_format this server cannot produce. The value is well-formed JSON, so
+			// the refusal comes from the check rather than the decoder.
+			name:  "unknown response_format",
+			body:  `{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"xml"}}`,
+			param: "response_format",
+		},
+		{
+			// Above the documented range. A penalty outside [-2, 2] is not a stronger penalty,
+			// it is a typo, and the sampler would accept it.
+			name:  "presence_penalty out of range",
+			body:  `{"messages":[{"role":"user","content":"hi"}],"presence_penalty":9}`,
+			param: "presence_penalty",
+		},
+		{
+			name:  "frequency_penalty out of range",
+			body:  `{"messages":[{"role":"user","content":"hi"}],"frequency_penalty":-9}`,
+			param: "frequency_penalty",
+		},
+		{
+			// A bias of -200 is not a ban, and logitBias refuses anything outside [-100, 100].
+			name:  "logit_bias out of range",
+			body:  `{"messages":[{"role":"user","content":"hi"}],"logit_bias":{"5":-200}}`,
+			param: "logit_bias",
+		},
+		{
+			// The fixture declares no chat template, so any variable is unusable. This is the
+			// path chat_template_kwargs takes on a model that cannot honour it.
+			name:  "template variable on a model without a template",
+			body:  `{"messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"enable_thinking":false}}`,
+			param: "chat_template_kwargs",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/chat/completions", c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readBody(t, resp))
+			}
+			body := readBody(t, resp)
+			if !strings.Contains(body, c.param) {
+				t.Errorf("the refusal does not name %s: %s", c.param, body)
+			}
+		})
+	}
+}
+
+// TestCompletionsRefusesTheFieldsItValidates is the same check for the other endpoint.
+//
+// The two handlers validate the same set, so a rule that holds on one and not the other is a
+// difference a client discovers by switching endpoints.
+func TestCompletionsRefusesTheFieldsItValidates(t *testing.T) {
+	srv, _ := newTestServer(t)
+	cases := []struct {
+		name  string
+		body  string
+		param string
+	}{
+		{"unknown response_format", `{"prompt":"hi","response_format":{"type":"xml"}}`, "response_format"},
+		{"presence_penalty out of range", `{"prompt":"hi","presence_penalty":9}`, "presence_penalty"},
+		{"frequency_penalty out of range", `{"prompt":"hi","frequency_penalty":-9}`, "frequency_penalty"},
+		{"logit_bias out of range", `{"prompt":"hi","logit_bias":{"5":-200}}`, "logit_bias"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/completions", c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readBody(t, resp))
+			}
+			if body := readBody(t, resp); !strings.Contains(body, c.param) {
+				t.Errorf("the refusal does not name %s: %s", c.param, body)
+			}
+		})
+	}
+}

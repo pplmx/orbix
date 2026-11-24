@@ -296,12 +296,13 @@ chat endpoint are worth knowing before pointing a client at it:
   objects of those -- and they render as Jinja2 would render what `json.loads` gives it, so an
   integer prints `3` and a fraction `2.5` rather than every number printing as a float.
 
-  Two things are refused with a 400 naming `chat_template_kwargs`, because either would
-  otherwise produce a prompt that ignored what the caller sent:
+  Three cases are refused with a 400 naming `chat_template_kwargs` and the variable, because each
+  would otherwise produce a prompt that ignored what the caller sent:
 
     - a model whose template this project cannot evaluate, where no variable can reach anything;
-    - a name the template never reads, and a name the renderer binds itself (`messages`,
-      `bos_token`, `eos_token`, `add_generation_prompt`, `tools`).
+    - a name the template never reads;
+    - a name the renderer binds itself: `messages`, `bos_token`, `eos_token`,
+      `add_generation_prompt`, `tools`.
 
   This is the opposite of how an unknown member is treated, and the distinction is the one the
   rest of this page draws: an unknown member asks for nothing the server claims to provide, while

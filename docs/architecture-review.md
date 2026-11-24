@@ -43,7 +43,7 @@
 复算命令：
 
 ```bash
-go run /tmp/count2.go            # 每包行数与函数数（AST）
+go run ./scripts/count.go       # 每包行数与函数数（AST）
 grep -c "func Test" internal/*/*_test.go cmd/orbix/*_test.go
 ```
 
@@ -53,7 +53,7 @@ grep -c "func Test" internal/*/*_test.go cmd/orbix/*_test.go
 
 ```text
 cmd/orbix      → engine, gguf, llama, otel, server, tokenize
-internal/server → engine, llama, otel, tokenize
+internal/server → engine, otel, tokenize
 internal/engine → chat, gguf, llama, otel
 internal/llama  → gguf, kernel, quant
 internal/quant  → f16, gguf
@@ -61,15 +61,29 @@ internal/tokenize → gguf
 internal/chat, kernel, f16, otel → （无内部依赖）
 ```
 
-无环，且 kernet 层不依赖任何上层。**但 graph 里有两个不该出现在上层的东西**：
+无环，且 kernel 层不依赖任何上层。
 
-- `internal/server` 直接导入 `llama`，用到 9 个符号：`Greedy`、`Temperature`、`Biased`、`Sampler`、`TokenBias`、`TokenLogprobs`、`Alternative`、`ErrPoolExhausted`、`Config` 的字段。其中 `ErrPoolExhausted` 是**存储层错误穿过调度层**：`server.go:1680` 和 `:1989` 用 `errors.Is(err, llama.ErrPoolExhausted)` 把它翻成 400/503，而 `engine` 自己也在 `engine.go:891` 做同样的判断。一个错误类型需要两个上层分别识别，说明"池耗尽"没有在 engine 边界上被翻译成领域错误。
-- `internal/engine` 的 `Request` 结构体字段类型是 `llama.Sampler`，`ChatRenderer` 住在 engine 包里却只依赖 `chat` 与 `gguf`。把渲染器放进调度包，使它成为唯一一个"engine 里不做调度"的文件（209 行）。
+**这一节最初写的两个"渗透"都已经修掉了，记录保留是因为它们解释了现在为什么是这个形状：**
+
+- `internal/server` 曾经直接导入 `llama`，用到 9 个符号（`Greedy`、`Temperature`、`Biased`、`Sampler`、
+  `TokenBias`、`TokenLogprobs`、`Alternative`、`ErrPoolExhausted` 和 `Config` 的字段）。其中
+  `ErrPoolExhausted` 是存储层错误穿过调度层：`server` 用 `errors.Is(err, llama.ErrPoolExhausted)` 把它
+  翻成 400/503，而 `engine` 自己也做同样的判断——一个错误类型需要两个上层分别识别，说明"池耗尽"没有
+  在 engine 边界上被翻译成领域错误。
+
+  现在这些类型都住在 `internal/engine`（`Sampler`、`Alternative`、`TokenBias`、`Engine.ErrPoolExhausted`），
+  `engine.ErrPoolExhausted` 的注释记着这段来历，`poolAwareErr` 把存储层的错误转成能匹配该 sentinel 的形状。
+  `internal/server/imports_test.go` 拒绝任何文件（含测试）导入 `internal/llama`，所以这条边不会悄悄回来。
+
+- `internal/engine` 的 `Request.Sampler` 字段类型曾是 `llama.Sampler`，现在是 engine 自己的 `Sampler`。
+  `ChatRenderer` 仍住在 engine 包里（`chat.go`，246 行），是唯一一个"engine 里不做调度"的文件——那个
+  位置保留着，理由在文件头部：渲染器要读 checkpoint 的模板，而它只依赖 `chat` 与 `gguf`，不构成向上依赖。
 
 复算命令：
 
 ```bash
 go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/... ./cmd/...
+# 现在应该没有输出：server 不导入 llama。
 grep -rho "llama\.[A-Z][A-Za-z]*" internal/server/*.go | sort | uniq -c
 ```
 

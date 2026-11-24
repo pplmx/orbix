@@ -34,6 +34,10 @@ printed once rather than under every later turn, because the limit is a property
 conversation and every turn after the first cut runs into it. `run --stats` prints the same
 figures as a `note:` line, and `bench` reports them in its `NOTE` column.
 
+The Status column names the release each command is planned to ship in. No release has been
+tagged yet, so `v0.1` is the first one -- every command in the table works today, and the marker
+says when it arrived rather than whether it is usable.
+
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |
 | `orbix model inspect <path>` | Print GGUF metadata, tensor types, quantization, and whether this build reproduces the model's pre-tokenizer | v0.1   |

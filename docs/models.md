@@ -1,6 +1,8 @@
 # Supported models and quantization
 
-Orbix targets the GGUF ecosystem. Initial support:
+Orbix targets the GGUF ecosystem. The Status column names the release each family is planned to
+ship in; no release has been tagged yet, so `v0.1` is the first one and `done` means implemented
+and cross-checked against a real checkpoint rather than released.
 
 | Family                  | Architectures        | Status        |
 | ----------------------- | -------------------- | ------------- |

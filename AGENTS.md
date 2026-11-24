@@ -188,7 +188,20 @@ HF 的 `models/` 路径会 302 到 `models-moved/` 再到 CDN，`dl` 的重定�
 
 ## 临时文件与后台进程
 
-- `pkill -f 'bin/orbix serve'` 在**同一条命令**里配 `serve` 启动会杀死自己的 shell（bash 命令行本身含 `serve`，匹配到就跑不完了）。拆成两条命令，或用 `pkill -f 'bin/orbix ser[v]e'` 让命令行的字面量不匹配自己。
+- **不要用 `pkill -f` 清服务器进程。** 它匹配的是完整命令行，而发起清理的那个 shell 自己的命令行里就含要匹配的字符串——`bin/orbix serve` 也好、`bin/orbix ser[v]e` 也好，只要 bash 的 `-c` 参数里出现过这些字面量，`pkill` 就会把自己一起杀掉，后面的命令一条都不执行。带方括号的写法不解决问题：那是给正则留的转义，而 shell 命令行里的字面量是 `serve`，匹配依然成立。这条在本会话里踩了十几次。
+
+  按监听端口找 pid，不按名字：
+
+  ```bash
+  ss -ltnp 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u |
+  while read p; do
+      case "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)" in
+          *orbix*) kill "$p" ;;
+      esac
+  done
+  ```
+
+  或者起服务时把 pid 记下来（`nohup ... & echo $! > /tmp/orbix.pid`），清理时 `kill "$(cat /tmp/orbix.pid)"`。
 - 起 server 用 `nohup ... &` 加 `sleep` 加 `/healthz` 轮询，不要用固定长 sleep。端口用 `--addr 127.0.0.1:19xxx` 手工编号，`--blocks`/`--block-size` 按测试意图显式给。
 - 注入验证（改代码看测试是否失败）之后**立刻复原**，并在同一条命令里跑 `git status --short` 确认工作区干净。用 `cp file /tmp/file.bak` 保存原件，不要靠 `git stash`。
 

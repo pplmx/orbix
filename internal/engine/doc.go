@@ -35,4 +35,28 @@
 // sequences, slots, and fairness; it knows nothing about HTTP or JSON. That
 // split is what lets the REPL, the CLI, the benchmark and internal/server share one
 // path -- the server is the third caller, not a hypothetical one.
+//
+// # What the serving layer is allowed to name
+//
+// Three types here exist so that the package below does not leak upward. Sampler is one
+// method, so llama's greedy and temperature samplers satisfy it without llama being named;
+// Alternative and TokenBias are the log-probability and bias shapes a request carries. They
+// moved here from llama after four files in internal/server imported that package purely to
+// name them, which put a KV-cache package on the HTTP layer's import path for a vocabulary it
+// did not need. internal/server/imports_test.go holds that edge shut.
+//
+// ErrPoolExhausted is the same idea for errors: the storage layer's "block pool exhausted"
+// is translated at this boundary into a sentinel the scheduler owns, because whether it is
+// temporary or permanent is a scheduling question. A caller can test for it with errors.Is
+// and decide whether a Retry-After is worth honouring, without importing the cache.
+//
+// # Reading a round
+//
+// Drive is the loop most callers want and the one the CLI uses: it drains each sequence's
+// channel on its own goroutine while pumping, then joins. Writing that by hand is four lines
+// and easy to get wrong in the same way every time -- reading before pumping fills the
+// buffers and stalls, which is what made the benchmark report a 64-token generation as 64
+// tokens regardless of the budget. internal/server does not use it, because it needs to poll
+// its own context and back off between rounds; the loop is spelled out there with the
+// polling inline.
 package engine

@@ -1677,7 +1677,12 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 			// same request succeeds once another sequence releases its blocks. 503 with
 			// Retry-After is what a client backs off on, and 500 would have it treat a
 			// temporary condition as a permanent one.
-			if errors.Is(f, llama.ErrPoolExhausted) {
+			//
+			// The sentinel is the engine's, not the cache's: which errors are transient is a
+			// scheduling judgement, and this layer should not have to import internal/llama to
+			// learn it. The message is unchanged either way -- engine.poolAwareErr keeps the
+			// storage layer's sentence, block count included.
+			if errors.Is(f, engine.ErrPoolExhausted) {
 				s.refusedPool.Add(1)
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusServiceUnavailable, f.Error())
@@ -1986,7 +1991,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 			// requests against an exhausted pool left refused_pool_total at 0 against 4 for the
 			// same four sent blocking. The count is the only signal that survives the
 			// protocol's inability to say it in the response.
-			if errors.Is(it.err, llama.ErrPoolExhausted) {
+			if errors.Is(it.err, engine.ErrPoolExhausted) {
 				s.refusedPool.Add(1)
 			}
 			return send(map[string]any{

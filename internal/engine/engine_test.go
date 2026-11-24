@@ -3340,3 +3340,88 @@ func TestCancellationLeavesThePoolWhole(t *testing.T) {
 		})
 	}
 }
+
+// TestPoolExhaustionIsRecognisableWithoutTheCachePackage pins the boundary this package exists
+// to provide.
+//
+// Which failures are transient is a scheduling judgement: a request refused because the pool has
+// no free block is well formed and the process is healthy, so a caller should retry rather than
+// report a fault. Callers used to answer that by importing internal/llama and testing its
+// sentinel -- internal/server did so in two places to choose 503 over 500 -- which put the
+// judgement in the HTTP layer and gave it a dependency on the cache's package to reach it.
+//
+// Two assertions that are easy to get wrong together: the engine's sentinel must match, and the
+// underlying cause must stay reachable. A translation that wrapped the storage error the wrong
+// way round satisfies the second and fails the first; one that dropped the cause satisfies the
+// first and loses the block counts a reader acts on.
+//
+// Exhaustion is produced by concurrency rather than by one oversized request, because a single
+// sequence that cannot get a block blocks inside Pump: the round finishes the sequence by sending
+// on a channel nobody is reading yet. Several requests racing for a small pool is the shape that
+// exercises the same path while staying drainable.
+func TestPoolExhaustionIsRecognisableWithoutTheCachePackage(t *testing.T) {
+	e, tok, _ := loadModelPath(t, Options{MaxActive: 4, MaxQueued: 64, Blocks: 4, BlockSize: 4})
+	prompt := tok.Encode(strings.Repeat("Once upon a time there was ", 4), true)
+
+	const n = 16
+	chans := make([]<-chan Event, 0, n)
+	for range n {
+		ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 8})
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		chans = append(chans, ch)
+	}
+
+	// Drain concurrently with pumping: the per-sequence buffers are bounded, so a request that
+	// fills one would otherwise stall the round that is trying to retire it.
+	// One slot per request, written only by that request's own goroutine: a shared channel
+	// closed after pumping raced the writers, which is a panic in the test rather than a
+	// finding about the engine.
+	collected := make([]error, n)
+	var wg sync.WaitGroup
+	for i, ch := range chans {
+		wg.Go(func() {
+			for ev := range ch {
+				if ev.Err != nil {
+					collected[i] = ev.Err
+				}
+			}
+		})
+	}
+	for e.Pump() > 0 {
+	}
+	wg.Wait()
+
+	var got error
+	for _, failure := range collected {
+		if failure != nil {
+			got = failure
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("%d requests against a 4-block pool all succeeded, so the pool never ran "+
+			"out and this test exercised nothing", n)
+	}
+	if !errors.Is(got, ErrPoolExhausted) {
+		t.Errorf("errors.Is(err, ErrPoolExhausted) = false for %q; a caller would have to "+
+			"import internal/llama to recognise the cause", got)
+	}
+	if !errors.Is(got, llama.ErrPoolExhausted) {
+		t.Errorf("errors.Is(err, llama.ErrPoolExhausted) = false for %q; the cause has to stay "+
+			"reachable for a caller that wants the specific one", got)
+	}
+	// The text has to be the storage layer's, not the engine's sentinel's. A translation that
+	// prefixed its own message would still satisfy both errors.Is checks above while changing
+	// what a client and an operator read -- and neither assertion would notice.
+	if want := "llama: block pool exhausted"; !strings.HasPrefix(got.Error(), want) {
+		t.Errorf("the error text does not begin with the storage layer's %q: %q", want, got)
+	}
+	if strings.Contains(got.Error(), "engine: block pool exhausted") {
+		t.Errorf("the engine's sentinel text leaked into the message: %q", got)
+	}
+	if !strings.Contains(got.Error(), "blocks of") {
+		t.Errorf("the message does not name the pool's geometry: %q", got.Error())
+	}
+}

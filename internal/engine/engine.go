@@ -18,6 +18,21 @@ import (
 // the request was well formed, and retrying later or shedding load is the right answer.
 var ErrQueueFull = errors.New("engine: too many requests waiting")
 
+// ErrPoolExhausted reports that a sequence needed a KV block and the pool had none left, even
+// after giving up every cached prefix it was holding on speculation.
+//
+// It is the scheduler's answer to "is this transient?", which is why it is declared here rather
+// than left to the storage layer: a request that arrives on an exhausted pool is well formed and
+// the process is healthy, so a server should say 503 and suggest a retry, not 500. Callers used
+// to decide that by importing internal/llama and testing its sentinel, which put a scheduling
+// judgement in the HTTP layer and made internal/server depend on the cache's package for it.
+//
+// poolAwareErr translates the storage layer's error into a shape that matches this sentinel on
+// the way out, so a caller can ask errors.Is(err, ErrPoolExhausted) without the import. The text
+// is still the storage layer's own -- it carries the block count and the block size, which is
+// what an operator acts on.
+var ErrPoolExhausted = errors.New("engine: block pool exhausted")
+
 // errCallerGone reports that the caller stopped reading events before the sequence finished.
 // It is a sentinel rather than an inline fmt.Errorf so the span can classify it: error.type must
 // be a stable, low-cardinality string, which an error that carries the sequence id could not be.
@@ -641,6 +656,40 @@ type pending struct {
 	tok int32
 }
 
+// poolAwareErr translates a model-side failure into the vocabulary this package promises.
+//
+// The block pool's exhaustion is the one cause a caller must react to differently -- 503 rather
+// than 500, because retrying after another sequence releases its blocks succeeds -- so it is the
+// one cause given a sentinel of this package's own. Everything else passes through unchanged: it
+// is a model-side failure whose message is the whole answer.
+//
+// The result matches errors.Is against both sentinels, and that is not decoration. A caller of
+// this package should be able to answer "is this transient?" from ErrPoolExhausted alone, without
+// importing internal/llama; a caller that already knows the storage layer keeps working too.
+// Wrapping with two %w verbs would give both, and it was the first attempt -- but it also puts
+// both messages in the text, so the client read "engine: block pool exhausted: llama: block pool
+// exhausted (4 blocks of 4 positions)". The sentence a user sees is the storage layer's, with the
+// geometry an operator needs; the engine's sentinel is a way to recognise it, not more prose.
+type poolExhaustedError struct{ cause error }
+
+func (e *poolExhaustedError) Error() string { return e.cause.Error() }
+func (e *poolExhaustedError) Unwrap() []error {
+	return []error{ErrPoolExhausted, e.cause}
+}
+
+// poolAwareErr maps a model failure onto that shape.
+//
+// It is unexported and stays that way. A version of this round exported the wrapper's constructor
+// so a test in cmd/orbix could build the translated shape by hand; that is API grown for a test,
+// and the assertion it enabled -- "the cause survives the explanation" -- belongs in this package,
+// where the real error is produced, not in a caller that only ever sees the result.
+func poolAwareErr(err error) error {
+	if errors.Is(err, llama.ErrPoolExhausted) {
+		return &poolExhaustedError{cause: err}
+	}
+	return err
+}
+
 // prefill processes a sequence's remaining prompt in one batched pass.
 //
 // pos doubles as the prompt index here because a sequence prefills before it
@@ -654,6 +703,7 @@ func (e *Engine) prefill(s *sequence) {
 	}
 	out, err := e.model.PrefillWithPrefix(s.cache, s.req.Prompt[s.pos:], s.pos)
 	if err != nil {
+		err = poolAwareErr(err)
 		// Done is what closes the sequence for the caller: every other finish in this file sets
 		// it, and this one did not, so a prefill failure -- a block pool with too few blocks is
 		// the reachable case -- closed the channel without ever saying the sequence had ended.
@@ -764,6 +814,7 @@ func (e *Engine) decode(batch []pending) {
 
 	out, err := e.model.DecodeStep(caches, tokens)
 	if err != nil {
+		err = poolAwareErr(err)
 		// The whole round failed. Each sequence's cache may or may not have
 		// advanced, so decoding cannot continue for any of them: finish them all
 		// with the error rather than leaving some in the active set with a cache

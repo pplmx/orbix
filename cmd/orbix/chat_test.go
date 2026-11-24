@@ -13,7 +13,6 @@ import (
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
-	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -429,15 +428,19 @@ func TestExplainChatError(t *testing.T) {
 		t.Errorf("an unrelated error was rewritten: %v", got)
 	}
 
-	exhausted := fmt.Errorf("%w (2 blocks of 16 positions)", llama.ErrPoolExhausted)
+	// The sentinel the command is allowed to know about. This test deliberately does not build
+	// the engine's translated wrapper: that shape is internal/engine's to produce, and its
+	// own test asserts the two unwrap links. What this command has to get right is narrower --
+	// recognising the sentinel and appending advice the engine cannot know.
+	exhausted := fmt.Errorf("%w (2 blocks of 16 positions)", engine.ErrPoolExhausted)
 	got := explainChatError(exhausted)
 	if got == exhausted {
 		t.Fatal("pool exhaustion was not explained")
 	}
-	// The original chain has to survive, because a caller checking errors.Is still needs to see
-	// what failed.
-	if !errors.Is(got, llama.ErrPoolExhausted) {
-		t.Error("the explanation dropped ErrPoolExhausted from the chain")
+	// The sentinel has to survive the explanation, because the REPL calls this on every failed
+	// turn and compares the result to decide whether to print the long version again.
+	if !errors.Is(got, engine.ErrPoolExhausted) {
+		t.Error("the explanation dropped engine.ErrPoolExhausted from the chain")
 	}
 	for _, want := range []string{"/clear", "--blocks"} {
 		if !strings.Contains(got.Error(), want) {

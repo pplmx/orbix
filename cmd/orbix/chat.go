@@ -410,8 +410,8 @@ func repeatingFailure(err error) error {
 	switch {
 	case errors.Is(err, errContextFull):
 		return errContextFull
-	case errors.Is(err, llama.ErrPoolExhausted):
-		return llama.ErrPoolExhausted
+	case errors.Is(err, engine.ErrPoolExhausted):
+		return engine.ErrPoolExhausted
 	default:
 		return nil
 	}
@@ -452,7 +452,7 @@ func explainChatError(err error) error {
 			" system prompt alone is longer than the window; a smaller --max-tokens leaves room"+
 			" for more turns, and the window itself is fixed by the model", err)
 	}
-	if !errors.Is(err, llama.ErrPoolExhausted) {
+	if !errors.Is(err, engine.ErrPoolExhausted) {
 		return err
 	}
 	// The engine's message already gives the pool's size, so this adds only what it cannot know:

@@ -567,6 +567,35 @@ func TestRopeFreqsLoadsFromTheTensor(t *testing.T) {
 		}
 	})
 
+	// A zero factor is the case checkFinite cannot catch: zero is finite, and the rope divides
+	// that dimension's theta by it, so theta/0 is +Inf, math.Cos(+Inf) is NaN, and every
+	// position's cos and sin for that dimension pair are NaN from the first token on. Measured
+	// with freqs {1, 0}: cos[pos=1][1] is NaN. The tensor's other values are valid, so the load
+	// has to fail on the zero alone.
+	t.Run("rejects a zero factor", func(t *testing.T) {
+		c := base
+		c.ropeFreqs = make([]float32, want)
+		for i := range c.ropeFreqs {
+			c.ropeFreqs[i] = 1
+		}
+		c.ropeFreqs[len(c.ropeFreqs)-1] = 0
+		_, err := New(buildTinyWeights(t, c))
+		if err == nil {
+			t.Fatal("a zero rope_freqs factor was accepted; it makes every position's cos and " +
+				"sin NaN for that dimension pair")
+		}
+		// The index and the length, because the whole point is which entry is zero -- a message
+		// saying only "has a zero" leaves the reader scanning the tensor.
+		for _, want := range []string{
+			"zero at index " + strconv.Itoa(len(c.ropeFreqs)-1),
+			"of " + strconv.Itoa(len(c.ropeFreqs)),
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to state %q", err, want)
+			}
+		}
+	})
+
 	// Without the tensor the field stays nil, which is the no-scaling case. Asserted here so a
 	// change that invented a default slice would fail rather than silently switch every model
 	// to a scaling this package made up.

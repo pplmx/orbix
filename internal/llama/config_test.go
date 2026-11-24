@@ -63,6 +63,14 @@ func buildFile(kvs []kv, tensors []gguf.TensorInfo, data []byte) []byte {
 	return b.Bytes()
 }
 
+// encodeValue writes one metadata value.
+//
+// This is a second copy of internal/gguf's builder_test.go helper, which lives in a _test.go file
+// and so cannot be imported. Keeping the two in step is the cost of that, and it has already been
+// paid once: this copy handled four types while gguf's handled all twelve, which is why
+// localLayers -- whose input needs a bool array -- had no test for as long as it did. The
+// enumeration in TestConfigFixtureBuilderEncodesEveryValueType is the guard; if gguf's list grows,
+// this one has to as well.
 func encodeValue(b *bytes.Buffer, v gguf.Value) {
 	u32 := func(x uint32) {
 		var tmp [4]byte

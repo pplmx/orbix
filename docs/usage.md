@@ -142,7 +142,10 @@ was done either way and OpenAI's own description warns that `best_of` consumes q
 insertion point and `suffix` the text after, and the reply is what belongs between them. That
 needs a checkpoint trained for it, so the server looks for the marker names a family uses --
 `<|fim_prefix|>` / `<|fim_suffix|>` / `<|fim_middle|>` for Qwen and CodeGemma, the same names
-without the pipes for StarCoder, and `<PRE>` / `<SUF>` / `<MID>` for CodeLlama -- and refuses with
+without the pipes for StarCoder, `<PRE>` / `<SUF>` / `<MID>` for CodeLlama, and the SentencePiece
+spelling of the first set with the word-boundary space (`\u2581<fim_prefix>` and its two
+siblings), which is how a vocabulary that encodes a leading space as a separate marker writes
+them -- and refuses with
 `unsupported_parameter` if the served model declares none of them, naming the sets it looked for
 so an operator can see what the checkpoint would have needed. Generating from the prefix alone
 would be worse than the refusal: it is a plausible continuation that silently ignores half of what

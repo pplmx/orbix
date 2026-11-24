@@ -201,8 +201,14 @@ Three exist because their failure mode is invisible in latency until it is alrea
 `orbix_kv_pool_free` reaching zero is a paged deployment about to refuse requests. The third,
 `orbix_requests_finished_by_reason_total`, is what catches clients leaving: a disconnect looks
 entirely healthy in every other number, and shows up here as `reason="cancel"` or
-`reason="abandoned"` growing against `reason="stop"`. The parts always sum to
-`orbix_requests_finished_total`, and the tests assert it.
+`reason="abandoned"` growing against `reason="stop"`. The label's value comes from
+`engine.FinishReason.String`, the same method that fills the `finish_reason` field, so the two
+cannot drift: `stop`, `length`, `cancel`, `abandoned` and `error`. A `cancel` or `abandoned`
+reason is one the client never sees in its own response -- it disconnected first -- which is why
+this counter is where that shows up. The parts always sum to `orbix_requests_finished_total`, and
+the tests assert it: the engine increments the total and one reason's slot in the same critical
+section, and a reason it does not recognise is left out of the split rather than guessed at, so a
+part smaller than the total is the signal that something produced an unknown reason.
 
 `orbix_requests_refused_queue_full_total` and `orbix_requests_refused_pool_total` count the
 requests answered `503`. They are the server's own counters rather than the engine's, since a

@@ -14,6 +14,10 @@ The prefix is not decoration: `go install` uses whatever CGO_ENABLED the environ
 is 1 wherever a C compiler exists, and such a binary reports `cgo: true` in `orbix version`. The
 code has no `import "C"`, so that build works, but it is not the artifact this project ships.
 
+`./models/` is not in the repository, so `--model` has to point at a checkpoint you already have.
+Anything the architecture table in [Models](models.md) lists will serve; the download snippets on
+that page name a file per family, and stories15M q4_0 (18 MiB) is enough to watch a request finish.
+
 The server implements `/v1/chat/completions`, `/v1/completions` (streaming and not),
 `/v1/models` plus `/v1/models/{id}` for `models.retrieve`, `/healthz` and `/metrics`. An
 unimplemented path under `/v1` answers 404 in the API's JSON envelope rather than Go's

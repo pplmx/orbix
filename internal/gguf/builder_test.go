@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"testing"
 )
 
 type kv struct {
@@ -150,4 +151,45 @@ func i32Array(vals ...int32) Value {
 		arr[i] = i32Val(v)
 	}
 	return Value{Type: TypeArray, ElemType: TypeInt32, Array: arr}
+}
+
+// TestBuilderEncodesEveryValueType keeps this fixture builder in step with the type list.
+//
+// encodeValue's default branch panics, so a ValueType added to this package without a case here
+// breaks whichever test first uses it -- and it breaks as a panic inside a builder rather than as
+// the assertion the test was making. Enumerating them makes the failure name the type.
+//
+// internal/llama keeps a second copy of this encoder because a _test.go file cannot be imported;
+// its own enumeration has to be extended alongside this one.
+func TestBuilderEncodesEveryValueType(t *testing.T) {
+	all := []struct {
+		name string
+		val  Value
+	}{
+		{"uint8", Value{Type: TypeUint8, Uint: 255}},
+		{"int8", Value{Type: TypeInt8, Int: -1}},
+		{"uint16", Value{Type: TypeUint16, Uint: 65535}},
+		{"int16", Value{Type: TypeInt16, Int: -2}},
+		{"uint32", Value{Type: TypeUint32, Uint: 1}},
+		{"int32", Value{Type: TypeInt32, Int: -3}},
+		{"uint64", Value{Type: TypeUint64, Uint: 1}},
+		{"int64", Value{Type: TypeInt64, Int: -4}},
+		{"float32", Value{Type: TypeFloat32, Float: 1.5}},
+		{"float64", Value{Type: TypeFloat64, Float: 2.5}},
+		{"bool", Value{Type: TypeBool, Bool: true}},
+		{"string", Value{Type: TypeString, Str: "x"}},
+		{"array", Value{
+			Type: TypeArray, ElemType: TypeBool,
+			Array: []Value{{Type: TypeBool, Bool: true}},
+		}},
+	}
+	for _, c := range all {
+		t.Run(c.name, func(t *testing.T) {
+			var b bytes.Buffer
+			encodeValue(&b, c.val)
+			if b.Len() == 0 {
+				t.Errorf("encoding %s wrote nothing", c.name)
+			}
+		})
+	}
 }

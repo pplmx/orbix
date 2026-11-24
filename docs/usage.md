@@ -51,6 +51,12 @@ OpenAI defines -- a string, or an array of `{"type": "text", "text": ...}` parts
 any other type, an image for instance, is refused with `unsupported_parameter` on
 `messages.content` rather than silently dropped.
 
+A body sent compressed without being decompressed is the one answer whose status is not 400:
+`Content-Encoding: gzip` on a request this server will not expand is refused with
+`415` and `code: unsupported_encoding`, naming the encoding it read. The distinction matters to
+a client because the body was never parsed -- the fix is to send it uncompressed, and a 400 with
+`invalid_json` would send a reader looking through bytes that were fine.
+
 Not every error has one. A refused request answers 503 with `type: service_unavailable_error`
 and no `code`, because there is nothing in the request to correct -- retry, or back off. Read a
 missing `code` as "this answer is about capacity, not about your fields", and branch on `type`

@@ -692,6 +692,12 @@ func (e *poolExhaustedError) Unwrap() []error {
 // so a test in cmd/orbix could build the translated shape by hand; that is API grown for a test,
 // and the assertion it enabled -- "the cause survives the explanation" -- belongs in this package,
 // where the real error is produced, not in a caller that only ever sees the result.
+//
+// TestPoolExhaustionReachesTheCallerAsTheSentinelsShape covers the branch that translates. The
+// other, `return err`, has no test and is not worth constructing one for: every reachable failure
+// out of PrefillWithPrefix besides exhaustion is a cache or shape error the caller cannot provoke,
+// and the startPos refusal needs a caller that prefills from a position other than zero, which
+// this engine never does.
 func poolAwareErr(err error) error {
 	if errors.Is(err, llama.ErrPoolExhausted) {
 		return &poolExhaustedError{cause: err}

@@ -9094,7 +9094,9 @@ func TestTopKIsHonoured(t *testing.T) {
 //
 // Measured before writing this: for each field below, the chat call site was changed to pass the
 // zero value, and every one of them left the whole package green -- none had a test that would
-// have noticed.
+// have noticed. top_p was added a round after the other three: the first version of this test
+// covered top_k plus the three penalties, and a second audit pass found top_p still passing the
+// whole package with a nil at the chat call site.
 func TestBothEndpointsHonourTheSameSamplingFields(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.Handler()
@@ -9123,6 +9125,7 @@ func TestBothEndpointsHonourTheSameSamplingFields(t *testing.T) {
 		{"logit_bias", `, "logit_bias": {"1": -100, "2": -100, "3": -100}`},
 		{"presence_penalty", `, "presence_penalty": 2.0`},
 		{"frequency_penalty", `, "frequency_penalty": 2.0`},
+		{"top_p", `, "top_p": 0.01`},
 	} {
 		t.Run(tc.field+" changes the chat output", func(t *testing.T) {
 			if got := chatText(7, tc.extra); got == baseline {

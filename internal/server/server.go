@@ -1577,6 +1577,13 @@ type choiceResult struct {
 //
 // A candidate that generated nothing scores -Inf, so it never wins: it has no per-token figure
 // to compare, and ranking it first on an empty sum would return an empty completion as "best".
+//
+// Nothing in production calls this: ranking uses scoreShown, which applies the same mean to the
+// run the response actually reports. It is kept because two tests need the whole-run figure as
+// the thing scoreShown differs from -- TestBestOfRanksOnTheTokensItReports builds a pair of
+// candidates whose whole-run and visible orderings disagree, and asserts both, so that the
+// ranking test would fail if the two scorings ever became the same. Removing this as dead code
+// would leave those cases passing without showing the distinction they exist for.
 func (c *choiceResult) score() float64 {
 	if len(c.samples) == 0 || len(c.samples) != len(c.out) {
 		// The length check matters: samples is only filled when log probabilities were

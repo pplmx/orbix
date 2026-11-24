@@ -3425,3 +3425,54 @@ func TestPoolExhaustionIsRecognisableWithoutTheCachePackage(t *testing.T) {
 		t.Errorf("the message does not name the pool's geometry: %q", got.Error())
 	}
 }
+
+// TestEventBufferMatchesTheDocumentedSize pins the number two documents state.
+//
+// docs/usage.md tells a caller "64 events buffer per sequence, then two seconds of grace, then
+// the slot", and doc.go says the same. Both are information a consumer needs: the buffer is how
+// far ahead the engine can run before a stalled reader starts costing it grace time, and the grace
+// is how long that stall is tolerated. The code writes the size as a bare literal at the channel's
+// make, so changing it would leave both documents wrong with nothing failing.
+//
+// cap() works on a receive-only channel, so the assertion reads the real buffer rather than a
+// constant restated in the test. That is the point: comparing 64 to a copy of 64 in the engine
+// would pass however the channel were sized.
+func TestEventBufferMatchesTheDocumentedSize(t *testing.T) {
+	eng, tok := loadModel(t)
+	ids := tok.Encode("hello", true)
+	ch, err := eng.Submit(Request{Prompt: ids, MaxTokens: 1})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	// Drain and pump so the sequence retires rather than lingering as an active sequence.
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(done)
+		}()
+		for eng.Pump() > 0 {
+		}
+		<-done
+	})
+
+	if got := cap(ch); got != 64 {
+		t.Errorf("the event buffer holds %d events, but doc.go and docs/usage.md both say 64; "+
+			"either the size changed or the documents need updating", got)
+	}
+}
+
+// TestAbandonGraceIsTwoSeconds pins the other number the same sentence states.
+//
+// The grace is a duration rather than a count, so it cannot be read from a channel -- what this
+// checks is the constant itself. That is a weaker assertion than cap(), and it is still worth
+// having: the value appears in two documents as "two seconds", and a change to it would otherwise
+// be caught only by TestStalledConsumerIsGivenUpOn, which asserts relative timing and would
+// tolerate a shift from two seconds to three.
+func TestAbandonGraceIsTwoSeconds(t *testing.T) {
+	if abandonGrace != 2*time.Second {
+		t.Errorf("abandonGrace is %v, but doc.go and docs/usage.md both say two seconds",
+			abandonGrace)
+	}
+}

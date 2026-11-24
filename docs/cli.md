@@ -43,6 +43,11 @@ figures as a `note:` line, and `bench` reports them in its `NOTE` column.
 | `orbix serve`                | Start the OpenAI-compatible inference server                                                                 | v0.3   |
 | `orbix bench`                | Run a built-in throughput/latency benchmark                                                                  | v0.2   |
 
+`version` reports what `-ldflags` baked in at build time, which only `just build` and the release
+workflow do. A binary from the README's `go install ...@latest` prints `orbix dev` with
+`commit: none` and `built: unknown` -- those are the zero values of the injected variables, not an
+error. The `go`, `platform` and `cgo` lines come from the runtime and are correct either way.
+
 ```bash
 orbix run --model ./model.gguf "Once upon a time"
 orbix run --model ./model.gguf --stats --max-tokens 64 "Explain KV caching."

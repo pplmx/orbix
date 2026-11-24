@@ -395,6 +395,48 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 第三个注入找出了一处死代码：`flush` 里 `if g.sent >= len(g.seen) { return "" }` 拿掉后行为不变，
 因为真正保证幂等的是 `g.sent = len(g.seen)`。guard 已删，注释写明哪一行才是性质所在。
 
+### 第三轮：`tokenize.New` 与"总数仍是 18"
+
+| 函数           | 之前 | 之后 | 拿出来的部分                                        |
+| -------------- | ---- | ---- | --------------------------------------------------- |
+| `tokenize.New` | 274  | 31   | `loadTokenMetadata`(98)、`loadPreTokenization`(157) |
+
+切分点是文件本身换命名空间的地方：前半段读 `tokenizer.ggml.*` 里关于单个 token 的事实（字符串、分数、
+类型、特殊 id、字节级探测），后半段读文本怎么切块（pre-tokenizer 家族、merges、前缀空格）。
+
+预分词器那个 `switch` 没有拆：它是查表，注释记录了每个名字属于 llama.cpp 的哪个分组、以及某个别名
+为什么是精确的，拆开会让这些理由与它们解释的分支分离。
+
+**这一轮又把函数总数从 18 保持在 18。** 三拆分后 `New` 少了 243 行，但两个新函数一个 98、一个 157，
+前者没超线、后者超了。三轮下来的净结果是 21 → 18。这个指标对"拆成两个中等函数"这类改动不敏感，
+它只对"拆成一个短函数加几个短函数"敏感。
+
+### 一次真实的破坏，以及为什么测试没发现
+
+`tokens` → `t.tokens` 的正则替换**也打到了两条错误消息**：
+
+```text
+tokenize: %d scores for %d t.tokens
+tokenize: %d token types for %d t.tokens
+```
+
+`just check` 全绿，`internal/tokenize` 全部测试通过。原因是那两条的测试只断言了数字：
+
+```go
+for _, want := range []string{"1", "3"} {
+    if !strings.Contains(err.Error(), want) { ... }
+}
+```
+
+数字对，句子错，断言成立。这正是 AGENTS.md 那条"断言消息里的数据，不要断言模板文字"的镜像：
+断言了数据，模板文字就可以被自由改坏。
+
+处理方式是把两条消息整体比较（`err.Error() != "tokenize: 1 scores for 3 tokens"`），然后把同样的
+损坏注入回去确认会红——它红了，报的正是 `error = "tokenize: 1 scores for 3 t.tokens"`。
+
+这个破坏不来自重构的逻辑，来自重构的**手法**。批量文本替换在移动代码时会连字符串一起改，而字符串
+里恰好有同名标识符。
+
 ### `run` 仍然不迁到 engine
 
 第九节把这件事列为待定。本轮看了它到底要什么，结论是**不迁**，理由比上一轮具体：

@@ -90,14 +90,26 @@
 // plausible-looking but completely scrambled matrix" that any same-source assertion would accept.
 //
 // scripts/quant_xcheck.py decodes the same bytes from ggml's published layout in Python and
-// compares bit patterns. Ten formats are covered, including the three whose layout or constants
-// are easiest to misread: Q4_K's nibble halves are separated by 32 positions rather than
-// interleaved per byte, Q6_K's super-scale is the block's last field, and IQ4_NL's nibble indexes
-// a codebook instead of reading as a signed offset. Writing the Python side from ggml rather than
-// from this package found one mistake -- in the Python -- and none in the Go.
+// compares bit patterns. Every format this package registers is covered -- all fourteen,
+// including F32, which does no work and is therefore the one a dispatch table can forget.
 //
-// Measured: changing Q4_0's interleaving to sequential pairs makes 58 of its 64 values differ,
-// giving Q4_K's second nibble half the wrong sub-block scale makes exactly its upper 256 of 512
-// differ, and replacing IQ4_NL's codebook with a plain offset makes all 64 differ. None of the
-// three touches the other formats.
+// The layouts were written from ggml's own `dequantize_row_*` in ggml-quants.c rather than from
+// this package, which is the whole point: a misreading repeated in both the code and its tests
+// cannot be seen from either side. Three of them carry a detail the comment above each decoder
+// already flags, and each is what a wrong reading gets wrong:
+//
+//   - Q4_K's nibble halves are separated by 32 positions rather than interleaved per byte.
+//   - Q6_K's super-scale is the block's last field, where every other format puts it first.
+//   - IQ4_NL's nibble indexes a codebook rather than reading as a signed offset.
+//
+// Writing the Python from ggml found two mistakes, both in the Python: Q6_K's scale pointer
+// advances by eight per half, and Q2_K's and Q3_K's code pointer advances by 32 per group while
+// their mask pointers do not. The Go side matched the reference every time once the Python was
+// right.
+//
+// Measured by breaking the Go side: Q4_0's interleaving to sequential pairs (58 of 64 values
+// differ), Q4_K's second nibble half given the first half's sub-block scale (its upper 256 of
+// 512), IQ4_NL's codebook replaced with a plain offset (all 64), and Q3_K's scale shuffle using
+// the wrong shift index (311 of 512). None of the four touches another format.
+
 package quant

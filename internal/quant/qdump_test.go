@@ -40,6 +40,7 @@ func TestDumpDequant(t *testing.T) {
 		{"Q8_0", gguf.Q8_0, 32, 34},
 		{"BF16", gguf.BF16, 1, 2},
 		{"F16", gguf.F16, 1, 2},
+		{"F32", gguf.F32, 1, 4},
 		// The K-quants put eight or sixteen sub-blocks inside one super-block, each with its
 		// own 6-bit scale, and locate the pieces in an order that differs between formats --
 		// Q6_K's super-scale is the last field, not the first. One block each is enough: the
@@ -47,6 +48,9 @@ func TestDumpDequant(t *testing.T) {
 		{"Q4_K", gguf.Q4_K, 256, 144},
 		{"Q6_K", gguf.Q6_K, 256, 210},
 		{"IQ4_NL", gguf.IQ4_NL, 32, 18},
+		{"Q2_K", gguf.Q2_K, 256, 84},
+		{"Q3_K", gguf.Q3_K, 256, 110},
+		{"Q5_K", gguf.Q5_K, 256, 176},
 	}
 
 	type block struct {

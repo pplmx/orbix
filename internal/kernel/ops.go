@@ -230,6 +230,10 @@ func Softmax(scores []float32) {
 		// which is backwards: NaN skips the guard rather than reaching it.
 		return
 	}
+	// One reciprocal and a multiply per element, which is what ggml does too (`sum = 1.0/sum`
+	// then ggml_vec_scale_f32). Dividing each element instead would be a different rounding, not
+	// a different answer -- the sum is accumulated in float64 either way, so the product stays
+	// inside the precision the accumulation bought.
 	inv := float32(1 / sum)
 	for i := range scores {
 		scores[i] *= inv
@@ -249,6 +253,12 @@ func Softmax(scores []float32) {
 // form took 0.85ms against 35.7ms unclamped, 42x. It also costs a branch on ordinary inputs
 // -- 30ms against 18ms over a million values in [-3, 3] -- which is why the threshold sits
 // where the answer is already 5e-37 rather than nearer the interesting range.
+//
+// The exponent is taken in float64 where ggml's ggml_silu_f32 calls expf. That is one ulp of
+// difference on roughly a quarter of inputs -- measured over [-20, 20] at 200001 points, 56004
+// differ, with a maximum relative difference of 1.6e-7 -- and it is the more accurate of the two,
+// so there is nothing to align. Written down because a reader comparing against ggml will find
+// the difference and want to know it was chosen.
 func SiLU(x []float32) {
 	for i, v := range x {
 		// Below this the sigmoid is 1 to well past float32's precision, so the product is

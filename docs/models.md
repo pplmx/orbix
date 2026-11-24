@@ -263,7 +263,7 @@ gates to fetch. It declares 4 experts at 2 used per token, on the `llama` archit
 curl -sSL -o /tmp/tinymoe2m.F32.gguf \
   https://huggingface.co/shibatch/tinymoe2m/resolve/main/tinymoe2m.F32.gguf
 
-MIXTRAL_MODEL=/tmp/tinymoe2m.F32.gguf CGO_ENABLED=0 go test ./internal/llama/ -run TestMoEReachesTheExperts
+MIXTRAL_MODEL=/tmp/tinymoe2m.F32.gguf CGO_ENABLED=0 go test ./internal/llama/ -run TestMoEReachesTheExpertsOnARealModel
 ```
 
 Any mixture-of-experts GGUF this loader accepts works; the test reads `expert_count` from the

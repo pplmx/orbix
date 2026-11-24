@@ -21,11 +21,8 @@ import (
 // markers become claims about history and the skip below says so rather than the test pretending
 // to have verified them.
 func TestDocsExplainTheirVersionMarkers(t *testing.T) {
-	root, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if tags := gitTags(t, filepath.Join(root, "..", "..")); len(tags) > 0 {
+	root := repoRoot(t)
+	if tags := gitTags(t, root); len(tags) > 0 {
 		t.Skipf("%d tag(s) exist (%s), so this check's premise -- that the version markers are "+
 			"plans -- no longer holds; the markers are now history and could be checked against "+
 			"the tag list", len(tags), strings.Join(tags, ", "))
@@ -33,7 +30,7 @@ func TestDocsExplainTheirVersionMarkers(t *testing.T) {
 
 	checked := 0
 	for _, name := range []string{"models.md", "cli.md"} {
-		path := filepath.Join(root, "..", "..", "docs", name)
+		path := filepath.Join(root, "docs", name)
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("reading %s: %v", name, err)

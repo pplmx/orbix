@@ -9083,3 +9083,54 @@ func TestTopKIsHonoured(t *testing.T) {
 		}
 	}
 }
+
+// TestBothEndpointsHonourTheSameSamplingFields checks that a sampling parameter reaches the
+// sampler on /v1/chat/completions and not only on /v1/completions.
+//
+// The two handlers build generateParams separately -- completionParams and chatParams -- and only
+// the completions path had an effect test for any sampling field. They do share the struct and
+// the engine call, so a field wired once is wired for both; what the test covers is precisely
+// that the chat side does not set it to a zero on the way through, which is the shape a copy of
+// the parameter list invites.
+//
+// top_k: 1 is again the sharpest form: one candidate per step makes the result independent of the
+// seed, so two seeds returning different text means the value did not arrive.
+func TestBothEndpointsHonourTheSameSamplingFields(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// chatText returns the assistant message for one chat request.
+	chatText := func(seed int, extra string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"model": %q, "messages": [{"role": "user", "content": "Once"}],
+			"max_tokens": 8, "temperature": 1.5, "seed": %d%s}`, srv.cfg.ModelName, seed, extra)
+		resp := post(t, h, "/v1/chat/completions", body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		got := decodeBody[chatResponse](t, resp)
+		if len(got.Choices) == 0 {
+			t.Fatal("no choices")
+		}
+		return got.Choices[0].Message.Content
+	}
+
+	// The fixture has to vary without the limit, or the equality below proves nothing.
+	seen := make(map[string]bool)
+	for seed := 1; seed <= 12; seed++ {
+		seen[chatText(seed, "")] = true
+	}
+	if len(seen) < 2 {
+		t.Skipf("all twelve chat seeds produced the same text, so this fixture cannot tell a "+
+			"working top_k from an ignored one; saw %d distinct", len(seen))
+	}
+
+	first := chatText(1, `, "top_k": 1`)
+	for seed := 2; seed <= 12; seed++ {
+		if got := chatText(seed, `, "top_k": 1`); got != first {
+			t.Fatalf("chat: top_k=1 gave seed %d %q and seed 1 %q, so the value is not "+
+				"reaching the sampler on this endpoint", seed, got, first)
+		}
+	}
+}

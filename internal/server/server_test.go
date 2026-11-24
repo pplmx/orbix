@@ -8885,3 +8885,35 @@ func TestModelObjectFields(t *testing.T) {
 			"retrieves compares the two", one, e)
 	}
 }
+
+// TestHealthzBody is the contract docs/usage.md states and no test read.
+//
+// "`/healthz` answers {"status": "ok", "model": "<name>"}" -- and until now only the status code
+// was asserted, so the body an operator's probe parses was free to change. The model field is what
+// makes the answer useful when several servers are behind one load balancer: a 200 that does not
+// say which checkpoint answered cannot distinguish a wrong backend from a right one.
+func TestHealthzBody(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, Name: "probe-target"})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var got struct {
+		Status string `json:"status"`
+		Model  string `json:"model"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("the body is not JSON: %v\n%s", err, w.Body.String())
+	}
+	// The literal "ok": a probe keys on this string, and changing it to "healthy" or a bool
+	// would break every check without changing the status code.
+	if got.Status != "ok" {
+		t.Errorf("status field = %q, want \"ok\"", got.Status)
+	}
+	if got.Model != "probe-target" {
+		t.Errorf("model = %q, want the configured name", got.Model)
+	}
+}

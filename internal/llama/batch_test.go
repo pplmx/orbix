@@ -1645,3 +1645,28 @@ func TestScoreBuffersAreDistinctSlices(t *testing.T) {
 		}
 	}
 }
+
+// TestNegativeWorkersFallsBackLikeZero pins the lower half of workers' guard.
+//
+// workers() uses `n <= 0` rather than `n == 0`, so a negative count means "decide for me" just
+// like an absent one. Injection shows nothing tested that: changing the guard to `n == 0` leaves
+// the whole package green, because every test passes a non-negative count.
+//
+// It is worth pinning even though three layers below would survive it -- scoreBuffers clamps
+// slots to 1, split treats parts <= 1 as serial, and Runner.Workers returns 1 for a nil runner --
+// because those are guards against a crash, not against a silently different fan-out. A negative
+// count that reached the kernel as -1 would run everything serially while the CLI reported the
+// value the caller asked for.
+func TestNegativeWorkersFallsBackLikeZero(t *testing.T) {
+	want := workers(0)
+	for _, n := range []int{-1, -4, -1000} {
+		if got := workers(n); got != want {
+			t.Errorf("workers(%d) = %d, want %d (the GOMAXPROCS fallback zero takes)", n, got, want)
+		}
+	}
+	// And a positive count is taken as given, so the fallback is not simply returning the
+	// default for everything.
+	if got := workers(3); got != 3 {
+		t.Errorf("workers(3) = %d, want 3", got)
+	}
+}

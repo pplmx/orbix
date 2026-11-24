@@ -42,47 +42,15 @@ func cmdBench(args []string) error {
 	if err := resolveModel(fs, model); err != nil {
 		return err
 	}
-	if *concurrency < 1 {
-		return fmt.Errorf("bench: --concurrency must be at least 1")
-	}
-	if *maxTokens < 1 {
-		return fmt.Errorf("bench: --max-tokens must be at least 1")
-	}
-	// Zero has a documented meaning here -- one request per concurrency slot -- and the code
-	// reaches it with "total <= 0", so a negative value was silently the same as zero. The
-	// difference matters in a benchmark: the number of requests is the sample size, and a
-	// mistyped one is not a smaller measurement but a different one.
-	if *requests < 0 {
-		return fmt.Errorf("bench: --requests must not be negative (0 means one per " +
-			"concurrency slot)")
-	}
-	// The suite fixes its own concurrency, request count, admission policy, and cache shape:
-	// those are the variables the rows compare, so letting a flag override them would remove
-	// the comparison the table exists to make. Which is exactly why the flags cannot be
-	// accepted and left unread. Passing `--suite --policy bogus` used to run the whole table
-	// and exit 0 with the invalid value never looked at, and `--suite --concurrency 32` printed
-	// a table of eight scenarios measured at other concurrencies with nothing to say so.
-	//
-	// Checked by walking what was actually set rather than by comparing against defaults: a
-	// default is indistinguishable from an explicit equal value, and the point is to tell the
-	// operator their flag did nothing.
-	if *suite {
-		var ignored []string
-		usedBySuite := map[string]bool{
-			"model": true, "max-tokens": true, "prompt": true, "workers": true, "suite": true,
-		}
-		fs.Visit(func(f *flag.Flag) {
-			if !usedBySuite[f.Name] {
-				ignored = append(ignored, "--"+f.Name)
-			}
-		})
-		if len(ignored) > 0 {
-			return fmt.Errorf("bench: --suite measures a fixed set of scenarios and does not use %s;"+
-				" drop the flag, or run without --suite to measure one configuration",
-				strings.Join(ignored, ", "))
-		}
-	}
-	if err := cache.validate("bench", false); err != nil {
+	if err := validateBenchFlags(benchFlags{
+		concurrency: *concurrency,
+		maxTokens:   *maxTokens,
+		requests:    *requests,
+		suite:       *suite,
+		prefixCache: *prefixCache,
+		cache:       cache,
+		visit:       fs.Visit,
+	}); err != nil {
 		return err
 	}
 	total := *requests
@@ -107,19 +75,6 @@ func cmdBench(args []string) error {
 			maxTok:  *maxTokens,
 			workers: *cache.workers,
 		})
-	}
-
-	// Two settings only take effect with a pool, and both used to be accepted and then
-	// ignored: the run stayed on the contiguous cache while the report still described what
-	// the operator had asked for. --prefix-cache was worse than ignored -- the reuse note at
-	// the end of the run dereferenced the pool that --blocks would have created, so the run
-	// measured everything and then panicked on its last print instead of reporting.
-	//
-	// Checked before the model is opened, so a mistyped run costs nothing. The suite above is
-	// exempt because it configures its own cache for each scenario and uses neither flag.
-	if *prefixCache && *cache.blocks == 0 {
-		return fmt.Errorf("bench: --prefix-cache needs a paged cache; add --blocks (and " +
-			"optionally --block-size), or drop --prefix-cache")
 	}
 
 	// Same trap as serve and chat -- a block the context cannot fill is never published to the
@@ -301,5 +256,87 @@ func cmdBench(args []string) error {
 				"             whole block to share, whatever the concurrency)\n", eng.Pool().BlockSize())
 		}
 	}
+	return nil
+}
+
+// benchFlags is what cmdBench read from its flags, before validation.
+type benchFlags struct {
+	concurrency int
+	maxTokens   int
+	requests    int
+	suite       bool
+	prefixCache bool
+	cache       cacheFlags
+	// visit reports the flags that were set explicitly, which the suite check needs: a
+	// default is indistinguishable from an explicit equal value, and the point there is to
+	// tell the operator their flag did nothing.
+	visit func(func(*flag.Flag))
+}
+
+// validateBenchFlags refuses every flag combination bench cannot honour.
+//
+// The suite check is the interesting one. The suite fixes its own concurrency, request count,
+// admission policy and cache shape -- those are the variables its rows compare -- so accepting a
+// flag and ignoring it would remove the comparison the table exists to make. Passing
+// `--suite --policy bogus` used to run the whole table and exit 0 with the invalid value never
+// read, and `--suite --concurrency 32` printed a table of eight scenarios measured at other
+// concurrencies with nothing to say so.
+func validateBenchFlags(v benchFlags) error {
+	if v.concurrency < 1 {
+		return fmt.Errorf("bench: --concurrency must be at least 1")
+	}
+	if v.maxTokens < 1 {
+		return fmt.Errorf("bench: --max-tokens must be at least 1")
+	}
+	// Zero has a documented meaning here -- one request per concurrency slot -- and the code
+	// reaches it with "total <= 0", so a negative value was silently the same as zero. The
+	// difference matters in a benchmark: the number of requests is the sample size, and a
+	// mistyped one is not a smaller measurement but a different one.
+	if v.requests < 0 {
+		return fmt.Errorf("bench: --requests must not be negative (0 means one per " +
+			"concurrency slot)")
+	}
+	// The suite fixes its own concurrency, request count, admission policy, and cache shape:
+	// those are the variables the rows compare, so letting a flag override them would remove
+	// the comparison the table exists to make. Which is exactly why the flags cannot be
+	// accepted and left unread. Passing `--suite --policy bogus` used to run the whole table
+	// and exit 0 with the invalid value never looked at, and `--suite --concurrency 32` printed
+	// a table of eight scenarios measured at other concurrencies with nothing to say so.
+	//
+	// Checked by walking what was actually set rather than by comparing against defaults: a
+	// default is indistinguishable from an explicit equal value, and the point is to tell the
+	// operator their flag did nothing.
+	if v.suite {
+		var ignored []string
+		usedBySuite := map[string]bool{
+			"model": true, "max-tokens": true, "prompt": true, "workers": true, "suite": true,
+		}
+		v.visit(func(f *flag.Flag) {
+			if !usedBySuite[f.Name] {
+				ignored = append(ignored, "--"+f.Name)
+			}
+		})
+		if len(ignored) > 0 {
+			return fmt.Errorf("bench: --suite measures a fixed set of scenarios and does not use %s;"+
+				" drop the flag, or run without --suite to measure one configuration",
+				strings.Join(ignored, ", "))
+		}
+	}
+	if err := v.cache.validate("bench", false); err != nil {
+		return err
+	}
+	// Two settings only take effect with a pool, and both used to be accepted and then ignored:
+	// the run stayed on the contiguous cache while the report still described what the operator
+	// asked for. --prefix-cache was worse than ignored -- the reuse note at the end of the run
+	// dereferenced the pool that --blocks would have created, so the run measured everything and
+	// then panicked on its last print instead of reporting.
+	//
+	// Checked before the model is opened, so a mistyped run costs nothing. The suite is exempt
+	// because it configures its own cache for each scenario and uses neither flag.
+	if v.prefixCache && (*v.cache.blocks) == 0 {
+		return fmt.Errorf("bench: --prefix-cache needs a paged cache; add --blocks (and " +
+			"optionally --block-size), or drop --prefix-cache")
+	}
+
 	return nil
 }

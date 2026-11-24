@@ -1049,7 +1049,13 @@ func (e *Engine) finish(s *sequence, last Event) {
 	close(s.events)
 }
 
-// Active returns the number of sequences still being advanced.
+// Active returns how many sequences have been accepted and have not finished, queued ones
+// included.
+//
+// Not "currently running": a sequence joins the map when Submit accepts it and leaves when it
+// finishes, so with MaxActive 1 and three requests submitted before any Pump, Active is 3.
+// Measured. What is running at this instant is not exposed -- a round advances at most
+// MaxActive of them, and which ones is a scheduling decision no caller acts on.
 func (e *Engine) Active() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()

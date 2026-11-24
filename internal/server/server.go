@@ -1359,102 +1359,9 @@ func (p generateParams) choiceCount() int {
 }
 
 func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generateParams) {
-	if p.maxTokens < 0 {
-		// Refused rather than treated as "unset". The field is a plain int, so zero is the
-		// only distinguishable "not sent", and the code below reaches it with "<= 0" -- which
-		// meant a negative budget silently became the server's default. A client asking for
-		// -5 tokens asked for nothing this server can do, and answering with 256 tokens of
-		// text is the one reply it cannot have meant. It is also the rule every command in
-		// cmd/orbix follows for the same flag value.
-		writeErrorParam(w, http.StatusBadRequest,
-			fmt.Sprintf("max_tokens must not be negative, got %d", p.maxTokens),
-			"max_tokens", "invalid_value")
+	promptTokens, maxTokens, fimStopIDs, ok := s.resolvePrompt(w, &p)
+	if !ok {
 		return
-	}
-	// The two names for the budget are alternatives, not a pair. OpenAI documents
-	// max_tokens as deprecated in favour of max_completion_tokens, so a request carrying
-	// both is a caller mid-migration, and the two numbers can disagree -- 3 and 300 are a
-	// typo either way round, and choosing one silently answers with a budget the caller may
-	// not have meant. Naming both is the one answer that cannot be wrong about which field
-	// to fix.
-	//
-	// The check comes after the negative one so a request with max_tokens: -5 and nothing
-	// else is reported for the value it got wrong rather than for a conflict that is not
-	// there.
-	if p.maxCompletionTokens != nil && *p.maxCompletionTokens < 0 {
-		writeRequestError(w, http.StatusBadRequest, newParamError(
-			"max_completion_tokens", "invalid_value",
-			"max_completion_tokens must not be negative, got %d", *p.maxCompletionTokens))
-		return
-	}
-	if p.maxCompletionTokens != nil && p.maxTokensGiven {
-		writeRequestError(w, http.StatusBadRequest, newParamError(
-			"max_completion_tokens", "invalid_value",
-			"max_tokens and max_completion_tokens are two spellings of one limit and cannot "+
-				"both be set (got %d and %d); send max_completion_tokens alone",
-			p.maxTokens, *p.maxCompletionTokens))
-		return
-	}
-	// Absent, not zero: an omitted budget takes the server's default, while an explicit zero is
-	// a budget of zero and is passed through. The engine finishes a sequence whose budget is
-	// already spent before sampling anything, so the caller gets an empty completion with
-	// finish_reason "length" -- the request it made, rather than the server's default length.
-	//
-	// This used to be one int, so zero meant both and an explicit zero silently became the
-	// default: measured, max_tokens: 0 came back with a full-length paragraph.
-	maxTokens := s.cfg.MaxTokens
-	switch {
-	case p.maxCompletionTokens != nil:
-		maxTokens = *p.maxCompletionTokens
-	case p.maxTokensGiven:
-		maxTokens = p.maxTokens
-	}
-
-	// Encode with BOS only when the model defines one: a model without a BOS id
-	// encodes the prompt as-is.
-	cfg := s.eng.Model().Config()
-
-	// A chat prompt is markup, so its control markers are matched whole; a completions
-	// prompt is text the caller wrote, so a literal "<|im_start|>" there stays text.
-	// The same distinction the CLI's chat command makes, for the same reason.
-	var promptTokens []int32
-	// fimStopIDs are the marker ids the engine stops on, kept separate from p.stop because the
-	// markers are control tokens: their text encodes to a run of characters rather than to the
-	// one token, so stopTokenIDs cannot find them.
-	var fimStopIDs []int32
-	switch {
-	case p.fim != nil:
-		promptTokens = s.fimPrompt(p.prompt, p.suffix, *p.fim)
-		// The generated middle ends at a marker the checkpoint emits, and which one is the
-		// model's business rather than ours. Measured on Qwen2.5-Coder without the closing
-		// markers: the correct expression came first and the reply then carried on writing the
-		// caller's own following lines, because nothing told it to stop.
-		p.stop = append(slices.Clone(p.stop), p.fim.StopStrings()...)
-		fimStopIDs = p.fim.StopIDs()
-	case p.chat:
-		promptTokens = s.tok.EncodeWithSpecials(p.prompt, cfg.BOSID >= 0)
-	default:
-		promptTokens = s.tok.Encode(p.prompt, cfg.BOSID >= 0)
-	}
-	if len(promptTokens) == 0 {
-		writeError(w, http.StatusBadRequest, "prompt encoded to no tokens")
-		return
-	}
-	if len(promptTokens) >= s.cfg.ContextLen {
-		// A coded error, not a bare message: OpenAI's guidance to clients is to branch on
-		// `code`, and its own context overflow carries `context_length_exceeded` with a
-		// `param` naming the side that overflowed. A client that follows that guidance
-		// otherwise sees an uncoded 400 and cannot tell "shorten and retry" from "your
-		// request was malformed".
-		writeRequestError(w, http.StatusBadRequest, newParamError(
-			promptParam(p.chat), "context_length_exceeded",
-			"prompt is %d tokens, context is %d", len(promptTokens), s.cfg.ContextLen))
-		return
-	}
-	// A request cannot exceed the window. Truncating the budget is the useful
-	// behaviour: a client asking for 512 tokens with 100 left should get the 100.
-	if room := s.cfg.ContextLen - len(promptTokens); maxTokens > room {
-		maxTokens = room
 	}
 	choices := p.choiceCount()
 	// best_of asks for more sequences than it returns, and ranking them needs each token's log
@@ -3145,4 +3052,121 @@ func (c *choiceResult) scoreShown(shown int) float64 {
 		sum += float64(s.logprob)
 	}
 	return sum / float64(shown)
+}
+
+// resolvePrompt validates the budget, encodes the prompt and fits both against the window.
+//
+// ok=false means a response has already been written: every refusal here is about the request,
+// and the writer is where the status and the coded error belong. Splitting this out leaves
+// generate with the sampling, admission and streaming, which is what its name suggests.
+//
+// The budget comes back truncated to the window, because that is the same decision: a client
+// asking for 512 tokens with 100 left gets the 100 rather than a refusal.
+func (s *Server) resolvePrompt(w http.ResponseWriter, p *generateParams) (
+	promptTokens []int32, maxTokens int, fimStopIDs []int32, ok bool) {
+	cfg := s.eng.Model().Config()
+	if p.maxTokens < 0 {
+		// Refused rather than treated as "unset". The field is a plain int, so zero is the
+		// only distinguishable "not sent", and the code below reaches it with "<= 0" -- which
+		// meant a negative budget silently became the server's default. A client asking for
+		// -5 tokens asked for nothing this server can do, and answering with 256 tokens of
+		// text is the one reply it cannot have meant. It is also the rule every command in
+		// cmd/orbix follows for the same flag value.
+		writeErrorParam(w, http.StatusBadRequest,
+			fmt.Sprintf("max_tokens must not be negative, got %d", p.maxTokens),
+			"max_tokens", "invalid_value")
+		return nil, 0, nil, false
+	}
+	// The two names for the budget are alternatives, not a pair. OpenAI documents
+	// max_tokens as deprecated in favour of max_completion_tokens, so a request carrying
+	// both is a caller mid-migration, and the two numbers can disagree -- 3 and 300 are a
+	// typo either way round, and choosing one silently answers with a budget the caller may
+	// not have meant. Naming both is the one answer that cannot be wrong about which field
+	// to fix.
+	//
+	// The check comes after the negative one so a request with max_tokens: -5 and nothing
+	// else is reported for the value it got wrong rather than for a conflict that is not
+	// there.
+	if p.maxCompletionTokens != nil && *p.maxCompletionTokens < 0 {
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			"max_completion_tokens", "invalid_value",
+			"max_completion_tokens must not be negative, got %d", *p.maxCompletionTokens))
+		return nil, 0, nil, false
+	}
+	if p.maxCompletionTokens != nil && p.maxTokensGiven {
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			"max_completion_tokens", "invalid_value",
+			"max_tokens and max_completion_tokens are two spellings of one limit and cannot "+
+				"both be set (got %d and %d); send max_completion_tokens alone",
+			p.maxTokens, *p.maxCompletionTokens))
+		return nil, 0, nil, false
+	}
+	// Absent, not zero: an omitted budget takes the server's default, while an explicit zero is
+	// a budget of zero and is passed through. The engine finishes a sequence whose budget is
+	// already spent before sampling anything, so the caller gets an empty completion with
+	// finish_reason "length" -- the request it made, rather than the server's default length.
+	//
+	// This used to be one int, so zero meant both and an explicit zero silently became the
+	// default: measured, max_tokens: 0 came back with a full-length paragraph.
+	maxTokens = s.cfg.MaxTokens
+	switch {
+	case p.maxCompletionTokens != nil:
+		maxTokens = *p.maxCompletionTokens
+	case p.maxTokensGiven:
+		maxTokens = p.maxTokens
+	}
+
+	// A chat prompt is markup, so its control markers are matched whole; a completions
+	// prompt is text the caller wrote, so a literal "<|im_start|>" there stays text.
+	// The same distinction the CLI's chat command makes, for the same reason.
+	//
+	// fimStopIDs are the marker ids the engine stops on, kept separate from p.stop because the
+	// markers are control tokens: their text encodes to a run of characters rather than to the
+	// one token, so stopTokenIDs cannot find them.
+	switch {
+	case p.fim != nil:
+		promptTokens = s.fimPrompt(p.prompt, p.suffix, *p.fim)
+		// The generated middle ends at a marker the checkpoint emits, and which one is the
+		// model's business rather than ours. Measured on Qwen2.5-Coder without the closing
+		// markers: the correct expression came first and the reply then carried on writing the
+		// caller's own following lines, because nothing told it to stop.
+		p.stop = append(slices.Clone(p.stop), p.fim.StopStrings()...)
+		fimStopIDs = p.fim.StopIDs()
+	case p.chat:
+		promptTokens = s.tok.EncodeWithSpecials(p.prompt, cfg.BOSID >= 0)
+	default:
+		promptTokens = s.tok.Encode(p.prompt, cfg.BOSID >= 0)
+	}
+	if len(promptTokens) == 0 {
+		writeError(w, http.StatusBadRequest, "prompt encoded to no tokens")
+		return nil, 0, nil, false
+	}
+	if len(promptTokens) >= s.cfg.ContextLen {
+		// A coded error, not a bare message: OpenAI's guidance to clients is to branch on
+		// `code`, and its own context overflow carries `context_length_exceeded` with a
+		// `param` naming the side that overflowed. A client that follows that guidance
+		// otherwise sees an uncoded 400 and cannot tell "shorten and retry" from "your
+		// request was malformed".
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			promptParam(p.chat), "context_length_exceeded",
+			"prompt is %d tokens, context is %d", len(promptTokens), s.cfg.ContextLen))
+		return nil, 0, nil, false
+	}
+	// A request cannot exceed the window. Truncating the budget is the useful behaviour: a
+	// client asking for 512 tokens with 100 left should get the 100 rather than a refusal.
+	//
+	// This is an optimisation rather than the guarantee, and the difference is worth knowing
+	// before changing it. The engine stops a sequence at the window too (engine.decode checks
+	// s.pos against ContextLen), so a server that skipped this cut would still not generate past
+	// the window -- measured, with the cut removed the same request returned 253 tokens and
+	// finish_reason "length" either way. What the cut buys is the response's own numbers: usage
+	// reports the budget that was actually used, so a caller sees 253 rather than a request for
+	// 100000 reported as though it had been honoured.
+	//
+	// A test cannot distinguish the two implementations for that reason, which is why there is
+	// none here: a case asserting completion_tokens == 253 passes with and without the cut.
+	if room := s.cfg.ContextLen - len(promptTokens); maxTokens > room {
+		maxTokens = room
+	}
+	return promptTokens, maxTokens, fimStopIDs, true
 }

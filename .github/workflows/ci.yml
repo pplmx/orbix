@@ -72,7 +72,7 @@ jobs:
         # 74 tests that a developer's machine ran. Printing the number puts it in every
         # run's record instead of leaving it to be discovered.
         run: |
-          skips="$(go test ./... -count=1 -v 2>&1 | grep -c '^--- SKIP' || true)"
+          skips="$(go test ./... -count=1 -v 2>&1 | grep -ac '^--- SKIP' || true)"
           echo "skipped tests: $skips"
           {
             echo "### Skipped tests: $skips"

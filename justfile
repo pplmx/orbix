@@ -316,7 +316,7 @@ cross:
 #
 # Counts the tests this tree skips, which is the number CI prints on every run.
 skips:
-    @go test ./... -count=1 -v 2>&1 | grep -c '^--- SKIP' || true
+    @go test ./... -count=1 -v 2>&1 | grep -ac '^--- SKIP' || true
 
 
 # Prints the version cz would bump to and the changelog section it would write, then stops. The

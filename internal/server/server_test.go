@@ -8817,3 +8817,71 @@ func TestKeptTokens(t *testing.T) {
 		})
 	}
 }
+
+// TestModelObjectFields covers the three fields of a model entry that no test read.
+//
+// TestModelsAndHealth decodes only object and data[].id, so created, owned_by and the entry's own
+// object were free to change. They are part of the OpenAI schema an SDK decodes into its own model
+// struct, which means a missing one is a zero value on the client rather than an error.
+//
+// created is the interesting one. It is deliberately zero -- a GGUF file records no creation date
+// and the file's mtime is when it was copied -- and the comment at modelObject explains why zero
+// is the honest value rather than a plausible-looking timestamp. That reasoning is only correct as
+// long as the field stays zero, so it is asserted rather than assumed.
+func TestModelObjectFields(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, Name: "orbix-test-model"})
+
+	var doc struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/v1/models status = %d", w.Code)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if len(doc.Data) != 1 {
+		t.Fatalf("got %d entries, want 1", len(doc.Data))
+	}
+	e := doc.Data[0]
+	if e.Object != "model" {
+		t.Errorf("object = %q, want \"model\": an SDK dispatches on this field", e.Object)
+	}
+	if e.Created != 0 {
+		t.Errorf("created = %d, want 0: a nonzero value would claim a date the file does not "+
+			"carry, and modelObject's comment explains why zero is the honest answer", e.Created)
+	}
+	if e.OwnedBy == "" {
+		t.Error("owned_by is empty; the schema requires it and an SDK shows it to a caller")
+	}
+
+	// The retrieve endpoint has to return the same object, which is why it exists in one place.
+	req = httptest.NewRequest(http.MethodGet, "/v1/models/orbix-test-model", nil)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("retrieve status = %d: %s", w.Code, w.Body.String())
+	}
+	var one struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int64  `json:"created"`
+		OwnedBy string `json:"owned_by"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &one); err != nil {
+		t.Fatalf("decoding retrieve: %v", err)
+	}
+	if one.ID != e.ID || one.Object != e.Object || one.Created != e.Created || one.OwnedBy != e.OwnedBy {
+		t.Errorf("retrieve returned %+v but the list entry was %+v: an SDK that lists then "+
+			"retrieves compares the two", one, e)
+	}
+}

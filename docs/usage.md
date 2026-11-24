@@ -474,6 +474,13 @@ round.** Kubernetes sends `SIGTERM`, waits `terminationGracePeriodSeconds` (30 b
 `[DONE]`, and the `shutdown: ... grace expired` line was never printed because the process was
 gone before its own timer fired. That is worse than a clean cut, and it is silent.
 
+That it is the *ordering* of the two numbers, and not the length of the generation, is what a
+controlled pair shows. Same synthetic model, same 18000-token stream, same SIGTERM and SIGKILL
+three seconds apart; only `--shutdown-grace` differs. At `30s` the process is killed before its
+own timer fires: no `[DONE]`, no line in the log, nothing to tell an operator the reply was cut.
+At `1s` the server cuts the stream itself and says so -- `shutdown:  1s grace for in-flight
+responses, then they are cut`. The cut is the same in both; only one of them admits to it.
+
 So keep `--shutdown-grace` below `terminationGracePeriodSeconds`, leaving enough of the
 difference for the process to act on its own deadline, or raise the pod's grace to match what
 the batch needs. The two values are one decision, made in two files.

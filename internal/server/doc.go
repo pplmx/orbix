@@ -43,6 +43,12 @@
 // exists to keep the code paired with the field that produced it. "param" is present when
 // one field is at fault and absent when the failure is about the body as a whole.
 //
+// Two more codes come from the router rather than from validation, and carry the same "error"
+// shape so a client does not need a second decoder: method_not_allowed with a 405 and an Allow
+// header, and unknown_endpoint with a 404. They are listed here because the sentence above says
+// to branch on code, and a reader who took that as the whole set would miss the two a mistyped
+// path produces.
+//
 // invalid_type is separate from invalid_json because the two ask different things of the
 // caller: a body that did not parse has to be re-sent, while a field of the wrong type has to
 // be edited, and the answer names which field -- {"max_tokens": "8"} is 400 invalid_type with

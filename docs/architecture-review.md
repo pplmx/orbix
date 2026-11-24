@@ -594,6 +594,33 @@ internal/engine imports internal/chat -- a reader meets the caller first
 还查了其余文档的失效引用：所有 `doc.go` 里反引号引用的符号都能在对应包里找到（0 个失效），
 `docs/cli.md` 覆盖了全部实际命令。
 
+### 第九轮：flag 全表也没有门禁
+
+上一轮查了 `doc.go` 与阅读顺序。这一轮查另一条"文档承诺"：`docs/configuration.md` 开头写着
+"Every setting is a flag today"，然后列了 44 个 flag。
+
+**核对结果是完全一致**——两个方向、44 个 flag、零差异。但那次核对是我手工做的，没有任何测试会
+因为漂移而失败。
+
+现在有了：
+
+| 检查                                     | 抓什么                        | 注入验证                        |
+| ---------------------------------------- | ----------------------------- | ------------------------------- |
+| `TestConfigurationDocListsEveryFlag`     | 命令接受但文档没列的 flag     | 把 `--shutdown-grace` 改名 → 红 |
+| `TestConfigurationDocNamesOnlyRealFlags` | 文档列了但没有命令接受的 flag | 编造 `--drain-timeout` → 红     |
+
+第二个方向**故意比能做的更弱**。按命令归因是显然的下一步，但它不成立：文档的表按**功能**分节，
+"Paged cache, on serve, chat and bench" 是一张覆盖三个命令的表。我按 `##`/`###` 分节 + "以冒号
+结尾且提到命令名的句子"做归因，**报了 11 个 flag 归错命令，全是误报**。于是退到并集检查：文档
+提到的每个 flag 必须被某个命令接受。它抓不住"这个 flag 属于别的命令"，但抓得住文档侧改名和代码侧
+删 flag——这两个才是"表承诺了没人能传的东西"的实际形态。
+
+实现上跑 `go run ./cmd/orbix <cmd> -h` 而不是把 flag 注册抽成函数。我试过抽成
+`defineServeFlags` 并改好了 `serve.go`（44 行改动），然后**撤回**了：抽出来后没有消费者，四个命令
+都要为同一个测试改一遍。实测四次调用共 1.2 秒，够便宜。
+
+守卫里 `if len(union) < 25` 的 25 是照实测的 26 留的余量，不是猜的。
+
 ### `run` 仍然不迁到 engine
 
 第九节把这件事列为待定。本轮看了它到底要什么，结论是**不迁**，理由比上一轮具体：

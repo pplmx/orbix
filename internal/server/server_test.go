@@ -5735,6 +5735,20 @@ func TestFinishReasonMapping(t *testing.T) {
 		}
 	}
 
+	// Every reason the engine can produce has to appear above.
+	for _, r := range engine.FinishReasons() {
+		found := false
+		for _, c := range cases {
+			if c.reason == r.String() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the engine defines reason %q and this table does not cover it", r.String())
+		}
+	}
+
 	// Every value the schema defines has to be reachable from some engine reason, or a client
 	// branching on them would see a case that never occurs.
 	seen := map[string]bool{}

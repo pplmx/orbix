@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -1794,79 +1795,12 @@ type streamItem struct {
 // distinguishes the two by choices being empty, and one that reads usage off every chunk
 // without a null there would see the field missing rather than absent.
 func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []<-chan engine.Event, id string, created int64, p generateParams, promptTokens int) {
-	flusher, ok := w.(http.Flusher)
+	ew, ok := newEventWriter(w, s.cfg.ModelName, eventEnvelope{id: id, created: created}, p)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this connection")
 		return
 	}
-	h := w.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	// nginx buffers proxied responses by default (proxy_buffering on), which holds an SSE
-	// stream until the response ends -- the stream still arrives intact, but all at once, and
-	// a token stream that arrives at the end is not a token stream. This header is nginx's own
-	// per-response switch for that, and nginx will not infer it: its maintainers declined to
-	// special-case text/event-stream on the grounds that a media type describes how a payload
-	// is formatted, not how it is delivered (nginx/nginx#1505).
-	//
-	// It costs nothing where it is not understood. A proxy that does not know it ignores it and
-	// a direct client has no use for it, so the only reader is nginx, and only to turn
-	// buffering off for this one response. The rest of the API keeps the proxy's default,
-	// which is what that default is for.
-	h.Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	// OpenAI's spec is explicit that a completion is "always" text_completion, and its own
-	// streaming example carries the same value as the non-streaming one -- the two endpoints
-	// differ here, since chat streams object="chat.completion.chunk". A client that switches
-	// on this field to tell a delta from a whole body looks for the chunk name it knows.
-	object := "text_completion"
-	if p.chat {
-		object = "chat.completion.chunk"
-	}
-	send := func(payload map[string]any) bool {
-		payload["id"] = id
-		payload["object"] = object
-		payload["created"] = created
-		payload["model"] = s.cfg.ModelName
-		if p.includeUsage {
-			// Set on every ordinary chunk, not only the usage one: OpenAI documents the
-			// field as present-and-null here, and a client that inspects it on each chunk
-			// then needs no branch for "the field is missing".
-			if _, ok := payload["usage"]; !ok {
-				payload["usage"] = nil
-			}
-		}
-		b, err := json.Marshal(payload)
-		if err != nil {
-			// Unreachable with the payloads built here -- maps of strings, ints, nils and
-			// nested maps of the same, none of which can fail to encode. Kept because a
-			// future field that does fail should end the stream rather than write a chunk
-			// with a hole in it, and returning false already means "stop streaming".
-			//
-			// It shares a return value with the write failure below, and the two mean
-			// different things: a write failure means the client is gone, while this one
-			// would mean the server built something it could not describe. Nothing above
-			// distinguishes them today because nothing can reach this branch.
-			return false
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-			return false
-		}
-		// A flush error is not checked, and that is deliberate: the request context is what
-		// notices a client that left, and it is already passed to the engine as Request.Cancel.
-		// Measured over a raw TCP connection that is reset mid-stream, the engine stops within
-		// two tokens of the reset -- the cancel fires first, so a flush check would add a second
-		// route to the same place.
-		//
-		// A test that measures this over http.Post and closes the body sees something else: a
-		// graceful close leaves the connection usable, no reset is sent, and generation runs to
-		// its full budget. That is a property of the client, not of this code, and it is worth
-		// knowing before reading a large number as waste.
-		flusher.Flush()
-		return true
-	}
+	send := ew.send
 
 	// writeItem is the one place a streamItem becomes bytes, so the inline and the fan-in
 	// paths cannot disagree about the shape of a chunk.
@@ -1928,32 +1862,27 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 	// once because the prompt is one text, completion_tokens summed because each choice
 	// generated its own.
 	if p.includeUsage {
-		usage := map[string]any{
-			"id": id, "object": object, "created": created, "model": s.cfg.ModelName,
+		// Through the same writer as every other chunk: the envelope -- id, object, created,
+		// model -- is what a client uses to tell this chunk apart from a text one, and building
+		// it here as well is how a field gets left off one of the two paths.
+		ew.send(map[string]any{
 			"choices": []map[string]any{},
 			"usage": map[string]int{
 				"prompt_tokens":     promptTokens,
 				"completion_tokens": generated,
 				"total_tokens":      promptTokens + generated,
 			},
-		}
-		ub, err := json.Marshal(usage)
-		if err != nil {
-			return
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", ub); err != nil {
-			return
-		}
+		})
 	}
 	if cancelled {
-		// No [DONE]: the stream did not complete, and saying it did is the difference between
-		// a client that retries and one that keeps a truncated reply. Flushing what is already
+		// No [DONE]: the stream did not complete, and saying it did is the difference between a
+		// client that retries and one that keeps a truncated reply. Flushing what is already
 		// buffered still happens so the deltas that did arrive are delivered.
-		flusher.Flush()
+		ew.flusher.Flush()
 		return
 	}
-	_, _ = w.Write([]byte("data: [DONE]\n\n"))
-	flusher.Flush()
+	_, _ = io.WriteString(ew.w, "data: [DONE]\n\n")
+	ew.flusher.Flush()
 }
 
 // streamChoices runs every choice and reports the stream's totals.
@@ -3178,4 +3107,112 @@ func (s *Server) choiceObject(c *choiceResult, out int, p generateParams) map[st
 		"finish_reason": finishReasonFor(reason),
 		"logprobs":      logprobs,
 	}
+}
+
+// eventEnvelope is the metadata every server-sent event carries.
+//
+// It is separate because the same four fields go on every chunk and on the usage chunk, and the
+// two were assembled at each site -- which is how a chunk ends up missing its model name.
+type eventEnvelope struct {
+	id      string
+	created int64
+}
+
+// eventWriter writes one response's server-sent events.
+//
+// Headers, the object name and the flush are protocol concerns that have nothing to do with
+// which tokens the engine produced, and keeping them here means the two paths that emit events --
+// blocking and streaming -- cannot disagree about the shape of a frame.
+//
+// send returning false means the stream must stop: the client is gone, or a payload could not be
+// encoded. The caller cannot tell those apart, and nothing above needs to: both end the response.
+type eventWriter struct {
+	w            http.ResponseWriter
+	flusher      http.Flusher
+	model        string
+	env          eventEnvelope
+	object       string
+	includeUsage bool
+}
+
+// newEventWriter checks that the connection can stream and writes the response headers.
+//
+// ok=false means the response has already been written with an error and the caller must return.
+// The check is on http.Flusher rather than on the response type because that is the capability a
+// stream needs: a writer that cannot flush holds every token until the response ends, which
+// arrives as one late body rather than as a stream.
+func newEventWriter(w http.ResponseWriter, model string, env eventEnvelope, p generateParams) (*eventWriter, bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return nil, false
+	}
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	// nginx buffers proxied responses by default (proxy_buffering on), which holds an SSE
+	// stream until the response ends -- the stream still arrives intact, but all at once, and a
+	// token stream that arrives at the end is not a token stream. This header is nginx's own
+	// per-response switch for that, and nginx will not infer it: its maintainers declined to
+	// special-case text/event-stream on the grounds that a media type describes how a payload is
+	// formatted, not how it is delivered (nginx/nginx#1505).
+	//
+	// It costs nothing where it is not understood. A proxy that does not know it ignores it and a
+	// direct client has no use for it, so the only reader is nginx, and only to turn buffering
+	// off for this one response. The rest of the API keeps the proxy's default, which is what
+	// that default is for.
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// OpenAI's spec is explicit that a completion is "always" text_completion, and its own
+	// streaming example carries the same value as the non-streaming one -- the two endpoints
+	// differ here, since chat streams object="chat.completion.chunk". A client that switches on
+	// this field to tell a delta from a whole body looks for the chunk name it knows.
+	object := "text_completion"
+	if p.chat {
+		object = "chat.completion.chunk"
+	}
+	return &eventWriter{
+		w: w, flusher: flusher, model: model, env: env, object: object,
+		includeUsage: p.includeUsage,
+	}, true
+}
+
+// send writes one event and flushes it.
+func (ew *eventWriter) send(payload map[string]any) bool {
+	payload["id"] = ew.env.id
+	payload["object"] = ew.object
+	payload["created"] = ew.env.created
+	payload["model"] = ew.model
+	if ew.includeUsage {
+		// Set on every ordinary chunk, not only the usage one: OpenAI documents the field as
+		// present-and-null here, and a client that inspects it on each chunk then needs no
+		// branch for "the field is missing".
+		if _, ok := payload["usage"]; !ok {
+			payload["usage"] = nil
+		}
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		// Unreachable with the payloads built here -- maps of strings, ints, nils and nested
+		// maps of the same, none of which can fail to encode. Kept because a future field that
+		// does fail should end the stream rather than write a chunk with a hole in it, and
+		// returning false already means "stop streaming".
+		return false
+	}
+	if _, err := fmt.Fprintf(ew.w, "data: %s\n\n", b); err != nil {
+		return false
+	}
+	// A flush error is not checked, and that is deliberate: the request context is what notices
+	// a client that left, and it is already passed to the engine as Request.Cancel. Measured
+	// over a raw TCP connection that is reset mid-stream, the engine stops within two tokens of
+	// the reset -- the cancel fires first, so a flush check would add a second route to the same
+	// place.
+	//
+	// A test that measures this over http.Post and closes the body sees something else: a
+	// graceful close leaves the connection usable, no reset is sent, and generation runs to its
+	// full budget. That is a property of the client, not of this code, and it is worth knowing
+	// before reading a large number as waste.
+	ew.flusher.Flush()
+	return true
 }

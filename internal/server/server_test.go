@@ -8459,3 +8459,90 @@ func TestChoiceObjectShapes(t *testing.T) {
 		}
 	})
 }
+
+// TestEventWriterFrameShape pins the bytes a client actually reads.
+//
+// Every chunk carries the same four metadata fields, and a client tells the usage chunk apart
+// from a text one by its empty choices array. Both were assembled at each emit site before this
+// type existed, which is how a field goes missing from one path and not the other.
+func TestEventWriterFrameShape(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ew, ok := newEventWriter(rec, "orbix-test", eventEnvelope{id: "cmpl-1", created: 1700000000},
+		generateParams{chat: true, includeUsage: true})
+	if !ok {
+		t.Fatal("a recorder can flush, so newEventWriter refused one it should accept")
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", got)
+	}
+	// The nginx switch, which has no other way to be noticed.
+	if got := rec.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Errorf("X-Accel-Buffering = %q, want no", got)
+	}
+
+	if !ew.send(map[string]any{"choices": []map[string]any{}}) {
+		t.Fatal("send reported failure on a writable recorder")
+	}
+	frame := rec.Body.String()
+	if !strings.HasPrefix(frame, "data: ") || !strings.HasSuffix(frame, "\n\n") {
+		t.Fatalf("frame is not an SSE data line: %q", frame)
+	}
+	var payload map[string]any
+	body := strings.TrimSuffix(strings.TrimPrefix(frame, "data: "), "\n\n")
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("the frame's payload is not JSON (%v): %s", err, body)
+	}
+	for _, key := range []string{"id", "object", "created", "model"} {
+		if _, ok := payload[key]; !ok {
+			t.Errorf("the payload has no %s: %v", key, payload)
+		}
+	}
+	if payload["id"] != "cmpl-1" {
+		t.Errorf("id = %v, want cmpl-1", payload["id"])
+	}
+	if payload["object"] != "chat.completion.chunk" {
+		t.Errorf("object = %v, want the chat chunk name", payload["object"])
+	}
+	// includeUsage puts a present-and-null usage on every ordinary chunk, which is what a
+	// client reading usage off each chunk expects rather than a missing key.
+	if u, present := payload["usage"]; !present {
+		t.Error("usage is absent from an ordinary chunk that includeUsage asked to mark")
+	} else if u != nil {
+		t.Errorf("usage = %v on an ordinary chunk, want null", u)
+	}
+}
+
+// TestEventWriterLeavesTheUsageChunkAlone checks the one payload that carries its own usage.
+//
+// The sentinel above must not overwrite it: a client finds the usage chunk by its empty choices
+// array and reads the totals off it, so replacing them with null loses the only number the
+// caller asked for.
+func TestEventWriterLeavesTheUsageChunkAlone(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ew, _ := newEventWriter(rec, "m", eventEnvelope{id: "x"}, generateParams{includeUsage: true})
+	ew.send(map[string]any{
+		"choices": []map[string]any{},
+		"usage":   map[string]int{"total_tokens": 7},
+	})
+	var payload map[string]any
+	body := strings.TrimSuffix(strings.TrimPrefix(rec.Body.String(), "data: "), "\n\n")
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("payload is not JSON: %v", err)
+	}
+	usage, ok := payload["usage"].(map[string]any)
+	if !ok || usage["total_tokens"] != float64(7) {
+		t.Errorf("usage = %v, want the totals it was given", payload["usage"])
+	}
+}
+
+// TestEventWriterRefusesAWriterThatCannotFlush keeps the one refusal it can make.
+//
+// A ResponseWriter without Flush holds every token until the response ends, which arrives as one
+// late body rather than as a stream. The check is on the capability rather than on the concrete
+// type because that is what the stream needs.
+func TestEventWriterRefusesAWriterThatCannotFlush(t *testing.T) {
+	plain := noFlushWriter{ResponseWriter: httptest.NewRecorder()}
+	if _, ok := newEventWriter(plain, "m", eventEnvelope{}, generateParams{}); ok {
+		t.Error("newEventWriter accepted a writer that cannot flush")
+	}
+}

@@ -114,51 +114,8 @@ type chatOptions struct {
 // whole conversation without a subprocess. The loop's contract is small on purpose:
 // one line in, one reply out, and history that only grows when a turn succeeds.
 func chatSession(in io.Reader, out io.Writer, opts chatOptions) error {
-	// One open for the metadata, the config, the tokenizer and the template; see openModel.
-	m, err := openModel(opts.model)
+	eng, m, err := openChatSession(out, &opts)
 	if err != nil {
-		return err
-	}
-	opts.renderer = m.renderer
-	// Say which format is in use. It is worth one line: a model whose template was
-	// not applied answers in a shape the caller did not expect, and knowing that from
-	// the start is the difference between a bug report and a mystery.
-	if _, err := fmt.Fprintf(out, "(using %s)\n", m.ChatFormat()); err != nil {
-		return err
-	}
-
-	// A paged cache with prefix reuse is the default for a REPL, so this command sizes a pool
-	// itself when --blocks is unset -- and, because reuse is on by default here, the
-	// oversized-block guard always applies rather than only under --prefix-cache.
-	plan, err := planCache("chat", m.cfg, cacheFlags{
-		blockSize: &opts.blockSize,
-		blocks:    &opts.blocks,
-		workers:   &opts.workers,
-	}, true, opts.prefixCache)
-	if err != nil {
-		return err
-	}
-
-	eng, err := engine.New(opts.model, engine.Options{
-		MaxActive: 1, // a REPL has one request at a time
-		Workers:   opts.workers,
-		BlockSize: plan.blockSize,
-		Blocks:    plan.blocks,
-	})
-	if err != nil {
-		return err
-	}
-	if opts.prefixCache {
-		if pool := eng.Pool(); pool != nil {
-			pool.EnablePrefixCache()
-		}
-	}
-	cfg := eng.Model().Config()
-
-	if _, err := fmt.Fprintf(out, "orbix chat: %s\n", cfg); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(out, "Type a message and press enter. Commands: %s\n\n", chatCommands); err != nil {
 		return err
 	}
 
@@ -674,4 +631,61 @@ func chatCommand(out io.Writer, line string, history *[]chatTurn, stats func() e
 		_, err := fmt.Fprintf(out, "unknown command %q, try /help\n", line)
 		return false, err
 	}
+}
+
+// openChatSession builds everything a REPL needs before the first prompt.
+//
+// The setup is separated from the loop because the two have different shapes: this part opens
+// files and fails once, while the loop runs until EOF. It also prints the banner -- which format
+// is in use -- because that is part of saying what was opened, not part of a turn.
+func openChatSession(out io.Writer, opts *chatOptions) (*engine.Engine, *modelFiles, error) {
+	// One open for the metadata, the config, the tokenizer and the template; see openModel.
+	m, err := openModel(opts.model)
+	if err != nil {
+		return nil, nil, err
+	}
+	opts.renderer = m.renderer
+	// Say which format is in use. It is worth one line: a model whose template was
+	// not applied answers in a shape the caller did not expect, and knowing that from
+	// the start is the difference between a bug report and a mystery.
+	if _, err := fmt.Fprintf(out, "(using %s)\n", m.ChatFormat()); err != nil {
+		return nil, nil, err
+	}
+
+	// A paged cache with prefix reuse is the default for a REPL, so this command sizes a pool
+	// itself when --blocks is unset -- and, because reuse is on by default here, the
+	// oversized-block guard always applies rather than only under --prefix-cache.
+	plan, err := planCache("chat", m.cfg, cacheFlags{
+		blockSize: &opts.blockSize,
+		blocks:    &opts.blocks,
+		workers:   &opts.workers,
+	}, true, opts.prefixCache)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	eng, err := engine.New(opts.model, engine.Options{
+		MaxActive: 1, // a REPL has one request at a time
+		Workers:   opts.workers,
+		BlockSize: plan.blockSize,
+		Blocks:    plan.blocks,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if opts.prefixCache {
+		if pool := eng.Pool(); pool != nil {
+			pool.EnablePrefixCache()
+		}
+	}
+	cfg := eng.Model().Config()
+
+	if _, err := fmt.Fprintf(out, "orbix chat: %s\n", cfg); err != nil {
+		return nil, nil, err
+	}
+	if _, err := fmt.Fprintf(out, "Type a message and press enter. Commands: %s\n\n", chatCommands); err != nil {
+		return nil, nil, err
+	}
+
+	return eng, m, nil
 }

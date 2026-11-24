@@ -23,7 +23,15 @@ Orbix targets the GGUF ecosystem. Initial support:
 | `IQ4_NL`                       | done   |
 | `K-quants` (`Q2_K`-`Q6_K`)     | done   |
 
-GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table expands incrementally. Two ggml types are defined and sized but not decoded -- `Q8_1` and `Q8_K` -- and both are conversion-tool intermediates rather than formats a released checkpoint uses. A file carrying either is refused with `cannot decode <type>` at load, the same way an unrecognised type is.
+GGUF parsing and tokenization are implemented in pure Go from the start; the quantization table
+expands incrementally. ggml names more formats than this package decodes: fifteen of the weight
+formats above have a block size in the size table and no decoder here -- `Q8_1` and `Q8_K`, which
+are conversion-tool intermediates rather than formats a released checkpoint uses, and thirteen
+of the newer low-bit and microscaling families (`IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`,
+`IQ3_XXS`, `IQ3_S`, `IQ4_XS`, `TQ1_0`, `TQ2_0`, `Q1_0`, `MXFP4`, `NVFP4`). A file carrying any of
+them is refused with `cannot decode <type>` at load, the same way an unrecognised type is, and
+`TestModelsDocListsEveryDecodableFormat` keeps this sentence and the tables honest in both
+directions.
 
 Six architectures are checked against real checkpoints: `llama` against llama.cpp's
 log-probabilities, `qwen2` against a converted official checkpoint, `gemma` and `gemma2` against

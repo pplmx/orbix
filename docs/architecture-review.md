@@ -784,6 +784,8 @@ uv run --offline python3 scripts/quant_xcheck.py /tmp/q.json               # 14 
 
 ORBIX_ROPEDUMP=/tmp/rope.json go test ./internal/llama/ -run TestDumpRope
 uv run --offline --with numpy python3 scripts/rope_xcheck.py /tmp/rope.json # 6 cases, 2048 values
+
+uv run --offline --with gguf python3 scripts/fixture_xcheck.py   # 18 keys, 21 tensors
 ```
 
 ```bash

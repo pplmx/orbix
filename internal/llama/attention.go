@@ -292,17 +292,32 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 // the nil check in one place is what keeps the three forward paths from each growing
 // their own copy of it.
 func (m *Model) addBias(layer *layer, rows int) error {
+	return m.addBiasTo(layer, m.q, m.k, m.v, rows)
+}
+
+// addBiasTo applies the attention projections' biases to rows rows of q, k and v.
+//
+// This was three functions -- addBias, addBiasBatch and addBiasDecode -- with the same six
+// kernel calls and a different struct holding the buffers. The arithmetic was never what
+// differed: q, k and v are laid out [rows, width] in all three paths, so the only parameter the
+// copies disagreed on was where the slices came from.
+//
+// It returns early when the layer carries no biases, which is every Llama and Gemma model. That
+// check is on the tensors rather than on an architecture flag: a file either has the three
+// vectors or it does not, and a flag that disagreed with the file would apply a nil bias or skip
+// a real one.
+func (m *Model) addBiasTo(layer *layer, q, k, v []float32, rows int) error {
 	cfg := m.W.Config
 	if layer.qBias == nil && layer.kBias == nil && layer.vBias == nil {
 		return nil
 	}
-	if err := kernel.AddBias(m.q, layer.qBias, rows, cfg.Heads*cfg.HeadDim); err != nil {
+	if err := kernel.AddBias(q, layer.qBias, rows, cfg.Heads*cfg.HeadDim); err != nil {
 		return err
 	}
-	if err := kernel.AddBias(m.k, layer.kBias, rows, cfg.kvDim()); err != nil {
+	if err := kernel.AddBias(k, layer.kBias, rows, cfg.kvDim()); err != nil {
 		return err
 	}
-	return kernel.AddBias(m.v, layer.vBias, rows, cfg.kvDim())
+	return kernel.AddBias(v, layer.vBias, rows, cfg.kvDim())
 }
 
 // trimSpans drops all but the last keep rows from a span list.

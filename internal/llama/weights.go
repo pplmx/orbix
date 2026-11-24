@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/pplmx/orbix/internal/kernel"
 	"github.com/pplmx/orbix/internal/quant"
 )
 
@@ -241,6 +242,32 @@ func embedInto(dst, row []float32, scale float32) {
 	}
 }
 
+// embedRow copies one token's embedding into dst, checking the bounds first.
+//
+// The three forward paths -- single token, batched prefill, batched decode -- each had their own
+// copy of this check, and their own comment apologising for it: "this is the third copy of the
+// check and it was missed when the first two were corrected". The comment was right about the
+// cause and the copies were right about the rule; what was missing is that the rule has one
+// home.
+//
+// The bound is on the token rather than on the computed offset, and that is the whole point. A
+// check written as `off+Hidden > len(embedding)` cannot see a negative token: off becomes
+// negative, off+Hidden stays below the slice length, and the copy that follows panics on a slice
+// expression starting below zero. Computing the offset only after the token is known to be in
+// range also keeps it from overflowing on a 32-bit int.
+func (m *Model) embedRow(dst []float32, token int) error {
+	cfg := m.W.Config
+	if token < 0 || token >= cfg.VocabSize {
+		return fmt.Errorf("llama: token %d outside vocabulary of %d", token, cfg.VocabSize)
+	}
+	off := token * cfg.Hidden
+	if off+cfg.Hidden > len(m.W.TokenEmbedding) {
+		return fmt.Errorf("llama: token %d embedding outside %d values", token, len(m.W.TokenEmbedding))
+	}
+	embedInto(dst, m.W.TokenEmbedding[off:off+cfg.Hidden], cfg.EmbedScale)
+	return nil
+}
+
 func checkFinite(tensors map[string][]float32) error {
 	for _, name := range slices.Sorted(maps.Keys(tensors)) {
 		values := tensors[name]
@@ -302,4 +329,30 @@ func (w *Weights) Params() int64 {
 		}
 	}
 	return n
+}
+
+// outputWeight returns the matrix the logits are projected through.
+//
+// A tied model reuses the embedding matrix, which has the same shape as an output projection:
+// [hidden, vocab]. Three forward paths had this choice written out, and a fourth that forgot it
+// would silently project through a nil slice or skip a real matrix.
+func (m *Model) outputWeight() []float32 {
+	if m.W.Output != nil {
+		return m.W.Output
+	}
+	return m.W.TokenEmbedding
+}
+
+// capLogits applies the output softcap, if the architecture declares one.
+//
+// This is the single home for a step that exists in three paths -- Forward, Prefill and
+// DecodeStep -- and was missed in one of them: docs/models.md records that Gemma 2's cap was
+// added to the single-token and batched-decode projections but not the prefill's, so every
+// reply's first token came from a different distribution than the rest. The defect was not the
+// cap's arithmetic; it was that the arithmetic had three homes and one of them did not know.
+//
+// Taking the slice rather than reading a field is what makes one call serve all three: the
+// prefill path has one row of logits, the decode path has n.
+func (m *Model) capLogits(logits []float32) {
+	kernel.Softcap(logits, m.W.Config.FinalSoftcap)
 }

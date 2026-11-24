@@ -231,27 +231,6 @@ func (m *Model) Prefill(cache Cache, tokens []int32, startPos int) ([]float32, e
 	return b.logits, nil
 }
 
-// addBiasBatch applies the attention projections' biases to every row of a batch.
-//
-// Reducing n to 1 -- applying the bias to the first row only -- is only observable when the
-// comparison is per-row. bias_test.go's two tests compare a biased model against one whose bias
-// vectors were zeroed, which stays green under that change: some row still reads the bias, so the
-// two runs still differ. TestPrefillAppliesAttentionBiasToEveryRow is the one that pins the row
-// count, by comparing a single batched prefill against the same positions run one at a time.
-func addBiasBatch(b *batch, layer *layer, n int) error {
-	if layer.qBias == nil && layer.kBias == nil && layer.vBias == nil {
-		return nil
-	}
-	cfg := b.cfg
-	if err := kernel.AddBias(b.q, layer.qBias, n, cfg.Heads*cfg.HeadDim); err != nil {
-		return err
-	}
-	if err := kernel.AddBias(b.k, layer.kBias, n, cfg.kvDim()); err != nil {
-		return err
-	}
-	return kernel.AddBias(b.v, layer.vBias, n, cfg.kvDim())
-}
-
 // normRows normalizes every row of the residual stream into b.xn.
 //
 // The rows are independent, so this is a plain loop over the per-row kernel
@@ -272,21 +251,11 @@ func (m *Model) normRows(b *batch, weight []float32) error {
 
 // embedBatch gathers the embedding rows for every token.
 func (m *Model) embedBatch(b *batch, tokens []int32) error {
-	cfg := m.W.Config
+	h := m.W.Config.Hidden
 	for i, tok := range tokens {
-		// The guard is on the token, not on the offset: a negative token makes off negative
-		// and `off+Hidden` can still be within the slice, so a check written against the sum
-		// alone lets it through and the copy panics on a slice expression starting below zero.
-		// The sum is then computed only after the token is known to be in range, which is what
-		// keeps it from overflowing on a 32-bit int as well.
-		if int(tok) < 0 || int(tok) >= cfg.VocabSize {
-			return fmt.Errorf("llama: token %d outside vocabulary of %d", tok, cfg.VocabSize)
+		if err := m.embedRow(b.x[i*h:(i+1)*h], int(tok)); err != nil {
+			return err
 		}
-		off := int(tok) * cfg.Hidden
-		if off+cfg.Hidden > len(m.W.TokenEmbedding) {
-			return fmt.Errorf("llama: token %d embedding outside %d values", tok, len(m.W.TokenEmbedding))
-		}
-		embedInto(b.x[i*cfg.Hidden:(i+1)*cfg.Hidden], m.W.TokenEmbedding[off:off+cfg.Hidden], cfg.EmbedScale)
 	}
 	return nil
 }
@@ -311,7 +280,7 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	if err := m.run.MatMulTransposed(b.v, b.xn, layer.wv, n, kvdim, cfg.Hidden); err != nil {
 		return err
 	}
-	if err := addBiasBatch(b, layer, n); err != nil {
+	if err := m.addBiasTo(layer, b.q, b.k, b.v, n); err != nil {
 		return err
 	}
 
@@ -470,19 +439,10 @@ func (m *Model) finishBatch(b *batch) error {
 	if err := kernel.RMSNorm(xn, last, m.W.OutputNorm, cfg.RMSNormEps); err != nil {
 		return err
 	}
-	w := m.W.Output
-	if w == nil {
-		w = m.W.TokenEmbedding
-	}
-	if err := m.run.MatVec(b.logits, w, xn, cfg.VocabSize, cfg.Hidden); err != nil {
+	if err := m.run.MatVec(b.logits, m.outputWeight(), xn, cfg.VocabSize, cfg.Hidden); err != nil {
 		return err
 	}
-	// The same bound the decode path applies. There are three places that project onto the
-	// vocabulary -- Forward, Prefill and DecodeStep -- and a cap applied to two of them makes the
-	// first token of a response come from a different distribution than the rest. This one was
-	// missed when the cap was added, and TestFinalSoftcapBoundsTheLogits is what found it: the
-	// uncapped logit read -165 where the cap allows -30.
-	kernel.Softcap(b.logits, cfg.FinalSoftcap)
+	m.capLogits(b.logits)
 	return nil
 }
 
@@ -621,19 +581,8 @@ func newDecodeBatch(cfg Config, n int) *decodeBatch {
 
 // embed copies one sequence's token embedding into its row.
 func (b *decodeBatch) embed(m *Model, row, token int) error {
-	cfg := m.W.Config
-	// Same rule as the batch path above, and for the same reason: the token is what has to be
-	// in range, because a negative one produces a negative offset that the sum-based check
-	// cannot see.
-	if token < 0 || token >= cfg.VocabSize {
-		return fmt.Errorf("llama: token %d outside vocabulary of %d", token, cfg.VocabSize)
-	}
-	off := token * cfg.Hidden
-	if off+cfg.Hidden > len(m.W.TokenEmbedding) {
-		return fmt.Errorf("llama: token %d embedding outside %d values", token, len(m.W.TokenEmbedding))
-	}
-	embedInto(b.x[row*cfg.Hidden:(row+1)*cfg.Hidden], m.W.TokenEmbedding[off:off+cfg.Hidden], cfg.EmbedScale)
-	return nil
+	h := m.W.Config.Hidden
+	return m.embedRow(b.x[row*h:(row+1)*h], token)
 }
 
 // attention runs one block's attention for every sequence in the batch.
@@ -677,7 +626,7 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 	if err := m.run.MatMulTransposed(b.v, b.xn, layer.wv, n, kvdim, cfg.Hidden); err != nil {
 		return err
 	}
-	if err := addBiasDecode(b, layer, n); err != nil {
+	if err := m.addBiasTo(layer, b.q, b.k, b.v, n); err != nil {
 		return err
 	}
 
@@ -738,22 +687,6 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
 }
 
-// addBiasDecode applies the attention projections' biases to every row of a decode
-// batch.
-func addBiasDecode(b *decodeBatch, layer *layer, n int) error {
-	if layer.qBias == nil && layer.kBias == nil && layer.vBias == nil {
-		return nil
-	}
-	cfg := b.cfg
-	if err := kernel.AddBias(b.q, layer.qBias, n, cfg.Heads*cfg.HeadDim); err != nil {
-		return err
-	}
-	if err := kernel.AddBias(b.k, layer.kBias, n, cfg.kvDim()); err != nil {
-		return err
-	}
-	return kernel.AddBias(b.v, layer.vBias, n, cfg.kvDim())
-}
-
 // feedForward runs one block's feed-forward network for every row.
 func (b *decodeBatch) feedForward(m *Model, l int) error {
 	cfg := m.W.Config
@@ -800,15 +733,11 @@ func (b *decodeBatch) finish(m *Model) error {
 			return err
 		}
 	}
-	w := m.W.Output
-	if w == nil {
-		w = m.W.TokenEmbedding
-	}
-	if err := m.run.MatMulTransposed(b.logits, b.xn, w, n, cfg.VocabSize, cfg.Hidden); err != nil {
+	if err := m.run.MatMulTransposed(b.logits, b.xn, m.outputWeight(), n, cfg.VocabSize, cfg.Hidden); err != nil {
 		return err
 	}
 	for r := range n {
-		kernel.Softcap(b.logits[r*cfg.VocabSize:(r+1)*cfg.VocabSize], cfg.FinalSoftcap)
+		m.capLogits(b.logits[r*cfg.VocabSize : (r+1)*cfg.VocabSize])
 	}
 	return nil
 }

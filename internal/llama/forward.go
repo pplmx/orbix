@@ -197,26 +197,7 @@ func (m *Model) Forward(cache Cache, token int, pos int) ([]float32, error) {
 
 // embed copies the token's embedding row into the residual stream.
 func (m *Model) embed(token int) error {
-	cfg := m.W.Config
-	// The token is what has to be in range. A check written as `off+Hidden > len(embedding)`
-	// cannot see a negative token: off becomes negative, and off+Hidden stays below the slice
-	// length, so the copy that follows panics on a slice expression starting below zero. The
-	// same fix is in decodeBatch.embed and the batched prefill path; this is the third copy of
-	// the check and it was missed when the first two were corrected.
-	//
-	// Callers do validate today -- Forward checks the token, and logitsForCached relies on
-	// its tokens having come from a prefill that checked them -- but the invariant is
-	// cross-function and this function is what performs the indexing, so the bound belongs
-	// here too.
-	if token < 0 || token >= cfg.VocabSize {
-		return fmt.Errorf("llama: token %d outside vocabulary of %d", token, cfg.VocabSize)
-	}
-	off := token * cfg.Hidden
-	if off+cfg.Hidden > len(m.W.TokenEmbedding) {
-		return fmt.Errorf("llama: token %d embedding outside %d values", token, len(m.W.TokenEmbedding))
-	}
-	embedInto(m.x, m.W.TokenEmbedding[off:off+cfg.Hidden], cfg.EmbedScale)
-	return nil
+	return m.embedRow(m.x, token)
 }
 
 // attention runs one block's self-attention and adds it to the residual.
@@ -371,19 +352,10 @@ func (m *Model) finish() error {
 	if err := kernel.RMSNorm(m.xn, m.x, m.W.OutputNorm, cfg.RMSNormEps); err != nil {
 		return err
 	}
-	// A tied model reuses the embedding matrix, which has the same shape as an
-	// output projection: [hidden, vocab].
-	w := m.W.Output
-	if w == nil {
-		w = m.W.TokenEmbedding
-	}
-	if err := m.run.MatVec(m.logits, w, m.xn, cfg.VocabSize, cfg.Hidden); err != nil {
+	if err := m.run.MatVec(m.logits, m.outputWeight(), m.xn, cfg.VocabSize, cfg.Hidden); err != nil {
 		return err
 	}
-	// Gemma 2 bounds the logits themselves, which is a bound on the distribution rather than on
-	// the attention scores: with both, the model cannot report more confidence than it was
-	// trained to express at either end.
-	kernel.Softcap(m.logits, cfg.FinalSoftcap)
+	m.capLogits(m.logits)
 	return nil
 }
 

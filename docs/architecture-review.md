@@ -289,6 +289,69 @@ CLI 层 3429 行里有大量不属于"解析参数并打印"的内容：
 - ~~`internal/server` 仍导入 `internal/llama`~~ — **已切掉**（`5619da2`）。`Sampler`、`Alternative`、`TokenBias` 现在声明在 `internal/engine`；`llama` 的实现结构化地满足 `Sampler`，所以没有牺牲能力。三个构造函数（`NewBiased`/`Greedy`/`NewTemperature`/`TokenLogprob`）转调 `llama`，没有重新实现——第一版我给 `Biased` 写了个拷贝 logits 的版本，那会改变一个原实现用整段注释解释过的每 token 成本。
   这条边现在由 `internal/server/imports_test.go` 强制：它解析包内每个 `.go` 文件（含测试），命中 `internal/llama` 就失败并给出原因。用 grep 不行——那个包里有好几处注释引用 `llama.cpp` 作为 FIM 与模板分词的对拍参考，那些应当留下。
 
+## 十、函数级失控：本轮按当下代码做的分解
+
+第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
+**18 个函数在 100 行以上**（用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
+统计骗成几千行；722 个函数，59 个在 60 行以上）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+与字段赋值是否逐字保留。
+
+| 函数                      | 之前 | 之后 | 拿出来的部分                                                |
+| ------------------------- | ---- | ---- | ----------------------------------------------------------- |
+| `llama.LoadConfig`        | 315  | 45   | 六个阶段方法 + `configParser`（`get` 一个必填正整数读取器） |
+| `server.generate`         | 282  | 189  | `resolvePrompt`（预算校验、按端点编码、窗口检查）           |
+| `cli.cmdBench`            | 279  | 234  | `validateBenchFlags`（59 行，9 条错误串逐字一致）           |
+| `cli.cmdServe`            | 311  | 238  | `validateServeFlags`（94 行，9 条错误串逐字一致）           |
+| `server.blockingResponse` | 201  | 131  | `choiceObject`（68 行，两种 schema / echo / stop 截断）     |
+| `server.streamResponse`   | 162  | 90   | `eventWriter`（帧头、对象名、usage 标记、编码、flush）      |
+
+`cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
+把一步拆成两半而不减少读者要在脑中持有的东西。
+
+**本轮没碰、仍 >=100 行的六个**：`chat.evalExpr` 275、`tokenize.New` 274、
+`tokenize.preFamilyOf` 271、`cli.chatSession` 178、`cli.cmdRun` 175、
+`server.streamOneChoice` 161，以及 `llama.LoadWeights` 134 与 `llama.attentionBatch` 133。
+前三个是解析器的分派函数，改动面比它们省下的行数大；`LoadWeights` 与 `attentionBatch` 上一轮
+判断过不该合（见第三节）。这一轮只处理了那些"拆开后能给出一个可命名的单元"的。
+
+`LoadConfig` 的六段是 `dimensions`、`headGeometry`、`rotation`、`experts`、`window`（含
+`localLayers`）、`vocabulary`。`dimensions` 顺手改成了表驱动；把 `block_count` 映射到错误的字段
+会让 117 个测试变红，这是那张表能改的前提。
+
+### 这一轮最重要的两个发现
+
+**一、有些改动在测试层面不可观测，写测试会得到一条通过但无判别力的用例。**
+
+`generate` 里把预算截到窗口的那一行（`ContextLen - len(promptTokens)`）就是。把它改成
+`ContextLen`，响应完全不变——实测两种实现都返回 `completion=253`、`finish_reason="length"`，
+因为 `engine.decode` 自己也会在窗口处停。这行代码改变的是 `usage` 报告的数字，不是模型生成的东西。
+
+我先写了断言 `completion_tokens == 253` 的测试，注入之后它**照样通过**，于是把它删了，改成在代码
+注释里写清这行为什么存在、以及为什么没有测试。留一条为错的理由通过的测试，比没有测试更糟。
+
+**二、注入验证必须先确认构建成功。**
+
+两次给 `validateBenchFlags` 注入 `if false` 都显示"测试没抓住"，实际上那次编辑让 `ignored`
+成了未使用变量，**包根本没编译过**，`go test` 跑的是上一次的测试二进制。改成能编译的
+`if !usedBySuite[f.Name] && false` 之后，测试立刻红。
+
+此后每次注入都先 `go build`。这条和 AGENTS.md 里"注意同一段文本可能出现在多处"是同一类错误：
+验证手段本身失效时报出的"通过"没有意义。
+
+### `run` 仍然不迁到 engine
+
+第九节把这件事列为待定。本轮看了它到底要什么，结论是**不迁**，理由比上一轮具体：
+
+- 它现在用 `llama.NewKVCache`，`--stats` 报 `cache: N/M positions, S reserved`，三个数都来自
+  contiguous cache 的 `Len()`/`Cap()`/`Bytes()`。engine 只有一个共享的 `BlockPool`
+  （`Blocks()`/`BlockSize()`/`Bytes()`），语义不同——报出来的不会是同一个量。
+- 它还靠 `cache.Len() == cache.Cap()` 判断"是不是窗口用尽"，据此打印预算被截断的提示。paged
+  pool 没有等价的判断。
+- 迁过去会让 `run` 测的不再是 `llama` 的生成路径，而它现在正是那条路径唯一的生产使用者。剔掉它
+  之后，`llama.Generate` 只剩测试在用，那等于把一个有生产调用方的接口变成测试专用接口。
+
+要做的话，先得回答"`run --stats` 应该报什么"，那是产品决定，不是重构决定。
+
 ## 复算清单
 
 ```bash

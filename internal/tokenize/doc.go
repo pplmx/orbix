@@ -58,6 +58,12 @@
 // the only check that compares where a rule cuts, which is why a family's absence from it is
 // worth knowing when deciding how much to trust one this package has not been run against.
 //
+// preGPT2 has a second instrument, scripts/pre_xcheck.py: the same inputs are split by GPT-2's
+// published pattern in Python and compared. Its expectations are written from OpenAI's source
+// rather than transcribed from llama.cpp like the table, so a misreading of either side shows up
+// as a disagreement. Measured with the rule's digit grouping changed from a single run to pairs:
+// the script reports "12345" splitting as ['12','34','5'] where the reference gives ['12345'].
+//
 // deepseek-v3 brought a letter class that includes combining marks, a punctuation
 // alternative naming categories instead of their complement, and a digit-group and CJK
 // expression ahead of the main rule. tekken brought structure *inside* the letter run: a run

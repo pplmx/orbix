@@ -1646,3 +1646,58 @@ func TestFairInterleavesNewArrivalsWithALongRunningSequence(t *testing.T) {
 			"that is the property it exists for", fair)
 	}
 }
+
+// TestAdmitFairBoundsEveryWait is the property PriorityFair's comment claims, checked across
+// rounds rather than within one.
+//
+// The comment states it as "no sequence can be passed over more than about len(active)/MaxActive
+// rounds in a row", which is a bound on a sequence's wait, not on the order of one selection. The
+// existing tests pin single selections -- which sequence is picked first, and that a never-served
+// one outranks a served one -- and neither can fail if the bound degrades to "usually".
+//
+// The simulation runs admit repeatedly, marking each winner with the round it ran, and checks the
+// longest gap between turns against the ceiling the comment names. A policy change that ordered by
+// lastServed but broke ties badly, or dropped the sorting for a cheaper approximation, would show
+// up here as one sequence waiting many more rounds than its neighbours.
+func TestAdmitFairBoundsEveryWait(t *testing.T) {
+	for _, tc := range []struct{ n, limit int }{
+		{6, 2}, {6, 1}, {10, 3}, {5, 5}, {9, 4},
+	} {
+		t.Run(fmt.Sprintf("n=%d limit=%d", tc.n, tc.limit), func(t *testing.T) {
+			ready := make([]*sequence, tc.n)
+			for i := range ready {
+				// Equal budgets, so PriorityFair's lastServed key is the only thing that
+				// orders them; a different budget would let the tie-break by remaining work
+				// interfere with the property under test.
+				ready[i] = fakeSeq(i, 100, 0, -1)
+			}
+
+			lastRan := make([]int, tc.n)
+			for i := range lastRan {
+				lastRan[i] = -1
+			}
+			const rounds = 40
+			for round := range rounds {
+				winners := admit(ready, tc.limit, PriorityFair)
+				if len(winners) != tc.limit {
+					t.Fatalf("round %d admitted %d, want %d", round, len(winners), tc.limit)
+				}
+				for _, w := range winners {
+					lastRan[w.id] = round
+					w.lastServed = round
+				}
+			}
+
+			// The bound the comment names, rounded up: with n sequences and limit slots, a
+			// sequence cannot be passed over more than ceil(n/limit) rounds in a row.
+			bound := (tc.n + tc.limit - 1) / tc.limit
+			for i, ran := range lastRan {
+				gap := rounds - 1 - ran
+				if gap > bound {
+					t.Errorf("sequence %d last ran on round %d, %d rounds before the end; the "+
+						"fair policy promises a wait of at most %d", i, ran, gap, bound)
+				}
+			}
+		})
+	}
+}

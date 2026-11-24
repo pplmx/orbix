@@ -72,7 +72,7 @@ func (t *Tokenizer) preSplit(text string) []string {
 		return splitZonos3(text)
 	}
 	if fam.digitsFromRight && !fam.caseSplit && !fam.letterMarks {
-		return splitDigitsFromRight(text, fam.digitsRightBoundary, fam.digitsRightDecimal)
+		return splitDigitsFromRight(text, false, false)
 	}
 	if fam.partition {
 		// The digit cut runs first, as llama.cpp applies the expressions in order: this
@@ -87,7 +87,7 @@ func (t *Tokenizer) preSplit(text string) []string {
 		pieces = splitNewlineRuns(text)
 	}
 	if fam.digitsFromRight {
-		pieces = splitDigitsFromRight(text, fam.digitsRightBoundary, fam.digitsRightDecimal)
+		pieces = splitDigitsFromRight(text, false, false)
 	}
 	if fam.preDigits > 0 {
 		pieces = splitDigitGroups(pieces, fam.preDigits)
@@ -1009,15 +1009,6 @@ type preRule struct {
 	// the remainder -- if any -- is the leftmost chunk. The superbpe lookahead asserts a
 	// multiple of three digits remain, which puts the boundary there.
 	digitsFromRight bool
-	// digitsRightDecimal restricts digitsFromRight to \d rather than \p{N}. The two differ
-	// on the superscripts and Roman numerals, which \p{N} includes and \d does not, and the
-	// family whose lookahead is written "\d" groups only the narrower set: tiny_aya leaves
-	// "\u00b2\u2163" whole where the wide class would group them.
-	digitsRightDecimal bool
-	// digitsRightBoundary restricts digitsFromRight to runs whose right neighbour is not a
-	// word character. tiny_aya's expression ends in \b, so a run touching a letter is gap
-	// text rather than a match.
-	digitsRightBoundary bool
 	// stopSetDigits is BLOOM's expression followed by a single-digit cut. Both steps are
 	// needed in that order, which is why the stop-set dispatch cannot return early for this
 	// family the way it does for the others.
@@ -2518,9 +2509,17 @@ func splitNewlineRuns(text string) []string {
 // which places the first boundary where the leftover digits end. Grouping from the left, as
 // the other digit-taking families do, would put the remainder on the right instead.
 //
-// When needWordBoundary is set the expression ends in \b, as tiny_aya's does: a run whose right
-// neighbour is a letter is not matched at all and stays gap text, so "123a" is one chunk where
-// superbpe would cut it. The left side is unconstrained -- "a123456" still groups.
+// needWordBoundary and decimalOnly are both false at every call site, and the branches behind
+// them are unreachable. They describe tiny_aya, which used to be the one family that set them --
+// a \b at the end of its expression and \d rather than \p{N} -- until commit 85e9e22 split it
+// into the two passes its expressions actually describe. The fields were left behind and never
+// set again: not true for any family, not constructed in any test.
+//
+// They are kept rather than deleted because the branches carry measurements -- "123a" staying
+// one chunk, a \p{N}-but-not-\d character not ending a gap -- that describe real behaviour of
+// the expressions they came from, and the next family with a \b will want them. What is fixed is
+// the claim that any current model reaches them: the call sites pass constants, so the compiler
+// and the reader both see that the live path is the unconstrained one.
 func splitDigitsFromRight(text string, needWordBoundary, decimalOnly bool) []string {
 	// digit reports whether s begins with a member of the family's digit class. "\d" is the
 	// Unicode decimal digits; "\p{N}" is wider, adding the superscripts and Roman numerals.

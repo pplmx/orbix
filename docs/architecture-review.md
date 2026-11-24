@@ -47,7 +47,7 @@ go run ./scripts/count.go       # 每包行数与函数数（AST）
 grep -c "func Test" internal/*/*_test.go cmd/orbix/*_test.go
 ```
 
-## 二、依赖图：分层是真的，渗透是真的
+## 二、依赖图：分层是真的，曾经的两处渗透已修掉
 
 `go list` 给出的实际内部导入边：
 
@@ -678,7 +678,7 @@ internal/engine imports internal/chat -- a reader meets the caller first
 
 API 面也复核了：`engine` 的导出签名里只出现 `Sampler`（`Greedy()` 返回它）和 `*gguf.File`（渲染器要读文件里的模板）；`server` 只出现 `*engine.Engine` 与 `*tokenize.Tokenizer`，都是它该接收的。没有下层实现类型泄漏到上层签名里。
 
-### 第九轮：四个怀疑，四次证伪
+### 第十一轮：四个怀疑，四次证伪
 
 这一轮没有改代码，因为查的四件事都经得起检验。记录在这里是为了让后来者不必重查。
 
@@ -723,7 +723,7 @@ go test -count=1 ./...                                    # 24s
 go test -cover ./...
 golangci-lint run                                         # 需 v2
 just docs && just cross
-uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # exit 1（inline_if）
+uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # 598 cases, exit 0
 ```
 
 ```bash

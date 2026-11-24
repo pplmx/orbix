@@ -8982,3 +8982,56 @@ func TestServerDefaultsAreUsedWhenTheRequestOmitsThem(t *testing.T) {
 			"above is then vacuous for this input")
 	}
 }
+
+// TestTheHonouredSamplingFieldsChangeTheOutput covers the half of "honoured" that the existing
+// test does not.
+//
+// TestRefusesTheFieldsItCannotHonour asserts that a request setting logit_bias,
+// presence_penalty or frequency_penalty is served with 200, and its comment says those three are
+// honoured now because "a caller who bans a token or asks for less repetition is asking for
+// different text". A field that is parsed and then dropped also returns 200, so that test cannot
+// tell the two apart -- and the docs/usage.md paragraph makes exactly the claim it cannot check.
+//
+// The assertion here is a comparison of outputs: the same prompt, seed and temperature, once
+// without the field and once with it. Different text means the value reached the sampler.
+func TestTheHonouredSamplingFieldsChangeTheOutput(t *testing.T) {
+	srv, _ := newTestServerConfig(t, gguftest.Model{NoEOS: true, ContextLen: 512}, Config{
+		MaxTokens: 8, ContextLen: 512,
+	})
+
+	run := func(t *testing.T, extra string) string {
+		t.Helper()
+		body := `{"prompt":"Once","max_tokens":8,"seed":7,"temperature":1.0`
+		if extra != "" {
+			body += "," + extra
+		}
+		body += "}"
+		resp := post(t, srv.Handler(), "/v1/completions", body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d for %s", resp.StatusCode, body)
+		}
+		got := decodeBody[completionResponse](t, resp)
+		if len(got.Choices) == 0 {
+			t.Fatalf("no choices for %s", body)
+		}
+		return got.Choices[0].Text
+	}
+
+	plain := run(t, "")
+	// A field whose value never reached the sampler would leave the text byte-identical to
+	// this baseline. The three are checked one at a time rather than together, so a field that
+	// became a no-op while another still worked would fail on its own.
+	for _, tc := range []struct{ name, field string }{
+		{"logit_bias", `"logit_bias":{"1":-100,"2":-100,"3":-100}`},
+		{"presence_penalty", `"presence_penalty":2.0`},
+		{"frequency_penalty", `"frequency_penalty":2.0`},
+	} {
+		t.Run(tc.name+" changes the output", func(t *testing.T) {
+			if got := run(t, tc.field); got == plain {
+				t.Errorf("with %s the text is unchanged (%q), so the value is parsed and "+
+					"dropped rather than honoured", tc.field, got)
+			}
+		})
+	}
+}

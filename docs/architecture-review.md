@@ -346,11 +346,11 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**仍未处理、>=100 行的十二个**（2026-11 末 AST 实测，729 个函数）：`tokenize.preFamilyOf` 271、
+**仍未处理、>=100 行的十二个**（2026-11 末 AST 实测，731 个函数）：`tokenize.preFamilyOf` 271、
 `chat.evalExpr` 242、`cli.cmdServe` 238、`cli.cmdBench` 234、`server.generate` 189、
 `server.streamOneChoice` 157、`tokenize.loadPreTokenization` 157、`cli.cmdRun` 147、
-`cli.chatSession` 135、`llama.LoadWeights` 134、`llama.attentionBatch` 133、
-`server.blockingResponse` 131。
+`cli.chatSession` 135、`llama.attentionBatch` 133、`server.blockingResponse` 131、
+`tokenize.splitKimiK2` 123。
 
 逐个判断如下，而不是笼统地"改动面大"：
 
@@ -470,6 +470,26 @@ right)`，`evalExpr` 从 275 行降到 242。
   三种符号组合都覆盖。
 
 注入验证：关掉溢出比较红两个测试，关掉负数检查按名字红掉 divisor 那条。
+
+### 第五轮：`LoadWeights` 终于降到线下，以及一个测不到的注释
+
+`LoadWeights` 134 行里塞着三件互不相关的事：读 rope 频率张量、推导张量名清单、逐层装配。名清单先拆
+（`tensorNames`，33 行），rope 张量后拆（`loadRopeFreqs`，23 行），**134 → 78**，四轮以来第一次让
+"≥100 行"的总数从 18 掉到 17。
+
+规模不是这轮的重点。重点是 `tensorNames` 此前**一个测试都没有**：所有现有测试都通过 `NewWithOptions`
+加载真实文件，而名字清单是 `LoadConfig` 与文件之间的契约——它决定了"缺张量"是被命名报错还是在第一次
+前向时空指针崩溃。现在五个测试直接覆盖它：四个可选组各自增减对应的张量、专家分支是**替换**稠密 FFN
+而不是追加、没有重名、数量随层数线性增长、每个层内张量都是 `blk.<n>.<name>` 形状。
+
+其中"没有重名"那条是永远不会自己报错的缺陷：重复的名字会让加载器把同一个张量读两遍、第二次覆盖第一次，
+唯一的症状是内存占用看起来不对。
+
+顺带补上 `rope_freqs` 的**零值**检查。它有注释和实测记录（`freqs {1, 0}` 时 `cos[pos=1][1]` 是 NaN），
+兄弟分支（读取、长度、NaN）各有子测试，唯独这条没有。它是 `checkFinite` 覆盖不到的那类：零是有限值。
+关掉检查后测试红，报的正是注释警告的那句话。
+
+四个注入全部先 build 再跑，全部命中。
 
 ### `run` 仍然不迁到 engine
 

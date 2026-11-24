@@ -3698,3 +3698,67 @@ func TestPreNameMappingIsComplete(t *testing.T) {
 		t.Errorf("an unknown name selected pre=%d, want preNone", tok.pre)
 	}
 }
+
+// TestWhitespaceFamilyChunks covers the one family whose rule is a single class rather than an
+// expression over alternatives.
+//
+// The comment on splitWhitespaceRuns records the defect this pins: dropping the spaces between
+// runs turned "a  b" into ["a", "b"], losing the two spaces and the word boundary they encode --
+// text the vocabulary was never trained to see as adjacent. llama.cpp's splitter emits the gap
+// before each match and the tail after the last as pieces of their own, so they are chunks here
+// too.
+func TestWhitespaceFamilyChunks(t *testing.T) {
+	tok := &Tokenizer{pre: preWhitespace}
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		// The separators are preserved, not dropped. These are the cases the comment names.
+		{"a  b", []string{"a", "  ", "b"}},
+		{"a b", []string{"a", " ", "b"}},
+		{"  a", []string{"  ", "a"}},
+		{"a  ", []string{"a", "  "}},
+		// A run of non-space characters stays whole: \S+ does not split on anything else.
+		{"hello", []string{"hello"}},
+		{"a.b,c", []string{"a.b,c"}},
+		{"中文", []string{"中文"}},
+		// Consecutive spaces are one chunk, as in the reference -- not one chunk per space.
+		{"a   b", []string{"a", "   ", "b"}},
+		// Mixed whitespace is still one class: a tab separates like a space does.
+		{"a\tb", []string{"a", "\t", "b"}},
+		{"a \t b", []string{"a", " \t ", "b"}},
+		// A newline is whitespace for this rule, which is what \S+ means.
+		{"a\nb", []string{"a", "\n", "b"}},
+		// Degenerate inputs.
+		{"", []string{""}},
+		{"   ", []string{"   "}},
+	}
+	for _, c := range cases {
+		got := tok.preSplit(c.in)
+		if !sameStrings(got, c.want) {
+			t.Errorf("preSplit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestWhitespaceFamilyKeepsEveryByte is the property the chunk list has to satisfy.
+//
+// Pre-tokenization decides where pieces end; it must not decide what text exists. Concatenating
+// the chunks has to give back the input exactly, or the vocabulary is fed something the model
+// never saw. A rule that discarded separators would still pass a spot check on one input.
+func TestWhitespaceFamilyKeepsEveryByte(t *testing.T) {
+	tok := &Tokenizer{pre: preWhitespace}
+	inputs := []string{
+		"a  b", " a b ", "a\t\tb", "a\n\nb", "\t\n a \n\t",
+		"hello world", "  ", "a", "中文 测试", "a\u00a0b", // U+00A0 is a space to unicode.IsSpace
+	}
+	for _, in := range inputs {
+		var rebuilt string
+		for _, c := range tok.preSplit(in) {
+			rebuilt += c
+		}
+		if rebuilt != in {
+			t.Errorf("preSplit(%q) reassembles to %q: the rule changed the text", in, rebuilt)
+		}
+	}
+}

@@ -398,6 +398,15 @@ func (e *Engine) Model() *llama.Model { return e.model }
 //
 // The channel is closed after the final event, so a caller can range over it.
 // Generation happens when Pump is called; Submit alone does no work.
+//
+// A caller that stops pumping is left holding an open channel that will never carry anything:
+// Submit does not start a goroutine, so there is nothing else to close it. A caller who submits
+// and then waits for an event without pumping waits forever, and the goroutine doing it leaks.
+// Measured with no pump: nothing arrives on the channel and it stays open.
+//
+// Every caller here pumps: engine.Drive as `for eng.Pump() > 0`, the server's run loop as
+// `if n := s.eng.Pump(); n > 0`, and the REPL as `if eng.Pump() == 0 { ... }`, which is why the
+// requirement never shows in practice.
 func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	cfg := e.model.Config()
 	if len(req.Prompt) == 0 {

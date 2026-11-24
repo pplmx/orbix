@@ -2325,3 +2325,55 @@ func TestBenchPrefixCacheNeedsAPagedPool(t *testing.T) {
 		})
 	}
 }
+
+// TestVersionJSONReportsCgoConsistently covers the two cgo fields and their relationship.
+//
+// The object carries both because they answer different questions: cgo is a bool derived from the
+// build tag when debug info is unavailable, and cgo_enabled carries the recorded setting as a
+// string when the binary still has it. Neither is redundant -- stripping the build info drops the
+// string and leaves the bool, which is exactly when the fallback to the compile-time tag matters.
+//
+// What is checkable is that they agree whenever both are present: cgo is true exactly when
+// cgo_enabled reads "1". A change that made one drift from the other would answer "is this binary
+// cgo-free" two ways in one object.
+func TestVersionJSONReportsCgoConsistently(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"version", "-json"}); err != nil {
+			t.Fatalf("version -json: %v", err)
+		}
+	})
+	var got struct {
+		Cgo        bool    `json:"cgo"`
+		CgoEnabled *string `json:"cgo_enabled"`
+		Platform   string  `json:"platform"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("version -json did not produce JSON: %v\n%s", err, out)
+	}
+
+	// The test binary is built the same way the package is, so build info is present; if it
+	// ever is not, the assertion below should say so rather than pass vacuously.
+	if got.CgoEnabled == nil {
+		t.Skip("this build carries no CGO_ENABLED setting, so the agreement cannot be checked " +
+			"here; the field was omitted as its omitempty tag intends")
+	}
+	switch *got.CgoEnabled {
+	case "1":
+		if !got.Cgo {
+			t.Errorf("cgo_enabled is \"1\" but cgo is false: the object answers the same "+
+				"question two ways\n%s", out)
+		}
+	case "0":
+		if got.Cgo {
+			t.Errorf("cgo_enabled is \"0\" but cgo is true\n%s", out)
+		}
+	default:
+		t.Errorf("cgo_enabled = %q, want \"0\" or \"1\"", *got.CgoEnabled)
+	}
+
+	// The platform field is OS/arch with a slash, which is what a caller parses to decide
+	// whether the binary is the one they expected.
+	if strings.Count(got.Platform, "/") != 1 {
+		t.Errorf("platform = %q, want os/arch", got.Platform)
+	}
+}

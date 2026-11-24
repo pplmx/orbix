@@ -3,6 +3,7 @@ package gguf
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"testing"
 )
@@ -124,7 +125,7 @@ func encodeValue(b *bytes.Buffer, v Value) {
 			encodeValue(b, e)
 		}
 	default:
-		panic("encodeValue: unsupported value type")
+		panic(fmt.Sprintf("encodeValue: unsupported value type %s (%d)", v.Type, uint32(v.Type)))
 	}
 }
 

@@ -3,6 +3,7 @@ package llama
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"slices"
@@ -129,7 +130,7 @@ func encodeValue(b *bytes.Buffer, v gguf.Value) {
 			encodeValue(b, e)
 		}
 	default:
-		panic("encodeValue: unsupported type")
+		panic(fmt.Sprintf("encodeValue: unsupported value type %s (%d)", v.Type, uint32(v.Type)))
 	}
 }
 

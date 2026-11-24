@@ -305,17 +305,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		return Config{}, fmt.Errorf("llama: unsupported architecture %q (supported: %s)", arch, supportedArchs())
 	}
 
-	get := func(name string) (int, error) {
-		v, ok := f.Get[int](arch + "." + name)
-		if !ok {
-			return 0, fmt.Errorf("llama: missing %s.%s", arch, name)
-		}
-		if v <= 0 {
-			return 0, fmt.Errorf("llama: %s.%s = %d, must be positive", arch, name, v)
-		}
-		return v, nil
-	}
-
+	p := configParser{arch: arch, file: f, spec: spec}
 	cfg := Config{
 		Arch:       arch,
 		RopeLayout: spec.rope,
@@ -327,27 +317,89 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	if name, ok := f.Get[string]("general.name"); ok {
 		cfg.Name = name
 	}
-	if cfg.Hidden, err = get("embedding_length"); err != nil {
+
+	// Assembly is staged by concern, one function per stage, in the order the file implies:
+	// dimensions first, because everything else is checked against them; then the head
+	// geometry; then the rotation, the experts and the window; then the vocabulary, which comes
+	// from a tensor rather than from a key. validate runs last, because comparing every tensor
+	// shape is only meaningful once the numbers it compares against exist.
+	for _, stage := range []func(*Config) error{
+		p.dimensions,
+		p.headGeometry,
+		p.rotation,
+		p.experts,
+		p.window,
+		p.vocabulary,
+	} {
+		if err := stage(&cfg); err != nil {
+			return Config{}, err
+		}
+	}
+	if err := cfg.validate(f); err != nil {
 		return Config{}, err
 	}
-	if cfg.Layers, err = get("block_count"); err != nil {
-		return Config{}, err
+	return cfg, nil
+}
+
+// configParser reads one architecture's metadata, spelling each key the way the file does.
+//
+// It exists for two reasons rather than as ceremony: every stage would otherwise repeat
+// arch + "." + name and the "required and positive" rule, and a stage that got either wrong
+// would fail on a file that is fine.
+type configParser struct {
+	arch string
+	file *gguf.File
+	// spec is the archSpecs entry for arch, carried so a stage can read a property the table
+	// records (the embedding scale is the one that matters here) without a second lookup.
+	spec archSpec
+}
+
+// get reads a required positive integer, naming the key as the file spells it.
+func (p configParser) get(name string) (int, error) {
+	v, ok := p.file.Get[int](p.arch + "." + name)
+	if !ok {
+		return 0, fmt.Errorf("llama: missing %s.%s", p.arch, name)
 	}
-	if cfg.Heads, err = get("attention.head_count"); err != nil {
-		return Config{}, err
+	if v <= 0 {
+		return 0, fmt.Errorf("llama: %s.%s = %d, must be positive", p.arch, name, v)
 	}
-	if cfg.FFN, err = get("feed_forward_length"); err != nil {
-		return Config{}, err
-	}
-	if cfg.ContextLen, err = get("context_length"); err != nil {
-		return Config{}, err
+	return v, nil
+}
+
+// dimensions reads the four numbers every later check is relative to.
+func (p configParser) dimensions(cfg *Config) error {
+	// One table rather than five ifs: the five keys are read the same way and differ only in
+	// which field they land in, and a table makes a new one a single line instead of a
+	// paragraph that could be written with the wrong error path.
+	for _, key := range []struct {
+		name string
+		dst  *int
+	}{
+		{"embedding_length", &cfg.Hidden},
+		{"block_count", &cfg.Layers},
+		{"attention.head_count", &cfg.Heads},
+		{"feed_forward_length", &cfg.FFN},
+		{"context_length", &cfg.ContextLen},
+	} {
+		v, err := p.get(key.name)
+		if err != nil {
+			return err
+		}
+		*key.dst = v
 	}
 
+	return nil
+}
+
+// headGeometry reads how the attention heads are laid out.
+func (p configParser) headGeometry(cfg *Config) error {
+	arch, f := p.arch, p.file
+	_, _ = arch, f
 	// GQA models list fewer KV heads than query heads. When the key is absent
 	// the model is multi-head, which is the same thing with equal counts.
 	if kv, ok := f.Get[int](arch + ".attention.head_count_kv"); ok {
 		if kv <= 0 {
-			return Config{}, fmt.Errorf("llama: %s.attention.head_count_kv = %d, must be positive", arch, kv)
+			return fmt.Errorf("llama: %s.attention.head_count_kv = %d, must be positive", arch, kv)
 		}
 		cfg.KVHeads = kv
 	} else {
@@ -355,7 +407,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	}
 
 	if cfg.Hidden%cfg.Heads != 0 {
-		return Config{}, fmt.Errorf("llama: embedding_length %d is not divisible by head_count %d", cfg.Hidden, cfg.Heads)
+		return fmt.Errorf("llama: embedding_length %d is not divisible by head_count %d", cfg.Hidden, cfg.Heads)
 	}
 	// The per-head width is usually Hidden/Heads, but not always: Gemma 2 has 2304 hidden and 8
 	// heads with 256-wide queries and keys, so the attention projections are not square. A file
@@ -364,7 +416,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	cfg.HeadDim = cfg.Hidden / cfg.Heads
 	if v, ok := f.Get[int](arch + ".attention.key_length"); ok {
 		if v <= 0 || v > cfg.Hidden {
-			return Config{}, fmt.Errorf("llama: %s.attention.key_length = %d, outside (0, %d]",
+			return fmt.Errorf("llama: %s.attention.key_length = %d, outside (0, %d]",
 				arch, v, cfg.Hidden)
 		}
 		cfg.HeadDim = v
@@ -373,23 +425,30 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// different key and value widths is refused rather than half-supported: the attention
 	// output would be assembled from the wrong slice of the wrong length.
 	if v, ok := f.Get[int](arch + ".attention.value_length"); ok && v != cfg.HeadDim {
-		return Config{}, fmt.Errorf("llama: %s.attention.value_length = %d, but key_length is %d; "+
+		return fmt.Errorf("llama: %s.attention.value_length = %d, but key_length is %d; "+
 			"equal widths are the only shape this package implements", arch, v, cfg.HeadDim)
 	}
 	if cfg.Heads%cfg.KVHeads != 0 {
-		return Config{}, fmt.Errorf("llama: head_count %d is not divisible by head_count_kv %d", cfg.Heads, cfg.KVHeads)
+		return fmt.Errorf("llama: head_count %d is not divisible by head_count_kv %d", cfg.Heads, cfg.KVHeads)
 	}
 
+	return nil
+}
+
+// rotation reads every rope key.
+func (p configParser) rotation(cfg *Config) error {
+	arch, f := p.arch, p.file
+	_, _ = arch, f
 	cfg.RopeDim = cfg.HeadDim
 	if v, ok := f.Get[int](arch + ".rope.dimension_count"); ok {
 		if v <= 0 || v > cfg.HeadDim {
-			return Config{}, fmt.Errorf("llama: rope.dimension_count %d outside (0, %d]", v, cfg.HeadDim)
+			return fmt.Errorf("llama: rope.dimension_count %d outside (0, %d]", v, cfg.HeadDim)
 		}
 		cfg.RopeDim = v
 	}
 	// rope.dimension_count must be even: the rotation pairs dimensions.
 	if cfg.RopeDim%2 != 0 {
-		return Config{}, fmt.Errorf("llama: rope.dimension_count %d is odd", cfg.RopeDim)
+		return fmt.Errorf("llama: rope.dimension_count %d is odd", cfg.RopeDim)
 	}
 
 	cfg.RopeBase = 10000
@@ -400,7 +459,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		// collapses to 1, the rotation stops distinguishing positions, and nothing reports
 		// it. Both are refused by naming the actual problem rather than a range.
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) || v <= 0 {
-			return Config{}, fmt.Errorf("llama: rope.freq_base %v must be a finite positive number", v)
+			return fmt.Errorf("llama: rope.freq_base %v must be a finite positive number", v)
 		}
 		cfg.RopeBase = v
 	}
@@ -417,7 +476,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		// still means the file said something the loader discarded without saying so. Both
 		// are refused now; the range cases keep their old behaviour.
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-			return Config{}, fmt.Errorf("llama: rope.scale_linear %v is not a finite number", v)
+			return fmt.Errorf("llama: rope.scale_linear %v is not a finite number", v)
 		}
 		if v > 0 {
 			cfg.RopeScale = v
@@ -427,9 +486,16 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// Refusing is the honest option: applying the plain rotation to a
 	// YaRN-trained model produces plausible but wrong text instead of an error.
 	if t, ok := f.Get[string](arch + ".rope.scaling.type"); ok && t != "" && t != "linear" && t != "none" {
-		return Config{}, fmt.Errorf("llama: unsupported rope scaling type %q", t)
+		return fmt.Errorf("llama: unsupported rope scaling type %q", t)
 	}
 
+	return nil
+}
+
+// experts reads the mixture-of-experts counts.
+func (p configParser) experts(cfg *Config) error {
+	arch, f := p.arch, p.file
+	_, _ = arch, f
 	// A file states its expert counts under the architecture namespace. The
 	// tensors decide whether they are used, because some converters emit the counts
 	// for a model that then stores a dense FFN; validate enforces that the two agree.
@@ -449,11 +515,18 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		// what established Experts, in validate; this runs before that and its message
 		// carries both numbers.
 		if cfg.Experts > 0 && cfg.ExpertUsed > cfg.Experts {
-			return Config{}, fmt.Errorf("llama: %s.expert_used_count %d exceeds expert_count %d",
+			return fmt.Errorf("llama: %s.expert_used_count %d exceeds expert_count %d",
 				arch, cfg.ExpertUsed, cfg.Experts)
 		}
 	}
 
+	return nil
+}
+
+// window reads the sliding window and its per-layer pattern.
+func (p configParser) window(cfg *Config) error {
+	arch, f := p.arch, p.file
+	_, _ = arch, f
 	// The sliding window is per-architecture, and a missing key means unbounded: a
 	// Mistral fine-tune that trained with full attention sets it to 0 or omits it.
 	//
@@ -482,7 +555,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 			continue
 		}
 		if v <= 0 || math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-			return Config{}, fmt.Errorf("llama: %s.%s = %v, must be a finite positive number",
+			return fmt.Errorf("llama: %s.%s = %v, must be a finite positive number",
 				arch, capKey.name, v)
 		}
 		*capKey.dst = v
@@ -499,15 +572,60 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// That last case is Gemma 3 270M: it declares a window of 512 and no pattern at all, so all 18
 	// of its layers are bounded. Reading its absence as "no window" or as "every second layer"
 	// both change what the model computes.
+	if err := p.localLayers(cfg); err != nil {
+		return err
+	}
+
+	// Gemma 3 can rotate local and global layers at different frequencies, and this package does
+	// not implement that: it keeps one rotation per model. Refused rather than served at the wrong
+	// rate, because a wrong rotation is invisible -- the output stays fluent and every token is
+	// slightly wrong -- and the file says plainly that two rates are wanted.
+	if base, ok := f.Get[float32](arch + ".rope.freq_base_swa"); ok && base != cfg.RopeBase {
+		return fmt.Errorf("llama: %s.rope.freq_base_swa = %g with a global base of %g: "+
+			"two rotation frequencies are not implemented", arch, base, cfg.RopeBase)
+	}
+
+	// Gemma scales the embeddings by sqrt(hidden) on the way in. Computed here, once, so the
+	// three lookup sites multiply by a constant instead of taking a square root per token.
+	if p.spec.embedScale {
+		cfg.EmbedScale = float32(math.Sqrt(float64(cfg.Hidden)))
+	}
+
+	cfg.RMSNormEps = 1e-5
+	if v, ok := f.Get[float32](arch + ".attention.layer_norm_rms_epsilon"); ok {
+		// Same gap as freq_base: a NaN epsilon is not "<= 0" and reached the norm, where
+		// every output became NaN. A zero epsilon is already refused by the range check.
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) || v <= 0 {
+			return fmt.Errorf("llama: attention.layer_norm_rms_epsilon %v must be a finite positive number", v)
+		}
+		cfg.RMSNormEps = v
+	}
+
+	return nil
+}
+
+// localLayers decides which layers a windowed model bounds.
+//
+// The key is written three ways and llama.cpp reads them in this order: an array of one boolean
+// per layer, then a single integer giving the period of an alternating pattern, then -- when both
+// are absent -- a per-architecture convention. The third case is the dangerous one, which is why
+// it is asserted on the architecture rather than applied to any windowed file: Gemma 3 declares a
+// window of 512 and no pattern at all, and its converter leaves the key out only when every layer
+// is local, while Gemma 2's files predate the key entirely and are described by the alternating
+// rule. Reading one convention as the other bounded the wrong layers, and the difference is
+// invisible in the output text.
+func (p configParser) localLayers(cfg *Config) error {
+	arch, f := p.arch, p.file
+
 	if pattern, ok := f.GetArray[bool](arch + ".attention.sliding_window_pattern"); ok {
 		if len(pattern) != cfg.Layers {
-			return Config{}, fmt.Errorf("llama: %s.attention.sliding_window_pattern holds %d "+
+			return fmt.Errorf("llama: %s.attention.sliding_window_pattern holds %d "+
 				"entries for %d layers", arch, len(pattern), cfg.Layers)
 		}
 		cfg.LocalLayers = pattern
 	} else if n, ok := f.Get[int](arch + ".attention.sliding_window_pattern"); ok {
 		if n < 0 {
-			return Config{}, fmt.Errorf("llama: %s.attention.sliding_window_pattern = %d, must "+
+			return fmt.Errorf("llama: %s.attention.sliding_window_pattern = %d, must "+
 				"not be negative", arch, n)
 		}
 		// The period counts every n-th layer as global and the rest local, starting local, which
@@ -530,31 +648,16 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		}
 	}
 
-	// Gemma 3 can rotate local and global layers at different frequencies, and this package does
-	// not implement that: it keeps one rotation per model. Refused rather than served at the wrong
-	// rate, because a wrong rotation is invisible -- the output stays fluent and every token is
-	// slightly wrong -- and the file says plainly that two rates are wanted.
-	if base, ok := f.Get[float32](arch + ".rope.freq_base_swa"); ok && base != cfg.RopeBase {
-		return Config{}, fmt.Errorf("llama: %s.rope.freq_base_swa = %g with a global base of %g: "+
-			"two rotation frequencies are not implemented", arch, base, cfg.RopeBase)
-	}
+	return nil
+}
 
-	// Gemma scales the embeddings by sqrt(hidden) on the way in. Computed here, once, so the
-	// three lookup sites multiply by a constant instead of taking a square root per token.
-	if spec.embedScale {
-		cfg.EmbedScale = float32(math.Sqrt(float64(cfg.Hidden)))
-	}
-
-	cfg.RMSNormEps = 1e-5
-	if v, ok := f.Get[float32](arch + ".attention.layer_norm_rms_epsilon"); ok {
-		// Same gap as freq_base: a NaN epsilon is not "<= 0" and reached the norm, where
-		// every output became NaN. A zero epsilon is already refused by the range check.
-		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) || v <= 0 {
-			return Config{}, fmt.Errorf("llama: attention.layer_norm_rms_epsilon %v must be a finite positive number", v)
-		}
-		cfg.RMSNormEps = v
-	}
-
+// vocabulary reads what the tokenizer namespace and the embedding tensor say.
+//
+// arch and f are aliased here because this stage mixes both namespaces: the vocabulary comes
+// from a tensor and the special tokens from tokenizer.ggml.*, so it does not go through p.get.
+func (p configParser) vocabulary(cfg *Config) error {
+	arch, f := p.arch, p.file
+	_, _ = arch, f
 	// The vocabulary size comes from the embedding tensor, not from a
 	// hyperparameter: GGUF does not store one, and the tokenizer length can
 	// legitimately differ from the padded embedding rows.
@@ -573,13 +676,13 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// at the entry points instead of at load time.
 	emb, ok := f.Tensor("token_embd.weight")
 	if !ok {
-		return Config{}, fmt.Errorf("llama: missing token_embd.weight")
+		return fmt.Errorf("llama: missing token_embd.weight")
 	}
 	if len(emb.Dims) != 2 {
-		return Config{}, fmt.Errorf("llama: token_embd.weight has %d dims, want 2", len(emb.Dims))
+		return fmt.Errorf("llama: token_embd.weight has %d dims, want 2", len(emb.Dims))
 	}
 	if got := int(emb.Dims[0]); got != cfg.Hidden {
-		return Config{}, fmt.Errorf("llama: token_embd.weight row length %d, want embedding_length %d", got, cfg.Hidden)
+		return fmt.Errorf("llama: token_embd.weight row length %d, want embedding_length %d", got, cfg.Hidden)
 	}
 	// A zero-width embedding gives VocabSize 0, and the first forward pass then produces an
 	// empty logits row: samplers are written for one row per position, and Temperature.Next
@@ -587,7 +690,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 	// empty row panics there. Refused at load time, where the shape can be named, rather than
 	// left for a sampler to trip over.
 	if emb.Dims[1] == 0 {
-		return Config{}, fmt.Errorf("llama: token_embd.weight has a zero-width vocabulary")
+		return fmt.Errorf("llama: token_embd.weight has a zero-width vocabulary")
 	}
 	cfg.VocabSize = int(emb.Dims[1])
 
@@ -605,10 +708,7 @@ func LoadConfig(f *gguf.File) (Config, error) {
 		cfg.BOSID = v
 	}
 
-	if err := cfg.validate(f); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
+	return nil
 }
 
 // validate checks the shapes of every tensor the forward pass will touch.

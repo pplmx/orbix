@@ -143,13 +143,46 @@ lint:
     # A shebang recipe rather than a plain one: the body is handed to bash verbatim, so `$`
     # needs no escaping. The first attempt wrote `$$` in a plain recipe and just turned it
     # into the PID, which made the version probe a file name.
-    v="$(golangci-lint --version 2>/dev/null | sed -n 's/.*version v\{0,1\}\([0-9][0-9]*\).*/\1/p' | head -1)"
-    if [ "${v:-}" != "2" ]; then
-        echo "golangci-lint is not v2 (found ${v:-unknown}): .golangci.yml is a v2 config and v1 refuses to read it"
+    #
+    # The check used to look only at `command -v golangci-lint` -- the first match on PATH --
+    # and refuse when it was v1. That is right about what it measures and wrong about what a
+    # contributor can act on: with both versions installed, PATH order decides, and the gate
+    # reported a missing toolchain while a working v2 sat one directory further along.
+    # Measured on this host: mise's shim resolves v1.64.8 first, v2.15.0 third, and
+    # `just check` failed on an otherwise clean tree until the absolute path was typed by hand.
+    #
+    # So: walk every candidate and take the first that reports major 2. `type -ap` is what makes
+    # that possible without guessing install locations, and it is a bash builtin the shebang
+    # already requires. The candidates go into an array because just reads a recipe body by
+    # indentation: a string carrying a literal newline ends the recipe, and a `$(printf ...)`
+    # that would have carried one loses its trailing newline to command substitution.
+    mapfile -t candidates < <(type -ap golangci-lint 2>/dev/null || true)
+    picked=""
+    seen=()
+    report=()
+    for bin in "${candidates[@]}"; do
+        [ -n "$bin" ] || continue
+        # A path can appear twice on PATH; probe and report each one once.
+        case " ${seen[*]:-} " in *" $bin "*) continue ;; esac
+        seen+=("$bin")
+        # The major number is the first digit run after "version". v1 prints "version v1.64.8"
+        # and v2 prints "version 2.15.0"; the leading `v` is optional.
+        v="$("$bin" --version 2>/dev/null | sed -n 's/.*version v\{0,1\}\([0-9][0-9]*\).*/\1/p' | head -1)"
+        if [ "${v:-}" = "2" ]; then
+            picked="$bin"
+            break
+        fi
+        report+=("${v:-unknown}  $bin")
+    done
+    if [ -z "$picked" ]; then
+        echo "no golangci-lint v2 on PATH: .golangci.yml is a v2 config and v1 refuses to read it"
+        for row in "${report[@]}"; do
+            echo "  $row"
+        done
         echo "install golangci-lint v2 (CI pins v2.15.0): https://golangci-lint.run/docs/welcome/install/"
         exit 1
     fi
-    golangci-lint run
+    "$picked" run
 
 # run kernel and engine benchmarks
 bench:

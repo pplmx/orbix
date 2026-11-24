@@ -159,13 +159,30 @@ SUBSET = {
     "defined_guard": """{% if not tools is defined %}NO_TOOLS{% endif %}""",
     "elif_false": """{% if false %}A{% elif true %}B{% else %}C{% endif %}""",
     "no_else": """{% if false %}A{% endif %}END""",
+    # The inline conditional, in both arms plus a condition over the conversation. It moved
+    # here from UNSUPPORTED when Gemma 3's template needed it: this tool kept expecting a
+    # refusal for months after the construct was implemented, so every run exited 1 on a case
+    # that was working. An expectation table that is not updated with the feature is a gate
+    # that reports a regression that is not there -- and, worse, hides the real one behind it.
+    "inline_if_true": """{{ 'a' if add_generation_prompt else 'b' }}""",
+    "inline_if_false": """{{ 'a' if not add_generation_prompt else 'b' }}""",
+    "inline_if_field": """{{ messages[0]['role'] if messages else 'empty' }}""",
+    # Precedence: the conditional binds looser than comparison and concatenation, so every
+    # one of these is a single expression rather than a parse error.
+    "inline_if_precedence": """{{ 'x' if messages and messages[0]['role'] == 'user' else 'y' }}""",
+    "inline_if_nested": """{{ 'a' if messages else ('b' if add_generation_prompt else 'c') }}""",
 }
 
 # Templates using constructs the package documents as unsupported. The expected Go result is
 # a parse error, which is what makes "unsupported" a designed refusal rather than a wrong
 # render. Jinja2 renders all of them.
 UNSUPPORTED = {
-    "inline_if": """{{ 'a' if add_generation_prompt else 'b' }}""",
+    # Jinja's short form, which yields Undefined when the condition is false. Jinja2 renders it
+    # as the empty string; here it is refused at parse time, which is the documented behaviour:
+    # an undefined result that reached output would put a hole in the prompt, and no published
+    # template relies on it. The refusal names the construct rather than rendering something
+    # inert, so a reader learns which form to write instead.
+    "inline_if_no_else": """{{ 'a' if add_generation_prompt }}""",
     "filter_block": """{% filter upper %}x{% endfilter %}""",
     "namespace": """{% set ns = namespace(x=1) %}{{ ns.x }}""",
     "macro": """{% macro m() %}x{% endmacro %}{{ m() }}""",

@@ -147,9 +147,17 @@ func (x *PrefixIndex) Match(tokens []int32) (n int, blocks []int32) {
 // The run is always exactly one block: a partial block will still be appended to, so its
 // contents are not yet a reusable prefix, and the length check below is what refuses one.
 //
-// parent is the key returned by the Remember call for the preceding block of the same
-// prompt, or zero to start a chain. The caller supplies it because only the caller knows
-// which blocks belong together: the index sees one block at a time.
+// parent is the chain key of everything before this run, or zero to start a chain. The caller
+// supplies it because only the caller knows which blocks belong together: the index sees one
+// block at a time, and nothing here can tell a prompt's second block from an unrelated prompt
+// that happens to hold the same tokens. PagedKVCache.rememberFullBlock computes it by folding
+// the prompt's earlier blocks, which is the same walk Match performs, so the two agree on what
+// a position's key is.
+//
+// This used to say the parent was "the key returned by the Remember call for the preceding
+// block", and there was an exported PrefixIndex.Key to produce one. Remember has never returned
+// a key, and Key had no caller in the repository -- the only implementation lives here, behind
+// chainRoot -- so the method described an interface that did not exist and was removed.
 func (x *PrefixIndex) Remember(tokens []int32, block int32, parent uint64) error {
 	if x == nil {
 		return nil
@@ -194,12 +202,6 @@ func (x *PrefixIndex) Remember(tokens []int32, block int32, parent uint64) error
 	}
 	x.order = append(x.order, key)
 	return nil
-}
-
-// Key returns the hash Remember would store for a block, so a caller can pass it as the
-// next block's parent.
-func (x *PrefixIndex) Key(parent uint64, tokens []int32) uint64 {
-	return chainKey(parent, hashTokens(tokens))
 }
 
 // evictTail gives up one entry that nothing else continues, releasing its reference.

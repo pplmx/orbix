@@ -161,6 +161,15 @@ SUBSET = {
     # dropped the positional one for a while: it was parsed and then ignored.
     "expr_tojson_indent_kw": """{{ messages[0] | tojson(indent=2) }}""",
     "expr_tojson_indent_pos": """{{ messages[0] | tojson(2) }}""",
+    # The two arithmetic operators doc.go lists beside +. They were implemented for one real
+    # template each -- Gemma's alternation check is `loop.index0 % 2 == 0` -- and neither was
+    # compared against Jinja2.
+    "expr_sub": """{{ 5 - 2 }}""",
+    "expr_sub_negative": """{{ 2 - 5 }}""",
+    "expr_sub_zero": """{{ 3 - 3 }}""",
+    "expr_mod": """{{ 7 % 3 }}""",
+    "expr_mod_zero_operand": """{{ 7 % 7 }}""",
+    "expr_neg_literal": """{{ -3 }}""",
     "expr_len": """{{ messages | length }}""",
     "expr_nl": """{{ 'a\\nb' }}""",
     "ws_control": """a  {{- 'b' -}}  c""",
@@ -480,7 +489,13 @@ def main():
     if refused_ok:
         print(f"{len(refused_ok)} unsupported constructs refused, as designed")
     if no_oracle:
-        print(f"{len(no_oracle)} cases skipped because Jinja2 itself failed")
+        # Named rather than counted. A skip is a case that ran neither side -- the Go render never
+        # happens and nothing is compared -- so a number without the names reads as coverage when
+        # it is the opposite. Templates that are refused on purpose land in refused_ok instead;
+        # this list is only for cases where the oracle itself could not render.
+        print(f"{len(no_oracle)} cases skipped because Jinja2 itself failed:")
+        for c in no_oracle:
+            print(f"  {c['name']}  ({c['oracle']})")
 
     failed = False
     if wrong:

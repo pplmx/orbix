@@ -21,7 +21,12 @@ CGO_ENABLED=0 go install github.com/pplmx/orbix/cmd/orbix@latest
 orbix serve --model ./models/qwen2.5-7b-instruct-q4_0.gguf --addr :8080
 ```
 
-That is the whole quick start. The server implements `/v1/chat/completions`,
+That is the whole quick start, minus the model file: `./models/` is not in the repository and the
+path above is a name to put your own checkpoint at, so the command answers `no such file or
+directory` until one is there. Any GGUF the architecture table in
+[Models](docs/models.md) lists will serve --
+[`stories15M-q4_0.gguf`](https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf)
+is 18 MiB and enough to see a reply come back. The server implements `/v1/chat/completions`,
 `/v1/completions` (streaming and not), `/v1/models`, `/healthz` and `/metrics`, and any OpenAI
 client library works against it.
 

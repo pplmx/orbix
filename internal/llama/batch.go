@@ -231,24 +231,6 @@ func (m *Model) Prefill(cache Cache, tokens []int32, startPos int) ([]float32, e
 	return b.logits, nil
 }
 
-// normRows normalizes every row of the residual stream into b.xn.
-//
-// The rows are independent, so this is a plain loop over the per-row kernel
-// rather than a batched variant: a multi-row norm measured slower than the loop
-// it would replace, and a second implementation of the same arithmetic is a
-// second thing to keep correct.
-func (m *Model) normRows(b *batch, weight []float32) error {
-	cfg := m.W.Config
-	for r := range b.n {
-		row := b.x[r*cfg.Hidden : (r+1)*cfg.Hidden]
-		out := b.xn[r*cfg.Hidden : (r+1)*cfg.Hidden]
-		if err := kernel.RMSNorm(out, row, weight, cfg.RMSNormEps); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // embedBatch gathers the embedding rows for every token.
 func (m *Model) embedBatch(b *batch, tokens []int32) error {
 	h := m.W.Config.Hidden
@@ -268,7 +250,7 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	qdim := cfg.Heads * cfg.HeadDim
 	kvdim := cfg.kvDim()
 
-	if err := m.normRows(b, layer.attnNorm); err != nil {
+	if err := m.normRowWise(rowsFromBatch(b, cfg), layer.attnNorm); err != nil {
 		return err
 	}
 	if err := m.run.MatMulTransposed(b.q, b.xn, layer.wq, n, qdim, cfg.Hidden); err != nil {
@@ -584,12 +566,8 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 	qdim := cfg.Heads * cfg.HeadDim
 	kvdim := cfg.kvDim()
 
-	for r := range n {
-		row := b.x[r*cfg.Hidden : (r+1)*cfg.Hidden]
-		out := b.xn[r*cfg.Hidden : (r+1)*cfg.Hidden]
-		if err := kernel.RMSNorm(out, row, layer.attnNorm, cfg.RMSNormEps); err != nil {
-			return err
-		}
+	if err := m.normRowWise(rowsFromDecode(b, cfg), layer.attnNorm); err != nil {
+		return err
 	}
 	// The projections are the batched part: [n, hidden] x [hidden, out].
 	if err := m.run.MatMulTransposed(b.q, b.xn, layer.wq, n, qdim, cfg.Hidden); err != nil {
@@ -806,7 +784,7 @@ type ffnRows struct {
 func (m *Model) feedForwardRows(r ffnRows, layer *layer, cfg Config) error {
 	n, hidden, ffn := r.n, r.hidden, r.ffn
 
-	if err := m.normFFNRows(r, layer.ffnNorm); err != nil {
+	if err := m.normRowWise(r, layer.ffnNorm); err != nil {
 		return err
 	}
 	if cfg.Experts > 0 {
@@ -831,12 +809,18 @@ func (m *Model) feedForwardRows(r ffnRows, layer *layer, cfg Config) error {
 	return kernel.AddInPlace(r.x[:n*hidden], r.scatter[:n*hidden])
 }
 
-// normFFNRows normalizes each row of the residual stream into xn.
+// normRowWise normalizes each row of the residual stream into xn.
 //
-// One RMSNorm per row rather than a batched kernel, which is what both batched paths did: a
-// multi-row norm measured slower than the loop it would replace, and a second implementation of
-// the same arithmetic is a second thing to keep correct.
-func (m *Model) normFFNRows(r ffnRows, weight []float32) error {
+// It serves both sublayers -- the attention input and the feed-forward input -- because they are
+// the same operation over the same layout, and the two batched paths each had their own copy:
+// one behind a normRows helper, one written inline. A multi-row norm kernel would be slower than
+// this loop (measured, which is why it does not exist), so the loop is the implementation rather
+// than a fallback.
+//
+// The rows are independent, so a caller may spread them across goroutines; none does today,
+// because the projections around this dominate and a spawn per norm would cost more than it
+// saves.
+func (m *Model) normRowWise(r ffnRows, weight []float32) error {
 	eps := m.W.Config.RMSNormEps
 	for i := range r.n {
 		row := r.x[i*r.hidden : (i+1)*r.hidden]

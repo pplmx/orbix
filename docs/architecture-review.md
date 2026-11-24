@@ -22,6 +22,18 @@
 | `internal/f16`      | 154       | 4              | 4        | 380       | 2.47      |
 | **合计**            | **25750** | **687**        | **384**  | **54994** | **2.14**  |
 
+**重构后的同一张表**（三项重构提交之后实测，与本表上下对照可以看出改动的规模）：
+
+| 包                | 代码行 | 函数（含方法） | 变化                                                                                         |
+| ----------------- | ------ | -------------- | -------------------------------------------------------------------------------------------- |
+| `internal/llama`  | 4666   | 123            | -20 行；函数 +2（新增 `embedRow`/`addBiasTo`/`outputWeight`/`capLogits`，删掉 6 个重复函数） |
+| `cmd/orbix`       | 3457   | 74             | +28 行；`model_files.go` 是新增的装配层，`chat.go` 净减 80 行                                |
+| `internal/engine` | 1789   | 40             | +96 行；`drive.go` 与它的测试                                                                |
+| `internal/gguf`   | 1488   | 51             | +29 行；`OpenCount`                                                                          |
+| `internal/server` | 4038   | 89             | +5 行注释，判断改到 engine 哨兵                                                              |
+
+行数变化不大，因为这次重构换掉的不是代码量而是**同一件事写了几遍**：`cmd/orbix` 少了三处重复装配、`llama` 少了六份重复函数、`engine` 多了两个共享入口。判断收益要看重复度而不是行数。
+
 三个观察：
 
 1. **仓库的重心在 token 与提示词，不在算子。** `tokenize` + `chat` 合计 7144 行，是 `kernel`（667 行）的 10.7 倍；`llama` 里真正属于"数学生成"的部分（attention、feedForward、rope、logprob）约 900 行。这与 README 的自述一致——这是学习工程，难点被有意放在"文件格式与模型格式"上。
@@ -85,7 +97,13 @@ MatMulTransposed(gate, xn, wGate) → MatMulTransposed(up, xn, wUp)
 
 - `llama/doc.go` 写着 Qwen3 的 QK 归一化"应用在四个地方——单 token、批量 prefill、批量 decode，以及复用提示词重算的 cached query——每一处都有对照参考的测试"。
 - `docs/models.md` 记录过一个真实缺陷：Gemma 2 的 output softcap "被加到了单 token 和批量 decode 的投影上，但没加到 prefill 的，于是每次回复的第一个 token 来自另一个分布"。这正是三份实现的必然产物。
-- `addBias` 有三个版本（`attention.go:294`、`batch.go:241`、`batch.go:743`）；`finish` 有三个版本，每个都要记得调 `kernel.Softcap(b.logits, cfg.FinalSoftcap)`。
+- `addBias` 有三个版本、`embed` 有三个版本、`finish` 有三个版本，每个都要记得调 `kernel.Softcap`。
+
+**这一节列出的重复已经处理掉了四分之三。** 三份 `embed`、三份 `addBias`、三份"选 tied 权重"和三份 softcap 合并成 `embedRow`、`addBiasTo`、`outputWeight`、`capLogits`，`internal/llama` 从 88.4% 覆盖率升到 88.7%（删掉的是重复语句）。
+
+两处注入验证证明这个合并不是只在行数上有益：把 `capLogits` 从 prefill 路径删掉，`TestFinalSoftcapBoundsTheLogits` 立刻红——复现的正是 `docs/models.md` 记录的那个历史缺陷；把 `embedRow` 的边界从 `token < 0 || token >= VocabSize` 放松成只查上界，`TestEmbedRejectsNegativeToken` 以 `slice bounds out of range [-32:]` panic——正是那条注释解释了三遍的失败。
+
+剩下的部分（`attention`、`feedForward` 各三份）**没有合并，这是判断而不是遗漏**：它们的差别不在算术而在驱动方式——单 token 用 `MatVec` 逐头、prefill 按位置并行、decode 按序列各自 cache 串行。合并需要一个能同时表达三种循环的抽象，收益是消掉两份约 100 行的函数，风险是动到三条都有独立参考测试的核心路径。四份真正逐字重复的东西合并后，剩下的重复已经降到"结构相似但循环不同"，继续合并的性价比明显下降。
 
 **更正（当轮复查时发现，上一轮的建议是错的）。** 这里原本写着"单 token 路径只剩 `run` 一个用户，把 `run` 迁到 engine 就能删掉这条腿约 190 行，把扇出从 3 降到 2"。前半句关于**生产**调用点是事实，结论却错了：单 token 路径不是遗留物，而是整个包唯一的**独立参考实现**。
 
@@ -104,7 +122,7 @@ grep -n "^func (m \*Model) Forward\|^func (m \*Model) Prefill\|^func (m \*Model)
 grep -rn "\.Forward(\|\.Generate(" --include=*.go internal cmd | grep -v _test
 ```
 
-## 四、entry point 的重复：三次打开模型、五处手写 pump 循环
+## 四、entry point 的重复（已处理，见本节末尾的结果）
 
 ### 4.1 一次 `serve` 打开模型三次
 
@@ -131,7 +149,18 @@ cmd/orbix/bench.go:240              ↑ 独立 goroutine drain + for eng.Pump() 
 cmd/orbix/bench_suite.go:378/464/566   三处几乎相同
 ```
 
-这不是"重复几行"的问题：`server` 那份处理了取消、退避和关闭；`bench` 那几份假定 `chans` 会在 Pump 返回零之前关闭；`chat` 那份多了一个 `Flush()`（丢弃跨 token 的半个字符会改变输出）。这些差异**没有任何测试交叉覆盖**——测 `bench` 的循环不会发现 `server` 的退避写错。一个 `engine.Drive(ctx, ...)` 之类的统一驱动函数可以同时收掉五个循环和它们的差异，但这是 API 变更，属于下一轮的决定，不在本轮。
+这不是"重复几行"的问题：`server` 那份处理了取消、退避和关闭；`bench` 那几份假定 `chans` 会在 Pump 返回零之前关闭；`chat` 那份多了一个 `Flush()`（丢弃跨 token 的半个字符会改变输出）。这些差异**没有任何测试交叉覆盖**——测 `bench` 的循环不会发现 `server` 的退避写错。
+
+### 4.4 处理结果
+
+三项都做了，改动分别是 `9831e01`、`d67b949`、`da9ec9d`。结论与原先的预测有出入，按实际测量写：
+
+- **`serve` 是 3 → 2，不是 3 → 1。** `openModel` 把"校验用的那次"和"tokenizer 那次"合成一次，于是元数据只解析一次；但 `engine.New → llama.LoadWeights → quant.OpenLoader` 还要再解析一次并另开一个 `os.Open`，因为它读张量字节需要一个定位在数据段的 reader，而元数据要同时可用。这是结构性的，不是遗漏。`bench` 与 `chat` 本来就在 2，它们的变化是"检查搬进 `planCache`、硬编码的 16 换掉"，不是"少解析一次"。
+- **`chat` 的 `cfgForBlocks` 是死路径。** 它在文件没写 `context_length` 时回退 2048，而 `openModel` 先调 `llama.LoadConfig`，后者把该键当必需——所以在当前结构下那个分支不可达。删掉，它的测试改成断言用户真能看到的拒绝。
+- **`--block-size` 的三处检查条件确实不一致**：`serve` 要求 `blocks>0` 且 `block-size>0`，`bench` 只要求 `block-size>0`，`chat` 无条件（因为它默认开复用）。现在统一在 `planCache`，按"是否真的会有池 + 是否真的会复用"判断——这才是这个检查真正的主题。
+- **`engine.Drive` 收掉了四处，不是五处。** 命令行侧四个循环共用同一个骨架（每序列一个 drainer → pump 到零 → join），差异只在 drainer 里的计数。`internal/server` 那份**保留**：它要轮询、空闲退避、响应 ctx 与关闭信号，是另一种循环，硬套 `Drive` 会把它需要的三件事塞进参数。`chat` 那份是**同步** drain（不能阻塞，否则与 pump 互锁），也不是同一形状。
+
+回归被测试钉住而不是写在注释里。`TestDriveDrainsBeyondTheEventBuffer` 要 200 token 对着 64 事件的缓冲；把 `Drive` 换回"先 pump 后读"，它恰好收到 64 并报出缺的 136——正是 `bench` 修复前产生的数字。
 
 复算命令：
 
@@ -208,7 +237,7 @@ CLI 层 3429 行里有大量不属于"解析参数并打印"的内容：
 **其余建议项**（半天级，有测试面扩张）：
 
 4. ~~**把 `run` 迁到 engine**~~ — **已作废**，理由见第三节的更正：单 token 路径是 numpy 参考与两条批量路径的对齐基准，删它等于抽掉三层验证。替代方向是"标量参考 + 批量实现"的合并，见下。
-5. **合一个 `cmd/orbix` 的装配函数**（`openModel`/`newEngine`）：消掉三次打开与三份 `--block-size` 校验。
+5. ~~**合一个 `cmd/orbix` 的装配函数**（`openModel`/`planCache`）~~ — 已做，见 4.4。
 6. ~~**在 `engine` 边界上翻译 `ErrPoolExhausted`**~~ — 已做，见下。
 
 **本轮做掉的第 6 项，连同它的代价一起记下来。**
@@ -239,7 +268,13 @@ CLI 层 3429 行里有大量不属于"解析参数并打印"的内容：
     - 把判断改回 `llama.ErrPoolExhausted` → **不红**，因为真实错误上两条链都成立。这一条无从
       测试，也不该假装能测。
 
-第 5 项（合并 CLI 装配）仍未做，与第 6 项互不依赖。
+第 5 项也已做完。三项重构（`9831e01`、`d67b949`、`da9ec9d`）覆盖了本节原本列的 5 与 6，以及第三节"三份实现"里逐字重复的四分之三。
+
+**没做的，以及为什么。**
+
+- `attention` 与 `feedForward` 的三份没有合并。它们的差别在驱动方式而不是算术：单 token 用 `MatVec` 逐头、prefill 按位置并行、decode 按序列各自 cache 串行。合并要设计一个同时表达三种循环的抽象，代价是动三条都有独立参考测试的核心路径。逐字重复的部分已经合并后，剩下的重复是"结构相似、循环不同"，性价比明显下降。
+- `run` 仍走 `llama.Model` + contiguous cache，没有迁到 engine。这不是被排除，而是**待定**：迁过去会改变它测的东西（它现在直接测 `llama` 的生成路径），也可能改变 `--stats` 里那几个数字的含义。要做的话应当先明确它到底该测什么。
+- `internal/server` 仍导入 `internal/llama`，用于采样器与 logprob 类型（7 个符号）。要把这条边也切掉，需要 engine 提供自己的采样器构造函数与 logprob 类型，是一次真正的 API 扩张，不是清理。
 
 ## 复算清单
 

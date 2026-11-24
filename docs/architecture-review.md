@@ -664,6 +664,30 @@ internal/engine imports internal/chat -- a reader meets the caller first
 
 API 面也复核了：`engine` 的导出签名里只出现 `Sampler`（`Greedy()` 返回它）和 `*gguf.File`（渲染器要读文件里的模板）；`server` 只出现 `*engine.Engine` 与 `*tokenize.Tokenizer`，都是它该接收的。没有下层实现类型泄漏到上层签名里。
 
+### 第九轮：四个怀疑，四次证伪
+
+这一轮没有改代码，因为查的四件事都经得起检验。记录在这里是为了让后来者不必重查。
+
+**「`best_of` 失败时每个 channel 起一个 goroutine，是无界的。」** 不是。
+`internal/server/server.go:1525` 那个循环确实每 channel 起一个 goroutine，但 `maxChoices = 8`
+（`server.go:852`）且 `maxBestOf = maxChoices`（`bestof.go:14`），两个字段都在 `invalid` 表里校验，
+所以循环最多 8 次。另外两处 `go func()`：`streamChoices` 的 `wg.Wait` 一个，`serve.go:323` 的
+`httpSrv.Serve` 一个。三处都有界。
+
+**「`preFamilyOf` 的 271 行里应该有可合并的重复。」** 没有。34 个 `case` 全部返回 `preRule`
+字面量（非字面量返回 0 个），按空白归一化后是 **33 条不同的规则**，只有 `preQwen2` 与
+`preBailingMoE` 共享一条。这不是可以压缩的逻辑，是 34 条各自独立的数据。
+
+**「`bench` 的表格用 `\t` 分隔，而 `docs/cli.md` 的样例是空格对齐。」** 一致。
+`bench_suite.go:215` 是 `tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)`，`\t` 展开成至少两空格的列对齐，
+文档样例就是它输出的样子。
+
+**「`/stats` 的 `kv pool:` 行没有测试。」** 有。`chat_test.go:1288` 断言了它的四个组成部分：
+`kv pool:`、`of 4 blocks free`、`16 positions each`、`64 total`。
+
+四件事里最有价值的是第一条：**"每个 X 起一个 goroutine"看起来像无界，但上界由请求校验决定，
+而不是由循环本身决定。** 判断并发是否安全，要看的是那个校验，不是循环的形状。
+
 ### `run` 仍然不迁到 engine
 
 第九节把这件事列为待定。本轮看了它到底要什么，结论是**不迁**，理由比上一轮具体：

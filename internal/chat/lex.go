@@ -180,9 +180,7 @@ func lex(src string) ([]piece, error) {
 	}
 	flushText(false)
 
-	if err := applyTrimMarkers(out); err != nil {
-		return nil, err
-	}
+	applyTrimMarkers(out)
 	return out, nil
 }
 
@@ -192,7 +190,7 @@ func lex(src string) ([]piece, error) {
 // The before-side trim happens while scanning, because the preceding literal is already
 // complete at that point; the after-side trim can only be applied once the following
 // literal exists, which is why it is a second pass.
-func applyTrimMarkers(pieces []piece) error {
+func applyTrimMarkers(pieces []piece) {
 	for i := range pieces {
 		if !pieces[i].trimAfter || pieces[i].kind == pieceText {
 			continue
@@ -201,5 +199,4 @@ func applyTrimMarkers(pieces []piece) error {
 			pieces[i+1].text = strings.TrimLeft(pieces[i+1].text, " \t\r\n")
 		}
 	}
-	return nil
 }

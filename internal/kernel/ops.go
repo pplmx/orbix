@@ -55,7 +55,8 @@ func MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMulTransposed(dst, a, b, m, n, k); err != nil {
 		return err
 	}
-	return matMulTransposedCols(dst, a, b, m, n, k, 0, n)
+	matMulTransposedCols(dst, a, b, m, n, k, 0, n)
+	return nil
 }
 
 // matMulTransposedCols computes columns [jlo,jhi) of MatMulTransposed, all m rows.
@@ -77,7 +78,7 @@ func MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 //
 // Neither the tiling nor the split changes the order of the p loop, so the result stays
 // bit-identical to a naive element-at-a-time multiply.
-func matMulTransposedCols(dst, a, b []float32, m, n, k, jlo, jhi int) error {
+func matMulTransposedCols(dst, a, b []float32, m, n, k, jlo, jhi int) {
 	const rowTile = 8
 	for base := 0; base < m; base += rowTile {
 		end := min(base+rowTile, m)
@@ -93,7 +94,6 @@ func matMulTransposedCols(dst, a, b []float32, m, n, k, jlo, jhi int) error {
 			}
 		}
 	}
-	return nil
 }
 
 // MatVec computes dst = a @ v for a weight matrix stored as n x k.
@@ -109,13 +109,14 @@ func MatVec(dst, a, v []float32, n, k int) error {
 	if err := checkMatVec(dst, a, v, n, k); err != nil {
 		return err
 	}
-	return matVecRows(dst, a, v, n, k, 0, n)
+	matVecRows(dst, a, v, n, k, 0, n)
+	return nil
 }
 
 // matVecRows computes rows [lo,hi) of MatVec. Each row is a complete dot
 // product in serial order, so a caller may split the row range across
 // goroutines without changing any value.
-func matVecRows(dst, a, v []float32, n, k, lo, hi int) error {
+func matVecRows(dst, a, v []float32, n, k, lo, hi int) {
 	for j := lo; j < hi; j++ {
 		row := a[j*k : (j+1)*k]
 		var sum float32
@@ -124,7 +125,6 @@ func matVecRows(dst, a, v []float32, n, k, lo, hi int) error {
 		}
 		dst[j] = sum
 	}
-	return nil
 }
 
 // AddBias adds a bias vector to every row of dst, in place.

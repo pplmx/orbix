@@ -55,7 +55,7 @@ func (r *Runner) MatVec(dst, a, v []float32, n, k int) error {
 	if err := checkMatVec(dst, a, v, n, k); err != nil {
 		return err
 	}
-	return r.splitRows(r.parts(n*k), n, func(lo, hi int) { _ = matVecRows(dst, a, v, n, k, lo, hi) })
+	return r.splitRows(r.parts(n*k), n, func(lo, hi int) { matVecRows(dst, a, v, n, k, lo, hi) })
 }
 
 // MatMulTransposed computes dst = a @ bᵀ where b is stored as n x k, splitting
@@ -92,7 +92,7 @@ func (r *Runner) MatMulTransposed(dst, a, b []float32, m, n, k int) error {
 		})
 	}
 	return r.splitCols(parts, n, func(jlo, jhi int) {
-		_ = matMulTransposedCols(dst, a, b, m, n, k, jlo, jhi)
+		matMulTransposedCols(dst, a, b, m, n, k, jlo, jhi)
 	})
 }
 

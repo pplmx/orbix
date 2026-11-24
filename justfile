@@ -297,6 +297,16 @@ cross:
         out="bin/orbix-$os-$arch$ext"
         echo "building $out"
         GOOS=$os GOARCH=$arch go build -trimpath -ldflags '{{LDFLAGS}}' -o "$out" ./cmd/orbix
+        # A build that silently acquired cgo would still compile and still start, so the marker
+        # Go bakes into the binary is read back rather than trusted. This works for every target
+        # including the ones that cannot run here: the string is in the file either way. Skipped
+        # where `strings` is missing, since the compile above is the part this recipe promises.
+        if command -v strings >/dev/null 2>&1; then
+            if [ "$(strings "$out" | grep -c 'CGO_ENABLED=0' || true)" -eq 0 ]; then
+                echo "$out does not report CGO_ENABLED=0" >&2
+                exit 1
+            fi
+        fi
     done
 
 # Prints the version cz would bump to and the changelog section it would write, then stops. The

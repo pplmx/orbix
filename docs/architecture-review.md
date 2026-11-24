@@ -558,6 +558,42 @@ reserved gigabytes of score buffers per layer and made a single request tens of 
 其中"切片互不别名"那条是计数型测试会漏的：每个条目都指向第一个，长度对、并发错，race detector
 会报而错误结果可能不报。
 
+### 第八轮：文档里有一条错的，而且它说了谎的方式很具体
+
+上一轮把依赖方向变成了门禁。这一轮先用同一个方法查另一条只写在散文里的承诺——"每个包都有
+`doc.go`，讲清这一层负责什么"。
+
+十二个包全都有 `doc.go`。但顺着读下来发现 **`docs/architecture.md` 的阅读顺序是错的**：
+
+```text
+文档: gguf(1) f16/quant(2) kernel(3) tokenize(4) llama(5) engine(6) chat(7) server(8)
+实际: engine → chat
+```
+
+文档把 `engine` 排在第 6、`chat` 排在第 7，而 `internal/engine` 导入 `internal/chat`。它自己是
+这么解释这个顺序的："the concepts arrive in the order a request travels through them"——那是一个
+依赖顺序，所以按它读，读者会在遇到渲染器之前先遇到调用它的调度器。
+
+改成 `chat(5) llama(6) engine(7)`，并加了一条守卫：
+`TestArchitectureDocAgreesWithTheLayerTable` 读那张表，对每一对有序的包断言两件事——层级表同意这个
+先后，且**前面的包不导入后面的包**。把旧顺序改回去，它同时报出两条：
+
+```text
+the layer table has them the other way round
+internal/engine imports internal/chat -- a reader meets the caller first
+```
+
+两个细节让这条守卫值得写：只比相对顺序而不比编号（文档把 f16 和 quant 放在同一行，因为读者是一起
+遇到的）；同名的包出现在两行时取最早的（重复链接不该看起来像矛盾）。
+
+顺带补了 `internal/engine/doc.go`：它描述了调度轮次、两种缓存布局和 pump 规则，却**没提**那三个
+为了让 server 不导入 llama 而存在的类型（`Sampler`、`Alternative`、`TokenBias`），也没提
+`ErrPoolExhausted` 的边界和 `Drive`。`Drive` 那段带的数字是查过的：读端先于 pump 会在 64 个事件处
+卡住（缓冲大小），实测 `--max-tokens` 65/100/200 每次都只生成 64 个 token 且不打印 finish 行。
+
+还查了其余文档的失效引用：所有 `doc.go` 里反引号引用的符号都能在对应包里找到（0 个失效），
+`docs/cli.md` 覆盖了全部实际命令。
+
 ### `run` 仍然不迁到 engine
 
 第九节把这件事列为待定。本轮看了它到底要什么，结论是**不迁**，理由比上一轮具体：

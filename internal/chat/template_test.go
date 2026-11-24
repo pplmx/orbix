@@ -3201,6 +3201,11 @@ func TestRaiseExceptionCarriesTheTemplatesMessage(t *testing.T) {
 		t.Error("an unimplemented call other than raise_exception rendered instead of failing")
 	} else if !strings.Contains(err.Error(), "no function is implemented") {
 		t.Errorf("error = %v, want it to name the missing function", err)
+	} else if !strings.Contains(err.Error(), "strftime_now") {
+		// The message reached here says "want it to name the missing function" and checked only
+		// that a function was missing. A template calling several of them gets one message, and
+		// the name is the part that says which.
+		t.Errorf("error = %v, want it to name strftime_now", err)
 	}
 }
 

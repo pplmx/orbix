@@ -149,16 +149,28 @@ func TestLoaderRejectsBadTensor(t *testing.T) {
 			t.Error("Tensor(absent) succeeded")
 		} else if !strings.Contains(err.Error(), "no tensor named") {
 			t.Errorf("Tensor error %q does not name the tensor", err)
+		} else if !strings.Contains(err.Error(), `"absent"`) {
+			// The message the three entry points share has to carry the name; asserting the
+			// template alone left the t.Errorf above claiming more than it checked.
+			t.Errorf("Tensor error %q names no tensor", err)
 		}
 		if err := l.TensorInto("absent", make([]float32, 2)); err == nil {
 			t.Error("TensorInto(absent) succeeded")
 		} else if !strings.Contains(err.Error(), "no tensor named") {
 			t.Errorf("TensorInto error %q does not name the tensor", err)
+		} else if !strings.Contains(err.Error(), `"absent"`) {
+			// The message the three entry points share has to carry the name; asserting the
+			// template alone left the t.Errorf above claiming more than it checked.
+			t.Errorf("TensorInto error %q names no tensor", err)
 		}
 		if _, err := l.TensorReader("absent"); err == nil {
 			t.Error("TensorReader(absent) succeeded")
 		} else if !strings.Contains(err.Error(), "no tensor named") {
 			t.Errorf("TensorReader error %q does not name the tensor", err)
+		} else if !strings.Contains(err.Error(), `"absent"`) {
+			// The message the three entry points share has to carry the name; asserting the
+			// template alone left the t.Errorf above claiming more than it checked.
+			t.Errorf("TensorReader error %q names no tensor", err)
 		}
 	})
 

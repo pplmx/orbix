@@ -87,7 +87,15 @@ MatMulTransposed(gate, xn, wGate) → MatMulTransposed(up, xn, wUp)
 - `docs/models.md` 记录过一个真实缺陷：Gemma 2 的 output softcap "被加到了单 token 和批量 decode 的投影上，但没加到 prefill 的，于是每次回复的第一个 token 来自另一个分布"。这正是三份实现的必然产物。
 - `addBias` 有三个版本（`attention.go:294`、`batch.go:241`、`batch.go:743`）；`finish` 有三个版本，每个都要记得调 `kernel.Softcap(b.logits, cfg.FinalSoftcap)`。
 
-值得注意的**代价上限**：单 token 路径只剩 `run` 一个用户。把 `run` 切到 engine 上（它本来就该走同一条路，见第四节），就能删掉 `Forward`/`Generate`/`attention`/`feedForward`/`finish`/`feedForwardMoE` 这一整条腿约 190 行，并把"改一处"的扇出从 3 降到 2。剩下的 prefill/decode 两份能否合并是另一个问题（它们访问的是不同的 cache 契约，合并的收益和风险都中等）。
+**更正（当轮复查时发现，上一轮的建议是错的）。** 这里原本写着"单 token 路径只剩 `run` 一个用户，把 `run` 迁到 engine 就能删掉这条腿约 190 行，把扇出从 3 降到 2"。前半句关于**生产**调用点是事实，结论却错了：单 token 路径不是遗留物，而是整个包唯一的**独立参考实现**。
+
+- `internal/llama/reference_test.go` 与 `reference_real_test.go`（后者是 numpy 交叉验证，六个 checkpoint 门禁）都是**逐 token 调 `Forward`**，并把每层的 residual 抓出来定位分叉点。它们是这个包唯一与外部实现对齐的证据。
+- `TestBatchMatchesSequential`、`TestQwen2PrefillMatchesForward`、`TestQwen3PrefillMatchesPerTokenForward`、`TestDecodeStepMatchesForward`、`TestDecodeStepContinuesLikeForward`、`TestPagedPrefillMatchesContiguous`、`TestMoEDecodeMatchesPrefill` 全部以 `Forward` 为 `want`。`qwen3_test.go:144` 的注释把理由写得很清楚：numpy 参考只走单 token，所以它**看不见**批量路径漏掉一步；批量路径的正确性靠与 `Forward` 对齐来保证。
+- 实测：35 处 `Forward(cache, …)` 调用点是这些断言的参考侧。
+
+所以删掉它会同时抽掉三层地基——numpy 对齐、prefill 对齐、decode 对齐——换来 190 行。**这个交换不成立，建议作废。**
+
+真正的问题因此换了个形状：三份实现里，**两份是被验的、一份是验的**。合理的做法不是删掉参考，而是把"三份"变成"一份可直接读的标量实现 + 一份批量实现"，并让批量实现与标量实现逐位对齐。那是一次真正的重构（要把 `batch` 与 `decodeBatch` 的 scratch 合并、把 `MatVec` 与 `MatMulTransposed` 的差别收进一个参数），不是删代码。是否值得做，取决于"三份"已经造成的缺陷率——按 `docs/models.md` 的记录是至少一次真实缺陷（Gemma 2 softcap），这个证据支持做，但不支持用"删掉一条腿"的方式做。
 
 复算命令：
 
@@ -197,13 +205,41 @@ CLI 层 3429 行里有大量不属于"解析参数并打印"的内容：
 2. ~~**修 `jinja_diff.py` 的期望表**~~ — 已修，门槛从 exit 1 回到 exit 0（598 例）。顺带把内联条件补成五个用例，并明确写进注释：期望表不随功能更新，是让门槛长期报假回归的原因。
 3. ~~**修 `just lint` 的候选解析**~~ — 已修，`just check` 在这台机器上首次全绿。
 
-**还没做**（半天级，有测试面扩张）：
+**其余建议项**（半天级，有测试面扩张）：
 
-4. **把 `run` 迁到 engine**：删掉单 token 前向腿约 190 行，把"改一处要改三处"降到两处。这是最值得做的结构性改动，也是唯一能降低后续架构改错率的一项。
+4. ~~**把 `run` 迁到 engine**~~ — **已作废**，理由见第三节的更正：单 token 路径是 numpy 参考与两条批量路径的对齐基准，删它等于抽掉三层验证。替代方向是"标量参考 + 批量实现"的合并，见下。
 5. **合一个 `cmd/orbix` 的装配函数**（`openModel`/`newEngine`）：消掉三次打开与三份 `--block-size` 校验。
-6. **在 `engine` 边界上翻译 `ErrPoolExhausted`**，让 `server` 不再导入 `llama.ErrPoolExhausted`。
+6. ~~**在 `engine` 边界上翻译 `ErrPoolExhausted`**~~ — 已做，见下。
 
-第 4 项与其余两项有先后关系：`run` 迁走之后，`Generate`/`Forward` 一并消失，第 5 项的装配函数才不必考虑"run 走的是另一条路"。
+**本轮做掉的第 6 项，连同它的代价一起记下来。**
+
+`engine` 现在有一个 `ErrPoolExhausted` 哨兵，`poolAwareErr` 在 prefill 与 decode 两处把存储层的错误翻译成
+`poolExhaustedError`：它 `Unwrap() []error` 成 `{engine 哨兵, 原始原因}`，所以 `errors.Is` 对两者都成立，
+而 `Error()` 直接返回原始原因的文本——客户端看到的仍是 `llama: block pool exhausted (4 blocks of 4 positions)`，
+块数与块大小都在。`internal/server` 的两处判断和 `cmd/orbix` 的两处判断都改到 engine 哨兵上。
+
+两个必须说清的限制：
+
+- **`server` 并没有因此不再导入 `llama`。** 它还用 `Greedy`、`Temperature`、`Biased`、`Sampler`、
+  `TokenBias`、`TokenLogprobs`、`Alternative` 七个符号（采样器与 logprob 类型）。这次消除的是
+  **"用存储层错误做调度判断"** 这一条，不是整个 import 边。上一轮把目标写成"让 server 不再导入 llama"
+  是不准确的，实际能做到的是这条边不再承载一个跨层语义。
+
+- **这处改动无法被测试区分，我没有假装它可以。** 注入验证的结果是：把 `chat.go` 的判断改回
+  `llama.ErrPoolExhausted`，`TestExplainChatError` 仍然通过——因为在真实错误上两条链都成立，
+  `errors.Is` 两种写法都是 true。这是**行为等价的接口收窄**，价值在于依赖方向而不是输出。
+  新加的 `TestPoolExhaustionIsRecognisableWithoutTheCachePackage` 能区分三件事，都做过注入验证：
+
+    - `Unwrap()` 只返回原因、不返回 engine 哨兵 → 红（"a caller would have to import
+      internal/llama to recognise the cause"）；
+    - 错误文本被改成 engine 哨兵的措辞（`"engine: block pool exhausted: llama: ..."`）→ 红。
+      这一条最重要：它锁住的正是**我第一版写错的那个形态**——用 `fmt.Errorf("%w: %v", ...)` 包装，
+      `errors.Is` 两条链都成立，但客户端看到的句子多了一层前缀。上一轮的断言只查 `errors.Is`，
+      对文本完全无感；
+    - 把判断改回 `llama.ErrPoolExhausted` → **不红**，因为真实错误上两条链都成立。这一条无从
+      测试，也不该假装能测。
+
+第 5 项（合并 CLI 装配）仍未做，与第 6 项互不依赖。
 
 ## 复算清单
 

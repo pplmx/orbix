@@ -1976,12 +1976,7 @@ const streamFanInBuffer = 64
 func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generateParams, emit func(streamItem) bool) (generated int, cancelled, ok bool) {
 	dec := s.tok.Seq()
 	reason := "stop"
-	// seen is the text already handed to the client, kept only when a stop string has to be
-	// matched against it.
-	seen := ""
-	// sent is how much of seen the client already has. With a stop list the tail is held
-	// back until it cannot be the start of a match, so this trails seen.
-	sent := 0
+	gate := &stopGate{stop: p.stop}
 	// tokenOffset is how many bytes of this choice's text the tokens so far have accounted
 	// for. It is the offset a logprob entry reports, and it is tracked separately from sent
 	// because held-back text has an offset before it has been written.
@@ -2030,8 +2025,8 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 			// accumulated so far: it can only be recognised once the rune that completes it
 			// arrives, which is exactly when the client should stop seeing output.
 			if len(p.stop) > 0 {
-				seen += text
-				if kept, found := cutAtStop(seen, p.stop); found {
+				release, found := gate.push(text)
+				if found {
 					// Output up to the stop string is the client's; the stop and anything
 					// after it are not. `sent` is what the client already has, so only the
 					// part between them still needs sending.
@@ -2042,8 +2037,8 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 					// part of it survives and neither "include" nor "truncate" is right.
 					// Dropping the straddling token is what the blocking path does, so the two
 					// transports report the same list for the same request.
-					if tail := kept[min(len(kept), sent):]; tail != "" {
-						if !emit(streamItem{index: index, delta: tail}) {
+					if release != "" {
+						if !emit(streamItem{index: index, delta: release}) {
 							return generated, cancelled, false
 						}
 					}
@@ -2077,11 +2072,10 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				// Hold back the longest tail that is a prefix of some stop string, and send
 				// everything before it. Without this, stop=["北京"] streamed "北" where the
 				// non-streaming body returned nothing.
-				if safe := safePrefixLen(seen, p.stop); safe > sent {
-					if !emit(streamItem{index: index, delta: seen[sent:safe], logprobs: chunkLogprobs}) {
+				if release != "" {
+					if !emit(streamItem{index: index, delta: release, logprobs: chunkLogprobs}) {
 						return generated, cancelled, false
 					}
-					sent = safe
 				} else if chunkLogprobs != nil {
 					// Everything visible is already out and this token's text is being held,
 					// so the entry travels alone. The text follows when the tail is released.
@@ -2122,9 +2116,11 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// Text held back in case it began a stop string is the client's after all: no match was
 	// found, so the tail was ordinary output. Sending it is what makes a stop list that never
 	// matches cost nothing but a later chunk.
-	if reason != "stop" && sent < len(seen) {
-		if !emit(streamItem{index: index, delta: seen[sent:]}) {
-			return generated, cancelled, false
+	if reason != "stop" {
+		if rest := gate.flush(); rest != "" {
+			if !emit(streamItem{index: index, delta: rest}) {
+				return generated, cancelled, false
+			}
 		}
 	}
 	// One final chunk carries the finish reason and an empty delta. Clients that accumulate
@@ -3215,4 +3211,61 @@ func (ew *eventWriter) send(payload map[string]any) bool {
 	// before reading a large number as waste.
 	ew.flusher.Flush()
 	return true
+}
+
+// stopGate decides which streamed text may be sent while a stop list is in force.
+//
+// A stop string is matched against decoded text, so a match can only be recognised once its
+// last character arrives -- by which time an earlier character already sent cannot be taken
+// back. Measured before this existed: stop=["北京"] streamed "北" where the non-streaming body
+// returned nothing, so the two transports disagreed about one request.
+//
+// The fix is to hold back the longest tail that could still begin a stop string, and to send
+// everything before it. This type is that bookkeeping: seen is the text this choice has produced,
+// sent is how much of it the client already holds, and push returns what became safe to send.
+//
+// The zero value is not usable; build one with the stop list, which may be empty.
+type stopGate struct {
+	stop []string
+	// seen is every byte of this choice's text the gate has been given.
+	seen string
+	// sent is how many bytes of seen the client has. It trails seen by the length of the
+	// held-back tail.
+	sent int
+}
+
+// push adds text and returns what may now be sent, and whether a stop string matched.
+//
+// On a match the returned text is the part between what the client holds and the cut, and the
+// gate is left with nothing more to send: everything after the stop string belongs to nobody.
+func (g *stopGate) push(text string) (release string, found bool) {
+	g.seen += text
+	if kept, hit := cutAtStop(g.seen, g.stop); hit {
+		// Only the part between what the client already has and the stop string still needs
+		// sending. Reading it after the cut rather than from the increment is what makes the
+		// held-back tail from earlier pushes come out here.
+		return kept[min(len(kept), g.sent):], true
+	}
+	// Nothing matched, so the tail that could still become a stop string stays back and
+	// everything before it goes out.
+	if safe := safePrefixLen(g.seen, g.stop); safe > g.sent {
+		out := g.seen[g.sent:safe]
+		g.sent = safe
+		return out, false
+	}
+	return "", false
+}
+
+// flush returns text still held back when no stop string matched.
+//
+// It is what makes a stop list that never matches cost nothing but a later chunk: the tail was
+// ordinary output all along.
+func (g *stopGate) flush() string {
+	// No guard against a second call: advancing sent is what makes this idempotent, and a
+	// sent >= len(seen) check above it would be dead weight -- measured, removing the guard
+	// changes nothing because the slice is empty by then anyway, while removing the
+	// assignment below makes a second call repeat the tail.
+	out := g.seen[g.sent:]
+	g.sent = len(g.seen)
+	return out
 }

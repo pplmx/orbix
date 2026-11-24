@@ -8546,3 +8546,93 @@ func TestEventWriterRefusesAWriterThatCannotFlush(t *testing.T) {
 		t.Error("newEventWriter accepted a writer that cannot flush")
 	}
 }
+
+// TestStopGateHoldsBackAPartialMatch covers the defect that made streaming disagree with
+// blocking.
+//
+// Measured before this existed: stop=["北京"] streamed "北" where the non-streaming body returned
+// nothing. A stop string is matched on decoded text, so its last character has to arrive before
+// the match can be seen -- and a character already sent cannot be taken back. Holding the longest
+// tail that could still begin a match is what makes the two transports agree.
+func TestStopGateHoldsBackAPartialMatch(t *testing.T) {
+	g := &stopGate{stop: []string{"北京"}}
+
+	// The first character could be the start of the stop string, so nothing goes out yet.
+	if out, found := g.push("北"); out != "" || found {
+		t.Errorf("push(北) = %q, %v; want nothing released and no match", out, found)
+	}
+	// The second completes it: nothing was ever released, so there is nothing to release and
+	// the match is reported.
+	if out, found := g.push("京"); out != "" || !found {
+		t.Errorf("push(京) = %q, %v; want nothing released and a match", out, found)
+	}
+}
+
+// TestStopGateReleasesTextBeforeTheHeldTail is the ordinary case: output that cannot become a
+// stop string must not be delayed.
+//
+// Without this a stream with a stop list would hold every chunk back, which defeats streaming.
+func TestStopGateReleasesTextBeforeTheHeldTail(t *testing.T) {
+	g := &stopGate{stop: []string{"END"}}
+
+	// "hello" cannot begin "END", so all of it goes out at once.
+	if out, _ := g.push("hello "); out != "hello " {
+		t.Fatalf("push(hello ) = %q, want all of it released", out)
+	}
+	// "E" could begin the stop string, so it is held and nothing new is released.
+	if out, _ := g.push("E"); out != "" {
+		t.Errorf("push(E) = %q, want it held back", out)
+	}
+}
+
+// TestStopGateReleasesEverythingWhenNoStopArrives pins flush.
+//
+// A stop list that never matches must cost nothing but a later chunk. Returning the held tail at
+// the end is what makes that true, and without it the stream would end short.
+func TestStopGateReleasesEverythingWhenNoStopArrives(t *testing.T) {
+	g := &stopGate{stop: []string{"END"}}
+	g.push("done.")
+	g.push("E")
+	if rest := g.flush(); rest != "E" {
+		t.Errorf("flush() = %q, want the held E", rest)
+	}
+	// Flushing twice must not repeat the text: a caller does it once, but a second call
+	// returning the same bytes would duplicate output if it ever did happen.
+	if rest := g.flush(); rest != "" {
+		t.Errorf("second flush() = %q, want nothing", rest)
+	}
+}
+
+// TestStopGateDropsTheStopAndEverythingAfterIt covers what a match discards.
+//
+// The stop string is not part of the response, and neither is anything the engine produced after
+// it. Returning only the text between what the client holds and the cut is what enforces that.
+func TestStopGateDropsTheStopAndEverythingAfterIt(t *testing.T) {
+	g := &stopGate{stop: []string{"STOP"}}
+	if out, _ := g.push("answer "); out != "answer " {
+		t.Fatalf("push(answer ) = %q", out)
+	}
+	out, found := g.push("STOP and more")
+	if !found {
+		t.Fatal("the stop string was not recognised")
+	}
+	if out != "" {
+		t.Errorf("released %q on the match, want nothing: the stop is not in the response", out)
+	}
+}
+
+// TestStopGateEmptyListReleasesEverythingImmediately keeps the no-stop path free of delay.
+//
+// Every request without a stop list takes this path, so a hold-back here would delay every
+// streamed chunk in the common case.
+func TestStopGateEmptyListReleasesEverythingImmediately(t *testing.T) {
+	g := &stopGate{}
+	for _, s := range []string{"a", "b", "c"} {
+		if out, found := g.push(s); out != s || found {
+			t.Errorf("push(%q) = %q, %v; want it released with no match", s, out, found)
+		}
+	}
+	if rest := g.flush(); rest != "" {
+		t.Errorf("flush() = %q, want nothing left", rest)
+	}
+}

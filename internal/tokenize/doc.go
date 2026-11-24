@@ -45,6 +45,15 @@
 // run, a punctuation run, whitespace -- and differ in choices, so the choices are data in
 // preRule rather than a function each.
 //
+// Sixteen of the thirty-four have a reference table (pre_reference_cases.go, 126 cases) whose
+// expectations come from applying llama.cpp's own expressions as sequential passes. The other
+// eighteen -- llama3, qwen2 and gpt2 among them -- are covered by direct tests and by a fuzz
+// target over every family, which check self-consistency and the shapes the port has been
+// written against rather than agreement with the reference. That distinction is worth knowing
+// before reading "34 families" as "34 families verified against llama.cpp": for the eighteen,
+// a rule that differs from the reference in a way the direct tests do not exercise will not be
+// caught.
+//
 // deepseek-v3 brought a letter class that includes combining marks, a punctuation
 // alternative naming categories instead of their complement, and a digit-group and CJK
 // expression ahead of the main rule. tekken brought structure *inside* the letter run: a run

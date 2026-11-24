@@ -34,15 +34,15 @@ Paged cache, on `serve`, `chat` and `bench`:
 
 `serve` and `bench`:
 
-| Flag                       | What it controls                                                    |
-| -------------------------- | ------------------------------------------------------------------- |
-| `--max-active`             | Sequences advanced per round, and therefore the batch size          |
-| `--max-queued`             | Backlog accepted before new requests get 503; 0 means 8x max-active |
-| `--policy`                 | Which sequences fill a round: `fifo`, `shortest`, or `fair`         |
-| `--addr`                   | Listen address, `:8080` by default                                  |
-| `--log-format`             | Access log to stderr: `text`, `json`, or `off`                      |
-| `--otlp-endpoint`          | OTLP/HTTP collector for traces; unset means no tracing              |
-| `--shutdown-grace`         | SIGTERM/SIGINT drain time for in-flight replies; 5s, 0 means none   |
+| Flag               | What it controls                                                                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `--max-active`     | Sequences advanced per round, and therefore the batch size                                                           |
+| `--max-queued`     | Backlog accepted before new requests get 503; 0 means 8x max-active                                                  |
+| `--policy`         | Which sequences fill a round: `fifo`, `shortest`, or `fair`                                                          |
+| `--addr`           | Listen address; `:8080` by default, which is every interface, not loopback -- pass `127.0.0.1:8080` to keep it local |
+| `--log-format`     | Access log to stderr: `text`, `json`, or `off`                                                                       |
+| `--otlp-endpoint`  | OTLP/HTTP collector for traces; unset means no tracing                                                               |
+| `--shutdown-grace` | SIGTERM/SIGINT drain time for in-flight replies; 5s, 0 means none                                                    |
 
 `run` and `chat` conversation options:
 

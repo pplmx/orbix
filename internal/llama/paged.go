@@ -219,6 +219,11 @@ func (p *BlockPool) Free() int {
 }
 
 // Positions returns how many positions the pool can hold in total.
+//
+// No production code calls this: /metrics reports Free and the block geometry separately. It is
+// kept because the tests assert the pool's arithmetic against it -- a --blocks/--block-size pair
+// that adds up to the wrong number of positions is a configuration bug the metrics would show
+// only as reuse that never happens.
 func (p *BlockPool) Positions() int { return p.total * p.block }
 
 // Bytes returns the pool's size in bytes.
@@ -333,6 +338,11 @@ func (c *PagedKVCache) Cap() int { return c.cfg.ContextLen }
 func (c *PagedKVCache) ReusedPositions() int { return c.reused }
 
 // BlocksHeld returns the number of blocks this sequence currently holds.
+//
+// No production code calls this. It exists for the tests that assert block accounting: that a
+// released sequence returns every block, and that an evicted prefix leaves the tail's blocks held
+// by whoever still points at them. Those are the two places a block leaks, and neither shows up
+// in a generation result until the pool runs dry many requests later.
 func (c *PagedKVCache) BlocksHeld() int { return len(c.blocks) }
 
 // Reset releases every block and forgets the positions.

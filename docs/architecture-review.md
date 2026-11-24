@@ -201,16 +201,53 @@ CLI 层 3429 行里有大量不属于"解析参数并打印"的内容：
 
 `internal/llama` 导出 20 个类型/函数，其中这些在生产代码里**零调用**：
 
-| 符号                      | 生产调用点 | 说明                                                |
-| ------------------------- | ---------- | --------------------------------------------------- |
-| `PagedKVCache.BlocksHeld` | 0          | 只在测试里用                                        |
-| `BlockPool.RefCount`      | 0          | 只在测试里用                                        |
-| `BlockPool.Positions`     | 0          | 只在测试里用                                        |
-| `Model.Logits`            | 0          | 文档注释说的"nil before the first pass"行为只为测试 |
+| 符号                      | 生产调用点 | 测试调用点 | 真实性质          |
+| ------------------------- | ---------- | ---------- | ----------------- |
+| `PagedKVCache.BlocksHeld` | 0          | 4          | 块核算的观察口    |
+| `BlockPool.RefCount`      | 0          | 15         | 引用计数的观察口  |
+| `BlockPool.Positions`     | 0          | 1          | 池容量的观察口    |
+| `Model.Logits`            | 0          | 2          | 前向结果的读取口  |
 
-这一节写下的当天就处理了第一个：`PrefixIndex.Key` 曾整个仓库零调用（包括测试），注释却说"so a caller can pass it as the next block's parent"，而实际实现是包内未导出的 `chainRoot`（`paged.go:439`）。它已删除，`Remember` 那段依赖它的注释同时改成描述真实契约——parent 是链上前缀的 key，由 `rememberFullBlock` 折叠得出。覆盖率里那条 `prefix.go:201 Key 0.0%` 随之消失，`internal/llama` 仍是 88.4%（这个数字里的分母小了，比例没动，说明删掉的正是从未执行的语句）。
+**这一节最初把"零生产调用"当成了缺陷，这是错的，复查后保留全部四个。** 判断要分两步：
+`PrefixIndex.Key` 是**整个仓库零调用，连测试都没有**，注释还描述了一个不存在的行为，那是死代码；
+上面这四个**有测试在依赖**，删掉它们等于删掉对应的测试能力——`RefCount` 撑起 prefix eviction 的
+引用计数断言，`BlocksHeld` 撑起"释放后块全部归还"和"驱逐前缀后尾部仍被持有"这两条，而那正是
+块泄漏仅有的两个发生点，泄漏在生成结果里不可见，要等池在几十个请求之后枯竭。
+
+`Model.Logits` 是唯一有歧义的：它本身是前向输出的唯一读取口，但注释花了四行讲"第一次前向之前是
+VocabSize 个零而不是 nil"——那个陷阱只对测试有意义。注释留着是对的，它是给测试读者的警告。
+
+所以处理方式是**把观察口的性质写在代码上**，而不是删掉它们：`Positions` 与 `BlocksHeld` 的注释现在
+各自写明了为什么没有生产调用方、以及它们守住的是哪个缺陷。`RefCount` 原本就有"for tests and
+diagnostics"。
+
+真正被处理掉的是 `PrefixIndex.Key`：曾整个仓库零调用（包括测试），注释却说"so a caller can pass it
+as the next block's parent"，而实际实现是包内未导出的 `chainRoot`（`paged.go:439`）。它已删除，
+`Remember` 那段依赖它的注释同时改成描述真实契约——parent 是链上前缀的 key，由 `rememberFullBlock`
+折叠得出。覆盖率里那条 `prefix.go:201 Key 0.0%` 随之消失，`internal/llama` 仍是 88.4%（分母小了，
+比例没动，说明删掉的正是从未执行的语句）。
 
 `Model.Forward`/`Generate` 则相反：有调用方（`run`），但那个调用方让整条单 token 路径活着（见第三节）。删它需要先迁移 `run`。
+
+### 用扫描器找死导出符号，结论是零个
+
+试过一次自动化：遍历所有 `.go`，对每个导出的函数/方法统计它在**非测试**文件里被 `SelectorExpr`
+引用的次数，为 0 就报出来。25 个结果，逐个查下来**没有一个是能删的**：
+
+| 误报来源     | 例子                                               | 真实情况                                                                                         |
+| ------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 同包内调用   | `kernel.MatMul`、`kernel.Dot`、`llama.LoadWeights` | 脚本只数跨包的 `x.Name`，漏掉包内直接调用                                                        |
+| 接口实现     | `MarshalJSON`、`UnmarshalJSON`、`Unwrap`           | 通过接口调用，永远不会出现字面的 `SelectorExpr`                                                  |
+| 测试对拍基准 | `MatMul`/`MatVec`/`Dot`                            | `ops.go:106` 原话是 "This is the serial reference"；生产走 `Runner` 的并行版，串行版就是拿来比的 |
+| 测试观察口   | `RefCount`、`BlocksHeld`、`Positions`              | 见上表                                                                                           |
+
+`MatMul` 的例子最典型：整个仓库只有它的定义、`checkMatMul`（校验形状）和 `ops_test.go` 三处提到它，
+一个纯粹的"零调用"信号。而它的文档写着"Tests compare against this one with a tolerance"，删掉它
+等于删掉并行实现的正确性基准。
+
+**结论：这类扫描能列出待查清单，不能给出结论。** 判断一个导出符号该不该删，要问的是"删掉之后
+谁的断言失去依据"，而不是"有多少个 `x.Name`"。这条和 AGENTS.md 里"判定不可达之前先看函数的参数"
+是同一个道理：静态计数看到的是引用图，不是用途。
 
 覆盖率快照（`go test -cover ./...`）：engine 95.8%、kernel 99.0%、quant 98.0%、f16 98.1%、tokenize 96.7%、server 94.9%、gguf 94.7%、chat 93.0%、otel 91.5%、gguftest 88.6%、llama 88.4%、cmd/orbix 88.2%。`llama` 与 `cmd` 的低点集中在 `cmdServe`（50.4%，模型加载后的编排难以在测试里跑完整）；删掉 `Key` 之后 `llama` 已无 0% 的函数，最低是 `rememberPrefix`/`feedForwardBatch`/`feedForward`/`sameTokens` 的 66.7%。
 

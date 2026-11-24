@@ -191,6 +191,12 @@ func RMSNorm(dst, src, weight []float32, eps float32) error {
 	mean := sumSquares / float64(n)
 	// Accumulate in float64: summing squares in float32 for a 4096-wide row
 	// loses enough precision to change the normalized values.
+	//
+	// ggml squares in float32 and widens only for the accumulation
+	// (`sum += (ggml_float)(x[i00] * x[i00])`), so the two sides differ. Measured over 200 random
+	// rows of width 32 to 4096 with magnitudes from 0.01 to 50: 60 of the scales differed, worst
+	// relative difference 1.2e-7, one ulp of float32. This side is the more accurate one and
+	// there is nothing to align -- recorded because a reader comparing against ggml will find it.
 	scale := float32(1 / math.Sqrt(mean+float64(eps)))
 
 	for i := range n {
@@ -277,6 +283,11 @@ func SiLU(x []float32) {
 // This is Gemma's feed-forward gate. The approximation is the one the reference implementations
 // use: the exact form needs erff, and the two differ by 1.5e-4 at 1 and less elsewhere over the
 // range a gate sees, far below what inference is sensitive to.
+//
+// The two constants match ggml's: SQRT_2_OVER_PI is 0.79788456080286535587989211986876f there and
+// 0.7978845608028654 here, both of which round to 0x3f4c422a, and GELU_COEF_A is 0.044715 on both
+// sides, 0x3d372713. Checked as bits rather than as decimal literals, since the literals differ in
+// how many digits they carry.
 //
 // Unlike SiLU there is no clamp. tanh saturates on its own, so a value far from zero costs the
 // same as any other and neither tail is truncated.

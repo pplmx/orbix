@@ -2162,3 +2162,21 @@ func TestOpenCountCountsParsesNotAttempts(t *testing.T) {
 		t.Errorf("one successful open moved the counter by %d, want 1", got)
 	}
 }
+
+// TestMaxArrayElementsIsTheDocumentedBound pins the number doc.go reasons from.
+//
+// doc.go's untrusted-input section states that one metadata array is bounded at 64 Mi elements,
+// and gives its measurement against that bound: a sixteen-byte header claiming an array made the
+// parser allocate 6144 MiB. The tests above assert the behaviour -- an oversized claim is refused,
+// the message names the count -- but they express the claim as maxArrayElements+1, so the constant
+// moves with them. Halving it would keep every one green while doc.go's "64 Mi" and the 6144 MiB
+// figure derived from it became wrong.
+//
+// maxMetadataBytes, the other bound in that sentence, does not need this: its test asserts the
+// literal 67108864 in the error message, which is the value itself.
+func TestMaxArrayElementsIsTheDocumentedBound(t *testing.T) {
+	if maxArrayElements != 67108864 {
+		t.Errorf("maxArrayElements is %d, want 67108864 (64 Mi): doc.go states that bound and "+
+			"derives its 6144 MiB array-claim measurement from it", maxArrayElements)
+	}
+}

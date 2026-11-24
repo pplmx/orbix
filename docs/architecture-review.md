@@ -719,6 +719,39 @@ API 面也复核了：`engine` 的导出签名里只出现 `Sampler`（`Greedy()
 四件事里最有价值的是第一条：**"每个 X 起一个 goroutine"看起来像无界，但上界由请求校验决定，
 而不是由循环本身决定。** 判断并发是否安全，要看的是那个校验，不是循环的形状。
 
+### 第十二轮：默认值与守卫，用注入量了一遍
+
+`LoadConfig` 给六个键提供默认值，`workers()`、`SoftcapValue`、`dataStart` 各有一处守卫。方法
+是同一个：把值改错或把守卫放松，跑整包，数失败的测试。目的是分清「有测试盯着」和「只是看起来
+合理」。
+
+| 改动                                 | 失败的测试 |
+| ------------------------------------ | ---------- |
+| `HeadDim = Hidden/Heads` → `Hidden`  | 130        |
+| `RopeScale = 1` → `2`                | 9          |
+| `RopeBase = 10000` → `1000`          | 8          |
+| `EmbedScale = sqrt(Hidden)` → `1`    | 6          |
+| `RopeDim = HeadDim` → `HeadDim/2`    | 3          |
+| `KVHeads = Heads` → `1`              | 1          |
+| `RMSNormEps = 1e-5` → `1e-9`         | **0**      |
+| `workers()` 的 `n <= 0` → `n == 0`   | **0**      |
+| `SoftcapValue` 的 `c <= 0` → `c < 0` | 13         |
+| `dataStart` 去掉 `nbytes < 0`        | 1          |
+
+两处 0 是真实的空白，都补了测试：
+
+- **`RMSNormEps`** 的默认值只在文件**不写** `attention.layer_norm_rms_epsilon` 时生效，而每个
+  fixture 都写了它。缺失该键合法（llama.cpp 同样当可选），且这个值决定 RMSNorm 里怎么防除零，
+  写错是静默的数值偏差而不是崩溃。
+- **`workers()` 的负数**：三层下游守卫（`scoreBuffers` 把 slots 夹到 1、`split` 对 `parts <= 1`
+  退化、`Runner.Workers` 对 nil 返回 1）都能兜住崩溃，但兜不住「悄悄变成串行」。CLI 会照报调用方
+  给的值，而实际 fan-out 是 1。
+
+`KVHeads` 只有 1 是合理的：它只在文件省略 `head_count_kv` 时生效，而那个省略很罕见。
+
+排除掉的一处：`RMSNorm` 里 `n == 0` 提前返回，删掉后零测试失败——但那是因为 `for i := range n`
+在 `n=0` 时本就不执行，删掉只是多算一次 NaN 再丢弃。它是微优化不是正确性守卫，不必为它写测试。
+
 ### `run` 仍然不迁到 engine
 
 第九节把这件事列为待定。本轮看了它到底要什么，结论是**不迁**，理由比上一轮具体：

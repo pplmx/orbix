@@ -102,35 +102,8 @@ func LoadWeights(path string) (*Weights, error) {
 		return nil, err
 	}
 
-	// The frequency factors are a tensor, not metadata, so they cannot be read by
-	// LoadConfig. A model without one leaves the field nil, which the rope treats as "no
-	// scaling" and is what every model before Llama 3.2 relies on.
-	if _, ok := l.File().Tensor("rope_freqs.weight"); ok {
-		freqs, err := l.Tensor("rope_freqs.weight")
-		if err != nil {
-			return nil, fmt.Errorf("llama: read rope_freqs: %w", err)
-		}
-		if want := cfg.RopeDim / 2; len(freqs) != want {
-			return nil, fmt.Errorf("llama: rope_freqs has %d values, want %d for rope dim %d",
-				len(freqs), want, cfg.RopeDim)
-		}
-		// This tensor is loaded outside the batch below, so it needs the same check the
-		// weights get: a NaN frequency factor poisons the rotation for every position, which
-		// is the same silent-garbage failure the batch guard exists to prevent.
-		if err := checkFinite(map[string][]float32{"rope_freqs.weight": freqs}); err != nil {
-			return nil, err
-		}
-		// Zero is finite, so checkFinite passes it, and the rope divides this dimension's
-		// theta by it: theta/0 is +Inf, math.Cos(+Inf) is NaN, and every position's cos and
-		// sin for that dimension pair are NaN from the first token on. Measured with
-		// freqs {1, 0}: cos[pos=1][1] is NaN. It is the failure the check above exists to
-		// prevent, reached by a value that checks as finite.
-		if i := slices.Index(freqs, 0); i >= 0 {
-			return nil, fmt.Errorf("llama: rope_freqs.weight has a zero at index %d of %d;"+
-				" a zero factor divides the rotation angle by zero, so every position's"+
-				" cos and sin become NaN -- the file is corrupt", i, len(freqs))
-		}
-		cfg.RopeFreqs = freqs
+	if err := loadRopeFreqs(l, &cfg); err != nil {
+		return nil, err
 	}
 
 	names := tensorNames(cfg)
@@ -372,4 +345,42 @@ func tensorNames(cfg Config) []string {
 		}
 	}
 	return names
+}
+
+// loadRopeFreqs reads the per-dimension frequency factors when the file carries them.
+//
+// They are a tensor rather than metadata, so LoadConfig cannot see them. A model without one
+// keeps the field nil, which the rope treats as no scaling -- what every model before Llama 3.2
+// relies on.
+//
+// Three checks guard the tensor, and the last is the one that reads as redundant and is not.
+// A wrong length is an out-of-range read on every position, so the length is compared to
+// RopeDim/2 before the slice is stored. A non-finite factor poisons the rotation, which the
+// generic weight check would catch if this tensor went through that batch -- it does not, so the
+// check is repeated here. A zero factor is finite, so that check passes it, and the rope divides
+// theta by it: theta/0 is +Inf, math.Cos(+Inf) is NaN, and every position's cos and sin for that
+// dimension pair are NaN from the first token on. Measured with freqs {1, 0}: cos[pos=1][1] is
+// NaN.
+func loadRopeFreqs(l *quant.Loader, cfg *Config) error {
+	if _, ok := l.File().Tensor("rope_freqs.weight"); !ok {
+		return nil
+	}
+	freqs, err := l.Tensor("rope_freqs.weight")
+	if err != nil {
+		return fmt.Errorf("llama: read rope_freqs: %w", err)
+	}
+	if want := cfg.RopeDim / 2; len(freqs) != want {
+		return fmt.Errorf("llama: rope_freqs has %d values, want %d for rope dim %d",
+			len(freqs), want, cfg.RopeDim)
+	}
+	if err := checkFinite(map[string][]float32{"rope_freqs.weight": freqs}); err != nil {
+		return err
+	}
+	if i := slices.Index(freqs, 0); i >= 0 {
+		return fmt.Errorf("llama: rope_freqs.weight has a zero at index %d of %d;"+
+			" a zero factor divides the rotation angle by zero, so every position's"+
+			" cos and sin become NaN -- the file is corrupt", i, len(freqs))
+	}
+	cfg.RopeFreqs = freqs
+	return nil
 }

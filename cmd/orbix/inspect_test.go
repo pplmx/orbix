@@ -288,6 +288,38 @@ func TestModelSubcommandDispatch(t *testing.T) {
 			t.Errorf("error %q does not explain the ordering", err)
 		}
 	})
+
+	// The other four commands fall back to ORBIX_MODEL, this one does not, and a caller who
+	// exports it runs `model inspect` bare expecting the same thing. Saying the variable is
+	// not used answers the question the message would otherwise leave open.
+	t.Run("a set ORBIX_MODEL is called out as not used", func(t *testing.T) {
+		t.Setenv("ORBIX_MODEL", "/some/checkpoint.gguf")
+		err := cmdModelInspect(nil)
+		if err == nil {
+			t.Fatal("model inspect accepted no path")
+		}
+		if !strings.Contains(err.Error(), "ORBIX_MODEL is not used here") {
+			t.Errorf("error %q does not say the variable is ignored", err)
+		}
+		// The variable must not be read as the path either: that would inspect a file the
+		// caller did not name, which is the reason it is not consulted.
+		if strings.Contains(err.Error(), "/some/checkpoint.gguf") {
+			t.Errorf("error %q used ORBIX_MODEL as a path", err)
+		}
+	})
+
+	// With the variable unset the message stays the plain one: there is no expectation to
+	// correct, so naming the variable would only add a line to read.
+	t.Run("without the variable the message is unchanged", func(t *testing.T) {
+		t.Setenv("ORBIX_MODEL", "")
+		err := cmdModelInspect(nil)
+		if err == nil {
+			t.Fatal("model inspect accepted no path")
+		}
+		if strings.Contains(err.Error(), "ORBIX_MODEL") {
+			t.Errorf("error %q mentions ORBIX_MODEL with none set", err)
+		}
+	})
 }
 
 // TestInspectSurvivesAFileWithNoMetadata covers the two degraded paths of the inspect report.

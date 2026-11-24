@@ -50,6 +50,15 @@ func cmdModelInspect(args []string) error {
 				return fmt.Errorf("model inspect: flags must come before the path, got %q after it", a)
 			}
 		}
+		// ORBIX_MODEL is deliberately not consulted here, and the message says so rather than
+		// leaving a reader to wonder. The other four commands take their path from it because
+		// they open the one model they were deployed with; this command's whole purpose is to
+		// describe a file named on the command line, so a default would make it inspect
+		// something the caller did not name.
+		if os.Getenv("ORBIX_MODEL") != "" {
+			return fmt.Errorf("model inspect: want exactly one file path, got %d "+
+				"(ORBIX_MODEL is not used here: name the file to inspect)", fs.NArg())
+		}
 		return fmt.Errorf("model inspect: want exactly one file path, got %d", fs.NArg())
 	}
 	path := fs.Arg(0)

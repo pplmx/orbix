@@ -894,6 +894,13 @@ func (s *sequence) emit(ev Event) bool {
 	// r.Context() stays live -- so the branch that trusted the cancel signal was the one a slow
 	// client takes. Both paths now share the same deadline, and the cancel is an early exit
 	// rather than the only exit.
+	//
+	// The cancel arm of that select is the one branch here without a test. Measured at three delay
+	// lengths against the full-buffer fixture: at 200ms and 500ms the buffer never fills, and at 3s
+	// the grace deadline fires first; at 1s the select is entered but the arm that wins is the
+	// deadline, because a cancel closed between two sends is only seen by the next one. Getting the
+	// two to coincide reliably means racing a scheduler, and a test that sometimes covers a branch is
+	// worse than one that says it does not.
 	timer := time.NewTimer(abandonGrace)
 	defer timer.Stop()
 	if s.req.Cancel != nil {

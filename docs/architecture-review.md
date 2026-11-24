@@ -346,11 +346,26 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**本轮没碰、仍 >=100 行的六个**：`chat.evalExpr` 275、`tokenize.New` 274、
-`tokenize.preFamilyOf` 271、`cli.chatSession` 178、`cli.cmdRun` 175、
-`server.streamOneChoice` 161，以及 `llama.LoadWeights` 134 与 `llama.attentionBatch` 133。
-前三个是解析器的分派函数，改动面比它们省下的行数大；`LoadWeights` 与 `attentionBatch` 上一轮
-判断过不该合（见第三节）。这一轮只处理了那些"拆开后能给出一个可命名的单元"的。
+**仍未处理、>=100 行的十二个**（2026-11 末 AST 实测，729 个函数）：`tokenize.preFamilyOf` 271、
+`chat.evalExpr` 242、`cli.cmdServe` 238、`cli.cmdBench` 234、`server.generate` 189、
+`server.streamOneChoice` 157、`tokenize.loadPreTokenization` 157、`cli.cmdRun` 147、
+`cli.chatSession` 135、`llama.LoadWeights` 134、`llama.attentionBatch` 133、
+`server.blockingResponse` 131。
+
+逐个判断如下，而不是笼统地"改动面大"：
+
+- **`preFamilyOf`（271）是数据不是逻辑。** 34 个 `case`，每个返回一个 `preRule` 字面量，注释是那个
+  家族的预分词正则原文。改成 `map[preType]preRule` 同样 271 行，注释还得逐条贴，而且 `(preRule, bool)`
+  的 `bool` 正是"这个家族是否已知"的判定，表驱动能保留它——所以改与不改都不改变读者要读的量。
+  **行数是数据密度，不是复杂度。**
+- **`evalExpr`（242）的骨架是分派。** 20 个 case 里 15 个只有 2–20 行"求子节点再合并"，拆成 20 个
+  方法只增加间接层。有独立规则的那一个已经拆出去了（`evalArithmetic`，见下节）。
+- **`cmdServe`/`cmdBench`/`cmdRun`/`chatSession`** 剩下的都是连续装配流程，只跑一次、只失败一次。
+- **`LoadWeights`（134）与 `attentionBatch`（133）** 我在第三节判断过不该合。
+- **`generate`/`streamOneChoice`/`blockingResponse`/`loadPreTokenization`** 是前几轮拆到一半的产物，
+  再拆一层会把一步分成两半而不减少要同时握住的东西。
+
+这一轮只处理了"拆开后能给出一个可命名的单元"的那种。
 
 `LoadConfig` 的六段是 `dimensions`、`headGeometry`、`rotation`、`experts`、`window`（含
 `localLayers`）、`vocabulary`。`dimensions` 顺手改成了表驱动；把 `block_count` 映射到错误的字段
@@ -436,6 +451,25 @@ for _, want := range []string{"1", "3"} {
 
 这个破坏不来自重构的逻辑，来自重构的**手法**。批量文本替换在移动代码时会连字符串一起改，而字符串
 里恰好有同名标识符。
+
+### 第四轮：`evalExpr` 里唯一有独立规则的那个 case
+
+`evalExpr` 的 20 个 case 里，19 个是"求子节点再合并"，唯一的例外是 `arithExpr`：43 行，包含减法的
+溢出检查、模零拒绝、负数模拒绝，每条都带实测注释。它现在是一个独立函数 `evalArithmetic(op, left,
+right)`，`evalExpr` 从 275 行降到 242。
+
+判断依据不是行数而是**有没有自己的规则**。`indexExpr` 的"括号按操作数分两种含义"也有规则，但它与
+两次递归求值耦合在一起，提取后剩 10 行；`sliceExpr` 的越界钳制只有 8 行且已有测试。这两个没动，
+`arithExpr` 动了，因为它的规则有 43 行且几乎没测过——整个包里只有一条 `{{ 1 % 0 }}`。
+
+补的六个测试覆盖了注释记录但无测试的两个真实缺陷：
+
+- `MinInt64 - 1` 曾渲染成 `9223372036854775807`，`MaxInt64 - (-1)` 反向回绕。两个方向都断言，
+  外加边界本身（`MaxInt64 - 0` 必须仍然通过），因为一端写了守卫通常漏另一端。
+- 取模的负操作数被拒绝而不是计算，因为 Go 的截断除法与 Jinja 的地板除法在这些操作数上结论不同。
+  三种符号组合都覆盖。
+
+注入验证：关掉溢出比较红两个测试，关掉负数检查按名字红掉 divisor 那条。
 
 ### `run` 仍然不迁到 engine
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -774,4 +775,92 @@ func TestInspectCannotBeMadeToPrintExtraRows(t *testing.T) {
 			t.Errorf("the sanitized name is missing from:\n%s", buf.String())
 		}
 	})
+}
+
+// TestInspectJSONShapeIsTheDocumentedContract pins the keys a caller parses.
+//
+// The other JSON tests read metadata and check its values; none asserts the shape of the object
+// around it, so a field could be renamed or dropped without a test noticing. That matters here
+// because this output is the machine-readable view of a file -- a script that reads
+// tensor_data_offset to seek, or bytes to size a tensor, breaks silently when the key changes.
+func TestInspectJSONShapeIsTheDocumentedContract(t *testing.T) {
+	path := gguftest.Model{Arch: "llama", NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = run([]string{"model", "inspect", "--json", path}) })
+	if runErr != nil {
+		t.Fatalf("inspect --json: %v", runErr)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+
+	// Every top-level key, with the type a caller would assert on.
+	want := map[string]string{
+		"version":            "number",
+		"alignment":          "number",
+		"tensor_data_offset": "number",
+		"metadata":           "map",
+		"tensors":            "array",
+	}
+	for key, kind := range want {
+		got, ok := doc[key]
+		if !ok {
+			t.Errorf("the object has no %q; got %v", key, sortedKeys(doc))
+			continue
+		}
+		switch kind {
+		case "number":
+			if _, ok := got.(float64); !ok {
+				t.Errorf("%s is %T, want a number", key, got)
+			}
+		case "map":
+			if _, ok := got.(map[string]any); !ok {
+				t.Errorf("%s is %T, want an object", key, got)
+			}
+		case "array":
+			if _, ok := got.([]any); !ok {
+				t.Errorf("%s is %T, want an array", key, got)
+			}
+		}
+	}
+	// No extra top-level keys: an additions is a contract change and should be a deliberate one
+	// rather than something a test tolerates.
+	if len(doc) != len(want) {
+		t.Errorf("the object has %d keys (%v), want exactly %v", len(doc), sortedKeys(doc), want)
+	}
+
+	// And the tensor entries inside, which is what a caller iterates.
+	tensors, _ := doc["tensors"].([]any)
+	if len(tensors) == 0 {
+		t.Fatal("the fixture produced no tensors, so the entry shape cannot be checked")
+	}
+	first, ok := tensors[0].(map[string]any)
+	if !ok {
+		t.Fatalf("a tensor entry is %T, want an object", tensors[0])
+	}
+	for _, key := range []string{"name", "dims", "type", "offset"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("a tensor entry has no %q; got %v", key, sortedKeys(first))
+		}
+	}
+	// bytes is optional: a type gguf cannot size leaves it out rather than guessing.
+	if _, isArray := first["dims"].([]any); !isArray {
+		t.Errorf("dims is %T, want an array", first["dims"])
+	}
+	if _, isString := first["type"].(string); !isString {
+		t.Errorf("type is %T, want a string", first["type"])
+	}
+}
+
+// sortedKeys lists a map's keys for an error message, so a failure shows what was there.
+func sortedKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

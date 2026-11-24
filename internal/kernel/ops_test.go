@@ -3,6 +3,7 @@ package kernel
 import (
 	"math"
 	"math/rand"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -1266,8 +1267,16 @@ func TestMatVecRejectsOverflowingShape(t *testing.T) {
 	if err == nil {
 		t.Fatal("MatVec accepted a shape whose product overflows int")
 	}
-	// The refusal names a dimension, so the message is usable rather than a bare failure.
+	// The refusal names a dimension, so the message is usable rather than a bare failure. The
+	// assertion used to check only the "kernel:" prefix while this comment claimed the dimension
+	// was named.
 	if !strings.Contains(err.Error(), "kernel:") {
 		t.Errorf("error = %q, want it prefixed like the package's other shape errors", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(n)) {
+		t.Errorf("error = %q, want it to name the %d it refused", err, n)
+	}
+	if !strings.Contains(err.Error(), "dst") {
+		t.Errorf("error = %q, want it to name which buffer was short", err)
 	}
 }

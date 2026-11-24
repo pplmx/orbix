@@ -40,6 +40,12 @@ func TestDumpDequant(t *testing.T) {
 		{"Q8_0", gguf.Q8_0, 32, 34},
 		{"BF16", gguf.BF16, 1, 2},
 		{"F16", gguf.F16, 1, 2},
+		// The K-quants put eight or sixteen sub-blocks inside one super-block, each with its
+		// own 6-bit scale, and locate the pieces in an order that differs between formats --
+		// Q6_K's super-scale is the last field, not the first. One block each is enough: the
+		// arithmetic repeats per sub-block.
+		{"Q4_K", gguf.Q4_K, 256, 144},
+		{"Q6_K", gguf.Q6_K, 256, 210},
 	}
 
 	type block struct {

@@ -104,6 +104,77 @@ def dequant_f16(src: bytes) -> list[float]:
     return [f16(src[i : i + 2]) for i in range(0, len(src), 2)]
 
 
+def get_scale_min_k4(j: int, q: bytes) -> tuple[int, int]:
+    """get_scale_min_k4 unpacks sub-block j's 6-bit scale and minimum.
+
+    ggml's own helper of the same name. The low four sub-blocks take their scale from the low
+    six bits of bytes 0-3 and their min from bytes 4-7; the high four take the low nibble of
+    bytes 8-11 as the low four bits and two bits from an earlier byte as the top two.
+    """
+    if j < 4:
+        return q[j] & 63, q[j + 4] & 63
+    return (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4), (q[j + 4] >> 4) | ((q[j] >> 6) << 4)
+
+
+def dequant_q4_k(src: bytes) -> list[float]:
+    """Q4_K: 2-byte d, 2-byte dmin, 12 scale bytes, then 128 code bytes for 256 weights.
+
+    The codes are four iterations of 64 weights. Within one iteration the first 32 come from
+    the low nibbles of 32 bytes and the next 32 from the high nibbles of those same bytes --
+    not interleaved per byte the way Q4_0 is.
+    """
+    d = f16(src[0:2])
+    dmin = f16(src[2:4])
+    scales = src[4:16]
+    qs = src[16:144]
+    out = [0.0] * 256
+    for it in range(4):
+        sc0, m0 = get_scale_min_k4(2 * it, scales)
+        sc1, m1 = get_scale_min_k4(2 * it + 1, scales)
+        d1, m1f = d * sc0, dmin * m0
+        d2, m2f = d * sc1, dmin * m1
+        for l in range(32):
+            q = qs[it * 32 + l]
+            out[it * 64 + l] = d1 * (q & 0x0F) - m1f
+            out[it * 64 + 32 + l] = d2 * (q >> 4) - m2f
+    return out
+
+
+def dequant_q6_k(src: bytes) -> list[float]:
+    """Q6_K: 128 low-nibble bytes, 64 high-2-bit bytes, 16 int8 sub-scales, then d.
+
+    d comes last here, unlike every other format. Two halves of 128 weights; within a half,
+    each of 32 byte positions yields four weights from ql[l] and ql[l+32] with the top two bits
+    from successive bit pairs of qh[l].
+    """
+    ql = src[0:128]
+    qh = src[128:192]
+    sc = src[192:208]
+    d = f16(src[208:210])
+    out = [0.0] * 256
+    for half in range(2):
+        ql_off = half * 64
+        qh_off = half * 32
+        out_off = half * 128
+        # The scale pointer advances by 8 per half in ggml, so the second half uses sc[8..15].
+        sc_off = half * 8
+        for l in range(32):
+            is_ = l // 16
+            q1 = (ql[ql_off + l] & 0x0F) | (((qh[qh_off + l] >> 0) & 3) << 4)
+            q2 = (ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)
+            q3 = (ql[ql_off + l] >> 4) | (((qh[qh_off + l] >> 4) & 3) << 4)
+            q4 = (ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)
+            s0 = d * struct.unpack("<b", bytes([sc[sc_off + is_]]))[0]
+            s2 = d * struct.unpack("<b", bytes([sc[sc_off + is_ + 2]]))[0]
+            s4 = d * struct.unpack("<b", bytes([sc[sc_off + is_ + 4]]))[0]
+            s6 = d * struct.unpack("<b", bytes([sc[sc_off + is_ + 6]]))[0]
+            out[out_off + l] = s0 * (q1 - 32)
+            out[out_off + l + 32] = s2 * (q2 - 32)
+            out[out_off + l + 64] = s4 * (q3 - 32)
+            out[out_off + l + 96] = s6 * (q4 - 32)
+    return out
+
+
 DECODERS = {
     "Q4_0": dequant_q4_0,
     "Q4_1": dequant_q4_1,
@@ -112,6 +183,8 @@ DECODERS = {
     "Q8_0": dequant_q8_0,
     "BF16": dequant_bf16,
     "F16": dequant_f16,
+    "Q4_K": dequant_q4_k,
+    "Q6_K": dequant_q6_k,
 }
 
 
@@ -132,7 +205,7 @@ def main() -> int:
         src = base64.b64decode(case["src"])
         # A block is 32 weights for the quantized formats and one for the wide ones; decode
         # whatever the encoded length covers rather than assuming a count.
-        block = 32 if name.startswith("Q") else 1
+        block = 256 if name.endswith("_K") else (32 if name.startswith("Q") else 1)
         want = case["bits"]
         size = len(src) // (len(want) // block)
         got = []

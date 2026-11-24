@@ -389,6 +389,9 @@ func TestLoadConfigRejects(t *testing.T) {
 				return replaceKey(c.kvs(), "llama.block_count", u32Val(0))
 			},
 			want: "must be positive",
+			// The message names the key it refused and the value it saw; without them a caller
+			// with several count keys cannot tell which one this is.
+			wantAll: []string{"llama.block_count = 0"},
 		},
 		{
 			name: "hidden not divisible by heads",
@@ -506,14 +509,16 @@ func TestLoadConfigRejects(t *testing.T) {
 			mutate: func(c *tinyConfig) []kv {
 				return append(c.kvs(), kv{"llama.rope.scaling.type", strVal("yarn")})
 			},
-			want: "unsupported rope scaling",
+			want:    "unsupported rope scaling",
+			wantAll: []string{`"yarn"`},
 		},
 		{
 			name: "non-positive epsilon",
 			mutate: func(c *tinyConfig) []kv {
 				return replaceKey(c.kvs(), "llama.attention.layer_norm_rms_epsilon", f32Val(0))
 			},
-			want: "must be a finite positive number",
+			want:    "must be a finite positive number",
+			wantAll: []string{"attention.layer_norm_rms_epsilon 0"},
 		},
 		{
 			// Same gap as the rope base: a NaN epsilon is not "<=" anything, so the norm

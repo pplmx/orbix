@@ -135,11 +135,6 @@ type Model struct {
 	// clean one would pass for the wrong reason.
 	NaNScaleTensor string
 
-	// RopeFreqs, when set, is written as rope_freqs.weight with exactly these values. Nil
-	// omits the tensor, which is what a model without rope scaling has. Its length must be
-	// RopeDim/2, since that is the shape the loader requires.
-	RopeFreqs []float32
-
 	// AddSpacePrefix is tokenizer.ggml.add_space_prefix. Nil omits the key, which leaves the
 	// loader to infer it from the vocabulary family -- true for SentencePiece, false for
 	// byte-level BPE. A non-nil value states it explicitly, which is the only way to test
@@ -262,9 +257,6 @@ func (m Model) tensors() []tensorSpec {
 		// a special token at once -- every sequence would end at its first step, which
 		// makes the fixture useless for tests that need generation to continue.
 		{"output.weight", []uint64{h, uint64(len(m.Vocab))}},
-	}
-	if len(m.RopeFreqs) > 0 {
-		out = append(out, tensorSpec{"rope_freqs.weight", []uint64{uint64(len(m.RopeFreqs))}})
 	}
 	for i := range m.Layers {
 		p := "blk." + itoa(i) + "."
@@ -397,9 +389,6 @@ func (m Model) Bytes() ([]byte, error) {
 		infos[i].Offset = uint64(offset)
 		vals := make([]float32, n)
 		fillWeights(vals, spec.name)
-		if spec.name == "rope_freqs.weight" {
-			copy(vals, m.RopeFreqs)
-		}
 		data = appendFloat32s(data, vals)
 		offset += int(n) * 4
 	}

@@ -396,7 +396,7 @@ func variableValue(v any) (value, error) {
 	case int64:
 		return strValue(strconv.FormatInt(x, 10)), nil
 	case float64:
-		return strValue(formatFloat(x)), nil
+		return strValue(renderNumber(x)), nil
 	case []any:
 		items := make([]value, len(x))
 		for i, item := range x {
@@ -423,7 +423,11 @@ func variableValue(v any) (value, error) {
 	}
 }
 
-// formatFloat prints a number the way Jinja2 would print the value the same JSON produces.
+// renderNumber prints a number the way Jinja2 would print the value the same JSON produces.
+//
+// The name says what it is for rather than what type it takes: internal/server has a
+// formatFloat too, which writes Prometheus exposition text, and two functions with one name
+// doing two jobs is how a reader picks the wrong one to change.
 //
 // That is not obvious, and it is measured rather than assumed. encoding/json gives this package
 // a float64 for every number in the request body, but Jinja2 receives what json.loads produced
@@ -434,7 +438,7 @@ func variableValue(v any) (value, error) {
 // Measured against jinja2 3.1.6: `{{ n }}` renders "3" for n=3, "3.0" for n=3.0, and "True" for
 // n=True. The bool case never reaches here -- variableValue maps it to boolValue, which print()
 // renders as Jinja does.
-func formatFloat(f float64) string {
+func renderNumber(f float64) string {
 	if f == math.Trunc(f) && math.Abs(f) < 1e15 {
 		// Whole and inside the range where float64 represents integers exactly, so it came from
 		// a JSON integer and Jinja2 would have held an int.

@@ -47,12 +47,16 @@
 //
 // Sixteen of the thirty-four have a reference table (pre_reference_cases.go, 126 cases) whose
 // expectations come from applying llama.cpp's own expressions as sequential passes. The other
-// eighteen -- llama3, qwen2 and gpt2 among them -- are covered by direct tests and by a fuzz
-// target over every family, which check self-consistency and the shapes the port has been
-// written against rather than agreement with the reference. That distinction is worth knowing
-// before reading "34 families" as "34 families verified against llama.cpp": for the eighteen,
-// a rule that differs from the reference in a way the direct tests do not exercise will not be
-// caught.
+// eighteen -- llama3, qwen2 and gpt2 among them -- have no such table. They are not unverified,
+// but what verifies them is a different instrument: direct assertions, a fuzz target over every
+// family, and the round-trip sweep in roundtrip_test.go, which encodes and decodes every valid
+// code point against a real vocabulary. That sweep is what found two escaping-table bugs the
+// fixture-based tests could not see.
+//
+// The gap that leaves is narrower than "unverified" but real: a chunk boundary that differs from
+// llama.cpp's produces the same characters back, so a round trip passes. The reference table is
+// the only check that compares where a rule cuts, which is why a family's absence from it is
+// worth knowing when deciding how much to trust one this package has not been run against.
 //
 // deepseek-v3 brought a letter class that includes combining marks, a punctuation
 // alternative naming categories instead of their complement, and a digit-group and CJK

@@ -8379,3 +8379,83 @@ func mustVars(t *testing.T, body string) map[string]any {
 	}
 	return m
 }
+
+// TestChoiceObjectShapes covers the response-shape decisions choiceObject owns.
+//
+// It is reachable directly because everything it does is a choice about the object a caller
+// reads -- where a stop string cuts the text, whether the prompt is echoed ahead of it, and which
+// of the two schemas the object takes. A test through the endpoint would have to guess the
+// fixture's generated text to see any of that.
+func TestChoiceObjectShapes(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 256})
+
+	// "abcdef" as ids the fixture can decode. Whatever they render to, the assertions below are
+	// about structure rather than about the text's meaning.
+	c := &choiceResult{
+		out:    []int32{4, 5, 6}, // a, b, c in the fixture's vocabulary
+		reason: "length",
+	}
+
+	t.Run("chat schema", func(t *testing.T) {
+		obj := srv.choiceObject(c, 0, generateParams{chat: true})
+		if _, ok := obj["message"]; !ok {
+			t.Errorf("chat choice has no message: %v", obj)
+		}
+		if _, ok := obj["text"]; ok {
+			t.Errorf("chat choice carries a text field: %v", obj)
+		}
+		if obj["index"] != 0 {
+			t.Errorf("index = %v, want 0", obj["index"])
+		}
+		if obj["finish_reason"] != "length" {
+			t.Errorf("finish_reason = %v, want length", obj["finish_reason"])
+		}
+	})
+
+	t.Run("completions schema", func(t *testing.T) {
+		obj := srv.choiceObject(c, 1, generateParams{})
+		if _, ok := obj["text"]; !ok {
+			t.Errorf("completions choice has no text: %v", obj)
+		}
+		if _, ok := obj["message"]; ok {
+			t.Errorf("completions choice carries a message field: %v", obj)
+		}
+		// The index is the response position, not the candidate's slot.
+		if obj["index"] != 1 {
+			t.Errorf("index = %v, want the response position 1", obj["index"])
+		}
+	})
+
+	t.Run("echo prepends the prompt", func(t *testing.T) {
+		plain := srv.choiceObject(c, 0, generateParams{})
+		echoed := srv.choiceObject(c, 0, generateParams{echo: true, prompt: "Once "})
+		if got, want := echoed["text"], "Once "+plain["text"].(string); got != want {
+			t.Errorf("echoed text = %q, want %q", got, want)
+		}
+		// echo has no effect on the chat schema: the caller sent messages, not a prompt, so
+		// there is nothing to prepend.
+		chatEcho := srv.choiceObject(c, 0, generateParams{chat: true, echo: true, prompt: "Once "})
+		msg := chatEcho["message"].(map[string]string)
+		if strings.HasPrefix(msg["content"], "Once ") {
+			t.Errorf("chat echo prepended a prompt: %q", msg["content"])
+		}
+	})
+
+	t.Run("a stop string cuts the text and reports stop", func(t *testing.T) {
+		full := srv.choiceObject(c, 0, generateParams{})
+		text := full["text"].(string)
+		if len(text) < 2 {
+			t.Skipf("the fixture generated %q, too short to cut", text)
+		}
+		// Cut at the second byte of whatever it produced, so the cut is inside the text rather
+		// than before or after it.
+		cutAt := text[:1]
+		obj := srv.choiceObject(c, 0, generateParams{stop: []string{cutAt}})
+		if got := obj["text"].(string); got != "" {
+			t.Errorf("text = %q, want empty: the stop string was the first character", got)
+		}
+		if obj["finish_reason"] != "stop" {
+			t.Errorf("finish_reason = %v, want stop", obj["finish_reason"])
+		}
+	})
+}

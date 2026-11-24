@@ -1700,79 +1700,9 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 		generated += len(results[i].out)
 	}
 
-	// Chooses each returned choice's text and finish reason. OpenAI's usage counts
-	// completion_tokens across every choice and prompt_tokens once, because the prompt was
-	// prefilled once per sequence but is the same text.
 	choices := make([]map[string]any, len(selected))
 	for out, idx := range selected {
-		c := &results[idx]
-		text := s.tok.DecodeCompletion(c.out)
-		// A stop string is text, and generation halts where it would appear. OpenAI's API
-		// takes strings, and a string need not be one token: " Paris" encodes as a space
-		// token followed by the word's own. stopTokenIDs can only hand the engine a single
-		// token, so the engine-side check cannot express this -- and taking the first token
-		// of a multi-token string is actively wrong, since the space token then stops every
-		// sequence at its first space and the response comes back empty.
-		reason := c.reason
-		if cut, found := cutAtStop(text, p.stop); found {
-			text = cut
-			reason = "stop"
-		}
-		// The logprob lists are cut to the text the response shows, which is the stop-cut
-		// text and not the echoed one: the prompt was not generated, so it has no logprob
-		// here. With echo the offsets move past it, because they index into the text the
-		// caller receives.
-		//
-		// A token whose text straddles the cut is dropped rather than half-reported: half of
-		// its text survived, and neither keeping it nor truncating it would describe the
-		// probability of the thing the caller can see.
-		var logprobs any
-		if p.logprobs {
-			described := s.describeTokens(c.samples)
-			keep, _ := keptTokens(described, len(text))
-			if p.chat {
-				logprobs = chatLogprobs(described, keep)
-			} else {
-				offset := 0
-				if p.echo {
-					offset = len(p.prompt)
-				}
-				logprobs = completionLogprobs(described, keep, offset)
-			}
-		}
-
-		// echo prepends the prompt after the stop cut, not before: the cut applies to what
-		// the model generated, and a stop string that happens to appear in the prompt must
-		// not truncate the part of the answer the caller already typed. The prompt is echoed
-		// as the caller sent it rather than re-decoded from its token ids, because that text
-		// is exactly what they are asking to see back.
-		//
-		// The echoed prompt is not counted again in usage: prompt_tokens already covers it,
-		// and adding it to completion_tokens as well would bill the same text twice. This is
-		// a choice, not a documented OpenAI rule -- the schema does not say -- and it is the
-		// one that keeps prompt_tokens + completion_tokens equal to the tokens actually
-		// processed.
-		if p.echo && !p.chat {
-			text = p.prompt + text
-		}
-		// The index is the position in the response, not the candidate's original slot: a
-		// caller reads choices[0] as the best one, and leaving a discarded candidate's number
-		// there would name an index that no longer exists.
-		if p.chat {
-			choices[out] = map[string]any{
-				"index":         out,
-				"message":       map[string]string{"role": "assistant", "content": text},
-				"finish_reason": finishReasonFor(reason),
-				"logprobs":      logprobs,
-			}
-			continue
-		}
-		choices[out] = map[string]any{
-			"index":         out,
-			"text":          text,
-			"finish_reason": finishReasonFor(reason),
-			"logprobs":      logprobs,
-		}
+		choices[out] = s.choiceObject(&results[idx], out, p)
 	}
 
 	usage := map[string]int{
@@ -3169,4 +3099,83 @@ func (s *Server) resolvePrompt(w http.ResponseWriter, p *generateParams) (
 		maxTokens = room
 	}
 	return promptTokens, maxTokens, fimStopIDs, true
+}
+
+// choiceObject builds one entry of the response's choices array.
+//
+// It is separated from blockingResponse because everything it does is a decision about the
+// response's shape rather than about generation: where a stop string cuts the text, which
+// logprob entries survive that cut, whether the prompt is echoed ahead of the answer, and which
+// of the two schemas -- chat or completions -- the object takes.
+//
+// out is the position in the response, not the candidate's original slot: a caller reads
+// choices[0] as the best one, and leaving a discarded candidate's number there would name an
+// index that no longer exists.
+func (s *Server) choiceObject(c *choiceResult, out int, p generateParams) map[string]any {
+	text := s.tok.DecodeCompletion(c.out)
+	// A stop string is text, and generation halts where it would appear. OpenAI's API
+	// takes strings, and a string need not be one token: " Paris" encodes as a space
+	// token followed by the word's own. stopTokenIDs can only hand the engine a single
+	// token, so the engine-side check cannot express this -- and taking the first token
+	// of a multi-token string is actively wrong, since the space token then stops every
+	// sequence at its first space and the response comes back empty.
+	reason := c.reason
+	if cut, found := cutAtStop(text, p.stop); found {
+		text = cut
+		reason = "stop"
+	}
+	// The logprob lists are cut to the text the response shows, which is the stop-cut
+	// text and not the echoed one: the prompt was not generated, so it has no logprob
+	// here. With echo the offsets move past it, because they index into the text the
+	// caller receives.
+	//
+	// A token whose text straddles the cut is dropped rather than half-reported: half of
+	// its text survived, and neither keeping it nor truncating it would describe the
+	// probability of the thing the caller can see.
+	var logprobs any
+	if p.logprobs {
+		described := s.describeTokens(c.samples)
+		keep, _ := keptTokens(described, len(text))
+		if p.chat {
+			logprobs = chatLogprobs(described, keep)
+		} else {
+			offset := 0
+			if p.echo {
+				offset = len(p.prompt)
+			}
+			logprobs = completionLogprobs(described, keep, offset)
+		}
+	}
+
+	// echo prepends the prompt after the stop cut, not before: the cut applies to what
+	// the model generated, and a stop string that happens to appear in the prompt must
+	// not truncate the part of the answer the caller already typed. The prompt is echoed
+	// as the caller sent it rather than re-decoded from its token ids, because that text
+	// is exactly what they are asking to see back.
+	//
+	// The echoed prompt is not counted again in usage: prompt_tokens already covers it,
+	// and adding it to completion_tokens as well would bill the same text twice. This is
+	// a choice, not a documented OpenAI rule -- the schema does not say -- and it is the
+	// one that keeps prompt_tokens + completion_tokens equal to the tokens actually
+	// processed.
+	if p.echo && !p.chat {
+		text = p.prompt + text
+	}
+	// The index is the position in the response, not the candidate's original slot: a caller
+	// reads choices[0] as the best one, and leaving a discarded candidate's number there would
+	// name an index that no longer exists.
+	if p.chat {
+		return map[string]any{
+			"index":         out,
+			"message":       map[string]string{"role": "assistant", "content": text},
+			"finish_reason": finishReasonFor(reason),
+			"logprobs":      logprobs,
+		}
+	}
+	return map[string]any{
+		"index":         out,
+		"text":          text,
+		"finish_reason": finishReasonFor(reason),
+		"logprobs":      logprobs,
+	}
 }

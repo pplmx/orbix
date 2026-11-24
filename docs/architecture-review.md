@@ -379,6 +379,8 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 而总数行写的是真实值 17。两个数字都在同一份输出里，被截断的那个进到了文档。补上的五个是
 `Submit`、`kvs`、`resolvePrompt`、`Read`、`lex`。
 
+复算用 `go run ./scripts/count.go -long`：计数行和列表来自同一个切片，不会再各说各话。
+
 逐个判断如下，而不是笼统地"改动面大"：
 
 - **`preFamilyOf`（271）是数据不是逻辑。** 34 个 `case`，每个返回一个 `preRule` 字面量，注释是那个

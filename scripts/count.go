@@ -19,8 +19,16 @@ type row struct {
 	testLines int
 }
 
+// fn is one function's size, for the -long report.
+type fn struct {
+	name  string
+	lines int
+	file  string
+}
+
 func main() {
 	var rows []row
+	var fns []fn
 	base, _ := os.Getwd()
 	for _, pat := range []string{"internal/*", "cmd/orbix"} {
 		paths, _ := filepath.Glob(filepath.Join(base, pat))
@@ -49,21 +57,38 @@ func main() {
 					continue
 				}
 				for _, d := range af.Decls {
-					if fd, ok := d.(*ast.FuncDecl); ok {
-						nfuncs++
-						if fd.Recv == nil {
-							top++
-						}
+					fd, ok := d.(*ast.FuncDecl)
+					if !ok {
+						continue
 					}
+					nfuncs++
+					if fd.Recv == nil {
+						top++
+					}
+					// A body-less declaration has no lines to count.
+					if fd.Body == nil {
+						continue
+					}
+					fns = append(fns, fn{
+						name:  fd.Name.Name,
+						lines: fs.Position(fd.Body.Rbrace).Line - fs.Position(fd.Pos()).Line + 1,
+						file:  filepath.ToSlash(relTo(base, f)),
+					})
 				}
 			}
 			rows = append(rows, row{filepath.Base(dir), lines, nfuncs, top, testLines})
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].funcs > rows[j].funcs })
-	if len(os.Args) > 1 && os.Args[1] == "-table" {
-		printTable(rows)
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-table":
+			printTable(rows)
+			return
+		case "-long":
+			printLong(fns)
+			return
+		}
 	}
 
 	fmt.Println("rank by ALL funcs (methods included):")
@@ -117,4 +142,43 @@ func printTable(rows []row) {
 		fmt.Sprintf("**%d**", totalLines), fmt.Sprintf("**%d**", totalFuncs),
 		fmt.Sprintf("**%d**", totalTop), fmt.Sprintf("**%d**", totalTestLines),
 		fmt.Sprintf("**%.2f**", totalRatio))
+}
+
+// printLong lists every function at or above the threshold, longest first.
+//
+// This replaces a scratch tool that printed only the first twelve and a total that said
+// seventeen; the twelve reached a document and the five it hid went unnoticed for weeks. The
+// limit that was useful as a terminal view is the wrong thing to hand a reader who is asking
+// "what is still long".
+//
+// The count line and the list are printed from the same slice, so they cannot disagree.
+func printLong(fns []fn) {
+	const threshold = 100
+	sorted := make([]fn, len(fns))
+	copy(sorted, fns)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].lines != sorted[j].lines {
+			return sorted[i].lines > sorted[j].lines
+		}
+		return sorted[i].name < sorted[j].name
+	})
+	var atOrAbove []fn
+	for _, f := range sorted {
+		if f.lines >= threshold {
+			atOrAbove = append(atOrAbove, f)
+		}
+	}
+	fmt.Printf("%d functions, %d at or above %d lines\n\n", len(fns), len(atOrAbove), threshold)
+	for _, f := range atOrAbove {
+		fmt.Printf("  %4d  %-32s %s\n", f.lines, f.name, f.file)
+	}
+}
+
+// relTo returns target relative to base, or target unchanged when it is not under base.
+func relTo(base, target string) string {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return target
+	}
+	return rel
 }

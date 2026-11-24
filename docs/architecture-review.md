@@ -87,7 +87,7 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/... ./cmd/...
 # 现在应该输出 0：server 不导入 llama。
 go list -f '{{join .Imports "\n"}}' ./internal/server | grep -c "internal/llama"
 
-# 上一步用 grep 扫 `llama.Token` 是行不通的：doc.go 和测试文件里的**注释**会命中，
+# 上一步用 grep 扫 "llama.某导出名" 是行不通的：doc.go 和测试文件里的**注释**会命中，
 # 看起来像渗透，实际是解释这件事为什么不能发生。
 grep -rn "llama\.[A-Z][A-Za-z]*" internal/server/*.go
 ```

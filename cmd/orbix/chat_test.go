@@ -1730,3 +1730,37 @@ func TestChatClearResetsTurnsButNotSessionTotals(t *testing.T) {
 			"counter, not a conversation one:\n%s", out)
 	}
 }
+
+// TestChatPrefixReuseOptionChangesTheReport covers the two halves of the flag's effect.
+//
+// docs/cli.md says `orbix chat` "runs on a paged cache with prefix reuse, so each turn re-attaches
+// the blocks the previous one filled". TestChatStatsCommand passes prefixCache: true explicitly, so
+// it cannot tell an option that works from a default that supplies it; this checks that turning
+// the option off changes what /stats reports, which is the half that was never asserted.
+//
+// What this does not cover is cmdChat's default. A first version of this test registered
+// --no-prefix-cache itself and read its default, which only restated the constant in the test:
+// injecting `prefixCache: false` into cmdChat left it green. The default lives in one line
+// (`prefixCache: !*noPrefix`) and reaching it needs cmdChat end to end, which needs a redirected
+// stdin; the honest thing is to say so rather than to assert a property from the wrong side.
+func TestChatPrefixReuseOptionChangesTheReport(t *testing.T) {
+	model := chatModel(t)
+	// A second turn re-sends the first turn's history, which is the prefix reuse exists for.
+	conversation := "Please tell me a story about a dragon and a knight who became friends " +
+		"despite everything that happened between their families over many years\n" +
+		"That was interesting, please continue the story with more detail\n" +
+		"/stats\n/exit\n"
+
+	withReuse := runChat(t, chatOptions{model: model, maxTokens: 2, prefixCache: true}, conversation)
+	if !strings.Contains(withReuse, "reused:") {
+		t.Fatalf("/stats printed no reuse line:\n%s", withReuse)
+	}
+	if strings.Contains(withReuse, "reused:     0 prompt positions") {
+		t.Errorf("with the option on, the two-turn conversation reused nothing:\n%s", withReuse)
+	}
+
+	off := runChat(t, chatOptions{model: model, maxTokens: 2}, conversation)
+	if !strings.Contains(off, "reused:     0 prompt positions") {
+		t.Errorf("with the option off, /stats did not report zero reuse:\n%s", off)
+	}
+}

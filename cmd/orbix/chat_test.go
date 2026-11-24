@@ -197,19 +197,38 @@ func TestChatBannerNamesEveryCommand(t *testing.T) {
 	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40}, "/exit\n")
 
 	// Every name chatHelp lists, in its first column, must appear in chatCommands.
+	//
+	// The column is separated from the description by two or more spaces, and a line can name
+	// several commands: "/exit, /quit, /q   end the session". Splitting at the first space
+	// yielded only "/exit," and silently skipped the aliases -- measured by adding ", /bogus"
+	// to that line, which the round that found it left passing.
 	for _, line := range strings.Split(chatHelp, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line == "Commands:" {
 			continue
 		}
-		names, _, _ := strings.Cut(line, " ")
-		for _, name := range strings.Split(names, ",") {
-			name = strings.TrimSpace(name)
-			if !strings.HasPrefix(name, "/") {
+		fields := strings.SplitN(line, "  ", 2)
+		names := strings.Split(fields[0], ",")
+		// The banner is the one-line form, so it names each command once and leaves the
+		// aliases to chatHelp. What has to hold is that every command appears at all:
+		// checking every alias would demand "/quit, /q" in the banner, and checking only the
+		// first name let a command be added to the help and never reach the banner.
+		primary := strings.TrimSpace(names[0])
+		if !strings.HasPrefix(primary, "/") {
+			continue
+		}
+		if !strings.Contains(chatCommands, primary) {
+			t.Errorf("chatHelp lists %q but the banner (%q) does not", primary, chatCommands)
+		}
+		// An alias whose primary is missing is the same failure, reported once.
+		for _, alias := range names[1:] {
+			alias = strings.TrimSpace(alias)
+			if !strings.HasPrefix(alias, "/") {
 				continue
 			}
-			if !strings.Contains(chatCommands, name) {
-				t.Errorf("chatHelp lists %q but the banner (%q) does not", name, chatCommands)
+			if !strings.Contains(chatCommands, primary) {
+				t.Errorf("chatHelp lists %q as an alias of %q, which the banner omits",
+					alias, primary)
 			}
 		}
 	}

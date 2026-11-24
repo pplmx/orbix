@@ -369,18 +369,21 @@ func runRequests(o suiteOptions, n, concurrency int, opts engine.Options) (resul
 		mu.Unlock()
 		return nil
 	}
-	// Drain concurrently with pumping: the buffers are bounded, so a scenario with a
-	// large token budget would block Pump waiting for a reader.
-	errs := make(chan error, len(chans))
-	for _, ch := range chans {
-		go func(ch <-chan engine.Event) { errs <- drain(ch) }(ch)
-	}
-	for eng.Pump() > 0 {
-	}
-	for range chans {
-		if err := <-errs; err != nil {
-			return result{}, err
+	// engine.Drive owns the drain-pump-join sequence: the buffers are bounded, so a scenario
+	// with a large token budget would otherwise block Pump waiting for a reader.
+	var drainErr error
+	var drainMu sync.Mutex
+	engine.Drive(eng, chans, func(ch <-chan engine.Event) {
+		if err := drain(ch); err != nil {
+			drainMu.Lock()
+			if drainErr == nil {
+				drainErr = err
+			}
+			drainMu.Unlock()
 		}
+	})
+	if drainErr != nil {
+		return result{}, drainErr
 	}
 	r := result{tokens: tokens, elapsed: time.Since(start), firstToken: firstToken, earlyStops: earlyStops}
 	r.prefixReused = eng.Stats().PrefixReused
@@ -435,36 +438,40 @@ func runPolicy(o suiteOptions, policy engine.Priority) (result, error) {
 		latency  time.Duration
 		firstTok bool
 	}
-	shortFirst := make(chan shortStats, 1)
-	go func() {
-		var st shortStats
-		for ev := range shortCh {
-			if ev.HasToken {
-				if !st.firstTok {
-					st.firstTok = true
-					st.round = eng.Round()
-					st.latency = time.Since(start)
+	// One Drive over both channels: they are pumped together, so they must be drained
+	// together. The type switch is on which channel arrived rather than on the event, because
+	// the two requests report different things -- the short one's first-token latency and the
+	// round it landed on, the long one only a token count.
+	stCh := make(chan shortStats, 1)
+	longCount := make(chan int, 1)
+	engine.Drive(eng, []<-chan engine.Event{shortCh, longCh},
+		func(ch <-chan engine.Event) {
+			switch ch {
+			case shortCh:
+				var st shortStats
+				for ev := range ch {
+					if ev.HasToken {
+						if !st.firstTok {
+							st.firstTok = true
+							st.round = eng.Round()
+							st.latency = time.Since(start)
+						}
+						st.tokens++
+					}
 				}
-				st.tokens++
+				stCh <- st
+			case longCh:
+				var n int
+				for ev := range ch {
+					if ev.HasToken {
+						n++
+					}
+				}
+				longCount <- n
 			}
-		}
-		shortFirst <- st
-	}()
-	longTokens := make(chan int, 1)
-	go func() {
-		var n int
-		for ev := range longCh {
-			if ev.HasToken {
-				n++
-			}
-		}
-		longTokens <- n
-	}()
-
-	for eng.Pump() > 0 {
-	}
-	st := <-shortFirst
-	tokens := st.tokens + <-longTokens
+		})
+	st := <-stCh
+	tokens := st.tokens + <-longCount
 	return result{
 		tokens:  tokens,
 		elapsed: time.Since(start),
@@ -548,11 +555,9 @@ func runSequential(o suiteOptions, n int, opts engine.Options) (result, error) {
 		if err != nil {
 			return result{}, fmt.Errorf("submit: %w", err)
 		}
-		// Drain and pump concurrently: the pump is what produces the events, so reading
+		// Drive drains and pumps together: the pump is what produces the events, so reading
 		// first would wait for a token that cannot arrive.
-		done := make(chan struct{})
-		go func(ch <-chan engine.Event) {
-			defer close(done)
+		engine.Drive(eng, []<-chan engine.Event{ch}, func(ch <-chan engine.Event) {
 			for ev := range ch {
 				if !ev.HasToken {
 					continue
@@ -562,10 +567,7 @@ func runSequential(o suiteOptions, n int, opts engine.Options) (result, error) {
 					firstToken = time.Since(start)
 				}
 			}
-		}(ch)
-		for eng.Pump() > 0 {
-		}
-		<-done
+		})
 	}
 	r := result{
 		tokens:       tokens,

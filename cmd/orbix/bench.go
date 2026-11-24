@@ -203,39 +203,37 @@ func cmdBench(args []string) error {
 		// The suite already drains this way and its comment names the reason. This path was
 		// left behind because its default budget is 32, which never reaches the buffer -- so
 		// the defect only appeared for a caller who asked for more than twice the default.
-		drained := make(chan error, batch)
+		// engine.Drive owns the drain-pump-join sequence; this closure is only the counting.
 		var tokMu sync.Mutex
 		var tokCount int
+		var seqErr error
 		var reasonMu sync.Mutex
-		for _, ch := range chans {
-			go func(ch <-chan engine.Event) {
-				var mine int
-				for ev := range ch {
-					if ev.Err != nil {
-						drained <- ev.Err
-						return
+		engine.Drive(eng, chans, func(ch <-chan engine.Event) {
+			var mine int
+			for ev := range ch {
+				if ev.Err != nil {
+					tokMu.Lock()
+					if seqErr == nil {
+						seqErr = ev.Err
 					}
-					if ev.HasToken {
-						mine++
-					}
-					if ev.Done {
-						reasonMu.Lock()
-						reason[ev.FinishReason]++
-						reasonMu.Unlock()
-					}
+					tokMu.Unlock()
+					continue
 				}
-				tokMu.Lock()
-				tokCount += mine
-				tokMu.Unlock()
-				drained <- nil
-			}(ch)
-		}
-		for eng.Pump() > 0 {
-		}
-		for range chans {
-			if err := <-drained; err != nil {
-				return fmt.Errorf("bench: %w", err)
+				if ev.HasToken {
+					mine++
+				}
+				if ev.Done {
+					reasonMu.Lock()
+					reason[ev.FinishReason]++
+					reasonMu.Unlock()
+				}
 			}
+			tokMu.Lock()
+			tokCount += mine
+			tokMu.Unlock()
+		})
+		if seqErr != nil {
+			return fmt.Errorf("bench: %w", seqErr)
 		}
 		tokMu.Lock()
 		generated += tokCount

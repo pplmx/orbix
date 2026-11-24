@@ -370,6 +370,11 @@ func TestLoadConfigRejects(t *testing.T) {
 				return kvs
 			},
 			want: "unsupported architecture",
+			// The message names the architecture it refused and lists the ones it would have
+			// accepted. Both are the caller's next step -- without the first they cannot tell
+			// which key was wrong, without the second they cannot pick a spelling -- and the
+			// assertion here checked only the template before.
+			wantAll: []string{"not-an-architecture", "llama", "gemma"},
 		},
 		{
 			name: "missing embedding_length",

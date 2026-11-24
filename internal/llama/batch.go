@@ -397,32 +397,7 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 
 // feedForwardBatch runs one block's feed-forward network for every row.
 func (m *Model) feedForwardBatch(b *batch, cfg Config, l int) error {
-	layer := &m.W.Layers[l]
-	n := b.n
-
-	if err := m.normRows(b, layer.ffnNorm); err != nil {
-		return err
-	}
-	if cfg.Experts > 0 {
-		return m.feedForwardMoERows(moeRowsFromBatch(b, cfg), layer, cfg)
-	}
-	if err := m.run.MatMulTransposed(b.gate, b.xn, layer.wGate, n, cfg.FFN, cfg.Hidden); err != nil {
-		return err
-	}
-	if err := m.run.MatMulTransposed(b.up, b.xn, layer.wUp, n, cfg.FFN, cfg.Hidden); err != nil {
-		return err
-	}
-	cfg.activateGate(b.gate[:n*cfg.FFN])
-	if err := kernel.MulInPlace(b.up[:n*cfg.FFN], b.gate[:n*cfg.FFN]); err != nil {
-		return err
-	}
-	if err := m.run.MatMulTransposed(b.attnOut, b.up, layer.wDown, n, cfg.Hidden, cfg.FFN); err != nil {
-		return err
-	}
-	if err := m.postNormRows(b.attnOut, layer.ffnPostNorm, n); err != nil {
-		return err
-	}
-	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
+	return m.feedForwardRows(rowsFromBatch(b, cfg), &m.W.Layers[l], cfg)
 }
 
 // finishBatch normalizes the last position and projects it onto the vocabulary.
@@ -690,36 +665,7 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 // feedForward runs one block's feed-forward network for every row.
 func (b *decodeBatch) feedForward(m *Model, l int) error {
 	cfg := m.W.Config
-	layer := &m.W.Layers[l]
-	n := b.n
-
-	for r := range n {
-		row := b.x[r*cfg.Hidden : (r+1)*cfg.Hidden]
-		out := b.xn[r*cfg.Hidden : (r+1)*cfg.Hidden]
-		if err := kernel.RMSNorm(out, row, layer.ffnNorm, cfg.RMSNormEps); err != nil {
-			return err
-		}
-	}
-	if cfg.Experts > 0 {
-		return m.feedForwardMoERows(moeRowsFromDecode(b, cfg), layer, cfg)
-	}
-	if err := m.run.MatMulTransposed(b.gate, b.xn, layer.wGate, n, cfg.FFN, cfg.Hidden); err != nil {
-		return err
-	}
-	if err := m.run.MatMulTransposed(b.up, b.xn, layer.wUp, n, cfg.FFN, cfg.Hidden); err != nil {
-		return err
-	}
-	cfg.activateGate(b.gate[:n*cfg.FFN])
-	if err := kernel.MulInPlace(b.up[:n*cfg.FFN], b.gate[:n*cfg.FFN]); err != nil {
-		return err
-	}
-	if err := m.run.MatMulTransposed(b.attnOut, b.up, layer.wDown, n, cfg.Hidden, cfg.FFN); err != nil {
-		return err
-	}
-	if err := m.postNormRows(b.attnOut, layer.ffnPostNorm, n); err != nil {
-		return err
-	}
-	return kernel.AddInPlace(b.x[:n*cfg.Hidden], b.attnOut[:n*cfg.Hidden])
+	return m.feedForwardRows(rowsFromDecode(b, cfg), &m.W.Layers[l], cfg)
 }
 
 // finish normalizes every row and projects the batch onto the vocabulary.
@@ -753,7 +699,7 @@ func (b *decodeBatch) finish(m *Model) error {
 // A token whose weight is zero contributes nothing, so a row joins an expert's group
 // only when its weight is non-zero. That also keeps the accumulation order independent
 // of how many rows happened to round to zero.
-func (m *Model) feedForwardMoERows(r moeRows, layer *layer, cfg Config) error {
+func (m *Model) feedForwardMoERows(r ffnRows, layer *layer, cfg Config) error {
 	n, hidden, ffn := r.n, r.hidden, r.ffn
 
 	// Route every row first, so the grouping below is a pure rearrangement. The router
@@ -829,11 +775,11 @@ func (m *Model) feedForwardMoERows(r moeRows, layer *layer, cfg Config) error {
 	return kernel.AddInPlace(r.x[:n*hidden], r.scatter[:n*hidden])
 }
 
-// moeRows is the per-row state a mixture-of-experts block needs, which both batch
+// ffnRows is the per-row state a feed-forward block needs, which both batch
 // layouts provide. Writing the MoE path once against this view is what keeps the
 // prefill and decode paths from drifting apart: the arithmetic is identical and only the
 // buffers differ.
-type moeRows struct {
+type ffnRows struct {
 	n      int
 	hidden int
 	ffn    int
@@ -847,9 +793,64 @@ type moeRows struct {
 	scatter []float32 // [n, hidden] the residual addition target
 }
 
-// moeRowsFromBatch adapts a prefill batch.
-func moeRowsFromBatch(b *batch, cfg Config) moeRows {
-	return moeRows{
+// feedForwardRows runs one block's feed-forward network over every row.
+//
+// This is the body the batched prefill and the batched decode used to carry twice, word for
+// word: the two scratch structs have the same field names and the same layouts, so the only
+// thing that differed was which one held the slices. The single-token path is a third body of
+// the same shape, and it stays separate on purpose -- see its own comment.
+//
+// The two paths are required to agree bit for bit (TestDecodeStepMatchesForward asserts exact
+// equality, not a tolerance), and they do because this is now one sequence of calls over the
+// same arithmetic in the same order.
+func (m *Model) feedForwardRows(r ffnRows, layer *layer, cfg Config) error {
+	n, hidden, ffn := r.n, r.hidden, r.ffn
+
+	if err := m.normFFNRows(r, layer.ffnNorm); err != nil {
+		return err
+	}
+	if cfg.Experts > 0 {
+		return m.feedForwardMoERows(r, layer, cfg)
+	}
+	if err := m.run.MatMulTransposed(r.gate, r.xn, layer.wGate, n, ffn, hidden); err != nil {
+		return err
+	}
+	if err := m.run.MatMulTransposed(r.up, r.xn, layer.wUp, n, ffn, hidden); err != nil {
+		return err
+	}
+	cfg.activateGate(r.gate[:n*ffn])
+	if err := kernel.MulInPlace(r.up[:n*ffn], r.gate[:n*ffn]); err != nil {
+		return err
+	}
+	if err := m.run.MatMulTransposed(r.scatter, r.up, layer.wDown, n, hidden, ffn); err != nil {
+		return err
+	}
+	if err := m.postNormRows(r.scatter, layer.ffnPostNorm, n); err != nil {
+		return err
+	}
+	return kernel.AddInPlace(r.x[:n*hidden], r.scatter[:n*hidden])
+}
+
+// normFFNRows normalizes each row of the residual stream into xn.
+//
+// One RMSNorm per row rather than a batched kernel, which is what both batched paths did: a
+// multi-row norm measured slower than the loop it would replace, and a second implementation of
+// the same arithmetic is a second thing to keep correct.
+func (m *Model) normFFNRows(r ffnRows, weight []float32) error {
+	eps := m.W.Config.RMSNormEps
+	for i := range r.n {
+		row := r.x[i*r.hidden : (i+1)*r.hidden]
+		out := r.xn[i*r.hidden : (i+1)*r.hidden]
+		if err := kernel.RMSNorm(out, row, weight, eps); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rowsFromBatch adapts a prefill batch.
+func rowsFromBatch(b *batch, cfg Config) ffnRows {
+	return ffnRows{
 		n: b.n, hidden: cfg.Hidden, ffn: cfg.FFN,
 		x: b.x, xn: b.xn, gate: b.gate, up: b.up,
 		proj: b.expertProj, out: b.expertFFN,
@@ -857,9 +858,9 @@ func moeRowsFromBatch(b *batch, cfg Config) moeRows {
 	}
 }
 
-// moeRowsFromDecode adapts a decode batch.
-func moeRowsFromDecode(b *decodeBatch, cfg Config) moeRows {
-	return moeRows{
+// rowsFromDecode adapts a decode batch.
+func rowsFromDecode(b *decodeBatch, cfg Config) ffnRows {
+	return ffnRows{
 		n: b.n, hidden: cfg.Hidden, ffn: cfg.FFN,
 		x: b.x, xn: b.xn, gate: b.gate, up: b.up,
 		proj: b.expertProj, out: b.expertFFN,

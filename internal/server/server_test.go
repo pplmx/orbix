@@ -9268,8 +9268,8 @@ func TestSuffixReachesTheEngineWhenTheModelSupportsFIM(t *testing.T) {
 
 // TestEveryErrorCodeIsDocumented checks that the package doc names every code the server sends.
 //
-// TestDocNamesTheRoutingCodes and its neighbours prove each code behaves as documented; nothing
-// proved that the doc covers all of them. Two were missing when this was written --
+// Its neighbours prove each code behaves as documented; nothing proved that the doc covers all
+// of them. Two were missing when this was written --
 // method_not_allowed and unknown_endpoint, both built outside paramError, which is why a search
 // for paramError's codes alone did not find them.
 //

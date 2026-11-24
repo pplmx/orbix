@@ -3467,9 +3467,13 @@ func TestEventBufferMatchesTheDocumentedSize(t *testing.T) {
 //
 // The grace is a duration rather than a count, so it cannot be read from a channel -- what this
 // checks is the constant itself. That is a weaker assertion than cap(), and it is still worth
-// having: the value appears in two documents as "two seconds", and a change to it would otherwise
-// be caught only by TestStalledConsumerIsGivenUpOn, which asserts relative timing and would
-// tolerate a shift from two seconds to three.
+// having: the value appears in two documents as "two seconds".
+//
+// Nothing else pins it. TestUnreadEventsDoNotStallPump is the test that exercises the grace, and
+// it waits up to twenty seconds for the pump to finish rather than timing the wait, so it would
+// pass unchanged if the grace became three seconds or ten. An earlier version of this comment
+// named a TestStalledConsumerIsGivenUpOn that asserts relative timing; no such test exists, and
+// searching the package for what it described turned up none.
 func TestAbandonGraceIsTwoSeconds(t *testing.T) {
 	if abandonGrace != 2*time.Second {
 		t.Errorf("abandonGrace is %v, but doc.go and docs/usage.md both say two seconds",

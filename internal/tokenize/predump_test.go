@@ -20,7 +20,10 @@ func TestDumpPreSplit(t *testing.T) {
 	if out == "" {
 		t.Skip("set ORBIX_PREDUMP to write a comparison corpus")
 	}
-	tok := &Tokenizer{pre: preGPT2}
+	// One entry per family the script has a published pattern for. Adding a family here means
+	// adding its pattern there; the script fails on a name it does not know rather than skipping
+	// it, so the two lists cannot drift apart silently.
+	families := map[string]preType{"gpt2": preGPT2, "llama3": preLlama3}
 	inputs := []string{
 		"hello world", "a.b", "it's 42", "  x  ", "", " ", "\n\n", "a\tb",
 		"Hello, World!", "12345", "3.14", "don't", "I'll", "we've",
@@ -29,9 +32,14 @@ func TestDumpPreSplit(t *testing.T) {
 		"a\nb", "line1\nline2\n", "!!!", "...", "@#$%",
 		"'s", "'re", "x'y", "O'Brien", "café", "naïve",
 	}
-	got := make(map[string][]string, len(inputs))
-	for _, in := range inputs {
-		got[in] = tok.preSplit(in)
+	got := make(map[string]map[string][]string, len(families))
+	for name, pre := range families {
+		tok := &Tokenizer{pre: pre}
+		per := make(map[string][]string, len(inputs))
+		for _, in := range inputs {
+			per[in] = tok.preSplit(in)
+		}
+		got[name] = per
 	}
 	b, err := json.MarshalIndent(got, "", " ")
 	if err != nil {

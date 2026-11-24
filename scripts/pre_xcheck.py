@@ -19,14 +19,27 @@ import sys
 
 import regex
 
-# openai/gpt-2 src/encoder.py:
-#   re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-PATTERN = regex.compile(
-    r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
-)
+# Each pattern is written from the source named above it, not from the Go implementation.
+PATTERNS = {
+    # openai/gpt-2 src/encoder.py:
+    #   re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+    "gpt2": regex.compile(
+        r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+    ),
+    # Meta's Llama 3 tokenizer, as llama.cpp spells it in llm_tokenizer_bpe:
+    #   (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+    # Three differences from GPT-2's, and each is a rule the Go side encodes separately: digits
+    # group in threes, a letter run may take any non-letter as its prefix (so "a.b" is
+    # ["a", ".b"]), and newlines get their own alternatives.
+    "llama3": regex.compile(
+        r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+        r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*"
+        r"|\s*[\r\n]+|\s+(?!\S)|\s+"
+    ),
+}
 
 
-def split(text: str) -> list[str]:
+def split(pattern: regex.Pattern, text: str) -> list[str]:
     """split returns the chunks the published pattern produces.
 
     An empty input is one empty chunk rather than none: the Go side's preSplit returns
@@ -35,7 +48,7 @@ def split(text: str) -> list[str]:
     """
     if text == "":
         return [""]
-    return [m.group(0) for m in PATTERN.finditer(text)]
+    return [m.group(0) for m in pattern.finditer(text)]
 
 
 def main() -> int:
@@ -45,13 +58,19 @@ def main() -> int:
     with open(sys.argv[1]) as f:
         go = json.load(f)
 
-    differ = 0
-    for text, want in go.items():
-        got = split(text)
-        if got != want:
-            differ += 1
-            print(f"DIFFER {text!r}\n  python {got}\n  go     {want}")
-    print(f"{len(go)} inputs, {len(go) - differ} agree, {differ} differ")
+    total = differ = 0
+    for family, cases in go.items():
+        pattern = PATTERNS.get(family)
+        if pattern is None:
+            print(f"unknown family {family!r}: add its published pattern above")
+            return 1
+        for text, want in cases.items():
+            total += 1
+            got = split(pattern, text)
+            if got != want:
+                differ += 1
+                print(f"DIFFER {family} {text!r}\n  python {got}\n  go     {want}")
+    print(f"{len(go)} families, {total} inputs, {total - differ} agree, {differ} differ")
     return 1 if differ else 0
 
 

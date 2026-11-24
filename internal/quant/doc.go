@@ -81,4 +81,15 @@
 // panic. Keeping the destination caller-owned is what keeps the allocation policy with
 // the caller: a model's largest tensor is hundreds of megabytes, and a decoder that
 // returned a fresh slice would force a copy at exactly the wrong moment.
+//
+// # Checking a layout against its published form
+//
+// The tests here pin each decoder against values computed by hand, and FuzzDecode covers the
+// length checks. Neither catches a misreading of the block layout that the test repeats: Q4_0's
+// interleaving is the example its own comment gives, where the wrong reading produces "a
+// plausible-looking but completely scrambled matrix" that any same-source assertion would accept.
+//
+// scripts/quant_xcheck.py decodes the same bytes from ggml's published layout in Python and
+// compares bit patterns. Measured by changing the interleaving to sequential pairs: 58 of Q4_0's
+// 64 decoded values differ, and the other six formats are unaffected.
 package quant

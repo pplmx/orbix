@@ -9035,3 +9035,51 @@ func TestTheHonouredSamplingFieldsChangeTheOutput(t *testing.T) {
 		})
 	}
 }
+
+// TestTopKIsHonoured is the check top_p has and top_k did not.
+//
+// TestTopPIsHonoured compares how many distinct continuations twelve seeds produce with and
+// without a narrow nucleus, on the reasoning that a limit which never reached the sampler would
+// leave the count unchanged. top_k is passed through a different path -- an int rather than a
+// pointer, defaulted from Config rather than from a nil check -- and nothing asserted its effect.
+//
+// top_k: 1 is the sharpest form of the test: with a single candidate per step, sampling cannot
+// vary, so every seed must produce the same text. That is an equality rather than a comparison of
+// counts, so it cannot pass by the two sides happening to be close.
+func TestTopKIsHonoured(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	sample := func(seed int, extra string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"model": %q, "prompt": "Once upon a time",
+			"max_tokens": 8, "temperature": 1.5, "seed": %d%s}`,
+			srv.cfg.ModelName, seed, extra)
+		resp := post(t, h, "/v1/completions", body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		return decodeBody[completionResponse](t, resp).Choices[0].Text
+	}
+
+	// Without top_k, temperature 1.5 across seeds should vary. If it does not, the fixture made
+	// every step near-certain and the equality below would hold for a field that was ignored.
+	seen := make(map[string]bool)
+	for seed := 1; seed <= 12; seed++ {
+		seen[sample(seed, "")] = true
+	}
+	if len(seen) < 2 {
+		t.Skipf("all twelve seeds produced the same text without top_k, so this fixture cannot "+
+			"distinguish a working top_k from an ignored one; saw %d distinct", len(seen))
+	}
+
+	first := sample(1, `, "top_k": 1`)
+	for seed := 2; seed <= 12; seed++ {
+		if got := sample(seed, `, "top_k": 1`); got != first {
+			t.Fatalf("top_k=1 gave seed %d %q and seed 1 %q; with one candidate per step the "+
+				"result cannot depend on the seed, so the value is not reaching the sampler",
+				seed, got, first)
+		}
+	}
+}

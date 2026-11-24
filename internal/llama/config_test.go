@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -81,11 +82,30 @@ func encodeValue(b *bytes.Buffer, v gguf.Value) {
 		// Get[int] -- so a test that needs a value beyond uint32's range has to be able to
 		// write one. Without this the builder panics rather than the loader refusing.
 		u64(v.Uint)
+	case gguf.TypeInt32:
+		u32(uint32(int32(v.Int)))
+	case gguf.TypeInt64:
+		u64(uint64(v.Int))
 	case gguf.TypeFloat32:
 		u32(math.Float32bits(float32(v.Float)))
 	case gguf.TypeString:
 		u64(uint64(len(v.Str)))
 		b.WriteString(v.Str)
+	case gguf.TypeBool:
+		if v.Bool {
+			b.WriteByte(1)
+		} else {
+			b.WriteByte(0)
+		}
+	case gguf.TypeArray:
+		// The element type and count, then the elements encoded as they would be on their own.
+		// Only bool arrays are needed so far: sliding_window_pattern is the one array this
+		// package reads and it had no test at all.
+		u32(uint32(v.ElemType))
+		u64(uint64(len(v.Array)))
+		for _, e := range v.Array {
+			encodeValue(b, e)
+		}
 	default:
 		panic("encodeValue: unsupported type")
 	}
@@ -1783,4 +1803,88 @@ func TestMissingEpsilonTakesTheDefault(t *testing.T) {
 	if want := float32(1e-5); cfg.RMSNormEps != want {
 		t.Errorf("RMSNormEps = %v with the key absent, want %v", cfg.RMSNormEps, want)
 	}
+}
+
+// TestSlidingWindowPatternReachesLocalLayers covers the three ways a file can describe which
+// layers are bounded by a sliding window.
+//
+// localLayers had no test at all: every branch of it was uncovered by the whole repository's
+// suite. It decides, layer by layer, whether attention is limited to WindowLen, and a wrong
+// answer changes the numbers without changing the shape of the output -- the comment above it
+// says as much about the gemma3 branch.
+func TestSlidingWindowPatternReachesLocalLayers(t *testing.T) {
+	base := tinyConfig{hidden: 8, layers: 4, heads: 2, kvHeads: 2, ffn: 16, ctx: 64, vocab: 8}
+
+	load := func(t *testing.T, extra []kv) (Config, error) {
+		t.Helper()
+		c := base
+		f, err := gguf.Read(bytes.NewReader(buildFile(append(c.kvs(), extra...), c.tensors(), nil)))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		return LoadConfig(f)
+	}
+
+	t.Run("an explicit pattern is taken as given", func(t *testing.T) {
+		// A bool array, which is the form the converters write for a model whose layers do not
+		// follow a simple period.
+		pattern := gguf.Value{
+			Type:     gguf.TypeArray,
+			ElemType: gguf.TypeBool,
+			Array: []gguf.Value{
+				{Type: gguf.TypeBool, Bool: false},
+				{Type: gguf.TypeBool, Bool: true},
+				{Type: gguf.TypeBool, Bool: false},
+				{Type: gguf.TypeBool, Bool: true},
+			},
+		}
+		cfg, err := load(t, []kv{{"llama.attention.sliding_window_pattern", pattern}})
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		want := []bool{false, true, false, true}
+		if !slices.Equal(cfg.LocalLayers, want) {
+			t.Errorf("LocalLayers = %v, want %v", cfg.LocalLayers, want)
+		}
+	})
+
+	t.Run("a pattern of the wrong length is refused", func(t *testing.T) {
+		pattern := gguf.Value{
+			Type: gguf.TypeArray, ElemType: gguf.TypeBool,
+			Array: []gguf.Value{{Type: gguf.TypeBool, Bool: true}},
+		}
+		_, err := load(t, []kv{{"llama.attention.sliding_window_pattern", pattern}})
+		if err == nil {
+			t.Fatal("LoadConfig accepted a 1-entry pattern for 4 layers")
+		}
+		// Both counts are what tells a reader how far off the file is.
+		for _, want := range []string{"1 ", "4 "} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("an integer period makes every n-th layer global", func(t *testing.T) {
+		cfg, err := load(t, []kv{{"llama.attention.sliding_window_pattern", u32Val(2)}})
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		// Period 2 with the first layer local: local, global, local, global.
+		want := []bool{true, false, true, false}
+		if !slices.Equal(cfg.LocalLayers, want) {
+			t.Errorf("LocalLayers = %v, want %v", cfg.LocalLayers, want)
+		}
+	})
+
+	t.Run("a negative period is refused", func(t *testing.T) {
+		neg := gguf.Value{Type: gguf.TypeInt32, Int: -2}
+		_, err := load(t, []kv{{"llama.attention.sliding_window_pattern", neg}})
+		if err == nil {
+			t.Fatal("LoadConfig accepted a negative pattern period")
+		}
+		if !strings.Contains(err.Error(), "-2") {
+			t.Errorf("error %q does not state the period it refused", err)
+		}
+	})
 }

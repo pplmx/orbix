@@ -3476,3 +3476,62 @@ func TestAbandonGraceIsTwoSeconds(t *testing.T) {
 			abandonGrace)
 	}
 }
+
+// TestPoolExhaustionReachesTheCallerAsTheSentinelsShape covers poolAwareErr, which had no test.
+//
+// ErrPoolExhausted's doc promises that "a caller can ask errors.Is(err, ErrPoolExhausted) without
+// the import", and poolAwareErr is what makes that true by wrapping the storage layer's sentinel.
+// Nothing exercised it: the HTTP layer refuses an oversized request before Submit, so the server's
+// tests never reach this path either, and the whole function read 0% across the repository.
+//
+// A pool of one four-position block against a prompt that needs more is the reachable case its
+// comment names -- the request is well formed and the process is healthy, so the answer has to be
+// the scheduler's sentinel rather than the cache's.
+func TestPoolExhaustionReachesTheCallerAsTheSentinelsShape(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	e, err := New(path, Options{BlockSize: 4, Blocks: 1, MaxActive: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if e.Pool() == nil {
+		t.Fatal("no pool with Blocks set, so this test would not exercise paging at all")
+	}
+
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	// Far more positions than one four-position block can hold.
+	prompt := tok.Encode("Once upon a time there was a little girl who lived in a city", true)
+
+	ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 8})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	// Pump advances the sequences; without it nothing runs and the channel never closes.
+	for e.Pump() > 0 {
+	}
+	var failure error
+	for ev := range ch {
+		if ev.Done && ev.Err != nil {
+			failure = ev.Err
+		}
+	}
+	if failure == nil {
+		t.Fatal("the request finished with no error against a pool that cannot hold its prompt")
+	}
+	if !errors.Is(failure, ErrPoolExhausted) {
+		t.Errorf("error %v does not match ErrPoolExhausted; a caller cannot tell this from a "+
+			"failure that is worth retrying", failure)
+	}
+	// The storage layer's text carries the numbers an operator acts on, and the wrapper is
+	// documented to keep it.
+	if !strings.Contains(failure.Error(), "blocks") {
+		t.Errorf("error %q does not carry the pool's own explanation", failure)
+	}
+}

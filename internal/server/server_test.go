@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -9262,5 +9263,53 @@ func TestSuffixReachesTheEngineWhenTheModelSupportsFIM(t *testing.T) {
 	if long <= short {
 		t.Errorf("a four-piece suffix produced a %d-token prompt and a one-piece suffix %d: the "+
 			"suffix text is not reaching the engine", long, short)
+	}
+}
+
+// TestEveryErrorCodeIsDocumented checks that the package doc names every code the server sends.
+//
+// TestDocNamesTheRoutingCodes and its neighbours prove each code behaves as documented; nothing
+// proved that the doc covers all of them. Two were missing when this was written --
+// method_not_allowed and unknown_endpoint, both built outside paramError, which is why a search
+// for paramError's codes alone did not find them.
+//
+// The codes are read from the source rather than listed here, so a new one fails this test
+// instead of being recorded in two places that then disagree. Reading Go source with a regular
+// expression is fragile, which is why both spellings are matched explicitly and the test asserts
+// it found a plausible number of each.
+func TestEveryErrorCodeIsDocumented(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("reading server.go: %v", err)
+	}
+	text := string(src)
+
+	codes := make(map[string]bool)
+	// newParamError(param, code, format, ...) and its relatives pass the code as the second
+	// argument.
+	for _, m := range regexp.MustCompile(`newParamError\([^,]+,\s*"([a-z_]+)"`).FindAllStringSubmatch(text, -1) {
+		codes[m[1]] = true
+	}
+	// The router assigns its two directly, and writeDecodeError picks a code for the body-level
+	// failures before wrapping it in a paramError.
+	for _, m := range regexp.MustCompile(`body\.Error\.Code = "([a-z_]+)"`).FindAllStringSubmatch(text, -1) {
+		codes[m[1]] = true
+	}
+	for _, m := range regexp.MustCompile(`\bcode (:?=) "([a-z_]+)"`).FindAllStringSubmatch(text, -1) {
+		codes[m[2]] = true
+	}
+	if len(codes) < 10 { // measured: 10
+		t.Fatalf("only %d codes were extracted, so this check is looking at the wrong thing: %v",
+			len(codes), slices.Sorted(maps.Keys(codes)))
+	}
+
+	doc, err := os.ReadFile("doc.go")
+	if err != nil {
+		t.Fatalf("reading doc.go: %v", err)
+	}
+	for _, code := range slices.Sorted(maps.Keys(codes)) {
+		if !bytes.Contains(doc, []byte(code)) {
+			t.Errorf("doc.go does not mention the error code %q, which the server can send", code)
+		}
 	}
 }

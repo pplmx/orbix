@@ -82,6 +82,20 @@ func encodeValue(b *bytes.Buffer, v gguf.Value) {
 		// Get[int] -- so a test that needs a value beyond uint32's range has to be able to
 		// write one. Without this the builder panics rather than the loader refusing.
 		u64(v.Uint)
+	case gguf.TypeUint8:
+		b.WriteByte(byte(v.Uint))
+	case gguf.TypeInt8:
+		b.WriteByte(byte(int8(v.Int)))
+	case gguf.TypeUint16:
+		var tmp [2]byte
+		binary.LittleEndian.PutUint16(tmp[:], uint16(v.Uint))
+		b.Write(tmp[:])
+	case gguf.TypeInt16:
+		var tmp [2]byte
+		binary.LittleEndian.PutUint16(tmp[:], uint16(int16(v.Int)))
+		b.Write(tmp[:])
+	case gguf.TypeFloat64:
+		u64(math.Float64bits(v.Float))
 	case gguf.TypeInt32:
 		u32(uint32(int32(v.Int)))
 	case gguf.TypeInt64:
@@ -1887,4 +1901,48 @@ func TestSlidingWindowPatternReachesLocalLayers(t *testing.T) {
 			t.Errorf("error %q does not state the period it refused", err)
 		}
 	})
+}
+
+// TestConfigFixtureBuilderEncodesEveryValueType keeps the fixture builder honest.
+//
+// localLayers went untested for as long as it did because encodeValue panicked on the type its
+// input needs: a bool array. That is a test-infrastructure gap rather than a forgotten test, and
+// it is invisible -- the panic only appears once someone tries to write the case. This enumerates
+// the types so the next one to be added shows up here instead.
+func TestConfigFixtureBuilderEncodesEveryValueType(t *testing.T) {
+	// The same list gguf's ValueType declares, in the same order.
+	all := []struct {
+		name string
+		typ  gguf.ValueType
+		val  gguf.Value
+	}{
+		{"uint8", gguf.TypeUint8, u32Val(255)},
+		{"int8", gguf.TypeInt8, gguf.Value{Type: gguf.TypeInt8, Int: -1}},
+		{"uint16", gguf.TypeUint16, u32Val(65535)},
+		{"int16", gguf.TypeInt16, gguf.Value{Type: gguf.TypeInt16, Int: -2}},
+		{"uint32", gguf.TypeUint32, u32Val(1)},
+		{"int32", gguf.TypeInt32, gguf.Value{Type: gguf.TypeInt32, Int: -3}},
+		{"float32", gguf.TypeFloat32, f32Val(1.5)},
+		{"bool", gguf.TypeBool, gguf.Value{Type: gguf.TypeBool, Bool: true}},
+		{"string", gguf.TypeString, strVal("x")},
+		{"array", gguf.TypeArray, gguf.Value{
+			Type: gguf.TypeArray, ElemType: gguf.TypeBool,
+			Array: []gguf.Value{{Type: gguf.TypeBool, Bool: true}},
+		}},
+		{"uint64", gguf.TypeUint64, gguf.Value{Type: gguf.TypeUint64, Uint: 1}},
+		{"int64", gguf.TypeInt64, gguf.Value{Type: gguf.TypeInt64, Int: -4}},
+	}
+	for _, c := range all {
+		t.Run(c.name, func(t *testing.T) {
+			v := c.val
+			v.Type = c.typ
+			var b bytes.Buffer
+			// A panic is the failure this test exists for, so it is allowed to propagate: the
+			// subtest's name is what says which type the builder cannot write.
+			encodeValue(&b, v)
+			if b.Len() == 0 {
+				t.Errorf("encoding %s wrote nothing", c.name)
+			}
+		})
+	}
 }

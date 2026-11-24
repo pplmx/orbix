@@ -462,7 +462,8 @@ func TestLoadConfigRejects(t *testing.T) {
 			mutate: func(c *tinyConfig) []kv {
 				return append(c.kvs(), kv{"llama.rope.freq_base", f32Val(0)})
 			},
-			want: "must be a finite positive number",
+			want:    "must be a finite positive number",
+			wantAll: []string{"rope.freq_base 0"},
 		},
 		{
 			// "v <= 0" is false for NaN, so this used to load and make every cos and sin

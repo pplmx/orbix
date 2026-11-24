@@ -372,10 +372,15 @@ type chatRequest struct {
 	// answer with a budget the caller might not have meant.
 	MaxCompletionTokens *int `json:"max_completion_tokens"`
 
-	// N, Logprobs, TopLogprobs and Echo change the response body, so they are refused
-	// rather than ignored; see the type comment. Their types are loose on purpose: the
-	// only thing read is whether the client asked for something, and a value this struct
-	// would reject as malformed is still a value the caller meant to send.
+	// N, Logprobs, TopLogprobs and Echo all change the response body, and all four are
+	// implemented now: they left the shape-field list when they started working. The comment
+	// that stood here said they were refused, which had stopped being true and would have sent a
+	// reader looking for a refusal that no longer happens -- n: 2 returns two choices, measured.
+	//
+	// Two refusals remain, and neither is about the shape-field rule. Chat still refuses echo
+	// because its response never includes the prompt. Completions refuses suffix only when the
+	// checkpoint declares no fill-in-the-middle markers, which is a statement about the model
+	// rather than about this server; see the handler. docs/usage.md has the reader-facing form.
 	N int `json:"n"`
 	// Function calling. Parsed to be refused: see chatToolFields.
 	Tools        json.RawMessage `json:"tools"`

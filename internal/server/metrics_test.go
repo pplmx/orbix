@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1088,6 +1089,75 @@ func TestMetricsValuesMatchStats(t *testing.T) {
 		}
 		if got != expected {
 			t.Errorf("%s = %s, want %s (the Stats field)", name, got, expected)
+		}
+	}
+}
+
+// TestMetricsDocListsEveryMetric checks the documentation against a live scrape, both ways.
+//
+// docs/cli.md has a table of every metric a scrape exposes. Nothing compared it with the code,
+// so a metric added to the builder -- or removed from it -- would leave the table quietly wrong.
+// This is the same guard TestConfigurationDocNamesOnlyRealFlags gives the flag table, and the
+// reason it is worth having is that the table is what an operator reads to build an alert.
+//
+// The scrape is the source of truth for the code side rather than a list in this file: a
+// hard-coded list would pass while the handler emitted something else.
+func TestMetricsDocListsEveryMetric(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	// Paged, because five of the seventeen only appear when there is a pool to describe. A
+	// contiguous engine would make this test pass with those five missing.
+	srv := serverWithPagedEngine(t, path)
+
+	// Every sample's name, minus the # HELP and # TYPE lines the exposition carries.
+	live := make(map[string]bool)
+	for _, line := range strings.Split(scrape(t, srv.Handler()), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, _, ok := strings.Cut(line, "{")
+		if !ok {
+			name, _, _ = strings.Cut(line, " ")
+		}
+		live[strings.TrimSpace(name)] = true
+	}
+	if len(live) < 15 { // measured: 17
+		t.Fatalf("only %d metrics were scraped, so this check is looking at the wrong thing", len(live))
+	}
+
+	raw, err := os.ReadFile("../../docs/cli.md")
+	if err != nil {
+		t.Fatalf("reading docs/cli.md: %v", err)
+	}
+	documented := make(map[string]bool)
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		rest, ok := strings.CutPrefix(line, "| `orbix_")
+		if !ok {
+			continue
+		}
+		name, _, ok := strings.Cut(rest, "`")
+		if !ok {
+			continue
+		}
+		documented["orbix_"+name] = true
+	}
+	if len(documented) < 15 { // measured: 17
+		t.Fatalf("only %d metrics were found in docs/cli.md, so the table moved", len(documented))
+	}
+
+	for name := range live {
+		if !documented[name] {
+			t.Errorf("%s is emitted but not in docs/cli.md's table", name)
+		}
+	}
+	// One metric needs --otlp-endpoint to appear, which this server does not set.
+	// TestMetricsCountRejectedSpans covers it under a collector that accepts and never answers,
+	// so it is excluded here rather than left to make the whole comparison unusable.
+	for name := range documented {
+		if name == "orbix_trace_spans_dropped_total" {
+			continue
+		}
+		if !live[name] {
+			t.Errorf("docs/cli.md lists %s, which no scrape emits", name)
 		}
 	}
 }

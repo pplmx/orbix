@@ -628,6 +628,42 @@ internal/engine imports internal/chat -- a reader meets the caller first
 
 守卫里 `if len(union) < 25` 的 25 是照实测的 26 留的余量，不是猜的。
 
+### 第十轮：端到端跑了一遍，以及一次"重复"的复核
+
+前九轮改的多是结构，`just check` 只证明单元与集成测试通过。这一轮用合成 fixture 起真服务跑了一遍：
+
+```bash
+# 合成一个 185 KiB 的完整模型，起服务
+./bin/orbix serve --model /tmp/e2e/tiny.gguf --addr 127.0.0.1:19871 --blocks 64 --block-size 16
+```
+
+| 路径                                   | 结果                                                           |
+| -------------------------------------- | -------------------------------------------------------------- |
+| `/healthz`                             | `{"model":"tiny","status":"ok"}`                               |
+| `/v1/completions` 非流式               | `finish_reason: length`，`completion_tokens` 与请求一致        |
+| `/v1/chat/completions`                 | 正常，`prompt_tokens` 随模板变化                               |
+| SSE 流式 + `[DONE]`                    | 逐 chunk 到达                                                  |
+| `stream_options.include_usage`         | usage 块携带完整计数                                           |
+| `chat_template_kwargs`（无模板的模型） | 400，`param: chat_template_kwargs`，消息说明模型没有可评估模板 |
+| `max_tokens: -5`                       | 400，`param: max_tokens`，`code: invalid_value`                |
+| `/metrics`                             | `orbix_tokens_generated_total 14`、`orbix_kv_pool_free 64`     |
+| SIGTERM                                | 日志 `shutting down`，端口释放                                 |
+
+顺带一个自己的错误：`nohup ... &` 记下的 `$!` 是**子 shell** 的 pid，kill 它不会停服务——第一次测关闭时得到
+`STILL UP`，看起来像缺陷。按端口取 pid 后正常。这正是 AGENTS.md 里那条不要按名字找进程的同一类。
+
+**重复代码复核**：用一个按函数切分的 8 行窗口散列扫全仓，跨函数重复 5 处，逐个查过**无一该合并**：
+
+| 位置                                  | 为什么不是重复                                                                           |
+| ------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `gguf.intAs` / `uintAs`               | 有符号与无符号的定义域不同，注释写明为什么分开；合并会让 uint64 超过 MaxInt64 的值被误拒 |
+| `llama.attention` / `forward`         | 前几轮已判定：差别在驱动方式而非算术                                                     |
+| `llama.newBatch` / `newDecodeBatch`   | 字段相似，但 scores 的类型不同（`[]float32` vs `[][]float32`）                           |
+| `bench.runRequests` / `runSequential` | 套件要对比的就是并发与串行两种测量                                                       |
+| `cmdBench` / `cmdServe`               | 滑窗假阳性，实际内容不同                                                                 |
+
+API 面也复核了：`engine` 的导出签名里只出现 `Sampler`（`Greedy()` 返回它）和 `*gguf.File`（渲染器要读文件里的模板）；`server` 只出现 `*engine.Engine` 与 `*tokenize.Tokenizer`，都是它该接收的。没有下层实现类型泄漏到上层签名里。
+
 ### `run` 仍然不迁到 engine
 
 第九节把这件事列为待定。本轮看了它到底要什么，结论是**不迁**，理由比上一轮具体：

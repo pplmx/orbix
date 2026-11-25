@@ -13,7 +13,7 @@
 | `internal/llama`    | 4856      | 135            | 40       | 13087     | 2.70      |
 | `cmd/orbix`         | 3910      | 85             | 81       | 8629      | 2.21      |
 | `internal/chat`     | 3333      | 81             | 41       | 5230      | 1.57      |
-| `internal/engine`   | 2085      | 47             | 20       | 6116      | 2.93      |
+| `internal/engine`   | 2090      | 47             | 20       | 6116      | 2.93      |
 | `internal/gguf`     | 1492      | 51             | 14       | 3060      | 2.05      |
 | `internal/quant`    | 922       | 27             | 20       | 3784      | 4.10      |
 | `internal/gguftest` | 817       | 22             | 14       | 372       | 0.46      |

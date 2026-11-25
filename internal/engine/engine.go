@@ -448,6 +448,11 @@ func (e *Engine) Submit(req Request) (<-chan Event, error) {
 	} else {
 		arena, err := llama.NewKVCache(cfg, cfg.ContextLen)
 		if err != nil {
+			// Unreachable from a loaded model: NewKVCache refuses a non-positive size and an
+			// invalid layer config, and LoadConfig has already refused both, so cfg.ContextLen
+			// is positive and the shape fields are set. Kept because the cache constructor
+			// reports its own preconditions and dropping the check would mean this call site
+			// silently discards them if that ever changes.
 			return nil, err
 		}
 		cache = arena

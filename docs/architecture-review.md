@@ -8,7 +8,7 @@
 
 | 包                  | 代码行    | 函数（含方法） | 顶层函数 | 测试行    | 测试/代码 |
 | ------------------- | --------- | -------------- | -------- | --------- | --------- |
-| `internal/server`   | 5044      | 109            | 51       | 12597     | 2.50      |
+| `internal/server`   | 5053      | 109            | 51       | 12597     | 2.49      |
 | `internal/tokenize` | 4868      | 138            | 109      | 7102      | 1.46      |
 | `internal/llama`    | 4856      | 135            | 40       | 13082     | 2.69      |
 | `cmd/orbix`         | 3910      | 85             | 81       | 8629      | 2.21      |
@@ -452,7 +452,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
 | ------------------------- | ---- | ---- | ----------------------------------------------------------- |
 | `llama.LoadConfig`        | 315  | 45   | 六个阶段方法 + `configParser`（`get` 一个必填正整数读取器） |
-| `server.generate`         | 282  | 199  | `resolvePrompt`（预算校验、按端点编码、窗口检查）           |
+| `server.generate`         | 282  | 208  | `resolvePrompt`（预算校验、按端点编码、窗口检查）           |
 | `cli.cmdBench`            | 279  | 240  | `validateBenchFlags`（59 行，9 条错误串逐字一致）           |
 | `cli.cmdServe`            | 311  | 275  | `validateServeFlags`（94 行，9 条错误串逐字一致）           |
 | `server.blockingResponse` | 201  | 141  | `choiceObject`（68 行，两种 schema / echo / stop 截断）     |
@@ -463,7 +463,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 
 **现存 20 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，762 个函数）：`chat.evalExpr`
 316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
-205、`server.generate` 199、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
+205、`server.generate` 208、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
 141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`
 122、`server.handleChat` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、`gguf.Read` 107、
 `chat.lex` 103、`cli.validateServeFlags` 101、`chat.parseCompare` 100。

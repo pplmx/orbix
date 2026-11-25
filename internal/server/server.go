@@ -1577,6 +1577,15 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			// a sequence whose events nobody reads only after abandonGrace -- holding its KV
 			// blocks until then. Draining them here releases the blocks as soon as each
 			// finishes instead of leaving the pool short for two seconds.
+			//
+			// No test covers this loop, and deleting it leaves the whole package green. What it
+			// changes is when blocks come back, not whether they do -- abandonGrace is two
+			// seconds, so a test would have to assert "the pool was free well before that",
+			// and a threshold loose enough not to flake is loose enough to pass without the
+			// loop. Reaching the branch at all also needs a request where choice 0 is accepted
+			// and a later one is refused, which against a fixture this fast means racing the
+			// two submissions. Both properties are why AGENTS.md puts this shape in comments
+			// rather than in tests.
 			for _, done := range chans {
 				go func() {
 					for range done {

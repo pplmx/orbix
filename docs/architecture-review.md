@@ -8,12 +8,12 @@
 
 | 包                  | 代码行    | 函数（含方法） | 顶层函数 | 测试行    | 测试/代码 |
 | ------------------- | --------- | -------------- | -------- | --------- | --------- |
-| `internal/server`   | 5023      | 109            | 51       | 12324     | 2.45      |
+| `internal/server`   | 5040      | 109            | 51       | 12377     | 2.46      |
 | `internal/tokenize` | 4843      | 138            | 109      | 7073      | 1.46      |
 | `internal/llama`    | 4820      | 135            | 40       | 12844     | 2.66      |
-| `cmd/orbix`         | 3746      | 82             | 78       | 8342      | 2.23      |
-| `internal/chat`     | 2767      | 73             | 37       | 4426      | 1.60      |
-| `internal/engine`   | 2065      | 47             | 20       | 6082      | 2.95      |
+| `cmd/orbix`         | 3890      | 85             | 81       | 8602      | 2.21      |
+| `internal/chat`     | 3151      | 78             | 40       | 4645      | 1.47      |
+| `internal/engine`   | 2079      | 47             | 20       | 6092      | 2.93      |
 | `internal/gguf`     | 1490      | 51             | 14       | 2968      | 1.99      |
 | `internal/quant`    | 904       | 27             | 20       | 3510      | 3.88      |
 | `internal/gguftest` | 817       | 22             | 14       | 372       | 0.46      |
@@ -21,7 +21,7 @@
 | `internal/kernel`   | 705       | 28             | 20       | 2017      | 2.86      |
 | `internal/f16`      | 154       | 4              | 4        | 380       | 2.47      |
 | `internal/arch`     | 14        | 0              | 0        | 909       | 64.93     |
-| **合计**            | **28137** | **751**        | **421**  | **62928** | **2.24**  |
+| **合计**            | **28696** | **759**        | **427**  | **63470** | **2.21**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -404,9 +404,9 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 ## 十、函数级失控：本轮按当下代码做的分解
 
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
-**19 个函数在 100 行以上**（2026-11-25 复算；本轮拆分前是 18，详见本节末尾的清单；
+**20 个函数在 100 行以上**（2026-11-25 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；751 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；759 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
@@ -421,22 +421,26 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**现存的十九个 >=100 行函数**（2026-11-25 AST 实测，751 个函数）：`tokenize.preFamilyOf` 271、
-`chat.evalExpr` 271、`cli.cmdServe` 261、`cli.cmdBench` 234、`server.streamOneChoice` 205、
-`server.generate` 192、`cli.runTo` 165、`tokenize.loadPreTokenization` 157、`cli.chatSession` 135、
-`server.blockingResponse` 131、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、
-`engine.Submit` 122、`server.handleChat` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、
-`gguf.Read` 107、`chat.lex` 103、`cli.validateServeFlags` 101。
+**现存 20 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，759 个函数）：`chat.evalExpr`
+310、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
+205、`server.generate` 199、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
+141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`
+122、`server.handleChat` 122、`gguftest.kvs` 119、`chat.parsePostfix` 113、`server.resolvePrompt`
+108、`gguf.Read` 107、`chat.lex` 103、`cli.validateServeFlags` 101。
 
-这一份上一版写的是「十七个」，逐项复算后变的不只是总数：
+这一份上一版写的是「十九个」，逐项复算后变的不只是总数：
 
-- 上一版漏了 `server.handleChat`（122 行），它和表里列出的 `engine.Submit` 一样长；
-- `chat.evalExpr` 从 242 涨到 271，`cli.cmdServe` 从 238 涨到 261，`server.streamOneChoice`
-  从 157 涨到 205，`server.generate` 从 189 涨到 192；
+- `chat.parsePostfix` 新进入清单。它在 `2605ec3` 之前是 79 行——这次提交给 Qwen3 的模板加
+  `[:n]` 切片、关键字参数和字符串方法，都落在这个函数里——现在是 113。它是最能说明这份
+  清单性质的一条：**不是有人把它写坏了，是功能长在了它身上**。
+- `chat.evalExpr` 从 271 涨到 310，`cli.cmdServe` 从 261 涨到 275，`server.generate` 从 192
+  涨到 199，`cli.runTo` 从 165 涨到 177，`server.blockingResponse` 从 131 涨到 141；其余几项
+  未变。函数总数从 751 涨到 759。
+- 上一版漏过 `server.handleChat`（122 行），它和表里列出的 `engine.Submit` 一样长；
 - `cli.cmdRun` 已改名为 `cli.runTo`（`cmdRun` 现在只是把 `os.Stdout` 传进去的一行）。它一度是
   174 行，因为流式输出直接写在函数体里；把那段移到 `generateStreaming` 之后是 165，仍比改写前的
   147 长，多出来的是新增的窗口预算提示与写入错误检查；
-- `cli.validateServeFlags` 新进入清单，101 行。
+- `cli.validateServeFlags` 是新进入清单的一项，101 行。
 
 `validateServeFlags` 进入清单是这套拆分的必然结果：从 `cmdServe` 切出来的部分自己也长到了
 一百行。这不说明拆分做错了，但说明「>=100 行」是个会自我复发的阈值，对它的计数要当作体检
@@ -448,14 +452,30 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 
 复算用 `go run ./scripts/count.go -long`：计数行和列表来自同一个切片，不会再各说各话。
 
+**而且现在有守卫了。** `TestArchitectureReviewLongFunctionCountsMatchTheCode` 跑同一条命令，把这份
+文档里的两组数字（本节开头的「N 个函数在 100 行以上 / M 个函数」和清单上方的「现存 N 个 / M 个函数」）
+以及整份名单逐项对上。这条测试存在的原因是这份清单已经悄悄过期两次，而每次都是靠人重新跑一遍才
+发现的；文档里写「数字可复算」并不能让数字保持正确，让某个测试去复算才行。
+
+它读文档的数字而不只是比名单，是因为两者会各自错：删掉一个名字而数字不变时，只比数字的守卫看不
+出来；数字改了而名字没改时，只比名单的守卫看不出来。所有四种情况都用注入验证过——改左边的数字、
+改右边的数字、从名单里删一个、往名单里加一个不在清单里的函数——每种都会红。把 `HEAD` 上那份旧
+文档放回去，它同时报出三条：`751 → 759`、`19 → 20`、以及 `parsePostfix` 没被列出。
+
 逐个判断如下，而不是笼统地"改动面大"：
 
 - **`preFamilyOf`（271）是数据不是逻辑。** 34 个 `case`，每个返回一个 `preRule` 字面量，注释是那个
   家族的预分词正则原文。改成 `map[preType]preRule` 同样 271 行，注释还得逐条贴，而且 `(preRule, bool)`
   的 `bool` 正是"这个家族是否已知"的判定，表驱动能保留它——所以改与不改都不改变读者要读的量。
   **行数是数据密度，不是复杂度。**
-- **`evalExpr`（242）的骨架是分派。** 20 个 case 里 15 个只有 2–20 行"求子节点再合并"，拆成 20 个
-  方法只增加间接层。有独立规则的那一个已经拆出去了（`evalArithmetic`，见下节）。
+- **`evalExpr`（310）的骨架是分派。** 20 个 case 里 15 个只有 2–20 行"求子节点再合并"，拆成 20 个
+  方法只增加间接层。有独立规则的那一个已经拆出去了（`evalArithmetic`，见下节）。它这一轮又长了
+  39 行，全部是 Qwen3 模板要的构造；下一个该从这里拿出去的是字符串方法（`strip` 族与 `split`），
+  它们已经有自己的 `evalStringMethod`，而分派那一支仍留在 `evalExpr` 里。
+- **`chat.parsePostfix`（113）** 是上一版清单里没有的一项，79 → 113 全部来自同一批构造。它处理
+  `.field`（含方法调用）、`[i]`、`[:n]`/`[n:]`/`[a:b]` 切片和 `|filter`（含关键字参数）四类后缀，
+  每类都有自己的参数解析规则，所以拆开只会把"后缀依次尝试"这个循环切成调用方看不见的几段。
+  **留着，但记下它为什么长：** 它是表达式语法的后缀侧，新增一个语法形态就长在这里。
 - **`cmdServe`/`cmdBench`/`cmdRun`/`chatSession`** 剩下的都是连续装配流程，只跑一次、只失败一次。
 - **`attentionBatch`（126）** 我在第三节判断过不该合。`LoadWeights` 当时还是 134 行，现在是 78，
   已经不在本表里了。

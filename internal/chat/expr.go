@@ -549,8 +549,13 @@ func (p *exprParser) parseCompare() (expr, error) {
 					"and 'is not defined' are supported after 'is not'")
 			}
 			if !p.accept("defined") {
-				return nil, fmt.Errorf("chat: only 'is defined', 'is not defined', 'is none', " +
-					"'is mapping', 'is iterable' and 'is string' are supported after 'is'")
+				// The list has to match what the switch above accepts, or a reader whose
+				// template wrote `is true` is told it is unsupported. It said "is defined,
+				// is not defined, is none, is mapping, is iterable and is string" -- six names,
+				// missing two the parser takes and three the message's own neighbour mentions.
+				return nil, fmt.Errorf("chat: unsupported test after 'is'. Supported: defined, " +
+					"is not defined, none, is not none, mapping, iterable, string, true, is not " +
+					"true, false, is not false")
 			}
 			// "x is defined" and "x.y is defined" are both used: the first asks
 			// whether a name is bound, the second whether a mapping has a key.

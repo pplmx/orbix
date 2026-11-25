@@ -12,7 +12,13 @@
 // published templates actually use:
 //
 //   - {% if %} / {% elif %} / {% else %} / {% endif %} with ==, !=, not, and, or,
-//     in, and the is-tests defined, none, mapping and iterable
+//     in, and seven is-tests: defined, none, mapping, iterable, string, true and false.
+//     `is not` negates four of the seven -- none, true, false and defined -- and rejects the
+//     other three at parse time with a message listing the four it takes. That is the state
+//     rather than a rule: each negation was added when a template needed it, and no template
+//     has yet written `is not mapping`, `is not iterable` or `is not string`. Writing
+//     `not (x is mapping)` works today for those three, so the gap costs a spelling, not a
+//     capability.
 //
 //   - {% for %} with loop.index0, loop.index, loop.first, loop.last, loop.length,
 //     loop.revindex, and loop.revindex0
@@ -82,8 +88,10 @@
 // a neutral transcript when a template cannot be parsed, so an unsupported checkpoint
 // degrades to the old behaviour rather than to a broken prompt.
 //
-// The is-tests cover four of Jinja2's, and two of the four answer differently from it: iterable
-// and none. "is mapping" and "is string" agree. A dict and a string are both iterable in Jinja2;
+// The is-tests cover seven of Jinja2's, and two of the seven answer differently from it:
+// iterable and none. "is mapping" and "is string" agree, and so do "is true" and "is false" --
+// those ask whether a value *is* the boolean, which is narrower than a truth test: `1 is true`
+// is False on both sides. "is defined" is Jinja2's own name test and agrees too. A dict and a string are both iterable in Jinja2;
 // here only a sequence is, because that is the only thing {% for %} can walk. And an absent field
 // reads as empty rather than as Undefined, so `field is none` is true here where Jinja2 says
 // false. The answers are pinned by tests rather than left to drift, and jinja_diff.py compares

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -3425,5 +3428,114 @@ func TestArithmeticBoundsAndOverflow(t *testing.T) {
 	// the int64 edges, and this pins that the bound is int64 rather than int32.
 	if got := render(t, `{{ 2147483647 - 1 }}`, nil, Inputs{}); got != "2147483646" {
 		t.Errorf("2147483647 - 1 deployed as %q, want 2147483646", got)
+	}
+}
+
+// TestDocumentedIsTestsMatchTheParser pins the list doc.go publishes against what parses.
+//
+// doc.go twice said "the is-tests defined, none, mapping and iterable" after string, true and
+// false had been added for real templates, and the paragraph further down said "four of
+// Jinja2's" while listing four names out of seven. Nothing failed, because a list in a comment
+// is not a list any test reads.
+//
+// This reads doc.go rather than restating its list. A hand-written copy inside the test would
+// agree with the parser by construction and could never notice the document -- measured: the
+// first version of this test carried the names itself, and putting the stale doc.go back left
+// it green.
+func TestDocumentedIsTestsMatchTheParser(t *testing.T) {
+	raw, err := os.ReadFile("doc.go")
+	if err != nil {
+		t.Fatalf("read doc.go: %v", err)
+	}
+	doc := string(raw)
+
+	// Both spellings the file has used: the older "the is-tests a, b and c" and the current
+	// "seven is-tests: a, b and c". Accepting either is what lets the failure below name the
+	// missing tests instead of reporting a formatting mismatch -- and a formatting mismatch is
+	// the less useful message, since the list is what this test is about.
+	var documented []string
+	for _, re := range docIsTestLists {
+		if m := re.FindStringSubmatch(doc); m != nil {
+			documented = splitDocList(m[1])
+			break
+		}
+	}
+	if len(documented) < 4 {
+		t.Fatalf("could not read the is-test list from doc.go; it holds none of the forms "+
+			"this test knows: %v", documented)
+	}
+
+	for _, name := range documented {
+		src := `{% if x is ` + name + ` %}y{% else %}n{% endif %}`
+		if _, err := Parse(src); err != nil {
+			t.Errorf("doc.go lists %q as a supported is-test, but %q does not parse: %v",
+				name, src, err)
+		}
+	}
+
+	// The other direction: a name the parser takes but the document omits. The set below is
+	// the parser's, written here because nothing exposes it; the comparison is against what
+	// doc.go actually says, which is what went stale.
+	for _, name := range []string{"defined", "none", "mapping", "iterable", "string", "true", "false"} {
+		if !slices.Contains(documented, name) {
+			t.Errorf("the parser accepts `is %s` but doc.go's list does not name it: %v",
+				name, documented)
+		}
+	}
+}
+
+// docIsTestLists captures the names from doc.go's enumeration, in either spelling the file has
+// used. The first is current; the second is what it said before this round, and accepting it
+// is what makes the failure name the missing tests rather than the wording.
+var docIsTestLists = []*regexp.Regexp{
+	regexp.MustCompile(`is-tests: ([a-z, ]+and [a-z]+)`),
+	regexp.MustCompile(`the is-tests ([a-z, ]+and [a-z]+)`),
+}
+
+// splitDocList turns "defined, none, mapping, iterable, string, true and false" into a slice.
+func splitDocList(s string) []string {
+	s = strings.ReplaceAll(s, " and ", ", ")
+	var out []string
+	for _, name := range strings.Split(s, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// TestUnsupportedIsTestNamesEverySupportedOne checks the refusal message against the parser.
+//
+// The message is the only thing a template author sees when their `is` test is refused, so it
+// has to list what does work. It said "is defined, is not defined, is none, is mapping, is
+// iterable and is string" -- six names, while the parser accepts eleven forms: the `is not`
+// variants of none, true and false parse a few lines below the refusal, and plain `is true` and
+// `is false` parse above it. A reader who wrote `x is true` and hit the other branch of that
+// switch was told their test did not exist.
+//
+// Asserted as "every accepted form appears in the message" rather than by comparing the whole
+// string, so wording can change without the test failing -- what may not change is that a form
+// the parser takes is missing from the list shown to the person who needs it.
+func TestUnsupportedIsTestNamesEverySupportedOne(t *testing.T) {
+	_, err := Parse(`{% if x is odd %}y{% endif %}`)
+	if err == nil {
+		t.Fatal("an unknown is-test parsed")
+	}
+	msg := err.Error()
+
+	accepted := []string{
+		"is defined", "is not defined", "is none", "is not none",
+		"is mapping", "is iterable", "is string",
+		"is true", "is not true", "is false", "is not false",
+	}
+	for _, form := range accepted {
+		// The message lists bare names rather than the whole form for some of them, so the
+		// check is on the distinguishing word plus the negation where there is one.
+		name := strings.TrimPrefix(strings.TrimPrefix(form, "is not "), "is ")
+		if form == "is not "+name && !strings.Contains(msg, "is not "+name) {
+			t.Errorf("the refusal does not name %q, which the parser accepts:\n%s", form, msg)
+		} else if form == "is "+name && !strings.Contains(msg, name) {
+			t.Errorf("the refusal does not name %q, which the parser accepts:\n%s", form, msg)
+		}
 	}
 }

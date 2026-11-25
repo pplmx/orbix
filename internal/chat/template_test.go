@@ -3539,3 +3539,43 @@ func TestUnsupportedIsTestNamesEverySupportedOne(t *testing.T) {
 		}
 	}
 }
+
+// TestDocumentedFiltersMatchTheParser pins doc.go's filter list against supportedFilters.
+//
+// Same shape as the is-test guard above, and found the same way: doc.go said "the trim, tojson
+// and length filters" while the parser also accepts first and last, so the authoritative
+// description of the package was missing two of its five filters. docs/usage.md had all five --
+// the summary page was right and the reference page was wrong, which is the direction a reader
+// is least likely to check.
+//
+// The list is read out of doc.go rather than restated here, for the reason the is-test version
+// documents: a copy inside the test agrees with the parser by construction.
+func TestDocumentedFiltersMatchTheParser(t *testing.T) {
+	raw, err := os.ReadFile("doc.go")
+	if err != nil {
+		t.Fatalf("read doc.go: %v", err)
+	}
+	m := docFilterList.FindStringSubmatch(string(raw))
+	if m == nil {
+		t.Fatalf("doc.go no longer enumerates the filters as \"five filters: a, b, c, d and e\"; " +
+			"restore that sentence or update this pattern")
+	}
+	documented := splitDocList(m[1])
+
+	for _, name := range documented {
+		src := `{{ messages | ` + name + ` }}`
+		if _, err := Parse(src); err != nil {
+			t.Errorf("doc.go lists the %q filter, but %q does not parse: %v", name, src, err)
+		}
+	}
+	// The other direction, against the parser's own table.
+	for name := range supportedFilters {
+		if !slices.Contains(documented, name) {
+			t.Errorf("supportedFilters has %q but doc.go's list does not name it: %v",
+				name, documented)
+		}
+	}
+}
+
+// docFilterList captures the names from doc.go's "five filters: trim, tojson, ..." sentence.
+var docFilterList = regexp.MustCompile(`five filters: ([a-z, ]+and [a-z]+)`)

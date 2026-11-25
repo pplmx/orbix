@@ -31,7 +31,9 @@
 //     made every call render with an empty name
 //
 //   - {{ expression }} with string and variable operands, +, - subtraction and % modulo between
-//     integers, and the trim, tojson and length filters. + adds two integers and joins anything
+//     integers, and five filters: trim, tojson, length, first and last. The last two answer
+//     none for an empty sequence rather than failing -- Qwen3's template writes
+//     `content.split('</think>')|last` on a reply that may not contain the marker at all. + adds two integers and joins anything
 //     else as text, which is Jinja2's behaviour for the first and a divergence for the second:
 //     {{ 1 + 2 }} is "3" on both, while {{ "a" + 1 }} is "a1" here and a TypeError there. Whether
 //     a value is a number is decided from its text, so {{ "5" + 1 }} is "6" here and a TypeError

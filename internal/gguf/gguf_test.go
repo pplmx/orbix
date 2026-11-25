@@ -2189,3 +2189,44 @@ func TestMaxArrayElementsIsTheDocumentedBound(t *testing.T) {
 			"derives its 6144 MiB array-claim measurement from it", maxArrayElements)
 	}
 }
+
+// TestUnknownArrayElementTypeIsRefused covers the wrapper around an array element's error.
+//
+// array() refuses a nested array before reading any element, so the unknown-type path is
+// reached from the element loop instead: value(et) falls through to its default arm and the loop
+// wraps that with the index. The wrapper is what makes the message usable -- a file whose element
+// names type 99 has to say which element -- and nothing exercised it.
+func TestUnknownArrayElementTypeIsRefused(t *testing.T) {
+	var b bytes.Buffer
+	u32 := func(v uint32) {
+		var x [4]byte
+		binary.LittleEndian.PutUint32(x[:], v)
+		b.Write(x[:])
+	}
+	u64 := func(v uint64) {
+		var x [8]byte
+		binary.LittleEndian.PutUint64(x[:], v)
+		b.Write(x[:])
+	}
+
+	b.WriteString(Magic)
+	u32(Version)
+	u64(0) // no tensors
+	u64(1) // one metadata entry
+	u64(uint64(len("odd")))
+	b.WriteString("odd")
+	u32(uint32(TypeArray)) // value type: array
+	u32(99)                // element type: not in the enum
+	u64(1)                 // one element
+
+	_, err := Read(bytes.NewReader(b.Bytes()))
+	if err == nil {
+		t.Fatal("Read accepted an array whose element type is not in the enum")
+	}
+	if !strings.Contains(err.Error(), "unknown metadata value type 99") {
+		t.Errorf("error %q does not name the unknown type", err)
+	}
+	if !strings.Contains(err.Error(), "array element 0") {
+		t.Errorf("error %q does not say which element", err)
+	}
+}

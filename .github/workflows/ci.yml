@@ -149,6 +149,27 @@ jobs:
       - name: go test
         run: go test ./... -count=1
 
+  isolate:
+    name: test order independence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # -shuffle=on and -count=2 catch the two failures the gate cannot: a test that passes
+      # only because an earlier one left state behind, and one that is not idempotent. Neither
+      # is visible when every package runs once in source order, which is how `just test` and
+      # the gate job run it. The recipe says why it is not inside `check`: a shuffled failure
+      # names a seed rather than a bug, and the gate is meant to answer yes or no.
+      - name: just isolate
+        run: just isolate
+
   # The race detector needs CGo on some toolchains, so it runs here rather than in the
   # gate: CGO_ENABLED=0 is the only supported build, but the race detector is a test
   # instrument, not a build artifact.

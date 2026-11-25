@@ -21,12 +21,17 @@ var (
 
 // cmdVersion implements "orbix version".
 //
-// -json exists because this is the command a build script reads: checking that an artifact
-// reports cgo:false is what the cross-build job does by hand today, and parsing a two-column
-// text report for that is worse than parsing a document. The other commands refuse an unknown
-// flag through the flag package; this one reads its arguments itself and used to ignore them,
-// so `version --json` printed the human report and exited zero -- a caller piping it into a
-// JSON parser got a parse error where the flag said success.
+// -json exists for a build script that has to read these facts, because parsing the two-column
+// text report for them is worse than parsing a document. Nothing in this repository reads it
+// today: the cross-build job asserts CGO_ENABLED by running `go version -m` on each artifact,
+// which reads the build info directly and needs no help from this command. The flag is for the
+// caller outside the repository -- the one writing a release check or a deploy probe -- and this
+// paragraph used to claim the CI job used it, which it never did.
+//
+// The other commands refuse an unknown flag through the flag package; this one reads its
+// arguments itself and used to ignore them, so `version --json` printed the human report and
+// exited zero -- a caller piping it into a JSON parser got a parse error where the flag said
+// success.
 func cmdVersion(args []string) error {
 	asJSON := false
 	for _, a := range args {

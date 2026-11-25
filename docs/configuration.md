@@ -359,9 +359,15 @@ value sits on that plateau rather than inside the climb, which is the property t
 `--workers 0` and an explicit `--workers 4` measured 189.4 and 192.3 -- the same within
 run-to-run noise, which is what "0 means GOMAXPROCS" should look like.
 
-For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that way
-(131072 x 8 x 64 x 2 x 4 x 16 = 8589934592 bytes), against 32 KiB for the synthetic fixtures.
-Any model with a long window should be run with `--blocks`.
+For scale: the 128k-window Llama 3.2 checkpoint reserves 8 GiB per request that way, against
+32 MiB for the synthetic fixtures -- 4096 x 4 x 2 x 128 x 2 x 4 = 33554432 bytes. An earlier
+version said 32 KiB, off by the 1024 between the two units; nobody recomputed it because the
+sentence only exists to say "much smaller". Any model with a long window should be run with `--blocks`.
+
+That 8 GiB is `window x layers x kv_heads x head_dim x 2 x 4` = 131072 x 16 x 8 x 64 x 2 x 4
+= 8589934592 bytes. The factors are written in that order deliberately: an earlier version
+of this line ended `x 16` with the 16 meaning layers, right after a paragraph about
+`--block-size`, where a trailing 16 reads as a block size.
 
 ## The weights are held as float32, which is the memory figure to plan with
 

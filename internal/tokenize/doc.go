@@ -24,6 +24,13 @@
 // split wrong, so the model answered a different question -- while applying the list gives
 // "to establish a new religion".
 //
+// An unknown `tokenizer.ggml.pre` is treated the same way -- accepted, with no pre-tokenizer at
+// all. The merge list still applies, but the chunk boundaries the expression would have drawn are
+// gone, so text splits differently from the model it came from. `orbix model inspect` is the one
+// place that reports this: it prints the family the file names and whether this build reproduces
+// it, as a pair, because a reader judging a checkpoint's quality needs the second half before the
+// first has any use.
+//
 // A file that declares `tokenizer.ggml.model = gpt2` and carries no merge list is accepted,
 // and `encodeChunk` then falls back to `t.scores[id]` -- the unigram rule this section opens
 // by rejecting. So such a file is tokenized by the wrong algorithm rather than refused. That

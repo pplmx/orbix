@@ -646,8 +646,8 @@ func loadPreTokenization(f *gguf.File, t *Tokenizer) error {
 		default:
 			// An unknown pre-tokenizer is not a reason to refuse the file: the merge list
 			// still tokenizes, just without the chunk boundaries. Reporting it would be
-			// better than silence, but this path has no logger, so the choice is
-			// documented in this package's doc.go, and "orbix model inspect" reports it.
+			// better than silence, but this path has no logger; "orbix model inspect" is
+			// where a reader finds out, and doc.go states the consequence.
 			t.pre = preNone
 		}
 	}

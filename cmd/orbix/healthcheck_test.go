@@ -44,13 +44,40 @@ func TestHealthcheckReportsSuccessAndFailure(t *testing.T) {
 	}
 
 	// A trailing slash is the same server and must not become "//healthz".
-	slashed := captureStdout(t, func() {
-		if err := cmdHealthcheck([]string{"--addr", ok.URL + "/", "--quiet"}); err != nil {
-			t.Errorf("healthcheck with a trailing slash: %v", err)
+	for _, suffix := range []string{"/", "//", "///"} {
+		slashed := captureStdout(t, func() {
+			if err := cmdHealthcheck([]string{"--addr", ok.URL + suffix, "--quiet"}); err != nil {
+				t.Errorf("healthcheck with %q appended to the address: %v", suffix, err)
+			}
+		})
+		if slashed != "" {
+			t.Errorf("--quiet with %q appended printed %q", suffix, slashed)
 		}
-	})
-	if slashed != "" {
-		t.Errorf("--quiet with a trailing slash printed %q", slashed)
+	}
+}
+
+// TestTrimTrailingSlash removes every trailing slash, not just one.
+//
+// The loop it replaced this shape of was untested: trimming a single slash instead left every
+// test green, because the healthy-server case above appends exactly one and the handler checks
+// only the path. A caller passing "http://host:8080//" -- from a template that appends a slash
+// to a value that already ended with one -- would then probe "//healthz", which a mux serving
+// only "/healthz" answers with 404.
+func TestTrimTrailingSlash(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"http://host:8080", "http://host:8080"},
+		{"http://host:8080/", "http://host:8080"},
+		{"http://host:8080///", "http://host:8080"},
+		{"http://host/prefix//", "http://host/prefix"},
+		// Everything is a slash: the answer is the empty string, and the caller builds
+		// "/healthz", which http.Get rejects as a missing scheme rather than probing.
+		{"///", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := trimTrailingSlash(c.in); got != c.want {
+			t.Errorf("trimTrailingSlash(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

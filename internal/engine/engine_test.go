@@ -1310,6 +1310,22 @@ func TestFinishReasonStringsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestFinishReasonStringFallsBackToUnknown pins what String() answers outside the enum.
+//
+// The round-trip test above walks the five defined values and rejects "unknown" for any of
+// them, which leaves the fallback itself unexercised. Injecting a different default -- ""
+// instead of "unknown" -- left every package green, so nothing was checking it. The fallback
+// is what a metric label or a finish_reason field would carry if a reason ever arrived from
+// outside this switch, and an empty string is not a label Prometheus accepts.
+func TestFinishReasonStringFallsBackToUnknown(t *testing.T) {
+	for _, r := range []FinishReason{FinishReasonCount, FinishReasonCount + 1, -1} {
+		if got := r.String(); got != "unknown" {
+			t.Errorf("FinishReason(%d).String() = %q, want %q: a value outside the enum has no "+
+				"name, and an empty one would become an invalid metric label", r, got, "unknown")
+		}
+	}
+}
+
 // TestFinishReasonsMatchTheEventStream keeps the enum and the events in step.
 //
 // It restates the five strings rather than reading them out of engine.go, which is worth being

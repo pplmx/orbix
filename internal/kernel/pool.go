@@ -136,10 +136,14 @@ const (
 	// of two above the break-even point, so the threshold errs toward serial --
 	// a kernel one step below it pays the call overhead without the fan-out.
 	minParallelWork = 1 << 15
-	// workPerWorker is the work each additional worker must receive. Without it
-	// a modest projection fans out to every available CPU and loses to two
-	// workers: measured at 41k multiply-adds, two workers win by 1.18x while
-	// sixteen lose.
+	// workPerWorker is the work each additional worker must receive. Without it a modest
+	// projection fans out to every available CPU and loses to two workers: measured at 41k
+	// multiply-adds, two workers win by 1.18x while sixteen lose.
+	//
+	// With it, 41k gives parts() = 2 whatever the runner was configured for, so the sixteen-way
+	// case cannot recur. BenchmarkWorkPerWorker measures that: every worker count from 2 upward
+	// reports 2 parts and the same time within noise, which is the guard working rather than a
+	// measurement of why sixteen would have lost.
 	workPerWorker = 1 << 14
 )
 

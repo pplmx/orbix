@@ -595,3 +595,45 @@ func TestPartsPinsTheThresholds(t *testing.T) {
 		t.Errorf("NewRunner(0).Workers() = %d, want 0: the type reports what it was given", got)
 	}
 }
+
+// BenchmarkWorkPerWorker reproduces the measurement workPerWorker's comment cites.
+//
+// The claim is that at ~41k multiply-adds two workers win by 1.18x while sixteen lose. Nothing
+// measured it: the benchmark above varies the shape at a fixed worker count, so the split the
+// comment is about never appears. Here the shape is fixed and the runner's worker count changes.
+//
+// Measured on a 128-core machine: workers=1 is 34452 ns and workers=2 is 29127 ns, which is the
+// 1.18x. Every count from 2 upward reports the same 2 parts, because workPerWorker caps the split
+// at 41472/16384 -- so this measures the guard holding, not a fan-out comparison. The sixteen-way
+// loss the comment cites cannot be reproduced through the runner any more, which is the point.
+//
+// The workers come from NewRunner, not from a field, so this exercises the same parts() decision
+// the kernel path takes.
+func BenchmarkWorkPerWorker(b *testing.B) {
+	const n, k = 288, 144 // 41472 multiply-adds, the row the comment names
+	v := make([]float32, k)
+	for i := range v {
+		v[i] = float32(i%7) / 7
+	}
+	a := make([]float32, n*k)
+	for i := range a {
+		a[i] = float32(i%13) / 13
+	}
+	dst := make([]float32, n)
+	work := n * k
+
+	for _, w := range []int{1, 2, 4, 8, 16, 32, runtime.GOMAXPROCS(0)} {
+		r := NewRunner(w)
+		// Skip a duplicate: GOMAXPROCS may already be in the list.
+		name := "workers=" + itoa(w)
+		b.Run(name, func(b *testing.B) {
+			b.SetBytes(int64(work) * 8)
+			b.ReportMetric(float64(r.parts(work)), "parts")
+			for range b.N {
+				if err := r.MatVec(dst, a, v, n, k); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

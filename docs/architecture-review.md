@@ -268,7 +268,13 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 谁的断言失去依据"，而不是"有多少个 `x.Name`"。这条和 AGENTS.md 里"判定不可达之前先看函数的参数"
 是同一个道理：静态计数看到的是引用图，不是用途。
 
-覆盖率快照（`go test -cover ./...`，2026-11-26 复测）：kernel 99.0%、f16 98.1%、quant 98.0%、tokenize 96.8%、engine 96.0%、server 95.7%、gguf 94.8%、chat 92.2%、otel 92.9%、llama 89.9%、gguftest 89.1%、cmd/orbix 88.0%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`（39.4%，模型加载后的编排难以在测试里跑完整）；删掉 `Key` 之后 `llama` 已无 0% 的函数，最低是 `rememberPrefix`/`feedForwardBatch`/`feedForward`/`sameTokens` 的 66.7%。
+覆盖率快照（`go test -cover ./...`，2026-11-26 复测）：kernel 99.0%、f16 98.1%、quant 98.0%、tokenize 96.8%、engine 96.0%、server 95.7%、gguf 94.8%、chat 92.2%、otel 92.9%、llama 90.1%、gguftest 89.1%、cmd/orbix 88.0%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`（39.4%，模型加载后的编排难以在测试里跑完整）；`llama` 已无 0% 的函数，最低是 `feedForwardRows` 的 64.7%、`feedForward` 的 66.7%。
+
+这一轮把 `outputWeight`（66.7% → 100%）、`sameTokens`（66.7% → 100%）和 `rememberPrefix`
+（66.7% → 83.3%）补上了测试。三个函数共同点不是"没测"，而是**它们各自的两种输出都说得通**：
+tied 模型的投影矩阵该用 embedding 还是 Output、同长不同内容的 token 串算不算同一个前缀、
+没有 prefix index 时该不该记块——写错任一个都会得到看起来合理的数字，所以既有测试看不出差别。
+`feedForwardRows` 的 64.7% 没有补：那是它的错误分支，属于算术而不是信息。
 
 **这一行是快照，不是断言。** 它没有守卫，因为它随每次改动变化，守它的测试会在无关提交上变红。复算只要一条命令，数字对不上时信命令。写下这一版时 `chat` 从 93.4% 降到 92.2%：`2605ec3` 给该包加了 Qwen3 需要的求值与解析代码（测得 91.3%），同一次复算又发现 `evalStringMethod` 里一段没人能走到的 `join` 分支，删掉后（`65c0a61`）回到 92.2%。**这两个百分点不是同一把尺子上的加减**：91.3% 与 92.2% 各自是在当时的测试集上测的。
 删 `join` 这一步单独的账是分母少 11 条语句、已覆盖的只少 4 条（1073/1170 → 1069/1159，

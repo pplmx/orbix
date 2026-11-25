@@ -1,6 +1,9 @@
 package arch
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"os"
 	"os/exec"
@@ -382,4 +385,124 @@ func archAtof(t *testing.T, s string) float64 {
 		t.Fatalf("%q is not a number: %v", s, err)
 	}
 	return v
+}
+
+// TestArchitectureReviewSplitTableMatchesTheCode checks the "after" column of the table in
+// section ten.
+//
+// That table records six functions that were split, each with its size before and after. The
+// guard above checks the list of functions still over 100 lines, which is a different claim: a
+// function that was split to 90 lines appears in neither, so the table's numbers had nothing
+// reading them. Four of the six were wrong when this test was written -- `cmdServe` said 238 and
+// measured 275, `blockingResponse` 131 against 141, `cmdBench` 234 against 240,
+// `server.generate` 189 against 199. Each had grown after the split, which is the ordinary way
+// this goes wrong.
+//
+// The "before" column is not checked. Those sizes describe code that no longer exists, so no
+// command can measure them; they are kept as the record of what the split bought. The "after"
+// column can be measured, and that is the part a reader might otherwise trust.
+func TestArchitectureReviewSplitTableMatchesTheCode(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	doc, err := os.ReadFile(filepath.Join(root, "docs", "architecture-review.md"))
+	if err != nil {
+		t.Fatalf("read architecture-review.md: %v", err)
+	}
+
+	rows := splitTableRows(t, string(doc))
+	if len(rows) < 4 {
+		t.Fatalf("parsed %d rows from the split table, too few; the table moved or its shape "+
+			"changed", len(rows))
+	}
+
+	// Where each function lives, so its size can be measured. A row for a function that has
+	// been renamed or removed fails here rather than silently going unchecked.
+	files := map[string]string{
+		"llama.LoadConfig":        filepath.Join(root, "internal", "llama", "config.go"),
+		"server.generate":         filepath.Join(root, "internal", "server", "server.go"),
+		"server.blockingResponse": filepath.Join(root, "internal", "server", "server.go"),
+		"server.streamResponse":   filepath.Join(root, "internal", "server", "server.go"),
+		"cli.cmdBench":            filepath.Join(root, "cmd", "orbix", "bench.go"),
+		"cli.cmdServe":            filepath.Join(root, "cmd", "orbix", "serve.go"),
+	}
+
+	for _, r := range rows {
+		path, ok := files[r.name]
+		if !ok {
+			t.Errorf("the table names %q, which this test has no file for; add it or drop the "+
+				"row", r.name)
+			continue
+		}
+		got := funcLines(t, path, r.funcName())
+		if got == 0 {
+			t.Errorf("%s: no function %q found in %s", r.name, r.funcName(), path)
+			continue
+		}
+		if got != r.after {
+			t.Errorf("%s: the table says %d lines after the split, measured %d",
+				r.name, r.after, got)
+		}
+	}
+}
+
+// splitRow is one line of the split table.
+type splitRow struct {
+	name  string
+	after int
+}
+
+// funcName strips the package prefix from the table's name.
+func (r splitRow) funcName() string {
+	if i := strings.LastIndex(r.name, "."); i >= 0 {
+		return r.name[i+1:]
+	}
+	return r.name
+}
+
+// splitTableRows parses the six-row table under "函数级失控".
+func splitTableRows(t *testing.T, doc string) []splitRow {
+	t.Helper()
+	var out []splitRow
+	inTable := false
+	for line := range strings.SplitSeq(doc, "\n") {
+		if !strings.HasPrefix(line, "|") {
+			if inTable && len(out) > 0 {
+				break
+			}
+			continue
+		}
+		if strings.Contains(line, "之前") && strings.Contains(line, "之后") {
+			inTable = true
+			continue
+		}
+		if !inTable || strings.Contains(line, "---") {
+			continue
+		}
+		m := splitRowPattern.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		out = append(out, splitRow{name: m[1], after: archAtoi(t, m[3])})
+	}
+	return out
+}
+
+var splitRowPattern = regexp.MustCompile(
+	`^\|\s*` + "`" + `([\w.]+)` + "`" + `\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|`)
+
+// funcLines returns the line count of the named function, or 0 when it is not in the file.
+func funcLines(t *testing.T, path, name string) int {
+	t.Helper()
+	fset := token.NewFileSet()
+	af, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, d := range af.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != name {
+			continue
+		}
+		return fset.Position(fn.End()).Line - fset.Position(fn.Pos()).Line + 1
+	}
+	return 0
 }

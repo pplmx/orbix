@@ -20,7 +20,7 @@
 | `internal/otel`     | 789       | 35             | 14       | 1681      | 2.13      |
 | `internal/kernel`   | 705       | 28             | 20       | 2017      | 2.86      |
 | `internal/f16`      | 154       | 4              | 4        | 380       | 2.47      |
-| `internal/arch`     | 14        | 0              | 0        | 1508      | 107.71    |
+| `internal/arch`     | 14        | 0              | 0        | 1631      | 116.50    |
 | **合计**            | **28696** | **759**        | **427**  | **63470** | **2.21**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
@@ -441,10 +441,10 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
 | ------------------------- | ---- | ---- | ----------------------------------------------------------- |
 | `llama.LoadConfig`        | 315  | 45   | 六个阶段方法 + `configParser`（`get` 一个必填正整数读取器） |
-| `server.generate`         | 282  | 189  | `resolvePrompt`（预算校验、按端点编码、窗口检查）           |
-| `cli.cmdBench`            | 279  | 234  | `validateBenchFlags`（59 行，9 条错误串逐字一致）           |
-| `cli.cmdServe`            | 311  | 238  | `validateServeFlags`（94 行，9 条错误串逐字一致）           |
-| `server.blockingResponse` | 201  | 131  | `choiceObject`（68 行，两种 schema / echo / stop 截断）     |
+| `server.generate`         | 282  | 199  | `resolvePrompt`（预算校验、按端点编码、窗口检查）           |
+| `cli.cmdBench`            | 279  | 240  | `validateBenchFlags`（59 行，9 条错误串逐字一致）           |
+| `cli.cmdServe`            | 311  | 275  | `validateServeFlags`（94 行，9 条错误串逐字一致）           |
+| `server.blockingResponse` | 201  | 141  | `choiceObject`（68 行，两种 schema / echo / stop 截断）     |
 | `server.streamResponse`   | 162  | 90   | `eventWriter`（帧头、对象名、usage 标记、编码、flush）      |
 
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会

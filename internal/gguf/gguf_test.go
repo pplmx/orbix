@@ -1311,17 +1311,21 @@ func TestGetSignedness(t *testing.T) {
 //
 // N() therefore saturates, and Size reports the byte count as unknown rather than computing it.
 func TestHugeDimensionsDoNotWrap(t *testing.T) {
+	// Only the overflowing shapes: {2, 3} used to sit in this list and is asserted below, where
+	// its exact count can be stated.
 	cases := [][]uint64{
 		{1 << 62, 4},
 		{1 << 40, 1 << 40},
 		{math.MaxUint64, 2},
 		{1 << 63},
-		{2, 3}, // a real shape still counts normally
 	}
 	for _, dims := range cases {
 		ti := TensorInfo{Dims: dims, Type: F32}
-		if n := ti.N(); n <= 0 {
-			t.Errorf("dims %v: N() = %d, want a positive count", dims, n)
+		// The saturated value exactly, not merely a positive one: any value above zero passes a
+		// "positive" check, including a smaller saturation the caller would then multiply by
+		// four and treat as a real size.
+		if n := ti.N(); n != math.MaxInt64 {
+			t.Errorf("dims %v: N() = %d, want %d", dims, n, int64(math.MaxInt64))
 		}
 		// For the shapes that overflow, the byte count must be reported as unavailable. A
 		// saturated N() times four would wrap, which is exactly what the second return value

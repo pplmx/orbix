@@ -359,12 +359,13 @@ func TestGreedyAndNaN(t *testing.T) {
 
 // TestTemperatureTreatsNonFiniteAsGreedy pins what a NaN or infinite Temp does.
 //
-// The comparison in Next is "s.Temp <= 0", and NaN fails it: the value sailed through to the
-// softmax, where exp(NaN) made sum NaN, every `r < acc` evaluated false, and the loop fell
-// through to its last-candidate fallback. The measured result on logits {1,5,3,0} was token 3
-// -- the least likely of the four -- while Temp 0 and Temp 1 both returned the argmax. A
-// caller that reached this through a flag or a request field would see plausible-looking
-// wrong text rather than an error, which is the failure mode worth pinning.
+// The guard in Next is "!(s.Temp > 0)", not "s.Temp <= 0". The two differ on exactly one value:
+// NaN fails a <= test, so it used to sail through to the softmax, where exp(NaN) made sum NaN,
+// every `r < acc` evaluated false, and the loop fell through to its last-candidate fallback. The
+// measured result on logits {1,5,3,0} was token 3 -- the least likely of the four -- while Temp 0
+// and Temp 1 both returned the argmax. A caller that reached this through a flag or a request
+// field would see plausible-looking wrong text rather than an error, which is the failure mode
+// worth pinning, and rewriting the comparison negated is what closed it.
 //
 // +Inf is the same shape of bug for a different reason: (logit-max)/+Inf is 0 for every
 // candidate, so exp is 1 for all of them and the draw becomes uniform. It is not a crash, it

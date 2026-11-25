@@ -174,3 +174,127 @@ func chineseNumeral(s string) int {
 	}
 	return chineseNumerals[s]
 }
+
+// TestAgentDocCLIScaleMatchesTheTree checks the CLI scale sentence in AGENTS.md.
+//
+// The sentence read "6 个命令、约 3400 行非测试代码的 CLI"，and the same sentence's parenthetical
+// went on to say 3607 lines -- a document contradicting itself within one paragraph, and both
+// halves stale: the dispatch has eight commands, and the tree is 3884 lines. Neither number had
+// a guard, so each could drift again as soon as something was added.
+//
+// The counts come from the tree rather than from a copy here, for the reason the other guards in
+// this file record: a copy agrees with itself forever.
+func TestAgentDocCLIScaleMatchesTheTree(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "AGENTS.md")))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+
+	// Commands, from the dispatch in main.go: the first switch is the one that names them.
+	mainSrc, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "cmd", "orbix", "main.go")))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	commands := dispatchCases(t, string(mainSrc))
+	if len(commands) == 0 {
+		t.Fatal("found no command cases in main.go; the dispatch moved or its shape changed")
+	}
+
+	// Lines, from the files the sentence's own parenthetical describes: non-test Go files under
+	// cmd/orbix, excluding the build-tag file that CGO_ENABLED=0 does not compile.
+	dir := filepath.Clean(filepath.Join("..", "..", "cmd", "orbix"))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read cmd/orbix: %v", err)
+	}
+	lines, files := 0, 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if name == "cgo_enabled.go" {
+			// Not built when CGO_ENABLED=0, which is the only supported build.
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		lines += strings.Count(string(raw), "\n")
+		files++
+	}
+
+	// The sentence under test, and the two numbers it states.
+	m := cliScaleSentence.FindStringSubmatch(string(doc))
+	if m == nil {
+		t.Fatalf("AGENTS.md no longer states the CLI scale as \"**N** 个命令（…）、**M** 行非测试代码\"; " +
+			"restore that shape or update this pattern")
+	}
+	if got, want := archAtoi(t, m[1]), len(commands); got != want {
+		t.Errorf("AGENTS.md says %d commands; the dispatch in main.go has %d (%v)",
+			got, want, commands)
+	}
+	if got, want := archAtoi(t, m[2]), lines; got != want {
+		t.Errorf("AGENTS.md says %d lines of non-test CLI code across %d files; measured %d",
+			got, files, want)
+	}
+}
+
+// archAtoi parses a number this file read out of a document.
+func archAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("%q is not a number: %v", s, err)
+	}
+	return n
+}
+
+// cliScaleSentence captures the command count and the line count from the AGENTS.md sentence.
+var cliScaleSentence = regexp.MustCompile(`\*\*(\d+)\*\* 个命令（[^）]*）、\*\*(\d+)\*\* 行非测试代码`)
+
+// dispatchCases returns the command names from the first switch in main.go.
+//
+// It reads the first switch rather than every switch in the file: helpFor has a second one that
+// names a subset of the same commands, and counting that would double them.
+func dispatchCases(t *testing.T, src string) []string {
+	t.Helper()
+	start := strings.Index(src, "switch")
+	if start < 0 {
+		t.Fatalf("main.go has no switch")
+	}
+	rest := src[start:]
+	end := strings.Index(rest, "\n\t}\n")
+	if end < 0 {
+		t.Fatalf("the first switch in main.go has no close this test can find")
+	}
+	body := rest[:end]
+
+	var names []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "case ") {
+			continue
+		}
+		for _, part := range strings.Split(strings.TrimPrefix(trimmed, "case "), ",") {
+			part = strings.TrimSpace(part)
+			// Aliases like "-v" and "--version" are spellings of a command, not new commands;
+			// the canonical name is the one without a dash.
+			if !strings.HasPrefix(part, `"`) {
+				continue
+			}
+			// A case line holds several comma-separated quoted names: split on the quote
+			// leaves a trailing fragment on all but the last, so cut between the quotes.
+			if q := strings.Index(part[1:], `"`); q >= 0 {
+				part = part[:q+2]
+			}
+			name := strings.Trim(part, `"`)
+			if strings.HasPrefix(name, "-") {
+				continue
+			}
+			names = append(names, name)
+		}
+	}
+	return names
+}

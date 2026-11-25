@@ -167,7 +167,7 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 
 1. 标准库已经覆盖的，用标准库。`flag`、`encoding/json`、`net/http`、`crypto/rand` 覆盖了 CLI 参数、GGUF 中的 JSON、HTTP 服务端和追踪 id。
 2. 库的能力要有实际去处。viper 的价值在多格式配置文件和配置来源合并；本项目只有 `ORBIX_MODEL` 一个环境变量、没有配置文件，引入它等于让库承担它无从发挥的工作。
-3. 规模匹配。6 个命令、约 3400 行非测试代码的 CLI 不需要命令树框架；`serve` 的 13 个 flag 是单命令最多的一处。命令数或单命令参数数显著增长时重新评估。（2026-11 复核：`orbix serve -h | grep -cE '^  -[a-z]'` 是 13，未变。行数在同一时期从 3429 涨到 3607 —— `ls cmd/orbix/*.go | grep -v _test` 有 13 个文件，但 `cgo_enabled.go` 在 `CGO_ENABLED=0` 下不编译，所以按实际构建算是 12 个文件 3607 行；把两个 build-tag 文件都算上是 3613 行，只算 `cgo_disabled.go` 那个则是 3601 行。2026-11 末复算。）
+3. 规模匹配。**8** 个命令（`run`/`bench`/`chat`/`serve`/`healthcheck`/`model`/`version`/`help`）、**3884** 行非测试代码的 CLI 不需要命令树框架；`serve` 的 13 个 flag 是单命令最多的一处。命令数或单命令参数数显著增长时重新评估。这一句原来写「6 个命令、约 3400 行」，与同句末尾的 3607 行自相矛盾；命令数漏了 `healthcheck` 和 `model`，而 `model` 还有 `inspect` 子命令。（2026-11-26 复算：`orbix serve -h | grep -cE '^  -[a-z]'` 是 13，未变。行数从记录下的 3607 涨到 **3884** —— `ls cmd/orbix/*.go | grep -v _test` 有 **14** 个文件，`model_files.go` 是后来加的；`cgo_enabled.go` 在 `CGO_ENABLED=0` 下不编译，排除它之后是 13 个文件 3884 行，全算上是 3890 行。这两个数都没有守卫，靠人复算，所以复算日期写在这里。）
 4. 维护状态看**默认分支的最新提交**，不看 `pushed_at`（它会被无关推送刷新）。2026-11 核对：
 
    | 库 | 最新提交 | 判断 |
@@ -183,7 +183,7 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 | ---- | ---- | ---- |
 | （无） | — | 见上 |
 | `viper` | 不采用 | 只有 1 个环境变量、0 个配置文件，没有多来源合并的需求 |
-| `cobra` / `urfave/cli` / `kong` | 不采用（当前规模） | 6 个命令用 `flag` 加 `cmd/orbix/flags.go` 的共用注册已经够；命令数或单命令参数数增长后重新评估 |
+| `cobra` / `urfave/cli` / `kong` | 不采用（当前规模） | 8 个命令用 `flag` 加 `cmd/orbix/flags.go` 的共用注册已经够；命令数或单命令参数数增长后重新评估 |
 | OpenTelemetry SDK | 不采用 | 只用到一个 protobuf 消息的 JSON 编码，`internal/otel` 自行实现且已被真实 collector 验证 |
 | `log/slog` | **采用（标准库）** | 服务端访问日志。要的只是分级结构化记录和可换 handler，`slog` 就是；配置见 `serve --log-format text\|json\|off` |
 | `urfave/cli` + `Koanf` | 不采用 | Koanf 的价值在多来源配置合并，本项目 0 个配置文件、1 个环境变量；CLI 规模见上 |

@@ -85,6 +85,12 @@ func (v value) printErr() (string, error) {
 }
 
 // shapeName names a value's container shape for an error message.
+//
+// The final "value" is unreachable from the one caller: printErr only asks after checking
+// isMap || isList, and a value that is neither is printed rather than refused. It stays as the
+// answer for "a shape with no name" instead of being deleted, because the switch has to return
+// something and an empty string in an error message reads like a formatting bug. Not worth a
+// test: there is no input that produces it.
 func (v value) shapeName() string {
 	switch {
 	case v.isMap:

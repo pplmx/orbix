@@ -55,6 +55,16 @@ func TestVariablesRenderLikeJinja2(t *testing.T) {
 		// None that is bound rather than absent.
 		{"null prints nothing", `[{{ z }}]`, map[string]any{"z": nil}, "[]"},
 		{"null is falsy", `{% if z %}T{% else %}F{% endif %}`, map[string]any{"z": nil}, "F"},
+		// The Go shapes below never arrive through JSON -- encoding/json produces float64 for
+		// every number -- but variableValue documents them as what "a Go caller reaches for
+		// first", and none had a case. Making int64 render "MUTANT" left the whole tree green.
+		{"Go int", `{{ n }}`, map[string]any{"n": 3}, "3"},
+		{"Go int64", `{{ n }}`, map[string]any{"n": int64(3)}, "3"},
+		{"Go int64 past 2^32", `{{ n }}`, map[string]any{"n": int64(1) << 40}, "1099511627776"},
+		// json.Number keeps its spelling, which is the reason the case exists: a decoder
+		// configured with UseNumber would otherwise lose "3" to "3.0".
+		{"json.Number", `{{ n }}`, map[string]any{"n": json.Number("3")}, "3"},
+		{"json.Number fraction", `{{ n }}`, map[string]any{"n": json.Number("2.50")}, "2.50"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

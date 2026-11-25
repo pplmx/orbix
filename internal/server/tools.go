@@ -306,8 +306,12 @@ func parseToolCalls(text string) (string, []toolCall) {
 		body := rest[start+len(open):]
 		end := strings.Index(body, closeTag)
 		if end < 0 {
-			// Cut off mid-call: the fragment is not a call, and keeping it as prose would put
-			// "<tool_call>" in front of a caller who asked for text.
+			// Cut off mid-call: the fragment cannot be a call, and keeping it as prose would put
+			// a bare "<tool_call>" in front of a caller who asked for text. It is dropped
+			// instead, along with whatever followed it -- so a truncated reply loses its tail.
+			// When this is the only marker the whole text comes back unchanged from the
+			// len(calls) == 0 return below, which is the common shape: a model that started a
+			// call and stopped has produced no calls, and its prose is all there is to show.
 			break
 		}
 		c, ok := decodeToolCall(body[:end])

@@ -53,6 +53,23 @@ func TestParseToolCalls(t *testing.T) {
 			},
 		},
 		{
+			// A reply cut off before the closing tag: the fragment is not a call, and the whole
+			// text comes back unchanged when it is the only marker.
+			name:  "an unclosed call with no other call is returned as text",
+			in:    `hello <tool_call>{"name": "x"}`,
+			prose: `hello <tool_call>{"name": "x"}`,
+		},
+		{
+			// Beside a complete call, the cut-off fragment is dropped: it cannot be a call, and
+			// keeping it would put a bare "<tool_call>" in front of a caller who asked for text.
+			// What is lost is the fragment, not the prose before it -- this case pins both.
+			name: "a cut-off call beside a complete one is dropped",
+			in: `<tool_call>{"name": "a", "arguments": {}}</tool_call>` +
+				` and then <tool_call>{"name": "b"`,
+			prose: "and then",
+			calls: []toolCall{{Name: "a", Arguments: `{}`}},
+		},
+		{
 			// Llama 3.1's template instructs the model to answer with this key instead.
 			name:  "parameters is accepted as the arguments key",
 			in:    `<tool_call>{"name": "get_weather", "parameters": {"city": "Paris"}}</tool_call>`,

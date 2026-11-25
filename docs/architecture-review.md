@@ -818,9 +818,9 @@ API 面也复核了：`engine` 的导出签名里只出现 `Sampler`（`Greedy()
 这一轮没有改代码，因为查的四件事都经得起检验。记录在这里是为了让后来者不必重查。
 
 **「`best_of` 失败时每个 channel 起一个 goroutine，是无界的。」** 不是。
-`internal/server/server.go:1525` 那个循环确实每 channel 起一个 goroutine，但 `maxChoices = 8`
-（`server.go:852`）且 `maxBestOf = maxChoices`（`bestof.go:14`），两个字段都在 `invalid` 表里校验，
-所以循环最多 8 次。另外两处 `go func()`：`streamChoices` 的 `wg.Wait` 一个，`serve.go:323` 的
+`internal/server/server.go:1581` 那个循环确实每 channel 起一个 goroutine，但 `maxChoices = 8`
+（`server.go:872`）且 `maxBestOf = maxChoices`（`bestof.go:14`），两个字段都在 `invalid` 表里校验，
+所以循环最多 8 次。另外两处 `go func()`：`streamChoices` 的 `wg.Wait` 一个，`serve.go:360` 的
 `httpSrv.Serve` 一个。三处都有界。
 
 **「`preFamilyOf` 的 271 行里应该有可合并的重复。」** 没有。34 个 `case` 全部返回 `preRule`

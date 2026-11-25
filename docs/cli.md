@@ -45,6 +45,7 @@ says when it arrived rather than whether it is usable.
 | `orbix version`              | Print version and build info; `-json` for a machine-readable object                                          | v0.1   |
 | `orbix chat`                 | Interactive REPL with conversation history                                                                   | v0.3   |
 | `orbix serve`                | Start the OpenAI-compatible inference server                                                                 | v0.3   |
+| `orbix healthcheck`          | Probe a running server's `/healthz`; the probe for a container that has no curl                              | v0.3   |
 | `orbix bench`                | Run a built-in throughput/latency benchmark                                                                  | v0.2   |
 
 `version` reports what `-ldflags` baked in at build time, which only `just build` and the release

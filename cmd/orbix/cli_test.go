@@ -1444,7 +1444,7 @@ func TestUsageAndDispatchAgree(t *testing.T) {
 	// means touching both main.go and this list. That is the point: the second edit is what
 	// makes someone notice the usage text has not been updated, and both loops below fail
 	// when the two sides drift.
-	all := []string{"run", "bench", "chat", "serve", "model", "version", "help"}
+	all := []string{"run", "bench", "chat", "serve", "model", "healthcheck", "version", "help"}
 	for _, name := range all {
 		if !slices.Contains(listed, name) {
 			t.Errorf("the dispatcher knows %q but the usage text does not list it", name)

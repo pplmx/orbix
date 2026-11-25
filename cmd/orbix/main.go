@@ -58,6 +58,8 @@ func run(args []string) error {
 		return cmdChat(args[1:])
 	case "serve":
 		return cmdServe(args[1:])
+	case "healthcheck":
+		return cmdHealthcheck(args[1:])
 	case "model":
 		return cmdModel(args[1:])
 	// The same courtesy help gets, for the other flag every CLI has. Before this,
@@ -90,7 +92,7 @@ func run(args []string) error {
 // The only case that is not `-h`-able is `model`, whose help lives on the subcommand.
 func helpFor(command string) error {
 	switch command {
-	case "run", "chat", "serve", "bench", "version":
+	case "run", "chat", "serve", "bench", "healthcheck", "version":
 		return run([]string{command, "-h"})
 	case "model":
 		return run([]string{"model", "-h"})
@@ -120,6 +122,7 @@ Commands:
   serve                  Serve an OpenAI-compatible HTTP API
   bench                  Measure generation throughput; --suite runs every scenario
   model inspect <path>   Print GGUF metadata, tensor types, quantization
+  healthcheck            Probe a running server's /healthz
   version                Print version and build info
   help                   Print this message
 

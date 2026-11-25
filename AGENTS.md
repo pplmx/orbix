@@ -45,10 +45,13 @@ just xcheck-quant # 反量化与 ggml quantize.c 的块布局对照，14 种格�
 just xcheck-rope # RoPE 与 numpy 按 RoFormer 定义算出的旋转对照，6 组参数
 just xcheck-fixture # 用 Python gguf 包解析 gguftest 的合成 fixture，比对元数据与张量目录
 just skips   # 数一次运行里实际跳过了多少个测试（当前 31），CI 每轮打印的就是这个数
-             # 本机设齐 5 个 checkpoint 变量后是 16（2026-11-26 复测），所以 31 是「没有
-             # 任何真实权重」的数，不是仓库的常数。剩下的 16 个要的是这台机器没有的东西：
-             # IQ4_NL/Q4_1/Q5_0/Q5_1 四种格式、gemma-1、mistral-v2、一个 MoE 文件，以及四个
-             # 只在设了 ORBIX_*DUMP 时执行的 dump 测试。
+             # 本机设齐 5 个 checkpoint 变量（MODEL/QWEN2_MODEL/QWEN3_MODEL/GEMMA2_MODEL/
+             # MODEL_KQUANT）后是 13，设齐 6 个（再加 GEMMA3_MODEL）后是 10（两者均 2026-11-26
+             # 复测）。所以 31 是「没有任何真实权重」的数，不是仓库的常数。5 个那档剩下的 13 个
+             # 要的是这台机器没有的东西：IQ4_NL/Q4_1/Q5_0/Q5_1 四种格式、gemma-1、mistral-v2、
+             # 一个 MoE 文件、三个只在设了 ORBIX_*DUMP 时执行的 dump 测试，以及四个需要别的
+             # 真实文件的（prefix cache 复用、真实权重矩阵统计、gemma3 的 prompt token ids、
+             # FIM 的 prompt ids）。
              # 它与 architecture-review.md 的「73 处 t.Skip」不是一回事：那是代码里的跳过点，
              # 这里是运行时真正跳过的。后者少于前者，因为有的跳过点在子测试里、有的在同一轮
              # 被别的路径覆盖。suite 失败时这条配方会先打印计数再以非零退出。

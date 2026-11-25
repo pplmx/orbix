@@ -216,7 +216,13 @@ func cmdBench(args []string) error {
 	fmt.Printf("generated:   %d tokens\n", generated)
 	fmt.Printf("elapsed:     %v\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("throughput:  %.1f tok/s\n", perSec)
-	fmt.Printf("per stream:  %.1f tok/s\n", perSec/float64(*concurrency))
+	// The divisor is how many streams were actually in flight, not the --concurrency cap.
+	// Those differ whenever fewer requests were asked for than the cap allows: measured with
+	// `--requests 1 --concurrency 4`, one stream ran and the old line reported 53.2 tok/s by
+	// dividing a single stream's 212.8 by four. The bound the submit loop honours is
+	// min(concurrency, total), so that is what this divides by.
+	streams := min(*concurrency, total)
+	fmt.Printf("per stream:  %.1f tok/s\n", perSec/float64(streams))
 	if len(reason) > 0 {
 		// Sorted and spelled out rather than printed as a map: this is the line a reader uses to
 		// tell a truncated run from a complete one, and "map[length:8 stop:4]" makes them parse Go

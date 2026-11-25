@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -425,6 +426,73 @@ func TestBenchSingleMeasurement(t *testing.T) {
 	if strings.Contains(out, "scenario") {
 		t.Errorf("a single measurement printed a suite table:\n%s", out)
 	}
+}
+
+// TestBenchPerStreamDividesByStreamsNotByTheCap covers a figure that was wrong by a factor.
+//
+// `per stream` divided throughput by --concurrency, which is a ceiling rather than a count.
+// The submit loop honours min(concurrency, total requests), so asking for fewer requests than
+// the cap allows runs that many streams -- and dividing by the cap then under-reports each
+// stream's speed. Measured with `--requests 1 --concurrency 4`: one stream ran at 212.8 tok/s
+// and the report said 53.2, because it divided by four.
+//
+// The two cases are asserted together, because the fix has to leave the ordinary case alone:
+// with as many requests as the cap, the divisor is still the cap.
+func TestBenchPerStreamDividesByStreamsNotByTheCap(t *testing.T) {
+	model := suiteModel(t)
+
+	run := func(args ...string) (throughput, perStream float64) {
+		t.Helper()
+		out := captureStdout(t, func() {
+			if err := cmdBench(append([]string{"--model", model, "--workers", "2"}, args...)); err != nil {
+				t.Errorf("cmdBench: %v", err)
+			}
+		})
+		return parseRate(t, out, "throughput:"), parseRate(t, out, "per stream:")
+	}
+
+	// Fewer requests than the cap: one stream, so the two figures must agree.
+	one, onePer := run("--max-tokens", "2", "--requests", "1", "--concurrency", "4")
+	if one <= 0 || onePer <= 0 {
+		t.Fatalf("rates were not positive: throughput %v, per stream %v", one, onePer)
+	}
+	if diff := one - onePer; diff > one*0.01 || diff < -one*0.01 {
+		t.Errorf("with one request and --concurrency 4, throughput %v and per stream %v differ; "+
+			"a single stream's rate is the throughput", one, onePer)
+	}
+
+	// Requests equal to the cap: the divisor is the cap, so per stream is a quarter.
+	total, per := run("--max-tokens", "2", "--requests", "4", "--concurrency", "4")
+	if total <= 0 || per <= 0 {
+		t.Fatalf("rates were not positive: throughput %v, per stream %v", total, per)
+	}
+	want := total / 4
+	if diff := per - want; diff > want*0.01 || diff < -want*0.01 {
+		t.Errorf("with 4 requests at --concurrency 4, per stream is %v; throughput %v implies %v",
+			per, total, want)
+	}
+}
+
+// parseRate reads a tok/s figure from a labelled line of the bench report.
+func parseRate(t *testing.T, out, label string) float64 {
+	t.Helper()
+	for line := range strings.SplitSeq(out, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), label)
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		v, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil {
+			t.Fatalf("parsing %q from %q: %v", fields[0], line, err)
+		}
+		return v
+	}
+	t.Fatalf("no %q line in:\n%s", label, out)
+	return 0
 }
 
 // TestBenchRefusesABlockBiggerThanTheContext covers bench's copy of the prefix-cache trap.

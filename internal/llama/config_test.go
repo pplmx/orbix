@@ -437,6 +437,41 @@ func TestLoadConfigRejects(t *testing.T) {
 			wantAll: []string{"llama.block_count = 0"},
 		},
 		{
+			// attention.key_length overrides the derived HeadDim, and the guard on that
+			// override had no case: removing it left the suite green. Both bounds matter --
+			// zero would make every per-head slice empty, and a width larger than the hidden
+			// size describes a projection the tensors cannot hold.
+			name: "key_length larger than hidden",
+			mutate: func(c *tinyConfig) []kv {
+				// Added rather than replaced: the fixture has no key_length of its own, and
+				// replaceKey only rewrites keys that are already there.
+				return append(c.kvs(), kv{"llama.attention.key_length", u32Val(64)})
+			},
+			want: "attention.key_length",
+			// hidden=8 in this fixture, so 64 is the value that was refused and 8 the bound.
+			wantAll: []string{"64", "8"},
+		},
+		{
+			name: "key_length zero",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.attention.key_length", u32Val(0)})
+			},
+			want:    "attention.key_length",
+			wantAll: []string{"0"},
+		},
+		{
+			// The package assumes q, k and v are the same width, so a file stating a different
+			// value_length is refused rather than half-supported. Removing this check left the
+			// suite green too.
+			name: "value_length differs from key_length",
+			mutate: func(c *tinyConfig) []kv {
+				kvs := append(c.kvs(), kv{"llama.attention.key_length", u32Val(4)})
+				return append(kvs, kv{"llama.attention.value_length", u32Val(8)})
+			},
+			want:    "equal widths",
+			wantAll: []string{"8", "4"},
+		},
+		{
 			name: "hidden not divisible by heads",
 			mutate: func(c *tinyConfig) []kv {
 				return replaceKey(c.kvs(), "llama.attention.head_count", u32Val(3))

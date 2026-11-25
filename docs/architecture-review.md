@@ -272,22 +272,22 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 
 ## 八、门禁与验证现状
 
-| 门禁                                     | 本轮结果                                        |
-| ---------------------------------------- | ----------------------------------------------- |
-| `go vet ./...`                           | 通过                                            |
-| `go test -count=1 ./...`                 | 通过，24 秒；engine 占 22.7 秒                  |
-| `just lint`                              | 通过，0 issues（自动选中 v2.15.0）              |
-| `just docs`（rumdl）                     | 通过，10 个文件（含本文）                       |
-| `just hooks`（prek）                     | 通过                                            |
-| `just cross`（5 目标）                   | 通过                                            |
-| `just check` 整体                        | **通过**（本文写完后修好了下面两条）            |
-| `just test-race`                         | 通过，无 `DATA RACE`；server 47.1 s，f16 54.6 s |
-| `just isolate`（`-count=2 -shuffle=on`） | 通过，13 个包全绿，无顺序依赖、无状态泄漏       |
-| `just FUZZTIME=10s fuzz`                 | 通过，6 个 target 无崩溃                        |
+| 门禁                                     | 本轮结果                                                                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `go vet ./...`                           | 通过                                                                                                            |
+| `go test -count=1 ./...`                 | 通过，24 秒；engine 占 22.7 秒                                                                                  |
+| `just lint`                              | 通过，0 issues（自动选中 v2.15.0）                                                                              |
+| `just docs`（rumdl）                     | 通过，10 个文件（含本文）                                                                                       |
+| `just hooks`（prek）                     | 通过                                                                                                            |
+| `just cross`（5 目标）                   | 通过                                                                                                            |
+| `just check` 整体                        | **通过**（本文写完后修好了下面两条）                                                                            |
+| `just test-race`                         | 通过，无 `DATA RACE`；server 47.1 s，f16 54.6 s                                                                 |
+| `just isolate`（`-count=2 -shuffle=on`） | 通过，13 个包全绿，无顺序依赖、无状态泄漏                                                                       |
+| `just FUZZTIME=10s fuzz`                 | 通过，9 个 target 无崩溃（2026-11 末复算：3 个在 tokenize，其余 chat、gguf、kernel、llama、quant、server 各一） |
 
 后三条是 CI 的独立 job 或辅助配方，`just check` 不跑它们，所以容易被忘。**2026-11 末一次完整跑**的结果记在这里，因为此前没有任何地方写过它们跑过——一个"CI 会跑"的门禁和一个"实际跑过"的门禁不是一回事。
 
-fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/FuzzRead/`，其余五个 target 一个都没有。这不是缺口：`go test` 会重放已有的 seed（实测 `FuzzRead/seed#0` 到 `seed#4` 都执行），而当前 fuzz 没发现崩溃，所以没有新语料落盘。语料薄说明还没有崩溃被查出来过，不说明检查没跑。
+fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/FuzzRead/`，其余八个 target 一个都没有。这不是缺口：`go test` 会重放已有的 seed（实测 `FuzzRead/seed#0` 到 `seed#4` 都执行），而当前 fuzz 没发现崩溃，所以没有新语料落盘。语料薄说明还没有崩溃被查出来过，不说明检查没跑。
 
 初测时 `just check` 在这台干净的树上还是红的，两个原因都不是代码：
 

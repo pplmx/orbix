@@ -35,10 +35,17 @@ them is refused with `cannot decode <type>` at load, the same way an unrecognise
 `TestModelsDocListsEveryDecodableFormat` keeps this sentence and the tables honest in both
 directions.
 
-Six architectures are checked against real checkpoints: `llama` against llama.cpp's
-log-probabilities, `qwen2` against a converted official checkpoint, `gemma` and `gemma2` against
-llama.cpp's log-probabilities on converted Gemma 2B files, `qwen3` the same way on Qwen3-0.6B, and
-`gemma3` on Gemma 3 270M. The MoE path has its own real file.
+Six architectures are checked against real checkpoints, in two places. `internal/llama/
+reference_real_test.go` holds six files covering five of them: `llama` (through the version 2
+Mistral file), `qwen2` against a converted official checkpoint, `gemma` on a converted Gemma 2B
+file, `qwen3` on Qwen3-0.6B, and `gemma3` twice -- on Gemma 3 270M with a six-token prompt and
+again with 513 tokens, where its window first binds. `gemma2` is checked by
+TestGemma2MatchesReferenceLogprobs, whose expected values also come from llama.cpp. The MoE
+path has its own real file.
+
+The count was right and the sentence was not: it listed `gemma2` among the six files, but no
+reference file in that directory names gemma2 -- gemma3 has two. Rewriting it this way also
+records why gemma3 appears twice, which the old sentence left out.
 
 `gemma3` keeps Gemma 2's block -- sandwich norms, GeGLU, scaled embeddings -- and differs in three
 ways that matter:

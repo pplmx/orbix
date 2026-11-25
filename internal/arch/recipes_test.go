@@ -33,30 +33,32 @@ func TestEveryRecipeIsDocumented(t *testing.T) {
 		t.Fatal("parsed no recipes from just --list; the output format changed")
 	}
 
-	// CONTRIBUTING.md is the one that has to be complete. It is the list a person reads when they
-	// clone the repository; AGENTS.md is for agents and may group a recipe under a longer
-	// explanation instead of a line per recipe. Checking the union would pass with CONTRIBUTING.md
-	// missing entries, which is exactly the drift this is here to catch.
-	body, err := os.ReadFile(filepath.Join(root, "CONTRIBUTING.md"))
-	if err != nil {
-		t.Fatalf("read CONTRIBUTING.md: %v", err)
-	}
-	documented := map[string]bool{}
-	for _, m := range justMention.FindAllStringSubmatch(string(body), -1) {
-		documented[m[1]] = true
-	}
-
-	var missing []string
-	for _, r := range recipes {
-		if r == "default" || documented[r] {
-			continue
+	// Each list has to be complete on its own. Checking the union passed with a line removed from
+	// CONTRIBUTING.md because AGENTS.md still named it -- and that is the drift this is here to
+	// catch, not a hypothetical. Both files list every recipe one per line, so the same rule holds
+	// for both.
+	for _, doc := range []string{"CONTRIBUTING.md", "AGENTS.md"} {
+		body, err := os.ReadFile(filepath.Join(root, doc))
+		if err != nil {
+			t.Fatalf("read %s: %v", doc, err)
 		}
-		missing = append(missing, r)
-	}
-	slices.Sort(missing)
-	for _, r := range missing {
-		t.Errorf("recipe %q is in the justfile but not named in CONTRIBUTING.md;"+
-			" add a line for it where the other recipes are listed", r)
+		documented := map[string]bool{}
+		for _, m := range justMention.FindAllStringSubmatch(string(body), -1) {
+			documented[m[1]] = true
+		}
+
+		var missing []string
+		for _, r := range recipes {
+			if r == "default" || documented[r] {
+				continue
+			}
+			missing = append(missing, r)
+		}
+		slices.Sort(missing)
+		for _, r := range missing {
+			t.Errorf("recipe %q is in the justfile but not named in %s;"+
+				" add a line for it where the other recipes are listed", r, doc)
+		}
 	}
 }
 

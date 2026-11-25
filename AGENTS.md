@@ -45,7 +45,7 @@ just         # 不带配方等价于 just check
 
 配置以单一事实源维护：Go 用 `go.mod`，lint 用 `.golangci.yml`，Markdown 用 `.rumdl.toml`，提交钩子用 `.pre-commit-config.yaml`，行尾与二进制标记用 `.gitattributes`，编辑器约定用 `.editorconfig`，命令入口用 `justfile`，版本与 changelog 用 `.cz.toml`，CI 用 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml`。
 
-CI 的 Go 相关 job 调用 just 配方，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `just test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `justfile` 里的其他变量。七个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建；编译后读回产物里的 `build\tCGO_ENABLED=0` 标记，所以「没带上 cgo」也被验了——不能运行的目标也能这样查，标记在文件里）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`just test-race` 单独覆盖）、prek（`just hooks`，补 `check` 看不见的非 Go 文件格式问题）、commits（`just commits`，按提交范围校验信息格式）、docs（`just docs`）。
+CI 的 Go 相关 job 调用 just 配方，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `just test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `justfile` 里的其他变量。八个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建；编译后读回产物里的 `build\tCGO_ENABLED=0` 标记，所以「没带上 cgo」也被验了——不能运行的目标也能这样查，标记在文件里）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`just test-race` 单独覆盖）、stress（`just fixture` 造出够大的合成 checkpoint，再用竞态版二进制跑混合负载；四条判据是 DATA RACE、5xx、active 未归零、以及「什么都没被取消」——最后一条防止在什么都没测到时报 ok）、prek（`just hooks`，补 `check` 看不见的非 Go 文件格式问题）、commits（`just commits`，按提交范围校验信息格式）、docs（`just docs`）。
 
 本地跑 `just check` 绿了，CI 的 gate 就应该绿；hooks、docs、cross、test-race、test-darwin 是需要额外工具或平台的独立门槛，各自有对应的 just 配方，动到非 Go 文件就加跑 `just hooks`，动到 Markdown 也加跑 `just docs`。
 

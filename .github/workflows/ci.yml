@@ -162,6 +162,35 @@ jobs:
       - name: just test-race
         run: just test-race
 
+
+  # The unit tests race the concurrency that appears in them; this races the mix a deployed
+  # server actually sees. It needed a checkpoint until `just fixture` existed, which is why it
+  # ran on developer machines only -- and on none of them unless someone remembered. The fixture
+  # it generates is random weights, which is fine: the script measures whether a disconnect is
+  # handled, not what the model said.
+  #
+  # Six seconds here, including the race build. The script fails on four things -- a DATA RACE, a
+  # 5xx, a non-zero active gauge, or nothing having been cancelled -- and the last one is what
+  # keeps it from reporting ok after testing nothing.
+  stress:
+    name: stress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: just fixture
+        run: just fixture
+
+      - name: just stress
+        run: just MODEL=.cache/stress.gguf stress
+
   # The hooks in .pre-commit-config.yaml check things `just check` does not: trailing
   # whitespace and final newlines in non-Go files, YAML/TOML/JSON syntax, and merge-conflict
   # markers. Measured before adding this job -- appending a whitespace line to

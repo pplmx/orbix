@@ -3803,6 +3803,21 @@ func TestSuffixWithoutMarkersIsRefused(t *testing.T) {
 			t.Errorf("message %q does not mention %q", body.Error.Message, want)
 		}
 	}
+	// And the part that makes the message actionable: the marker sets a code-tuned checkpoint
+	// would have to declare. Replacing fimMarkerHint's list with an empty one left this test
+	// green, so nothing was checking that the parenthesis had anything in it -- the message
+	// would have read "declares none of the marker sets this server knows ()".
+	for _, want := range []string{
+		"<|fim_prefix|> and <|fim_middle|>",
+		"<fim_prefix> and <fim_middle>",
+		"<PRE> and <MID>",
+		"\u2581<fim_prefix> and \u2581<fim_middle>",
+	} {
+		if !strings.Contains(body.Error.Message, want) {
+			t.Errorf("message %q does not name the marker set %q a checkpoint could declare",
+				body.Error.Message, want)
+		}
+	}
 }
 
 // TestFIMPromptAssembly pins the order the parts are joined in, which is the whole of the

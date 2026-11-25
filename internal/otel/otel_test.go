@@ -1267,6 +1267,38 @@ func TestRecordDropsInvalidSpans(t *testing.T) {
 	}
 }
 
+// TestSendReportsAMalformedEndpoint covers the request-build failure in send.
+//
+// NewExporter only checks that the endpoint is non-empty, so a malformed one reaches the
+// first send and fails there. That arm had no test: the message it produces is the only
+// thing that tells the operator their --otlp-endpoint is a typo rather than the collector
+// being down, and dropping the wrap would leave "parse ...: invalid control character"
+// with nothing saying which side of the exchange was at fault.
+func TestSendReportsAMalformedEndpoint(t *testing.T) {
+	for _, ep := range []string{"://no-scheme", "http://ctrl\x7fchar.example"} {
+		exp, err := NewExporter(ExporterOptions{Endpoint: ep})
+		if err != nil {
+			t.Fatalf("NewExporter(%q): %v; the format is checked on send, not here", ep, err)
+		}
+		span, ok := exp.Tracer().StartTrace("x", 1)
+		if !ok {
+			t.Fatalf("StartTrace failed")
+		}
+		span.End = span.Start
+		exp.Record(span)
+		err = exp.Flush(t.Context())
+		_ = exp.Close()
+		if err == nil {
+			t.Errorf("Flush with endpoint %q succeeded; a URL without a scheme cannot be sent", ep)
+			continue
+		}
+		if !strings.Contains(err.Error(), "build export request") {
+			t.Errorf("Flush(%q) error %q does not say the request could not be built, so an "+
+				"operator cannot tell a bad endpoint from a collector that is down", ep, err)
+		}
+	}
+}
+
 // TestNewExporterRequiresAnEndpoint covers the one thing the constructor refuses.
 //
 // An exporter with no endpoint would either post to "/v1/traces" relative to nothing or

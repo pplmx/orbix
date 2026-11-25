@@ -733,21 +733,27 @@ func addValues(a, b value) (value, bool) {
 	if a.isBool || b.isBool || a.isList || b.isList || a.isMap || b.isMap || a.isNone || b.isNone {
 		return value{}, false
 	}
-	x, err := strconv.Atoi(a.text)
+	x, err := strconv.ParseInt(a.text, 10, 64)
 	if err != nil {
 		return value{}, false
 	}
-	y, err := strconv.Atoi(b.text)
+	y, err := strconv.ParseInt(b.text, 10, 64)
 	if err != nil {
 		return value{}, false
 	}
-	// Overflow to the other sign means the sum did not fit; concatenating that pair would
-	// produce something no template asked for, so it is reported rather than papered over.
-	if (y > 0 && x > math.MaxInt32-y) || (y < 0 && x < math.MinInt32-y) {
+	// A sum outside int64 falls back to concatenation, which is the documented behaviour for
+	// every other pair this function declines -- there is one fallback path, not two.
+	//
+	// The arithmetic used to be bounded at int32 and, on overflow, joined the operands: measured
+	// before this, {{ 2147483647 + 1 }} rendered "21474836471". That is worse than either
+	// alternative because it looks like a number and is not the one the template computed.
+	// Jinja2 adds these exactly (Python's ints are unbounded), so int64 is the closest this
+	// package can come without a big-integer dependency; a sum that exceeds it joins instead of
+	// silently wrapping.
+	if (y > 0 && x > math.MaxInt64-y) || (y < 0 && x < math.MinInt64-y) {
 		return value{}, false
 	}
-	v := value{text: strconv.Itoa(x + y), isNumber: true}
-	return v, true
+	return value{text: strconv.FormatInt(x+y, 10), isNumber: true}, true
 }
 
 // equalValues compares two values by their string form, except for booleans and lists.

@@ -3355,3 +3355,42 @@ func TestInlineConditionalAndStringTest(t *testing.T) {
 			"value and no template here relies on one")
 	}
 }
+
+// TestArithmeticBoundsAndOverflow covers the edges of + and -. Both were wrong in ways that render
+// a plausible number rather than an error.
+//
+// + was bounded at int32: {{ 2147483647 + 1 }} rendered "21474836471", the operands joined because
+// the sum did not fit the check while the evaluator had already decided it was arithmetic. The check
+// is int64 now, so the same expression renders 2147483648, and a sum past int64 joins (the one
+// fallback + has) rather than wrapping. - is int64 already and reports its overflow, which is the
+// difference: subtraction always means subtraction, so there is no string reading to fall back to.
+func TestArithmeticBoundsAndOverflow(t *testing.T) {
+	cases := []struct {
+		name, src, want string
+	}{
+		// Jinja2 renders the first two the same way; its ints are unbounded, so the third is
+		// "9223372036854775808" there and a join here. That is the documented limit.
+		{"an int32-boundary sum adds", `{{ 2147483647 + 1 }}`, "2147483648"},
+		{"a loop index plus one", `{% for m in messages %}{{ loop.index0 + 1 }}{% endfor %}`, "1"},
+		{"a sum past int64 joins", `{{ 9223372036854775807 + 1 }}`, "92233720368547758071"},
+		// A string literal of digits is arithmetic here and a TypeError in Jinja2, because + is
+		// decided by the text on both sides rather than by the value's type. The evaluation is
+		// by text throughout this package -- a template variable arrives as text -- so there is
+		// no type to branch on, and "5" + 1 is indistinguishable from 5 + 1.
+		{"a digit string adds", `{{ "5" + 1 }}`, "6"},
+	}
+	msgs := []Message{{Role: "user", Content: "x"}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := render(t, c.src, msgs, Inputs{}); got != c.want {
+				t.Errorf("%s rendered %q, want %q", c.src, got, c.want)
+			}
+		})
+	}
+
+	// Subtraction reports its overflow rather than wrapping or joining: the existing test covers
+	// the int64 edges, and this pins that the bound is int64 rather than int32.
+	if got := render(t, `{{ 2147483647 - 1 }}`, nil, Inputs{}); got != "2147483646" {
+		t.Errorf("2147483647 - 1 deployed as %q, want 2147483646", got)
+	}
+}

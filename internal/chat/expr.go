@@ -488,6 +488,13 @@ func (p *exprParser) parseCompare() (expr, error) {
 // is a number. The evaluator concatenated every operand regardless, which rendered that subscript
 // as the string "01" and made the template index a missing key.
 //
+// Whether an operand is a number is decided from its text, not from where it came from. Every value
+// in this package is text once it comes from a template variable or a loop index, so there is no
+// type bit to consult, and "5" + 1 is 6 here exactly as 5 + 1 is. Jinja2 raises TypeError for the
+// quoted form; the difference only shows up for a literal digit string, and the alternative -- a
+// flag set by the lexer -- would make + depend on whether the digits were quoted, which is not a
+// distinction any template draws.
+//
 // Concatenation stays the answer when either side is not a number, because that is what every
 // template in the corpus actually writes: {{ "user: " + m.content }}, a marker plus a loop index,
 // a prefix plus a field. Jinja2 raises a TypeError for "a" + 1 instead; rendering it as text here

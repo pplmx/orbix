@@ -27,9 +27,11 @@
 //   - {{ expression }} with string and variable operands, +, - subtraction and % modulo between
 //     integers, and the trim, tojson and length filters. + adds two integers and joins anything
 //     else as text, which is Jinja2's behaviour for the first and a divergence for the second:
-//     {{ 1 + 2 }} is "3" on both, while {{ "a" + 1 }} is "a1" here and a TypeError there. The sum
-//     is not optional -- Qwen2.5's tool branch subscripts messages[loop.index0 + 1] -- and the
-//     join is what every template in the corpus writes, a marker concatenated with a field.
+//     {{ 1 + 2 }} is "3" on both, while {{ "a" + 1 }} is "a1" here and a TypeError there. Whether
+//     a value is a number is decided from its text, so {{ "5" + 1 }} is "6" here and a TypeError
+//     in Jinja2 -- the difference only shows for a quoted digit string. The sum is not optional --
+//     Qwen2.5's tool branch subscripts messages[loop.index0 + 1] -- and the join is what every
+//     template in the corpus writes, a marker concatenated with a field.
 //
 //   - raise_exception, which is the one global implemented
 //

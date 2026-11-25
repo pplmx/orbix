@@ -26,9 +26,16 @@ path above is a name to put your own checkpoint at, so the command answers `no s
 directory` until one is there. Any GGUF the architecture table in
 [Models](docs/models.md) lists will serve --
 [`stories15M-q4_0.gguf`](https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf)
-is 19 MB and enough to see a reply come back. The server implements `/v1/chat/completions`,
-`/v1/completions` (streaming and not), `/v1/models`, `/healthz` and `/metrics`, and any OpenAI
-client library works against it.
+is 19 MB and enough to see a reply come back.
+
+**Size it by parameter count, not by file size.** Weights are widened to float32 once at load,
+so a deployment needs about four bytes per parameter however small the file is: the 7B name
+above is a 3.7 GiB download that needs 26-29 GiB resident for the weights alone, before any KV
+cache, and the 19 MB stories model peaks at 136 MiB. [Configuration](docs/configuration.md#the-weights-are-held-as-float32-which-is-the-memory-figure-to-plan-with)
+has the measured figures and says why every quantized file grows by a different factor.
+
+The server implements `/v1/chat/completions`, `/v1/completions` (streaming and not),
+`/v1/models`, `/healthz` and `/metrics`, and any OpenAI client library works against it.
 
 ## Documentation
 

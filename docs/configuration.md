@@ -384,9 +384,16 @@ tensors that were never quantized -- the per-layer norms and often the output pr
 F32 already and do not grow at all. Measured against that formula the four rows above come out
 at 7.1x, 12.3x and 3.8x where 7.6x, 9.5x and 4.8x were observed.
 
-A 7B Q4_0 checkpoint is roughly 3.7 GiB on disk and needs about 26 GiB resident, which is more
-than most hosts have -- that is a property of this design, not a misconfiguration, and it is
-why the project runs small checkpoints.
+A 7B Q4_0 checkpoint is roughly 3.7 GiB on disk and needs about 26 GiB resident **for the
+weights alone**, before any KV cache -- which is more than most hosts have. That is a property
+of this design, not a misconfiguration, and it is why the project runs small checkpoints.
+
+The weights-only figure is the round number `parameters x 4 bytes`: 7.6 B parameters (what the
+Qwen2.5-7B family actually carries) comes to 28.3 GiB, and a checkpoint advertised as 7B ranges
+from about 6.7 to 7.7 B, so 26-29 GiB is the band. Measured calibration on this host: the
+Qwen2.5-0.5B above is 494 M parameters, so 1.84 GiB of weights, and a single short request
+peaks at 2.87 GiB -- the extra gibibyte is the contiguous KV cache reserving the whole context,
+which is the second number to add rather than a rounding error.
 
 A mixture-of-experts file is worth calling out separately, because its file size is the least
 predictive of all: every expert is widened and held even though only `expert_used_count` of them

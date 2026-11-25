@@ -31,6 +31,14 @@ func OpenLoader(path string) (*Loader, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Two handles on purpose: gguf.Open keeps its own for the metadata, and a separate one is
+	// what lets a read seek without disturbing it.
+	//
+	// These two arms are uncovered. gguf.Open has already opened the same path successfully, so
+	// os.Open fails here only if the file vanished in between, and Stat on an open descriptor
+	// fails only on a filesystem that stops reporting sizes -- neither is reachable from a test
+	// without racing a delete against OpenLoader. The malformed and missing-file cases are on
+	// the gguf.Open call above and both have tests.
 	fh, err := os.Open(path)
 	if err != nil {
 		return nil, err

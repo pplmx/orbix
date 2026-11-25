@@ -372,6 +372,49 @@ func TestLoaderRejectsTruncatedTensor(t *testing.T) {
 	}
 }
 
+// TestLoaderReportsAReadThatComesUpShort covers the second line of defence.
+//
+// dataStart compares the directory's claim against the size recorded when the file was
+// opened, so a file that was already short when OpenLoader ran is refused there and the
+// io.ReadAt call is never reached -- which is why TestLoaderRejectsTruncatedTensor, the
+// obvious test for this, leaves these two arms uncovered. The case that does reach them is a
+// file truncated after the loader was open: the recorded size still says the tensor fits,
+// and only the read finds out otherwise.
+func TestLoaderReportsAReadThatComesUpShort(t *testing.T) {
+	path := writeModel(t, []gguf.TensorInfo{
+		{Name: "big", Dims: []uint64{256}, Type: gguf.F32, Offset: 0},
+	}, make([]byte, 1024))
+
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+	defer closeLoader(t, l)
+
+	// Shrink the file now that the size is recorded.
+	if err := os.Truncate(path, 128); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	_, err = l.Tensor("big")
+	if err == nil {
+		t.Fatal("Tensor succeeded after the file shrank under it")
+	}
+	// The message has to name the tensor: this read failed for one of several, and a caller
+	// scanning a large model needs to know which.
+	if !strings.Contains(err.Error(), `read tensor "big"`) {
+		t.Errorf("error = %q, want it to name the tensor that could not be read", err)
+	}
+
+	// TensorInto takes the other of the two paths through the same read.
+	dst := make([]float32, 256)
+	if err := l.TensorInto("big", dst); err == nil {
+		t.Fatal("TensorInto succeeded after the file shrank under it")
+	} else if !strings.Contains(err.Error(), `read tensor "big"`) {
+		t.Errorf("TensorInto error = %q, want it to name the tensor", err)
+	}
+}
+
 func TestLoaderFile(t *testing.T) {
 	path := writeModel(t, nil, nil)
 	l, err := OpenLoader(path)

@@ -318,7 +318,9 @@ func openReaderAt(path string) (*os.File, int64, error) {
 // This opens the file itself, which makes it convenient for reading one
 // tensor. Callers streaming many tensors should keep one *os.File open and
 // seek with TensorDataLoc and TensorInfo.Offset instead, so the model is not
-// reopened per tensor.
+// reopened per tensor. Nothing in this repository calls this method: the
+// weight loader takes the second route, which is why loading a model does not
+// open the file once per tensor.
 func (f *File) TensorData(path, name string) (io.ReadCloser, error) {
 	fh, size, err := openReaderAt(path)
 	if err != nil {

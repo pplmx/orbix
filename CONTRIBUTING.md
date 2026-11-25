@@ -30,6 +30,10 @@ just stress    # race binary under mixed load: plain, SSE, and clients that hang
 just fixture   # write a synthetic checkpoint big enough for just stress to interrupt
 just skips     # count the tests that skip for want of a checkpoint, which CI reports too
 just isolate   # run the suite twice with shuffling, to catch order dependence
+just fmt       # gofmt -w, to fix whatever just check reported
+just vet       # go vet on one package: just PKG=./internal/gguf vet
+just clean     # remove bin/, .cache and the profiles; leaves the module cache alone
+just release   # bump the version, write the changelog, tag; a person decides this, not CI
 ```
 
 ## The gates, and where they differ

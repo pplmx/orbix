@@ -1,6 +1,9 @@
 package chat
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestNamespaceCarriesStateOutOfALoop covers the namespace construct.
 //
@@ -217,5 +220,42 @@ func TestStringSlicing(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%q => %q, want %q", c.src, got, c.want)
 		}
+	}
+}
+
+// TestJoinIsRefusedAtTheRightStage pins where Jinja's join stops working here.
+//
+// The package never supported join, but it used to look as though it did: evalStringMethod
+// carried a "join" case, and no test or document mentioned it. That case could not run. Its
+// argument is the separator and its receiver has to be a sequence, while the value a method
+// call delivers is always text, so every spelling failed with "join() needs a sequence" --
+// including one over a slice and one bound through {% set %}.
+//
+// The two refusals happen at different stages for a reason worth keeping straight:
+// `list | join` is a filter, and an unsupported filter name is a parse error (so the caller
+// falls back before committing to a prompt); `x.join(...)` is a method call, which parses
+// anywhere and fails when evaluated. This asserts both, and asserts the stage, because a
+// change that moved either one would be a change to the fallback contract.
+func TestJoinIsRefusedAtTheRightStage(t *testing.T) {
+	// As a filter: refused at parse time, naming the filter.
+	if _, err := Parse(`{{ messages | join('-') }}`); err == nil {
+		t.Fatal("parsing `messages | join(...)` succeeded; an unsupported filter must fail at parse time")
+	} else if !strings.Contains(err.Error(), "unsupported template filter") {
+		t.Errorf("the parse error was %q; it should name the unsupported filter, so a reader "+
+			"can tell it from a syntax error", err)
+	}
+
+	// As a method: parses, then fails at render time.
+	tpl, err := Parse(`{{ messages.join('-') }}`)
+	if err != nil {
+		t.Fatalf("Parse(`messages.join(...)`): %v -- a method call parses anywhere, which is "+
+			"why the unimplemented ones surface at render time", err)
+	}
+	_, err = tpl.Render(nil, Inputs{})
+	if err == nil {
+		t.Fatal("rendering `messages.join(...)` succeeded; nothing implements it")
+	}
+	if !strings.Contains(err.Error(), "not implemented") {
+		t.Errorf("the render error was %q; it should say the method is not implemented", err)
 	}
 }

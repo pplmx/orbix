@@ -1009,23 +1009,19 @@ func evalStringMethod(t callExpr, recv value, sc *scope) (value, error) {
 			out[i] = strValue(part)
 		}
 		return value{list: out, isList: true}, nil
-	case "join":
-		if len(t.args) != 1 {
-			return value{}, fmt.Errorf("chat: join() takes one argument")
-		}
-		items, err := evalExpr(t.args[0], sc)
-		if err != nil {
-			return value{}, err
-		}
-		if !items.isList {
-			return value{}, fmt.Errorf("chat: join() needs a sequence")
-		}
-		parts := make([]string, len(items.list))
-		for i, it := range items.list {
-			parts[i] = it.text
-		}
-		return strValue(strings.Join(parts, s)), nil
 	}
+	// Everything else is refused at render time, because a method call parses anywhere: the
+	// receiver is just an expression to the left of the dot, and the parser has no reason to
+	// know which names are methods until something evaluates them.
+	//
+	// A "join" case lived here and could not be reached. Its argument is the separator and its
+	// receiver has to be a sequence, but `s` above is recv.text, so the receiver a method call
+	// can deliver is always text: `messages.join('-')` reads messages' text (empty) and then
+	// fails "needs a sequence", and every other spelling does the same -- measured on five,
+	// including one over a slice and one through a {% set %} binding. Jinja's join is a filter
+	// (`list | join('-')`), and it is not in supportedFilters, so the parse refuses it before
+	// this function runs. Removed rather than left as an unreachable branch: it made the
+	// package look like it supported join.
 	return value{}, fmt.Errorf("chat: method %q is not implemented", t.name)
 }
 

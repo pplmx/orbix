@@ -1,6 +1,7 @@
 package arch
 
 import (
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,4 +210,176 @@ var chineseNumerals = map[string]int{
 	"十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20,
 	"二十一": 21, "二十二": 22, "二十三": 23, "二十四": 24, "二十五": 25,
 	"二十六": 26, "二十七": 27, "二十八": 28, "二十九": 29,
+}
+
+// TestArchitectureReviewSizeTableMatchesTheCode checks the twelve-row size table.
+//
+// It is the most numeric thing in the repository -- five figures per package -- and the only
+// part of that document with no guard. Measured before writing this: four of the sixty cells
+// were wrong, all from this session's own edits (chat's lines, functions and top-level count,
+// and the test-line columns for chat, llama and quant). None of them were noticed by anyone;
+// they were found by comparing against `go run ./scripts/count.go`, which is the command the
+// document itself gives for reproducing the table.
+//
+// Lines, functions and top-level functions come from count.go rather than from a copy here, for
+// the reason the long-function guard records: the document's reproduce command and the guard
+// should be the same computation. Test lines and the ratio are measured here, because count.go
+// does not cover them.
+func TestArchitectureReviewSizeTableMatchesTheCode(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	doc, err := os.ReadFile(filepath.Join(root, "docs", "architecture-review.md"))
+	if err != nil {
+		t.Fatalf("read architecture-review.md: %v", err)
+	}
+
+	rows := sizeTableRows(t, string(doc))
+	if len(rows) < 12 {
+		t.Fatalf("parsed %d size-table rows, too few; the table moved or its shape changed", len(rows))
+	}
+
+	counts := countGoOutput(t, root)
+	for _, r := range rows {
+		short := r.pkg[strings.LastIndex(r.pkg, "/")+1:]
+		got, ok := counts[short]
+		if !ok {
+			t.Errorf("the table names %q but count.go reports nothing for %q", r.pkg, short)
+			continue
+		}
+		if r.lines != got.lines {
+			t.Errorf("%s: the document says %d code lines, count.go says %d", r.pkg, r.lines, got.lines)
+		}
+		if r.funcs != got.funcs {
+			t.Errorf("%s: the document says %d functions, count.go says %d", r.pkg, r.funcs, got.funcs)
+		}
+		if r.top != got.top {
+			t.Errorf("%s: the document says %d top-level functions, count.go says %d",
+				r.pkg, r.top, got.top)
+		}
+
+		// Test lines, which count.go does not measure.
+		testLines := packageTestLines(t, filepath.Join(root, r.pkg))
+		if r.testLines != testLines {
+			t.Errorf("%s: the document says %d test lines, measured %d", r.pkg, r.testLines, testLines)
+		}
+		// And the ratio the last column prints, recomputed from the two figures beside it.
+		if want := float64(testLines) / float64(r.lines); math.Abs(want-r.ratio) > 0.005 {
+			t.Errorf("%s: the document says the test/code ratio is %.2f, %d/%d is %.2f",
+				r.pkg, r.ratio, testLines, r.lines, want)
+		}
+	}
+}
+
+// sizeRow is one line of the document's table.
+type sizeRow struct {
+	pkg       string
+	lines     int
+	funcs     int
+	top       int
+	testLines int
+	ratio     float64
+}
+
+// sizeTableRows parses the twelve-row table that opens the document.
+//
+// Anchored on the header rather than on position: the document holds many tables, and the
+// long-function section has one with similar-looking numeric cells.
+func sizeTableRows(t *testing.T, doc string) []sizeRow {
+	t.Helper()
+	var out []sizeRow
+	inTable := false
+	for line := range strings.SplitSeq(doc, "\n") {
+		if !strings.HasPrefix(line, "|") {
+			if inTable && len(out) > 0 {
+				break
+			}
+			continue
+		}
+		if strings.Contains(line, "测试/代码") {
+			inTable = true
+			continue
+		}
+		if !inTable || strings.Contains(line, "---") {
+			continue
+		}
+		m := sizeRowPattern.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		out = append(out, sizeRow{
+			pkg:       m[1],
+			lines:     archAtoi(t, m[2]),
+			funcs:     archAtoi(t, m[3]),
+			top:       archAtoi(t, m[4]),
+			testLines: archAtoi(t, m[5]),
+			ratio:     archAtof(t, m[6]),
+		})
+	}
+	return out
+}
+
+var sizeRowPattern = regexp.MustCompile(
+	`^\|\s*` + "`" + `([\w/]+)` + "`" + `\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.]+)\s*\|`)
+
+// sizeCounts is one package's figures from count.go.
+type sizeCounts struct{ lines, funcs, top int }
+
+// countGoOutput runs the document's own reproduce command and parses it.
+func countGoOutput(t *testing.T, root string) map[string]sizeCounts {
+	t.Helper()
+	cmd := exec.Command("go", "run", "./scripts/count.go")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go run ./scripts/count.go: %v", err)
+	}
+	got := map[string]sizeCounts{}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		m := countGoPattern.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		got[m[1]] = sizeCounts{
+			lines: archAtoi(t, m[4]),
+			funcs: archAtoi(t, m[2]),
+			top:   archAtoi(t, m[3]),
+		}
+	}
+	if len(got) == 0 {
+		t.Fatal("count.go printed no rows this test could parse; its format changed")
+	}
+	return got
+}
+
+var countGoPattern = regexp.MustCompile(
+	`^\s+\d+\.\s+(\S+)\s+funcs=\s*(\d+) toplevel=\s*(\d+) lines=\s*(\d+)`)
+
+// packageTestLines counts the lines in a package's _test.go files.
+func packageTestLines(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	total := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		total += strings.Count(string(raw), "\n")
+	}
+	return total
+}
+
+// archAtof parses a ratio cell.
+func archAtof(t *testing.T, s string) float64 {
+	t.Helper()
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		t.Fatalf("%q is not a number: %v", s, err)
+	}
+	return v
 }

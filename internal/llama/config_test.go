@@ -1187,6 +1187,41 @@ func TestConfigStringVariants(t *testing.T) {
 		}
 	})
 
+	// The window summary counts bounded layers rather than describing a rule, and neither of
+	// its two uncommon branches had a case: "no layer bounded" and "N of M layers bounded"
+	// both went unexercised, while the fixture's WindowLen of 0 skips the whole block.
+	t.Run("no layer bounded", func(t *testing.T) {
+		// A window declared but every layer marked global: LocalLayers is all false, so
+		// windowFor answers 0 for each one. The pair looks like a mistake to a reader, which is
+		// why the summary says it out loud.
+		c := base
+		c.WindowLen = 4096
+		c.LocalLayers = []bool{false, false}
+		if s := c.String(); !strings.Contains(s, "no layer bounded to 4096") {
+			t.Errorf("String() = %q, want it to say no layer is bounded", s)
+		}
+	})
+
+	t.Run("some layers bounded", func(t *testing.T) {
+		// One of two layers local. The count is what a reader checks against the file; a rule
+		// like "every second layer" was wrong for exactly this shape.
+		c := base
+		c.WindowLen = 4096
+		c.LocalLayers = []bool{true, false}
+		if s := c.String(); !strings.Contains(s, "1 of 2 layers bounded to 4096") {
+			t.Errorf("String() = %q, want the 1-of-2 count", s)
+		}
+	})
+
+	t.Run("every layer bounded", func(t *testing.T) {
+		c := base
+		c.WindowLen = 4096
+		c.LocalLayers = []bool{true, true}
+		if s := c.String(); !strings.Contains(s, "every layer bounded to 4096") {
+			t.Errorf("String() = %q, want it to say every layer is bounded", s)
+		}
+	})
+
 	t.Run("both", func(t *testing.T) {
 		// The two suffixes are appended in one format string, so the pair has to read correctly
 		// too: ", attention bias" after "tied embeddings".

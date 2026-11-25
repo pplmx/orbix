@@ -308,6 +308,10 @@ func (m *Model) postNormRows(v, weight []float32, rows int) error {
 		return nil
 	}
 	if len(weight) == 0 {
+		// Unreachable from a loaded model: weights.go appends both post-norm tensors to the
+		// required list when PostNorms is set, so a file without them is refused before a
+		// Model exists. Kept as the local statement of that invariant -- the check above reads
+		// a config flag, and the flag alone does not prove the tensor was loaded.
 		return fmt.Errorf("llama: post-norm weight is missing on a model that normalizes sub-layer outputs")
 	}
 	h := m.W.Config.Hidden

@@ -6224,6 +6224,45 @@ func TestStreamingClientGoneReleasesTheSequence(t *testing.T) {
 		"the engine still holds a sequence after the client hung up")
 }
 
+// TestStreamingTwoChoicesClientGoneReleasesBothSequences covers the fan-in path when a client
+// hangs up.
+//
+// n=1 runs inline and n>1 runs one goroutine per choice behind a channel; the existing
+// disconnect test uses n=1, so nothing exercised the second shape. Deleting the whole fan-in
+// left this test passing too, which is the limit of what it proves -- see below.
+//
+// It reaches the fan-in but not its cancel arm. That arm runs when writeItem returns false,
+// which needs the response write to fail while a choice is still producing; against the
+// fixture the stream finishes in under a hundred milliseconds, so closing the connection
+// after one chunk usually lands after the last write. Tried: the arm's line stays uncovered
+// across three runs, and deleting it leaves this test green. A longer budget or a slowed
+// writer would make it a race, and a test that passes or fails on scheduling is worse than
+// one that says what it covers.
+//
+// What it does assert is the property a hang-up must preserve either way: no sequence is
+// left in the engine.
+func TestStreamingTwoChoicesClientGoneReleasesBothSequences(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 2048})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/completions", "application/json",
+		strings.NewReader(`{"prompt":"Once upon a time","max_tokens":500,"stream":true,"n":2,`+
+			`"temperature":1.2,"seed":5}`))
+	if err != nil {
+		t.Fatalf("starting the stream: %v", err)
+	}
+	// Read one chunk so the server is mid-generation, then hang up.
+	buf := make([]byte, 32)
+	if _, err := resp.Body.Read(buf); err != nil {
+		t.Fatalf("reading the first chunk: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	waitFor(t, 15*time.Second, func() bool { return srv.eng.Active() == 0 },
+		"the engine still holds a sequence after the client hung up on a two-choice stream")
+}
+
 // whyPhrase returns a phrase the refusal reason must contain for a given shape field.
 //
 // The values come from the shapeField table: each explains why the field cannot be honoured, and a

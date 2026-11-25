@@ -308,11 +308,12 @@ chat endpoint are worth knowing before pointing a client at it:
   `internal/chat` evaluates a subset of it: `if`/`elif`/`else`, `for` with the `loop`
   variables, `set` scoped the way Jinja2 scopes it (a `for` body is a frame, an `if` body is
   not), `set ns.field` through a `namespace(...)`, `+` (which adds two integers and joins
-  anything else), `-`, `%`, comparisons including the ordering ones, `[:n]` and `[n:]` slices
-  of a sequence or a string, the `is` tests `defined`, `none`, `mapping`, `iterable`, `string`,
-  `true` and `false`, the string methods `strip`, `lstrip`, `rstrip` and `split` (with Python's
-  character-set argument rule, not a substring), and the `trim`, `tojson`, `length`, `first`
-  and `last` filters. That covers the
+  anything else), `-`, `%`, comparisons including the ordering ones, slices of a sequence or a
+  string in every form Python writes (`[:n]`, `[n:]`, `[a:b]`, and a step: `[::-1]`, `[::2]`,
+  `[a:b:c]`), the `is` tests `defined`, `none`, `mapping`, `iterable`, `string`,
+  `true` and `false`, the string methods `strip`, `lstrip`, `rstrip`, `split` (with Python's
+  character-set argument rule, not a substring), `startswith` and `endswith`, and the `trim`,
+  `tojson`, `length`, `first` and `last` filters. That covers the
   published templates for Qwen2.5, Llama 3.1 and Qwen3 exactly, and each is checked against its
   real source: `scripts/jinja_diff.py --template-file <checkpoint.gguf>` reads
   `tokenizer.chat_template` out of the file and renders it through this package and through
@@ -323,6 +324,11 @@ chat endpoint are worth knowing before pointing a client at it:
   Qwen3 0.6B's template is what drove the subset's last expansion. It needs `namespace(...)`
   to carry `last_query_index` out of a for body, the string methods to strip a `thinking`
   reasoning block, `[:n]` on a string, the ordering comparisons, and `is true` / `is false`.
+  The checkpoint that ships today also writes `messages[::-1]` and guards its tool-response
+  branch with `startswith`/`endswith`; without the slice step and those two predicates the
+  whole template was refused, and every conversation with that file used the neutral
+  transcript while the per-construct tests passed. That asset is now in
+  `internal/chat/testdata` and rendered by a test, so this cannot go unnoticed again.
   Before those it fell back to the neutral transcript, and a two-turn probe answered "What is
   my name?" correctly and then went on inventing further turns. After them `serve` reports
   `chat: model template`, and a request declaring `tools` comes back with

@@ -415,9 +415,9 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 ## 十、函数级失控：本轮按当下代码做的分解
 
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
-**20 个函数在 100 行以上**（2026-11-25 复算；本轮拆分前是 18，详见本节末尾的清单；
+**19 个函数在 100 行以上**（2026-11-26 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；759 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；762 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
@@ -432,18 +432,19 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**现存 20 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，759 个函数）：`chat.evalExpr`
-310、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
+**现存 19 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，762 个函数）：`chat.evalExpr`
+316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
 205、`server.generate` 199、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
 141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`
-122、`server.handleChat` 122、`gguftest.kvs` 119、`chat.parsePostfix` 113、`server.resolvePrompt`
-108、`gguf.Read` 107、`chat.lex` 103、`cli.validateServeFlags` 101。
+122、`server.handleChat` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、`gguf.Read` 107、
+`chat.lex` 103、`cli.validateServeFlags` 101。
 
 这一份上一版写的是「十九个」，逐项复算后变的不只是总数：
 
-- `chat.parsePostfix` 新进入清单。它在 `2605ec3` 之前是 79 行——这次提交给 Qwen3 的模板加
-  `[:n]` 切片、关键字参数和字符串方法，都落在这个函数里——现在是 113。它是最能说明这份
-  清单性质的一条：**不是有人把它写坏了，是功能长在了它身上**。
+- `chat.parsePostfix` 上一版新进入清单（113 行）。它后来被拆成 `parsePostfix` 与
+  `parseBracket`——加 `[a:b:c]` 都要落在这里，两个函数各管一段比一个函数管三种形式清楚——
+  于是它降回 100 行以下、离开清单，而 `chat.evalExpr` 从 310 涨到 316。**这条值得留着**：它是
+  这份清单最常见的一次真实变化，加一个语法形态会长在一个函数上，拆开就消失。
 - `chat.evalExpr` 从 271 涨到 310，`cli.cmdServe` 从 261 涨到 275，`server.generate` 从 192
   涨到 199，`cli.runTo` 从 165 涨到 177，`server.blockingResponse` 从 131 涨到 141；其余几项
   未变。函数总数从 751 涨到 759。
@@ -483,10 +484,11 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
   方法只增加间接层。有独立规则的那一个已经拆出去了（`evalArithmetic`，见下节）。它这一轮又长了
   39 行，全部是 Qwen3 模板要的构造；下一个该从这里拿出去的是字符串方法（`strip` 族与 `split`），
   它们已经有自己的 `evalStringMethod`，而分派那一支仍留在 `evalExpr` 里。
-- **`chat.parsePostfix`（113）** 是上一版清单里没有的一项，79 → 113 全部来自同一批构造。它处理
-  `.field`（含方法调用）、`[i]`、`[:n]`/`[n:]`/`[a:b]` 切片和 `|filter`（含关键字参数）四类后缀，
-  每类都有自己的参数解析规则，所以拆开只会把"后缀依次尝试"这个循环切成调用方看不见的几段。
-  **留着，但记下它为什么长：** 它是表达式语法的后缀侧，新增一个语法形态就长在这里。
+- **`chat.parsePostfix`（原 113，现不在清单里）** 处理 `.field`（含方法调用）、`|filter`（含
+  关键字参数）和方括号。加 `[a:b:c]` 时它被拆开：`parseBracket` 用一个扫描器读三种方括号形式
+  （索引 / 切片 / 带步长），`parsePostfix` 只负责把后缀串起来。**这是这份清单里唯一一次
+  "拆开真的让两个函数都变短"的例子**——因为切开的边界正好是一次后缀的完整解析，而不是把一步
+  分成两半。
 - **`cmdServe`/`cmdBench`/`cmdRun`/`chatSession`** 剩下的都是连续装配流程，只跑一次、只失败一次。
 - **`attentionBatch`（126）** 我在第三节判断过不该合。`LoadWeights` 当时还是 134 行，现在是 78，
   已经不在本表里了。

@@ -1267,6 +1267,26 @@ func TestRecordDropsInvalidSpans(t *testing.T) {
 	}
 }
 
+// TestNewExporterRequiresAnEndpoint covers the one thing the constructor refuses.
+//
+// An exporter with no endpoint would either post to "/v1/traces" relative to nothing or
+// drop every span silently, and neither is what a caller who forgot the flag intended. The
+// arm had no test: deleting the check left the package green.
+func TestNewExporterRequiresAnEndpoint(t *testing.T) {
+	if exp, err := NewExporter(ExporterOptions{}); err == nil {
+		_ = exp.Close()
+		t.Fatal("NewExporter accepted an empty endpoint; every span would then be posted " +
+			"to a relative path or dropped")
+	}
+	// And the endpoints that do work: the defaults are what a caller who sets only the
+	// endpoint gets, so a zero Interval or MaxBatch must become a usable value.
+	exp, err := NewExporter(ExporterOptions{Endpoint: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	_ = exp.Close()
+}
+
 // TestPartialSuccessRejectedCountsSpans covers the acknowledgement that says "200 OK, but I
 // kept none of it".
 //
@@ -1292,6 +1312,12 @@ func TestPartialSuccessRejectedCountsSpans(t *testing.T) {
 		{``, 0, "no body at all"},
 		{`not json`, 0, "an unparseable acknowledgement is not a drop"},
 		{`{"partialSuccess":{"rejectedSpans":"0"}}`, 0, "an explicit zero"},
+		// rejectedSpans is a string in the proto3 JSON form, so a string that is not a number
+		// reaches the ParseInt failure at the end of the reader. Those two returns had no
+		// case: a malformed count was only ever sent as JSON it could not unmarshal at all.
+		{`{"partialSuccess":{"rejectedSpans":"lots"}}`, 0, "a string that is not a number"},
+		// The same for a value that is neither a number nor a string, which fails both reads.
+		{`{"partialSuccess":{"rejectedSpans":{"n":1}}}`, 0, "an object where a count belongs"},
 	}
 	for _, c := range cases {
 		if got := partialSuccessRejected([]byte(c.body)); got != c.want {

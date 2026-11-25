@@ -17,7 +17,7 @@
 | `internal/gguf`     | 1492      | 51             | 14       | 3060      | 2.05      |
 | `internal/quant`    | 904       | 27             | 20       | 3747      | 4.14      |
 | `internal/gguftest` | 817       | 22             | 14       | 372       | 0.46      |
-| `internal/otel`     | 794       | 35             | 14       | 1722      | 2.17      |
+| `internal/otel`     | 794       | 35             | 14       | 1748      | 2.20      |
 | `internal/kernel`   | 705       | 28             | 20       | 2017      | 2.86      |
 | `internal/f16`      | 154       | 4              | 4        | 399       | 2.59      |
 | `internal/arch`     | 14        | 0              | 0        | 1631      | 116.50    |

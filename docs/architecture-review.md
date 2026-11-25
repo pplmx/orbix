@@ -211,13 +211,14 @@ grep -rn "gguf.Open" cmd/orbix/*.go
 
 ## 五、`cmd/orbix` 是第四个"逻辑层"
 
-CLI 层 3429 行里有大量不属于"解析参数并打印"的内容：
+CLI 层 3900 行里有大量不属于"解析参数并打印"的内容（行数是快照，写成时记的是 3429）：
 
-- **窗口与预算的算术**：`server.go:1402`、`chat.go:520`、`run.go:189` 各自实现"预算超过剩余窗口就截断"，`run` 还额外判断 `cache.Len() == cache.Cap()` 来决定是否打印提示。
-- **错误消息的领域解释**：`chat.go:441` 的 `explainChatError` 把 `ErrPoolExhausted`、`errContextFull` 翻译成带建议的段落，并在同一会话里"解释一次，之后只打印数字"。
-- **启动横幅**：`serve.go` 的 `poolCapacityWarning`、`poolReservationWarning`、`reservationWarning`、`contiguousMemoryNote` 四个函数共 120 行，把配置翻译成告诫。
+- **窗口与预算的算术**：`chat.go:405` 的 `room := cfg.ContextLen - len(ids)` 一处，`bench.go` 又自己算了一遍并打印 `note:`，`run.go` 则用 `cache.Len() == cache.Cap()` 反推它是不是被窗口截断的。三处各写一遍，判据还不一样。
+- **错误消息的领域解释**：`chat.go` 的 `explainChatError` 把 `ErrPoolExhausted`、`errContextFull` 翻译成带建议的段落，并在同一会话里"解释一次，之后只打印数字"。
 
 这些是有价值的 UX，但它们的输入（`ContextLen`、`PoolBlocks`、`PoolBlockSize`、`errContextFull`）全部来自 engine/llama，所以**每加一个缓存布局或一条限制，就要回到三个命令里各改一次**。`engine.Stats` 已经把池字段聚合好了，而 `chat`/`run` 仍在通过 `eng.Model().Config()`、`pool.Blocks()`、`cache.Cap()` 自己拼装同一个判断。
+
+The three line numbers this section used to cite -- `server.go:1402`, `chat.go:520`, `chat.go:441` -- no longer point at any of that; only `run.go:189` still does. They are dropped rather than corrected, because a coordinate that has to be rewritten every time a file moves is not worth reading. The claim is checkable without them: `grep -rn "windowCutTheBudget\|explainChatError" cmd/orbix`.
 
 ## 六、并发模型：一处状态机，多处手写
 

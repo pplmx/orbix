@@ -131,8 +131,10 @@ func splitOverRows(m, n, parts int) bool {
 // them the obvious thing to rerun.
 const (
 	// minParallelWork is the multiply-add count below which a kernel stays on
-	// one goroutine. Measured on an EPYC 7742: at 27k multiply-adds the
-	// parallel form breaks even, at 8k it is 1.4x slower.
+	// one goroutine. Measured on an EPYC 7742: the parallel form breaks even at
+	// 27k multiply-adds and is 1.2x slower at 8k. The constant is the next power
+	// of two above the break-even point, so the threshold errs toward serial --
+	// a kernel one step below it pays the call overhead without the fan-out.
 	minParallelWork = 1 << 15
 	// workPerWorker is the work each additional worker must receive. Without it
 	// a modest projection fans out to every available CPU and loses to two

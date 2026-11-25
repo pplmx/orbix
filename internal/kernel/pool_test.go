@@ -214,7 +214,14 @@ func TestSplitRowsClampsMorePartsThanRows(t *testing.T) {
 // the threshold because spawning goroutines and joining them costs more than the
 // arithmetic it splits.
 func BenchmarkRunnerCrossover(b *testing.B) {
+	// The first two are the sizes minParallelWork's comment cites. Both are below the constant,
+	// so parts() returns 1 for them and the "parallel" variant is the serial one plus the check
+	// -- which is exactly what the comment calls the call overhead of a kernel kept on one
+	// goroutine. Reading them as a parallel-versus-serial comparison would be wrong, and the
+	// naming does invite that; the sizes above the constant are where the two differ.
 	shapes := []struct{ n, k int }{
+		{64, 128},    // 8k multiply-adds: below minParallelWork, the parallel form should lose
+		{169, 160},   // 27k: the break-even point named in the comment
 		{288, 288},   // one attention projection of a small model
 		{768, 288},   // one FFN projection of stories15M
 		{32000, 288}, // the vocabulary projection

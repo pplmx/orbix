@@ -417,7 +417,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
 **19 个函数在 100 行以上**（2026-11-26 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；762 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；761 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
@@ -432,7 +432,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**现存 19 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，762 个函数）：`chat.evalExpr`
+**现存 19 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，761 个函数）：`chat.evalExpr`
 316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
 205、`server.generate` 199、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
 141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`

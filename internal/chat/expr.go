@@ -636,35 +636,6 @@ func (p *exprParser) parseMul() (expr, error) {
 	return left, nil
 }
 
-// finishSlice reads the optional step of a slice and the closing bracket.
-//
-// It is called once the lower and upper bounds have been parsed, whether either was present. A
-// leading colon was already consumed by the caller when the lower bound was absent, and a
-// second colon means a step follows: `[a:b]` and `[a:b:c]` differ only here.
-func (p *exprParser) finishSlice(s sliceExpr) (sliceExpr, error) {
-	if p.accept("]") {
-		return s, nil
-	}
-	// Not the closing bracket, so a step must be next.
-	if !p.accept(":") {
-		return sliceExpr{}, fmt.Errorf("chat: missing ']' in slice expression")
-	}
-	// `[a:b:]` is legal Python and means step 1, so an absent step after the second colon is
-	// not an error.
-	if p.accept("]") {
-		return s, nil
-	}
-	step, err := p.parseOr()
-	if err != nil {
-		return sliceExpr{}, err
-	}
-	if !p.accept("]") {
-		return sliceExpr{}, fmt.Errorf("chat: missing ']' in slice expression")
-	}
-	s.step = step
-	return s, nil
-}
-
 // parseBracket reads what follows a "[" up to its "]" and builds either an index or a slice.
 //
 // Python writes three forms inside one pair of brackets and this reads all of them with one

@@ -59,6 +59,7 @@ orbix run --model ./model.gguf --stats --max-tokens 64 "Explain KV caching."
 orbix run --model ./model.gguf --workers 32 "Explain KV caching."   # see below on the ratio
 orbix run --model ./model.gguf Once upon a time    # the same prompt, unquoted
 orbix run --model ./model.gguf -- "-5 degrees outside"   # a prompt that starts with a dash
+echo "Once upon a time" | orbix run --model ./model.gguf --stdin   # prompt from a pipe
 
 orbix chat --model ./model.gguf
 

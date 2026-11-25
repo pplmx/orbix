@@ -38,6 +38,7 @@ func runTo(dst io.Writer, args []string) error {
 	seed := fs.Int64("seed", 0, "sampling seed; 0 uses the current time. Has no effect without --temp, because greedy decoding is already deterministic")
 	contextLen := fs.Int("ctx", 0, "context length; 0 uses the model's trained amount")
 	echo := fs.Bool("echo", false, "print the prompt before the generated text")
+	fromStdin := fs.Bool("stdin", false, "read the prompt from standard input instead of the arguments")
 	workers := workersFlag(fs)
 	stats := fs.Bool("stats", false, "print timing and token counts to stderr")
 	if err := fs.Parse(args); err != nil {
@@ -46,7 +47,13 @@ func runTo(dst io.Writer, args []string) error {
 	if err := resolveModel(fs, model); err != nil {
 		return err
 	}
-	prompt, err := promptFromArgs(fs, args)
+	var prompt string
+	var err error
+	if *fromStdin {
+		prompt, err = promptFromStdin(os.Stdin, fs)
+	} else {
+		prompt, err = promptFromArgs(fs, args)
+	}
 	if err != nil {
 		return err
 	}
@@ -127,9 +134,10 @@ func runTo(dst io.Writer, args []string) error {
 	// produces fewer. It goes to stderr, so piped stdout continues to carry only the reply.
 	if room := nCtx - len(promptTokens); *maxTokens > room {
 		fmt.Fprintf(os.Stderr,
-			"orbix: note: --max-tokens %d is past this model's %d-token window, so at most %d "+
-				"tokens can be generated; lower --max-tokens to hear about a cut reply sooner\n",
-			*maxTokens, nCtx, room)
+			"orbix: note: --max-tokens %d exceeds what this model's %d-token window leaves "+
+				"after a %d-token prompt, so generation stops at %d; the reply will report "+
+				"finish_reason length either way\n",
+			*maxTokens, nCtx, len(promptTokens), room)
 	}
 
 	var sampler llama.Sampler = llama.Greedy{}
@@ -237,6 +245,35 @@ func generateStreaming(
 		return nil, 0, fmt.Errorf("run: write output: %w", werr)
 	}
 	return out, time.Since(start), nil
+}
+
+// promptFromStdin reads the prompt from standard input.
+//
+// `echo "Once upon a time" | orbix run --model m --stdin` is the shape a shell script reaches
+// for, and without it the only way to pass a generated prompt was to build it into an argument --
+// which trips the argument-length limit for a large one and needs quoting for anything with
+// spaces. The flag is explicit rather than implied by "no prompt argument", because a run with
+// its stdin attached to a terminal would otherwise block waiting for input that a user never
+// meant to provide.
+//
+// Trailing newlines are trimmed rather than the whole input being trimmed: a prompt assembled by
+// `cat file` ends with one, and it is not part of what the caller meant to send, but leading
+// whitespace and interior newlines are and are kept. An input that is empty after that is
+// refused here instead of being passed on as a zero-token prompt.
+func promptFromStdin(stdin io.Reader, fs *flag.FlagSet) (string, error) {
+	if fs.NArg() > 0 {
+		return "", fmt.Errorf("run: --stdin reads the prompt from standard input, so the "+
+			"argument %q is ambiguous; pass the prompt one way or the other", fs.Arg(0))
+	}
+	raw, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", fmt.Errorf("run: read stdin: %w", err)
+	}
+	prompt := strings.TrimRight(string(raw), "\r\n")
+	if prompt == "" {
+		return "", fmt.Errorf("run: --stdin was given but standard input was empty")
+	}
+	return prompt, nil
 }
 
 // promptFromArgs assembles the prompt from everything after the flags.

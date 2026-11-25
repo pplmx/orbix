@@ -52,6 +52,7 @@ Paged cache, on `serve`, `chat` and `bench`:
 | `--seed`   | `run` only: sampling seed; no effect without `--temp`                            |
 | `--stats`  | `run` only: timings and token counts to stderr                                   |
 | `--echo`   | `run` only: print the prompt before the generated text                           |
+| `--stdin`  | `run` only: read the prompt from standard input instead of the arguments         |
 | `--system` | `chat` only: system prompt for the session                                       |
 
 `bench` workload:

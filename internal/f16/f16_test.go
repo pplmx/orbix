@@ -101,6 +101,25 @@ func TestFromFloat32Specials(t *testing.T) {
 	if got := FromFloat32(float32(math.NaN())); !IsNaN(got) {
 		t.Errorf("FromFloat32(NaN) = %#04x, want NaN", got)
 	}
+	// The NaN path has two arms, chosen by whether the payload survives the shift into the
+	// ten-bit binary16 mantissa. math.NaN() is 0x7fc00000, whose payload sits in the high
+	// bits, so it always takes the second arm; the branch for a payload that would shift to
+	// zero had no test. Truncating such a payload without forcing a bit turns NaN into
+	// infinity, which is a different value and a much worse one to meet in weights.
+	for _, bits := range []uint32{
+		0x7f800001, // signaling NaN: payload is one bit, below the shift
+		0x7f801fff, // payload 0x1fff, still entirely below the shift
+	} {
+		f := math.Float32frombits(bits)
+		got := FromFloat32(f)
+		if !IsNaN(got) {
+			t.Errorf("FromFloat32(%#08x) = %#04x, want NaN: a payload that would shift away "+
+				"must still produce a NaN, not infinity", bits, got)
+		}
+		if got == 0x7c00 || got == 0xfc00 {
+			t.Errorf("FromFloat32(%#08x) = %#04x, which is infinity", bits, got)
+		}
+	}
 	// Values below the subnormal range underflow to zero rather than to a
 	// denormal that binary16 cannot hold.
 	if got := FromFloat32(1e-10); got != 0x0000 {

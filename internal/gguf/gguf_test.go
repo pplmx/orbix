@@ -1035,6 +1035,30 @@ func TestScalarAsFloatToInteger(t *testing.T) {
 // unsigned case was reached before, because the fixture's large value happens to be
 // unsigned; a negative metadata value is the interesting one, since a conversion that
 // routed signed values through the unsigned field would turn -7 into a huge positive.
+// TestReadIntegerTypeOnATruncatedStream covers the read-error arm of every scalar type.
+//
+// The happy-path test above feeds exactly the bytes each type needs, so r.bytes never fails
+// there and the error return stayed uncovered for all of them. A stream with nothing left is
+// the cheapest way to reach it, and it is the real shape of a truncated file: the metadata
+// declares a type whose bytes are not all there.
+func TestReadScalarTypeOnATruncatedStream(t *testing.T) {
+	for _, typ := range []ValueType{
+		TypeUint8, TypeInt8, TypeUint16, TypeInt16,
+		TypeUint32, TypeInt32, TypeUint64, TypeInt64,
+		// The floats take a different read (u32/u64 then a bit cast), so their error arms
+		// are separate lines and were missed when this list was only the integers.
+		TypeFloat32, TypeFloat64,
+	} {
+		t.Run(typ.String(), func(t *testing.T) {
+			r := &reader{r: bytes.NewReader(nil)}
+			if _, err := r.value(typ); err == nil {
+				t.Errorf("value(%s) on an empty stream returned no error; a truncated file "+
+					"would be decoded from whatever bytes happened to be next", typ)
+			}
+		})
+	}
+}
+
 // TestReadEveryIntegerType decodes each integer metadata type from its bytes.
 //
 // TestScalarAsIntegerToFloat covers the conversion from a Value that already exists; this

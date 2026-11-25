@@ -15,7 +15,7 @@ const maxBestOf = maxChoices
 
 // checkBestOf validates the candidate count, given how many completions were asked for.
 //
-// Three things are refused, each for a different reason:
+// Two things are refused, each for a different reason:
 //
 //   - a negative or over-cap count is a malformed value, reported with the number that arrived;
 //   - a count that is not greater than n is refused because OpenAI documents best_of as the

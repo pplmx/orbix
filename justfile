@@ -96,13 +96,13 @@ stress:
     @# requests, SSE streams, and clients that disconnect mid-stream -- against one engine, which
     @# is where KV block recycling and goroutine teardown collide.
     @#
-    @# Needs a checkpoint: `just MODEL=/path/to.gguf stress`. There is no synthetic fallback,
-    @# because the disconnect path this exists to exercise needs a request that takes long
-    @# enough to interrupt, and the default in-repo fixture finishes in single-digit milliseconds.
-    @# A scaled-up one does work: measured with gguftest.Model{Layers: 4, Hidden: 256,
-    @# ContextLen: 4096} written to /tmp, the script reported 3 cancelled on two consecutive
-    @# runs, so the disconnect path is reachable without a real checkpoint.
-    @test -n "{{MODEL}}" || { echo "stress: needs MODEL=/path/to.gguf" >&2; exit 1; }
+    @# Needs a model that generates for long enough to interrupt. Either a real checkpoint
+    @# (`just MODEL=/path/to.gguf stress`) or one from `just fixture`, which writes a scaled-up
+    @# gguftest fixture to .cache: `just fixture && just MODEL=.cache/stress.gguf stress`. The
+    @# default in-repo fixture is too small -- it finishes in single-digit milliseconds, so no
+    @# client gets a chance to hang up -- but the scaled one is not: it reported 3 cancelled on
+    @# two consecutive runs.
+    @test -n "{{MODEL}}" || {         echo "stress: needs MODEL=<checkpoint>, or run 'just fixture' and pass .cache/stress.gguf" >&2;         exit 1; }
     @mkdir -p .cache
     @CGO_ENABLED=1 go build -race -o .cache/orbix-race ./cmd/orbix
     @scripts/stress.sh .cache/orbix-race "{{MODEL}}"

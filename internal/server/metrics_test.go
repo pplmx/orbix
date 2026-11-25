@@ -69,7 +69,8 @@ func TestMetricsSplitFinishedByReason(t *testing.T) {
 	h := srv.Handler()
 
 	// One request that runs to its budget, and one whose client leaves straight away.
-	post(t, h, "/v1/completions", `{"prompt": "hi", "max_tokens": 2}`)
+	resp := post(t, h, "/v1/completions", `{"prompt": "hi", "max_tokens": 2}`)
+	defer func() { _ = resp.Body.Close() }()
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
 		strings.NewReader(`{"prompt": "hi", "max_tokens": 50, "stream": true}`))

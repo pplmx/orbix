@@ -43,7 +43,8 @@ func firstRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
 func TestLoggerRecordsOnePerRequest(t *testing.T) {
 	srv, buf := loggingServer(t)
 
-	post(t, srv.Handler(), "/v1/completions", `{"prompt": "Once", "max_tokens": 2}`)
+	resp := post(t, srv.Handler(), "/v1/completions", `{"prompt": "Once", "max_tokens": 2}`)
+	defer func() { _ = resp.Body.Close() }()
 
 	rec := firstRecord(t, buf)
 	for _, key := range []string{"method", "path", "status", "duration", "bytes"} {
@@ -64,7 +65,8 @@ func TestLoggerRecordsOnePerRequest(t *testing.T) {
 func TestLoggerBadRequestIsNotAWarning(t *testing.T) {
 	srv, buf := loggingServer(t)
 
-	post(t, srv.Handler(), "/v1/completions", `{"prompt": ""}`)
+	resp := post(t, srv.Handler(), "/v1/completions", `{"prompt": ""}`)
+	defer func() { _ = resp.Body.Close() }()
 
 	rec := firstRecord(t, buf)
 	if status, _ := rec["status"].(float64); status != http.StatusBadRequest {
@@ -83,6 +85,7 @@ func TestNilLoggerIsSilent(t *testing.T) {
 		t.Fatal("Logger() returned nil; an unconfigured server must still answer")
 	}
 	resp := post(t, srv.Handler(), "/v1/completions", `{"prompt": "Once", "max_tokens": 2}`)
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d with no logger configured", resp.StatusCode)
 	}
@@ -126,8 +129,9 @@ func TestStatusRecorderDefaultsTo200(t *testing.T) {
 func TestStreamingProducesARecord(t *testing.T) {
 	srv, buf := loggingServer(t)
 
-	post(t, srv.Handler(), "/v1/completions",
+	resp := post(t, srv.Handler(), "/v1/completions",
 		`{"prompt": "Once", "max_tokens": 2, "stream": true}`)
+	defer func() { _ = resp.Body.Close() }()
 
 	if buf.Len() == 0 {
 		t.Fatal("a streaming request produced no log record")

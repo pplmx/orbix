@@ -6019,6 +6019,14 @@ func TestFinishReasonMapping(t *testing.T) {
 		{"cancel", "length"},
 		{"abandoned", "stop"},
 		{"error", "stop"},
+		// A schema value that must NOT be folded into "stop", which is why it has its own
+		// case rather than sharing the default: a client branches on it to decide whether to
+		// run a tool. This is the only test that checks the mapping: removing the case left
+		// the whole package green apart from this table. TestFinalChoiceCarriesCalls asserts
+		// "tool_calls" reaches a chunk, but it builds the reason itself, so it never runs
+		// finishReasonFor -- one is about the mapping, the other about what finalChoice does
+		// with a reason it is handed.
+		{"tool_calls", "tool_calls"},
 		// Anything unrecognised falls back rather than producing an invalid enum value, which a
 		// strict client would reject outright.
 		{"something-new", "stop"},

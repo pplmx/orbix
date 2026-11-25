@@ -602,10 +602,13 @@ func TestPartsPinsTheThresholds(t *testing.T) {
 // measured it: the benchmark above varies the shape at a fixed worker count, so the split the
 // comment is about never appears. Here the shape is fixed and the runner's worker count changes.
 //
-// On a 128-core machine with -benchtime=2s, workers=1 runs 288x144 in about 35 us and workers=2 in
-// about 42-50 us, repeated three times: two workers are slower here, not faster. The 1.18x the
-// constant's comment cites is not reproducible on this host -- it was measured on an EPYC 7742,
-// where the cache topology is different.
+// The 1.18x does not reproduce on the machine this was run on, but the reason is the machine, not
+// the constant: it was saturated while the measurement ran -- load average 131 on 128 cores, 0.1%
+// idle -- so any comparison involving more than one goroutine measures contention for a core
+// rather than the fan-out. Every parallel figure in this file is suspect for the same reason.
+//
+// A measurement of this constant needs an idle machine. What can be said without one is the part
+// that does not depend on timing: every worker count from 2 upward reports 2 parts here.
 //
 // Every count from 2 upward reports the same 2 parts, because workPerWorker caps the split at
 // 41472/16384. So this measures the guard holding, not a fan-out comparison, and the sixteen-way

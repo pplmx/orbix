@@ -145,11 +145,10 @@ const (
 	// reports 2 parts, which is the guard working rather than a measurement of why sixteen would
 	// have lost.
 	//
-	// The 1.18x itself does not reproduce on every host. On a 128-core machine with
-	// -benchtime=2s, two workers are 20-40% slower than one at this shape, repeated three times.
-	// The constant was measured on an EPYC 7742; a host whose cores share a cache differently can
-	// invert the comparison, so the number here is the one that machine produced rather than a
-	// property of the shape.
+	// Re-measuring it needs an idle machine. The host this was last checked on was saturated
+	// (load average 131 on 128 cores), and under that load every parallel path in this package
+	// measured slower than the serial one -- the comparison is then about waiting for a core
+	// rather than about the fan-out. The number above is what an EPYC 7742 produced.
 	workPerWorker = 1 << 14
 )
 

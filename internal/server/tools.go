@@ -157,6 +157,15 @@ func checkTools(raw json.RawMessage) ([]toolRequest, []engine.ToolSpec, error) {
 
 // checkToolChoice normalises tool_choice against the tools the request declared.
 func checkToolChoice(raw json.RawMessage, tools []toolRequest) (toolChoice, error) {
+	// "none" has to be read before jsonAsks, which answers false for it: the helper exists so an
+	// empty form is treated as "asked for nothing", and for tool_choice the string "none" is
+	// exactly that -- but it is also a *decision* this server has to act on, by withholding the
+	// tool list from the prompt. Normalising it to auto left the tools in the prompt, so
+	// tool_choice "none" behaved like "auto" while the documentation said the tools were
+	// withheld; measured before this fix, mode was "auto" for a request that sent "none".
+	if strings.TrimSpace(string(raw)) == `"none"` {
+		return toolChoice{Mode: modeNone}, nil
+	}
 	if !jsonAsks(raw) {
 		return toolChoice{Mode: modeAuto}, nil
 	}

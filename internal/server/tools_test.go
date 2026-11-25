@@ -1,6 +1,8 @@
 package server
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -323,6 +325,473 @@ func TestStreamOneChoiceCarriesCallsToTheTerminalChunk(t *testing.T) {
 	for _, it := range items {
 		if strings.Contains(it.delta, "tool_call") || strings.Contains(it.delta, "get_weather") {
 			t.Errorf("a delta carried part of the call: %q", it.delta)
+		}
+	}
+}
+
+// TestCheckToolsRefusesWhatItCannotHonour covers every branch of the validation that decides
+// which tool lists reach a prompt.
+//
+// Each row asserts three things, because each one is a separate way a refusal can be useless:
+// the status the handler would use (set by the code), the *param* naming the field the caller has
+// to fix, and a phrase from the message saying why. A message that only says "invalid_value" would
+// leave the caller guessing which of their tools was wrong, and the param is what an SDK shows.
+//
+// These branches had no test at all when the feature landed. The coverage was checkTools 75%;
+// every row below was an uncovered statement.
+func TestCheckToolsRefusesWhatItCannotHonour(t *testing.T) {
+	const okTool = `{"type": "function", "function": {"name": "get_weather"}}`
+	cases := []struct {
+		name      string
+		raw       string
+		wantParam string
+		wantCode  string
+		wantMsg   string
+	}{
+		{
+			name:      "not an array",
+			raw:       `{"type": "function"}`,
+			wantParam: "tools",
+			wantCode:  "invalid_value",
+			wantMsg:   "must be an array",
+		},
+		{
+			name:      "a tool type that is not function",
+			raw:       `[{"type": "retrieval", "function": {"name": "r"}}]`,
+			wantParam: "tools[0].type",
+			wantCode:  "unsupported_parameter",
+			wantMsg:   `"retrieval"`,
+		},
+		{
+			name:      "a type with no function member",
+			raw:       `[{"type": "function"}]`,
+			wantParam: "tools[0].function",
+			wantCode:  "missing_required_parameter",
+			wantMsg:   "has no function member",
+		},
+		{
+			name:      "an empty name",
+			raw:       `[{"type": "function", "function": {"name": "   "}}]`,
+			wantParam: "tools[0].function.name",
+			wantCode:  "missing_required_parameter",
+			wantMsg:   "an unnamed one could not be called",
+		},
+		{
+			// Two tools with one name make every call to it ambiguous, so the refusal has to
+			// name the second declaration rather than the first.
+			name: "a name declared twice",
+			raw: `[` + okTool + `, {"type": "function", "function": ` +
+				`{"name": "get_weather", "description": "again"}}]`,
+			wantParam: "tools[1].function.name",
+			wantCode:  "invalid_value",
+			wantMsg:   "declared more than once",
+		},
+		{
+			name:      "strict, which needs constrained decoding",
+			raw:       `[{"type": "function", "function": {"name": "f", "strict": true}}]`,
+			wantParam: "tools[0].function.strict",
+			wantCode:  "unsupported_parameter",
+			wantMsg:   "constrained decoding",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, err := checkTools(json.RawMessage(c.raw))
+			if err == nil {
+				t.Fatalf("%s was accepted", c.raw)
+			}
+			var pe *paramError
+			if !errors.As(err, &pe) {
+				t.Fatalf("error %v is not a paramError, so the response would carry no field", err)
+			}
+			if pe.param != c.wantParam {
+				t.Errorf("param = %q, want %q", pe.param, c.wantParam)
+			}
+			if pe.code != c.wantCode {
+				t.Errorf("code = %q, want %q", pe.code, c.wantCode)
+			}
+			if !strings.Contains(pe.message, c.wantMsg) {
+				t.Errorf("message %q does not contain %q", pe.message, c.wantMsg)
+			}
+		})
+	}
+
+	// The accepting side, so the table above cannot pass by refusing everything.
+	t.Run("a valid list is accepted", func(t *testing.T) {
+		_, specs, err := checkTools(json.RawMessage(`[` + okTool + `]`))
+		if err != nil {
+			t.Fatalf("a valid tool was refused: %v", err)
+		}
+		if len(specs) != 1 || specs[0].Name != "get_weather" {
+			t.Fatalf("specs = %+v, want the one tool", specs)
+		}
+		// A tool with no parameters is a real shape and its schema becomes {}, which is what a
+		// template prints; leaving it empty would render a signature with no argument document.
+		if specs[0].Parameters != "{}" {
+			t.Errorf("parameters = %q, want {}", specs[0].Parameters)
+		}
+	})
+	t.Run("an explicit null parameters also becomes {}", func(t *testing.T) {
+		_, specs, err := checkTools(json.RawMessage(
+			`[{"type": "function", "function": {"name": "f", "parameters": null}}]`))
+		if err != nil {
+			t.Fatalf("null parameters was refused: %v", err)
+		}
+		if specs[0].Parameters != "{}" {
+			t.Errorf("parameters = %q, want {}", specs[0].Parameters)
+		}
+	})
+	t.Run("the empty forms declare nothing", func(t *testing.T) {
+		for _, raw := range []string{"", "null", "[]"} {
+			tools, specs, err := checkTools(json.RawMessage(raw))
+			if err != nil {
+				t.Errorf("%q was refused: %v", raw, err)
+			}
+			if tools != nil || specs != nil {
+				t.Errorf("%q produced %d tools and %d specs, want none", raw, len(tools), len(specs))
+			}
+		}
+	})
+}
+
+// TestCheckToolChoice pins which tool_choice values are accepted and which are refused.
+//
+// This function was at 35% coverage when the feature landed: only the "auto" path had ever run,
+// and "auto" is what an absent field produces. The refusal of a forcing choice is the whole reason
+// the function exists -- no template in the subset can print the constraint, so accepting
+// "required" would answer with whatever the model chose while the caller believed it was forced.
+func TestCheckToolChoice(t *testing.T) {
+	tools := []toolRequest{{Type: "function", Function: &toolFunction{Name: "get_weather"}}}
+
+	t.Run("the accepted spellings", func(t *testing.T) {
+		cases := []struct {
+			name, raw, wantMode, wantName string
+		}{
+			{"absent", "", modeAuto, ""},
+			{"null", "null", modeAuto, ""},
+			{"auto", `"auto"`, modeAuto, ""},
+			{"none", `"none"`, modeNone, ""},
+			{"required parses", `"required"`, modeRequired, ""},
+			{"named", `{"type": "function", "function": {"name": "get_weather"}}`, modeNamed, "get_weather"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				got, err := checkToolChoice(json.RawMessage(c.raw), tools)
+				if err != nil {
+					t.Fatalf("%q was refused: %v", c.raw, err)
+				}
+				if got.Mode != c.wantMode {
+					t.Errorf("mode = %q, want %q", got.Mode, c.wantMode)
+				}
+				if want := c.wantName; got.Name != want {
+					t.Errorf("name = %q, want %q", got.Name, want)
+				}
+			})
+		}
+	})
+
+	t.Run("the refusals", func(t *testing.T) {
+		cases := []struct {
+			name, raw, wantParam, wantMsg string
+		}{
+			{"an unknown string", `"sometimes"`, "tool_choice", "not one of auto, none, required"},
+			// A name that is not in this request's list cannot be forced, so it is refused with
+			// the reason rather than silently treated as auto.
+			{"a name the request did not declare",
+				`{"type": "function", "function": {"name": "nope"}}`,
+				"tool_choice.function.name", "not one of the tools this request declares"},
+			{"an object with no function", `{"type": "function"}`,
+				"tool_choice", "must be"},
+			{"a non-function object", `{"type": "retrieval", "function": {"name": "f"}}`,
+				"tool_choice", "must be"},
+			{"a name that is only whitespace",
+				`{"type": "function", "function": {"name": "  "}}`,
+				"tool_choice", "must be"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				_, err := checkToolChoice(json.RawMessage(c.raw), tools)
+				if err == nil {
+					t.Fatalf("%q was accepted", c.raw)
+				}
+				var pe *paramError
+				if !errors.As(err, &pe) {
+					t.Fatalf("error %v is not a paramError", err)
+				}
+				if pe.param != c.wantParam {
+					t.Errorf("param = %q, want %q", pe.param, c.wantParam)
+				}
+				if !strings.Contains(pe.message, c.wantMsg) {
+					t.Errorf("message %q does not contain %q", pe.message, c.wantMsg)
+				}
+			})
+		}
+	})
+}
+
+// TestCheckToolMessages pins the validation of a conversation's tool turns.
+//
+// The three refusals are all about a result the model cannot place: an empty one, one naming a
+// call nobody declared, and a call id on a turn that is not a tool result. Each was uncovered.
+func TestCheckToolMessages(t *testing.T) {
+	withCall := func() []chatMessage {
+		msgs := []chatMessage{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", ToolCalls: json.RawMessage(
+				`[{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]`)},
+		}
+		if err := resolveToolCallMessages(msgs); err != nil {
+			t.Fatalf("resolveToolCallMessages: %v", err)
+		}
+		return msgs
+	}
+
+	t.Run("a well-formed exchange is accepted and converted", func(t *testing.T) {
+		msgs := append(withCall(), chatMessage{
+			Role: "tool", Content: `{"t": 21}`, ToolCallID: "call_1"})
+		turns, err := checkToolMessages(msgs)
+		if err != nil {
+			t.Fatalf("a valid exchange was refused: %v", err)
+		}
+		if len(turns) != 3 {
+			t.Fatalf("got %d turns, want 3", len(turns))
+		}
+		// The call has to survive the conversion: it is what the template renders back.
+		if len(turns[1].ToolCalls) != 1 || turns[1].ToolCalls[0].Name != "f" {
+			t.Errorf("the assistant turn carries %+v, want the call", turns[1].ToolCalls)
+		}
+	})
+
+	cases := []struct {
+		name   string
+		mutate func([]chatMessage) []chatMessage
+		param  string
+		msg    string
+	}{
+		{
+			name: "an empty tool result",
+			mutate: func(m []chatMessage) []chatMessage {
+				return append(m, chatMessage{Role: "tool", Content: "   ", ToolCallID: "call_1"})
+			},
+			param: "messages[2].content",
+			msg:   "tool result with no content",
+		},
+		{
+			name: "a result naming an undeclared call",
+			mutate: func(m []chatMessage) []chatMessage {
+				return append(m, chatMessage{Role: "tool", Content: "x", ToolCallID: "call_9"})
+			},
+			param: "messages[2].tool_call_id",
+			msg:   "no earlier assistant turn declared",
+		},
+		{
+			name: "a call id on a non-tool turn",
+			mutate: func(m []chatMessage) []chatMessage {
+				return append(m, chatMessage{Role: "user", Content: "x", ToolCallID: "call_1"})
+			},
+			param: "messages[2].tool_call_id",
+			msg:   `not "tool"`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := checkToolMessages(c.mutate(withCall()))
+			if err == nil {
+				t.Fatal("the conversation was accepted")
+			}
+			var pe *paramError
+			if !errors.As(err, &pe) {
+				t.Fatalf("error %v is not a paramError", err)
+			}
+			if pe.param != c.param {
+				t.Errorf("param = %q, want %q", pe.param, c.param)
+			}
+			if !strings.Contains(pe.message, c.msg) {
+				t.Errorf("message %q does not contain %q", pe.message, c.msg)
+			}
+		})
+	}
+
+	// A tool turn with no tool_call_id at all is allowed: some clients send the result without
+	// echoing an id, and the turn is still renderable because the call precedes it.
+	t.Run("a tool result with no call id is accepted", func(t *testing.T) {
+		msgs := append(withCall(), chatMessage{Role: "tool", Content: "x"})
+		if _, err := checkToolMessages(msgs); err != nil {
+			t.Errorf("a result without a call id was refused: %v", err)
+		}
+	})
+}
+
+// TestResolveToolCallMessages pins the decoding of a message's tool_calls and the argument shapes.
+func TestResolveToolCallMessages(t *testing.T) {
+	cases := []struct {
+		name  string
+		raw   string
+		want  string
+		param string
+		msg   string
+	}{
+		{
+			name: "arguments as an object",
+			raw:  `[{"id": "c", "type": "function", "function": {"name": "f", "arguments": {"city": "P"}}}]`,
+			want: `{"city": "P"}`,
+		},
+		{
+			name: "arguments as a JSON string, which is what the response writes",
+			raw: `[{"id": "c", "type": "function", "function": ` +
+				`{"name": "f", "arguments": "{\"city\": \"P\"}"}}]`,
+			want: `{"city": "P"}`,
+		},
+		{
+			name: "no arguments member becomes {}",
+			raw:  `[{"id": "c", "type": "function", "function": {"name": "f"}}]`,
+			want: `{}`,
+		},
+		{
+			name:  "a number argument is refused",
+			raw:   `[{"id": "c", "type": "function", "function": {"name": "f", "arguments": 42}}]`,
+			param: "messages[0].tool_calls[0].function.arguments",
+			msg:   "must be a JSON object or a string containing one",
+		},
+		{
+			name:  "a string that is not an object is refused",
+			raw:   `[{"id": "c", "type": "function", "function": {"name": "f", "arguments": "text"}}]`,
+			param: "messages[0].tool_calls[0].function.arguments",
+			msg:   "does not contain a JSON object",
+		},
+		{
+			name:  "a call with no name is refused",
+			raw:   `[{"id": "c", "type": "function", "function": {"arguments": {}}}]`,
+			param: "messages[0].tool_calls[0].function.name",
+			msg:   "names no tool",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msgs := []chatMessage{{Role: "assistant", ToolCalls: json.RawMessage(c.raw)}}
+			err := resolveToolCallMessages(msgs)
+			if c.param != "" {
+				if err == nil {
+					t.Fatalf("%s was accepted", c.raw)
+				}
+				var pe *paramError
+				if !errors.As(err, &pe) {
+					t.Fatalf("error %v is not a paramError", err)
+				}
+				if pe.param != c.param {
+					t.Errorf("param = %q, want %q", pe.param, c.param)
+				}
+				if !strings.Contains(pe.message, c.msg) {
+					t.Errorf("message %q does not contain %q", pe.message, c.msg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveToolCallMessages: %v", err)
+			}
+			if got := msgs[0].parsedToolCalls; len(got) != 1 || got[0].Arguments != c.want {
+				t.Errorf("parsed = %+v, want arguments %q", got, c.want)
+			}
+		})
+	}
+
+	// tool_calls belongs on an assistant turn only; anywhere else it is refused by name.
+	t.Run("tool_calls on a user turn", func(t *testing.T) {
+		msgs := []chatMessage{{Role: "user", ToolCalls: json.RawMessage(
+			`[{"id": "c", "type": "function", "function": {"name": "f"}}]`)}}
+		err := resolveToolCallMessages(msgs)
+		if err == nil {
+			t.Fatal("tool_calls on a user turn was accepted")
+		}
+		if !strings.Contains(err.Error(), "only an assistant turn makes calls") {
+			t.Errorf("error %q does not say which role may carry calls", err)
+		}
+	})
+}
+
+// TestToolCallGateHoldsAnUnterminatedCall covers the flush path that was uncovered: a stream that
+// ends inside a call.
+//
+// The behaviour matters because it decides what a client sees when generation is cut off mid-call
+// -- a budget running out, a cancel, a stop string firing inside the JSON. Releasing the fragment
+// as content would send the call's own bytes as prose, immediately before parseToolCalls either
+// reports them as a call (when the fragment happens to parse) or returns them as content anyway
+// (when it does not). Dropping them here is safe for that reason and only for that reason: nothing
+// is lost, because the decision is made once, from the whole text.
+func TestToolCallGateHoldsAnUnterminatedCall(t *testing.T) {
+	var g toolCallGate
+	g.push("before <tool_call>{\"name\": \"f\", \"argum")
+	if got := g.flush(); got != "" {
+		t.Errorf("flush released %q from an unterminated call; the bytes belong to the parser", got)
+	}
+	// And the parser agrees the fragment is not a call, so it comes back as text rather than
+	// disappearing: what the gate withheld is recoverable from the text it kept.
+	if _, calls := parseToolCalls(g.text); len(calls) != 0 {
+		t.Errorf("an unterminated call parsed as %+v", calls)
+	}
+	if !strings.Contains(g.text, "before ") {
+		t.Errorf("the gate dropped the prose before the marker: %q", g.text)
+	}
+}
+
+// TestJSONKind covers the helper the argument checks are built on. Its empty-input answer (0) was
+// uncovered, and it is the one that decides an absent arguments member is not an object.
+func TestJSONKind(t *testing.T) {
+	cases := []struct {
+		in   string
+		want byte
+	}{
+		{"", 0},
+		{"   \n\t ", 0},
+		{`{"a": 1}`, '{'},
+		{`  "text"`, '"'},
+		{"42", '4'},
+		{"null", 'n'},
+	}
+	for _, c := range cases {
+		if got := jsonKind(json.RawMessage(c.in)); got != c.want {
+			t.Errorf("jsonKind(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestCheckToolsRefusesMalformedConversationJSON covers the decode failure the table above does not
+// reach: tool_calls that is not an array of objects at all.
+func TestCheckToolsRefusesMalformedConversationJSON(t *testing.T) {
+	for _, raw := range []string{`{"id": "c"}`, `["not an object"]`, `[{"function": 42}]`} {
+		msgs := []chatMessage{{Role: "assistant", ToolCalls: json.RawMessage(raw)}}
+		err := resolveToolCallMessages(msgs)
+		if err == nil {
+			t.Errorf("tool_calls %s was accepted", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), "must be an array of") {
+			t.Errorf("error for %s does not say the shape: %v", raw, err)
+		}
+	}
+}
+
+// TestArgumentsTextRefusesANonStringJSON covers the branch where arguments is syntactically a
+// string but does not decode as one. It is unreachable from JSON input (encoding/json would have
+// rejected the outer document), so it is exercised directly: the check exists so that a future
+// caller passing raw bytes cannot get past it silently.
+func TestArgumentsTextRefusesANonStringJSON(t *testing.T) {
+	if _, err := argumentsText(json.RawMessage(`"unterminated`)); err == nil {
+		t.Error("a string that does not decode was accepted as arguments")
+	}
+}
+
+// TestCheckToolChoiceRefusesNonObject covers tool_choice values that are valid JSON but neither a
+// string nor an object, which is the decode-error branch.
+func TestCheckToolChoiceRefusesNonObject(t *testing.T) {
+	for _, raw := range []string{"[1]", "true", "42"} {
+		_, err := checkToolChoice(json.RawMessage(raw), nil)
+		if err == nil {
+			t.Errorf("tool_choice %s was accepted", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), "must be") {
+			t.Errorf("error for %s does not describe the accepted shapes: %v", raw, err)
 		}
 	}
 }

@@ -4550,6 +4550,44 @@ func TestChatRendersToolSignaturesIntoThePrompt(t *testing.T) {
 	if strings.Contains(without, "TOOLS:") {
 		t.Errorf("a request with no tools took the tool branch: %q", without)
 	}
+
+	// tool_choice "none" declares tools but withholds them, which is the one direction that needs
+	// no prompt rewrite. It was broken until a test asked: jsonAsks answers false for the string
+	// "none" -- it was written for the old refusal, where every non-empty form was refused -- so
+	// the mode came back "auto" and the tools went into the prompt anyway. The documentation in
+	// doc.go and usage.md both said "none" withholds them, so the code was the thing that was
+	// wrong. This assertion is what distinguishes the two.
+	noneBody := `{"messages": [{"role": "user", "content": "hi"}], "tools": [` + tool + `],
+		"tool_choice": "none"}`
+	var noneReq chatRequest
+	if err := json.Unmarshal([]byte(noneBody), &noneReq); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	declared, _, err := checkTools(noneReq.Tools)
+	if err != nil {
+		t.Fatalf("checkTools: %v", err)
+	}
+	choice, err := checkToolChoice(noneReq.ToolChoice, declared)
+	if err != nil {
+		t.Fatalf("checkToolChoice: %v", err)
+	}
+	if choice.Mode != modeNone {
+		t.Fatalf("tool_choice \"none\" became %q, want %q", choice.Mode, modeNone)
+	}
+	noneTurns, err := checkToolMessages(noneReq.Messages)
+	if err != nil {
+		t.Fatalf("checkToolMessages: %v", err)
+	}
+	// What the handler does with the mode: it drops the spec list, which is the whole effect of
+	// "none". Passed explicitly here rather than reusing noneSpecs, so the assertion below is
+	// about the render the handler would do and not about a value the test forgot to change.
+	nonePrompt, err := srv.renderChatTurns(noneTurns, nil, nil)
+	if err != nil {
+		t.Fatalf("renderChatTurns: %v", err)
+	}
+	if strings.Contains(nonePrompt, "TOOLS:") {
+		t.Errorf("tool_choice none still rendered the tools: %q", nonePrompt)
+	}
 }
 
 // TestChatParsesToolCallsOutOfTheReply covers the response-side half end to end: the model writes

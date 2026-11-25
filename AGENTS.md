@@ -29,7 +29,7 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外十四个是辅助配方，不进门槛，但会用得上：
+上面是门槛和发布入口。另外十三个是辅助配方，不进门槛，但会用得上：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题

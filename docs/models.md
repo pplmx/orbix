@@ -308,16 +308,24 @@ check every claim the project makes. `go test ./... -v | grep -c '^--- SKIP'` is
 it is worth re-measuring rather than trusting these figures -- adding a gated test raises it.
 Measured 2026-11:
 
-| Gates set    | Skipped |
-| ------------ | ------- |
-| none         | 31      |
-| all fourteen | 0       |
+| Gates set                                                                                                         | Skipped |
+| ----------------------------------------------------------------------------------------------------------------- | ------- |
+| none                                                                                                              | 31      |
+| the six that were on hand (`MODEL`, `QWEN2_MODEL`, `QWEN3_MODEL`, `GEMMA2_MODEL`, `GEMMA3_MODEL`, `MODEL_KQUANT`) | 9       |
+| all fourteen                                                                                                      | 0       |
 
-Both figures re-measured 2026-11 with `go test -v ./...`. The table names two rows rather than a
-ladder because the middle rungs stop meaning anything once the gates outnumber the checkpoints: a
-row for "the four original" said something when four was most of them and says nothing now, and the
-number under it moves whenever a gated test is added. What a reader needs is where the count starts
-and that it reaches zero.
+Both end figures re-measured 2026-11 with `go test -v ./...`; the middle row was measured the same
+way on 2026-11-25, with six checkpoints downloaded from ModelScope and set. The nine it leaves are
+worth naming because they show what the remaining gates buy: three are the `ORBIX_*` dump switches
+(`TestDumpRope`, `TestDumpDequant`, `TestDumpPreSplit`), which read no checkpoint at all, and six
+need a file those six do not cover -- Gemma 1, a MoE checkpoint, a Llama v2 file, a FIM/code model,
+one of the four 32-weight quantizations, and the reference-corpus generator. A machine that has six
+of the fourteen is therefore closer to covered than the ratio suggests.
+
+The table names three rows rather than a full ladder because a row per gate would mostly restate
+the same fact. What a reader needs is where the count starts, that it reaches zero, and -- from the
+middle row -- that most of the distance is covered by the small checkpoints rather than only by the
+large ones.
 
 There are fourteen gates: ten named directly at the call site, and four that
 `internal/quant/formats_real_test.go` looks up from a table. The four table rows are easy to miss

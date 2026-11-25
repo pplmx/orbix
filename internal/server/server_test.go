@@ -6373,6 +6373,28 @@ func TestRequestLargerThanThePoolIsRefusedPermanently(t *testing.T) {
 		}
 	}
 
+	// The same refusal with n=2 has to state the multiplication. A single-choice message
+	// quoting the prompt-plus-budget figure reads as if one choice needed those blocks, and
+	// with n choices the total is n times that. This branch had no test: every case above
+	// leaves n at its default, so `if candidates > 1` never ran.
+	multi := post(t, srv.Handler(), "/v1/completions",
+		`{"prompt": `+quoteJSON(over)+`, "max_tokens": 4, "n": 2, "temperature": 1.2, "seed": 5}`)
+	defer func() { _ = multi.Body.Close() }()
+	if multi.StatusCode != http.StatusBadRequest {
+		t.Fatalf("n=2 status = %d, want 400", multi.StatusCode)
+	}
+	multiBody := readBody(t, multi)
+	for _, want := range []string{
+		"times 2 sequences at",
+		// The blocks one sequence of this size needs, which the message quotes per sequence.
+		"blocks each",
+		"context_length_exceeded",
+	} {
+		if !strings.Contains(multiBody, want) {
+			t.Errorf("n=2 body does not contain %q:\n%s", want, multiBody)
+		}
+	}
+
 	// A request that fits must still be served: the refusal is about the size, not about the
 	// pool existing.
 	fits := post(t, srv.Handler(), "/v1/completions", `{"prompt": "hi", "max_tokens": 2}`)

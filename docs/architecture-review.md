@@ -8,20 +8,20 @@
 
 | 包                  | 代码行    | 函数（含方法） | 顶层函数 | 测试行    | 测试/代码 |
 | ------------------- | --------- | -------------- | -------- | --------- | --------- |
-| `internal/tokenize` | 4821      | 138            | 109      | 7016      | 1.46      |
-| `internal/llama`    | 4807      | 135            | 40       | 12480     | 2.60      |
-| `internal/server`   | 4225      | 96             | 41       | 10622     | 2.51      |
-| `cmd/orbix`         | 3596      | 78             | 74       | 7953      | 2.21      |
-| `internal/chat`     | 2614      | 72             | 36       | 4160      | 1.59      |
-| `internal/engine`   | 1965      | 45             | 19       | 5819      | 2.96      |
-| `internal/gguf`     | 1488      | 51             | 14       | 2875      | 1.93      |
-| `internal/quant`    | 873       | 27             | 20       | 3153      | 3.61      |
+| `internal/server`   | 5023      | 109            | 51       | 12324     | 2.45      |
+| `internal/tokenize` | 4843      | 138            | 109      | 7073      | 1.46      |
+| `internal/llama`    | 4820      | 135            | 40       | 12844     | 2.66      |
+| `cmd/orbix`         | 3746      | 82             | 78       | 8342      | 2.23      |
+| `internal/chat`     | 2767      | 73             | 37       | 4426      | 1.60      |
+| `internal/engine`   | 2065      | 47             | 20       | 6082      | 2.95      |
+| `internal/gguf`     | 1490      | 51             | 14       | 2968      | 1.99      |
+| `internal/quant`    | 904       | 27             | 20       | 3510      | 3.88      |
 | `internal/gguftest` | 817       | 22             | 14       | 372       | 0.46      |
-| `internal/otel`     | 784       | 35             | 14       | 1639      | 2.09      |
-| `internal/kernel`   | 667       | 28             | 20       | 1932      | 2.90      |
+| `internal/otel`     | 789       | 35             | 14       | 1681      | 2.13      |
+| `internal/kernel`   | 705       | 28             | 20       | 2017      | 2.86      |
 | `internal/f16`      | 154       | 4              | 4        | 380       | 2.47      |
-| `internal/arch`     | 14        | 0              | 0        | 481       | 34.36     |
-| **合计**            | **26825** | **731**        | **405**  | **58882** | **2.20**  |
+| `internal/arch`     | 14        | 0              | 0        | 909       | 64.93     |
+| **合计**            | **28137** | **751**        | **421**  | **62928** | **2.24**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -268,7 +268,9 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 谁的断言失去依据"，而不是"有多少个 `x.Name`"。这条和 AGENTS.md 里"判定不可达之前先看函数的参数"
 是同一个道理：静态计数看到的是引用图，不是用途。
 
-覆盖率快照（`go test -cover ./...`，2026-11 末复测）：kernel 99.0%、quant 98.0%、f16 98.1%、tokenize 96.7%、server 94.9%、gguf 94.8%、engine 94.7%、chat 93.2%、otel 91.5%、llama 89.2%、gguftest 88.6%、cmd/orbix 87.8%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`（50.4%，模型加载后的编排难以在测试里跑完整）；删掉 `Key` 之后 `llama` 已无 0% 的函数，最低是 `rememberPrefix`/`feedForwardBatch`/`feedForward`/`sameTokens` 的 66.7%。
+覆盖率快照（`go test -cover ./...`，2026-11-25 复测）：kernel 99.0%、f16 98.1%、quant 98.0%、tokenize 96.8%、engine 96.0%、server 95.7%、gguf 94.8%、chat 93.4%、otel 92.9%、llama 89.9%、gguftest 89.1%、cmd/orbix 88.1%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`（39.2%，模型加载后的编排难以在测试里跑完整）；删掉 `Key` 之后 `llama` 已无 0% 的函数，最低是 `rememberPrefix`/`feedForwardBatch`/`feedForward`/`sameTokens` 的 66.7%。
+
+这一行上一版写的是 2026-11 末的一组数，逐项复算后全部偏低（engine 94.7→96.0、server 94.9→95.7、otel 91.5→92.9），差额来自这段时间新增的测试。**`cmdServe` 是唯一反向的一项：上一版写 50.4%，实测 39.2%**，连续两次 `go tool cover -func` 都是这个数。同段的结论（`cmd/orbix` 的低点集中在 `cmdServe`）仍然成立，错的只是那个百分点。
 
 ## 八、门禁与验证现状
 
@@ -297,9 +299,9 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
    写这段踩了两个 bash 与 just 的交互坑，都记在 justfile 注释里：字符串里的字面换行会**结束 recipe**（just 按缩进读正文），而想用 `$(printf '%s\n' …)` 绕开时，命令替换会**吃掉末尾换行**，最后一行和下一句粘在一起。最终用 bash 数组。
 
 2. **`scripts/jinja_diff.py` 的期望表过期**：`inline_if` 被列在"应当拒绝"里，而 `internal/chat` 在 `6da2e26` 之后已经支持内联条件（Gemma 3 模板需要它）。门槛因此长期出口 1，报的是一个**已经实现**的构造——一个不随功能更新的期望表，会把真实的回归藏在它后面。
-   现在 `inline_if` 移入 SUBSET 并扩成五个用例（两个分支、字段条件、与比较/连接的优先级、嵌套），空出的"应拒绝"位置换成文档确实承诺拒绝的短式 `a if cond`。结果：**598 例，588 与 Jinja2 一致，10 例按设计拒绝，exit 0**（此后补齐 `is none`、`is string` 的缺陷与 `-`、`%` 的对照，现已扩到 714 例、700 一致、4 例按设计发散，数字见第十节后的复算清单）。
+   现在 `inline_if` 移入 SUBSET 并扩成五个用例（两个分支、字段条件、与比较/连接的优先级、嵌套），空出的"应拒绝"位置换成文档确实承诺拒绝的短式 `a if cond`。结果：**598 例，588 与 Jinja2 一致，10 例按设计拒绝，exit 0**（此后补齐 `is none`、`is string` 的缺陷与 `-`、`%` 的对照，现已扩到 712 例、700 一致、2 例按设计发散，数字见第十节后的复算清单）。
 
-覆盖率与 checkpoint 门禁：73 处 `t.Skip` 分布在 28 个测试文件里（2026-11 复算；写下时是 65 和 24，新增的对照脚本和 fixture 测试各带了几处），由 11 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`CODER_MODEL`、`ORBIX_REFERENCE_DIR`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+覆盖率与 checkpoint 门禁：74 处 `t.Skip` 分布在 29 个测试文件里（2026-11-25 复算；上一版写 73 和 28，写下时是 65 和 24），由 11 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`CODER_MODEL`、`ORBIX_REFERENCE_DIR`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
 `ORBIX_PREDUMP`、`ORBIX_QUANTDUMP`、`ORBIX_ROPEDUMP` 不算在这 11 个里：它们不是 checkpoint
 门禁，而是让跨实现对照脚本拿到 Go 侧输出的开关，没有它们时那几个 dump 测试自己跳过。
 
@@ -349,7 +351,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 **本轮已做**（三项小时级的，全部有实测验证）：
 
 1. ~~**删 `PrefixIndex.Key`**~~ — 已删，`Remember` 的注释改成描述真实契约，`internal/llama` 里再无 0% 的函数。
-2. ~~**修 `jinja_diff.py` 的期望表**~~ — 已修，门槛从 exit 1 回到 exit 0（当时 598 例，现 714 例）。顺带把内联条件补成五个用例，并明确写进注释：期望表不随功能更新，是让门槛长期报假回归的原因。
+2. ~~**修 `jinja_diff.py` 的期望表**~~ — 已修，门槛从 exit 1 回到 exit 0（当时 598 例，现 712 例）。顺带把内联条件补成五个用例，并明确写进注释：期望表不随功能更新，是让门槛长期报假回归的原因。
 3. ~~**修 `just lint` 的候选解析**~~ — 已修，`just check` 在这台机器上首次全绿。
 
 **其余建议项**（半天级，有测试面扩张）：
@@ -398,9 +400,9 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 ## 十、函数级失控：本轮按当下代码做的分解
 
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
-**18 个函数在 100 行以上**（两轮合计从 21 降到 18，且降幅远小于被拆开的函数数——见本节末尾；
+**19 个函数在 100 行以上**（2026-11-25 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；722 个函数，59 个在 60 行以上）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；751 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
@@ -415,12 +417,26 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**仍未处理、>=100 行的十七个**（2026-11 末 AST 实测，731 个函数）：`tokenize.preFamilyOf` 271、
-`chat.evalExpr` 242、`cli.cmdServe` 238、`cli.cmdBench` 234、`server.generate` 189、
-`server.streamOneChoice` 157、`tokenize.loadPreTokenization` 157、`cli.cmdRun` 147、
-`cli.chatSession` 135、`server.blockingResponse` 131、`llama.attentionBatch` 126、
-`tokenize.splitKimiK2` 123、`engine.Submit` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、
-`gguf.Read` 107、`chat.lex` 103。
+**现存的十九个 >=100 行函数**（2026-11-25 AST 实测，751 个函数）：`tokenize.preFamilyOf` 271、
+`chat.evalExpr` 271、`cli.cmdServe` 261、`cli.cmdBench` 234、`server.streamOneChoice` 205、
+`server.generate` 192、`cli.runTo` 165、`tokenize.loadPreTokenization` 157、`cli.chatSession` 135、
+`server.blockingResponse` 131、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、
+`engine.Submit` 122、`server.handleChat` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、
+`gguf.Read` 107、`chat.lex` 103、`cli.validateServeFlags` 101。
+
+这一份上一版写的是「十七个」，逐项复算后变的不只是总数：
+
+- 上一版漏了 `server.handleChat`（122 行），它和表里列出的 `engine.Submit` 一样长；
+- `chat.evalExpr` 从 242 涨到 271，`cli.cmdServe` 从 238 涨到 261，`server.streamOneChoice`
+  从 157 涨到 205，`server.generate` 从 189 涨到 192；
+- `cli.cmdRun` 已改名为 `cli.runTo`（`cmdRun` 现在只是把 `os.Stdout` 传进去的一行）。它一度是
+  174 行，因为流式输出直接写在函数体里；把那段移到 `generateStreaming` 之后是 165，仍比改写前的
+  147 长，多出来的是新增的窗口预算提示与写入错误检查；
+- `cli.validateServeFlags` 新进入清单，101 行。
+
+`validateServeFlags` 进入清单是这套拆分的必然结果：从 `cmdServe` 切出来的部分自己也长到了
+一百行。这不说明拆分做错了，但说明「>=100 行」是个会自我复发的阈值，对它的计数要当作体检
+指标而不是任务清单。
 
 这份清单原先写的是"十二个"，因为生成它的脚本只打印前 12 行（`if i >= 12 { break }`），
 而总数行写的是真实值 17。两个数字都在同一份输出里，被截断的那个进到了文档。补上的五个是
@@ -816,7 +832,7 @@ go test -count=1 ./...                                    # 24s
 go test -cover ./...
 golangci-lint run                                         # 需 v2
 just docs && just cross
-uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # 714 cases, 700 agree, 4 diverge by design, exit 0
+uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # 712 cases, 700 agree, 2 diverge by design, exit 0
 
 # 跨实现对照：三个脚本各自从上游写期望值，不复述 Go 的读法
 ORBIX_PREDUMP=/tmp/pre.json go test ./internal/tokenize/ -run TestDumpPreSplit

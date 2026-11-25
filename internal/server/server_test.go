@@ -220,6 +220,35 @@ func post(t *testing.T, h http.Handler, path, body string) *http.Response {
 // at which the server stopped reading.
 //
 // 413 rather than 400 is the part a client acts on: the JSON was fine, the size was not.
+// TestNonObjectBodySaysWhatArrived covers the body-not-an-object path, which has its own
+// message because there is no field to name.
+//
+// Every other type mismatch says "<param> must be <type>", and param is the path the decoder
+// walked. A body that is an array or a string has no path, so param is empty and the message
+// has to say what did arrive instead. Rewording it left the whole package green.
+func TestNonObjectBodySaysWhatArrived(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, c := range []struct{ body, wantType string }{
+		{`[1, 2]`, "array"},
+		{`"hi"`, "string"},
+		{`42`, "number"},
+	} {
+		resp := post(t, srv.Handler(), "/v1/completions", c.body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400", c.body, resp.StatusCode)
+		}
+		out := decodeBody[errorBody](t, resp)
+		want := "the request body must be a JSON object, but it is " + c.wantType
+		if out.Error.Message != want {
+			t.Errorf("body %s: message = %q, want %q", c.body, out.Error.Message, want)
+		}
+		if out.Error.Code != "invalid_type" {
+			t.Errorf("body %s: code = %q, want invalid_type", c.body, out.Error.Code)
+		}
+	}
+}
+
 func TestOversizedBodyIs413(t *testing.T) {
 	srv, _ := newTestServer(t)
 	limit := srv.maxBodyBytes()

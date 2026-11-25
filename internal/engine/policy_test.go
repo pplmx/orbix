@@ -1079,6 +1079,14 @@ func TestRenderChatPromptCapitalizesRunes(t *testing.T) {
 		{"", "User: hi\nAssistant:", "an empty role defaults to user"},
 		{"é", "É: hi\nAssistant:", "a two-byte rune must survive whole"},
 		{"中文", "中文: hi\nAssistant:", "capitalizing a rune with no upper case leaves it alone"},
+		// A first byte that is not a rune at all. DecodeRuneInString answers RuneError with
+		// size 1 for it, so the guard falls to the else arm, which had no case: the five above
+		// all take the other one. The invalid byte becomes the replacement character rather
+		// than staying invalid -- the assertion below requires a transcript that is valid
+		// UTF-8 whatever the role was, and writing the byte through broke it, measurably:
+		// a request with role "\xffa" returned 200 and the prompt opened with the raw byte.
+		{"\xffa", "\uFFFDa: hi\nAssistant:", "an invalid first byte becomes the replacement character"},
+		{"\xc3", "\uFFFD: hi\nAssistant:", "a lone continuation byte is the same case"},
 	}
 	for _, c := range cases {
 		got := RenderChatPrompt([]Turn{{Role: c.role, Text: "hi"}})

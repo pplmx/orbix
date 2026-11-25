@@ -77,7 +77,13 @@ func RenderChatPrompt(turns []Turn) string {
 			b.WriteString(strings.ToUpper(string(first)))
 			b.WriteString(role[size:])
 		} else {
-			b.WriteString(role)
+			// The role's first byte is not a rune. Writing it through left the transcript with
+			// an invalid UTF-8 sequence, which the encoder then turned into token-per-byte
+			// garbage; measured through the server, a request with role "\xffa" returned 200
+			// and the prompt opened with the raw byte. ToValidUTF8 puts the standard
+			// replacement character there instead, so the transcript stays encodable and the
+			// prompt says *something* was there.
+			b.WriteString(strings.ToValidUTF8(role, "\uFFFD"))
 		}
 		b.WriteString(": ")
 		b.WriteString(strings.TrimSpace(t.Text))

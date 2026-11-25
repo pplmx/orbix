@@ -550,6 +550,72 @@ a larger body cannot describe a prompt the model could attend over. Anything ove
 `413` without reading the rest; unbounded, a 64 MiB request spent 82 seconds being read and
 tokenized before the server could say it was too long.
 
+## In a container
+
+The repository ships a `Dockerfile` that builds the binary and puts it in a `scratch` image.
+That is possible because the build is statically linked: measured, `ldd` says "not a dynamic
+executable" and the ELF has no dynamic section, so the runtime needs no libc and no shell.
+
+```bash
+docker build -t orbix --build-arg VERSION=v0.1.0 --build-arg COMMIT="$(git rev-parse --short HEAD)" .
+docker run --rm -p 8080:8080 -v /path/to/models:/models:ro \
+  orbix --model /models/your-model.gguf
+```
+
+The image does not contain a model. A checkpoint is hundreds of megabytes to several gigabytes
+and belongs in a volume or a derived image; the default `CMD` names `/models/model.gguf` as a
+placeholder so that a run without a `--model` fails with a path rather than starting a server
+with nothing to serve.
+
+Two details in that file are easy to get wrong, and both were found by building from the exact
+context `.dockerignore` produces rather than from the working tree:
+
+- **`-buildvcs=false` is required.** `.dockerignore` excludes `.git`, and without the flag the
+  go command stops with `error obtaining VCS status: exit status 128`. Version metadata comes
+  from `--build-arg` instead, because a build context has no reliable `.git` and stamping a wrong
+  commit hash is worse than stamping none.
+- **The CA bundle is copied in.** Trace export is OTLP over HTTP, which means TLS to any real
+  collector, and `scratch` has no certificate store -- so without it every span fails with
+  `x509: certificate signed by unknown authority` and only `orbix_trace_spans_dropped_total`
+  shows it.
+
+### Probing it
+
+`scratch` has no curl, no wget and no shell, so both probe mechanisms need an http client that is
+already in the image. `orbix healthcheck` is that client, and it is what the image's
+`HEALTHCHECK` line runs:
+
+```bash
+orbix healthcheck --addr http://127.0.0.1:8080          # prints ok and the model name
+orbix healthcheck --addr http://127.0.0.1:8080 --quiet  # exit status only
+```
+
+It checks more than the status code: the body's `status` must be `"ok"`, because a 200 from a
+proxy or a stale process on the same port is "something is listening" rather than "this model is
+ready". The same command works as a Kubernetes exec probe, which avoids needing an `httpGet`
+probe to reach a server that may be bound to loopback:
+
+```yaml
+livenessProbe:
+  exec:
+    command: ["/orbix", "healthcheck", "--addr", "http://127.0.0.1:8080", "--quiet"]
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+readinessProbe:
+  exec:
+    command: ["/orbix", "healthcheck", "--addr", "http://127.0.0.1:8080", "--quiet"]
+  periodSeconds: 10
+  timeoutSeconds: 5
+  # The engine is built before net.Listen, so a 200 means the weights are resident. A checkpoint
+  # that takes longer than this to load will fail readiness until it finishes, which is what the
+  # probe is for -- but a large model on slow storage can exceed a minute.
+  initialDelaySeconds: 60
+```
+
+`terminationGracePeriodSeconds` has to be larger than `--shutdown-grace`, not the other way
+round; [Behind a reverse proxy](#behind-a-reverse-proxy) measures what happens when it is not.
+
 ## Embedding it in a Go service
 
 Not supported today, and the reason is structural rather than an omission. Every package that

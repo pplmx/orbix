@@ -180,3 +180,67 @@ func TestTensorNamesPrefixesEveryLayerTensor(t *testing.T) {
 		}
 	}
 }
+
+// TestOutputWeightSelectsTheRightMatrix covers the decision every forward path makes before it
+// projects logits, on both kinds of model.
+//
+// The function exists because three forward paths (Forward, Prefill, DecodeStep) each had this
+// choice written out, and the comment on it says a fourth that forgot would "silently project
+// through a nil slice or skip a real matrix". The config flag was tested; the selection was not
+// -- nothing asserted which matrix comes back, so a swapped pair or a nil Output on a real
+// projection would have been found by a wrong answer rather than by a failing test.
+//
+// Both arms are built from the same tinyConfig so the two models differ in exactly one thing:
+// whether output.weight is in the file. A tied model has no such tensor, so its projection has
+// to be the embedding; an untied one has it, and returning the embedding there would be wrong
+// even though both are [hidden, vocab] and the shapes would not complain.
+func TestOutputWeightSelectsTheRightMatrix(t *testing.T) {
+	// buildTinyWeights, not buildFile: the latter writes a directory with no tensor data, which
+	// gguf.Read accepts and New does not ("extends past end of file"). The first version of this
+	// test used it and failed at load.
+	write := func(tied bool) string {
+		c := defaultTiny()
+		c.tied = tied
+		return buildTinyWeights(t, c)
+	}
+
+	tiedPath := write(true)
+	tied, err := New(tiedPath)
+	if err != nil {
+		t.Fatalf("New(tied): %v", err)
+	}
+	if !tied.Config().TiedEmbeddings {
+		t.Fatal("the fixture without output.weight did not load as tied; the rest of this test " +
+			"would be asserting the wrong branch")
+	}
+	if tied.W.Output != nil {
+		t.Fatal("a tied model carries an output projection")
+	}
+	if got := tied.outputWeight(); got == nil {
+		t.Fatal("outputWeight is nil for a tied model; the projection would come from nothing")
+	} else if &got[0] != &tied.W.TokenEmbedding[0] {
+		t.Error("a tied model did not project through its embedding matrix")
+	}
+
+	untiedPath := write(false)
+	untied, err := New(untiedPath)
+	if err != nil {
+		t.Fatalf("New(untied): %v", err)
+	}
+	if untied.Config().TiedEmbeddings {
+		t.Fatal("the fixture with output.weight loaded as tied")
+	}
+	if untied.W.Output == nil {
+		t.Fatal("an untied model has no output projection")
+	}
+	if got := untied.outputWeight(); &got[0] != &untied.W.Output[0] {
+		t.Error("a model with its own output projection did not use it")
+	}
+	// And the two matrices are genuinely different, so the assertion above is not comparing a
+	// slice with itself: a loader that filled Output with a copy of the embedding would make
+	// every logit identical and this test would still pass.
+	if &untied.W.Output[0] == &untied.W.TokenEmbedding[0] {
+		t.Error("the untied fixture's output projection aliases its embedding, so this test " +
+			"cannot tell the two branches apart")
+	}
+}

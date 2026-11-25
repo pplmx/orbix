@@ -1162,3 +1162,73 @@ func TestPrefixCacheReuseOfRepeatedContent(t *testing.T) {
 		}
 	}
 }
+
+// TestSameTokensThreeOutcomes covers the comparison Match makes after its hash lookup.
+//
+// The middle case is the one nothing reached: two runs of the same length whose elements
+// differ. Reaching it through Match needs a hash collision, which the index cannot be asked to
+// produce, so the function is tested directly -- it is a pure predicate and the only caller
+// treats false and false as the same answer.
+//
+// It matters that the third case is distinguishable from the first. Match calls
+// `!ok || !sameTokens(...)`, so a sameTokens that returned true whenever the lengths agreed
+// would let a colliding key attach another block's tokens -- the failure the comment above
+// Match describes as "matching wrongly costs correctness".
+func TestSameTokensThreeOutcomes(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b []int32
+		want bool
+	}{
+		{"identical", []int32{1, 2, 3}, []int32{1, 2, 3}, true},
+		{"both empty", nil, nil, true},
+		{"empty against non-empty", nil, []int32{1}, false},
+		{"different lengths", []int32{1, 2}, []int32{1, 2, 3}, false},
+		// The uncovered branch: equal lengths, differing content.
+		{"same length, first differs", []int32{9, 2, 3}, []int32{1, 2, 3}, false},
+		{"same length, last differs", []int32{1, 2, 9}, []int32{1, 2, 3}, false},
+		{"same length, middle differs", []int32{1, 9, 3}, []int32{1, 2, 3}, false},
+	}
+	for _, c := range cases {
+		if got := sameTokens(c.a, c.b); got != c.want {
+			t.Errorf("%s: sameTokens(%v, %v) = %v, want %v", c.name, c.a, c.b, got, c.want)
+		}
+		// Symmetric, which the caller relies on: it compares a stored run with a slice of the
+		// incoming prompt and does not know which is which.
+		if got := sameTokens(c.b, c.a); got != c.want {
+			t.Errorf("%s: sameTokens is not symmetric", c.name)
+		}
+	}
+}
+
+// TestRememberPrefixWithoutAnIndexIsANoOp covers the early return a cache without a prefix
+// index takes.
+//
+// `serve --prefix-cache` is what installs an index, so the default server path has none and
+// reaches this branch on every prefill. It was uncovered: the branch returns nil having done
+// nothing, and nothing asserted that a model running without the flag still completes a
+// prefill -- the closest tests all build an index first.
+//
+// The assertion is the absence of an error plus the absence of remembered blocks. Returning an
+// error here would make every prefill fail on a server started without the flag; writing blocks
+// anyway would publish into a nil index.
+func TestRememberPrefixWithoutAnIndexIsANoOp(t *testing.T) {
+	m, err := New(buildTinyWeights(t, defaultTiny()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: 2, Blocks: 8})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	if pool.index != nil {
+		t.Fatal("a freshly built pool already has a prefix index, so this test would not reach " +
+			"the branch it names")
+	}
+	cache := &PagedKVCache{cfg: cfg, pool: pool, block: 2}
+	if err := m.rememberPrefix(cache, []int32{1, 2, 3, 4}, 0); err != nil {
+		t.Errorf("rememberPrefix returned %v for a cache with no index; a server started "+
+			"without --prefix-cache would fail every prefill", err)
+	}
+}

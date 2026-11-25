@@ -185,6 +185,7 @@ func collect(t *testing.T, ch <-chan Event) ([]int32, string) {
 func TestSubmitRejectsBadRequests(t *testing.T) {
 	e, tok := loadModel(t)
 	cfg := e.Model().Config()
+	before := e.Stats().RequestsSubmitted
 
 	if _, err := e.Submit(Request{}); err == nil {
 		t.Error("Submit accepted an empty prompt")
@@ -223,6 +224,18 @@ func TestSubmitRejectsBadRequests(t *testing.T) {
 	}
 	if reason != "length" {
 		t.Errorf("finish reason = %q, want length: zero is a reached budget, not a stop", reason)
+	}
+
+	// A refused request never entered the queue. The counter is what a caller reads as
+	// "requests the engine agreed to serve", so counting refusals would make the admission
+	// rate wrong in the direction that looks worse -- every rejected argument reading as load.
+	//
+	// Three of the four submissions above were refused and one (MaxTokens: 0) was accepted, so
+	// the counter has to have moved by exactly one. Guarding on zero instead is what this
+	// assertion caught the first time it ran: the accepted one moved it.
+	if got := e.Stats().RequestsSubmitted - before; got != 1 {
+		t.Errorf("four submissions, one of them accepted, moved RequestsSubmitted by %d, want 1",
+			got)
 	}
 }
 

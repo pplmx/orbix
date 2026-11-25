@@ -402,10 +402,12 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 
 两个必须说清的限制：
 
-- **`server` 并没有因此不再导入 `llama`。** 它还用 `Greedy`、`Temperature`、`Biased`、`Sampler`、
-  `TokenBias`、`TokenLogprobs`、`Alternative` 七个符号（采样器与 logprob 类型）。这次消除的是
-  **"用存储层错误做调度判断"** 这一条，不是整个 import 边。上一轮把目标写成"让 server 不再导入 llama"
-  是不准确的，实际能做到的是这条边不再承载一个跨层语义。
+- **`server` 已经不再导入 `llama`。** 这一段原先写的是它还用
+  `Greedy`、`Temperature`、`Biased`、`Sampler`、`TokenBias`、`TokenLogprobs`、`Alternative` 七个符号，
+  所以只能消除"用存储层错误做调度判断"而不能消除整个 import 边。那些类型后来搬进了
+  `internal/engine`，`llama` 的实现以结构化方式满足它们，所以这条边如今不存在——
+  `grep -rn "internal/llama" internal/server/*.go | grep -v _test` 只找到一行注释。
+  `internal/server/imports_test.go` 把这件事钉成了会失败的测试。
 
 - **这处改动无法被测试区分，我没有假装它可以。** 注入验证的结果是：把 `chat.go` 的判断改回
   `llama.ErrPoolExhausted`，`TestExplainChatError` 仍然通过——因为在真实错误上两条链都成立，

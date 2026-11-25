@@ -26,6 +26,10 @@ just bench     # run kernel and engine benchmarks
 just cross     # build all five supported platforms with CGo disabled
 just test-race # the suite under the race detector; needs cgo, so it is separate
 just xcheck    # compare a GGUF file against the Python gguf parser, tensor by tensor
+just stress    # race binary under mixed load: plain, SSE, and clients that hang up; needs MODEL=
+just fixture   # write a synthetic checkpoint big enough for just stress to interrupt
+just skips     # count the tests that skip for want of a checkpoint, which CI reports too
+just isolate   # run the suite twice with shuffling, to catch order dependence
 ```
 
 ## The gates, and where they differ
@@ -69,6 +73,21 @@ This is the check for the assumption a repository cannot test against itself. Th
 fixtures and the converter that wrote them share every assumption, so a wrong one is invisible
 to all three: a dimension order reversed, a block layout misread, or an offset measured from the
 wrong base all produce plausible numbers rather than an error. A second reader is what notices.
+
+## Stressing the server without a checkpoint
+
+`just stress` needs a model to generate from and a request long enough to interrupt mid-stream.
+`just fixture` writes one -- random weights, a few megabytes -- so the disconnect path is
+reachable on a machine with no checkpoint:
+
+```bash
+just fixture && just MODEL=.cache/stress.gguf stress
+```
+
+The weights are random, so the generated text is meaningless. That is fine: the script measures
+whether a disconnect is handled, not what the model said. It fails on a DATA RACE, a 5xx, an
+active gauge that did not return to zero, or a run in which nothing was cancelled -- the last
+condition is what keeps it from reporting ok after testing nothing.
 
 Measured on four checkpoints -- 33, 57, 201 and 290 tensors -- every tensor agreed. The script's
 own failure modes were checked by breaking them: shifting the reported offset by one byte fails

@@ -326,7 +326,9 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 
    真正修掉这一点的是给新构造逐个补上语料条目，并各做一次注入。四种改动当时**全都不让门槛变红**：`<` 改成 `<=`、切片的负起点当成 0、`split` 按首字符切、`namespace` 写回当前帧。原因是旧语料里没有相等边界、负索引、多字符分隔符，也没有 loop 之外的字段赋值。补上这些用例后再注入，四种都被抓住。语料条目是对照的判别力所在，不是例数。
 
-覆盖率与 checkpoint 门禁：73 处 `t.Skip` 分布在 28 个测试文件里（2026-11-26 复算；上一版写 74 和 29，再上一版 73 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+覆盖率与 checkpoint 门禁：73 处 `t.Skip` 分布在 28 个测试文件里（2026-11-26 复算；上一版写 74 和 29，再上一版 73 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+
+“本机没有 `.gguf`”是复算当时的环境，不是永久事实：后来本机装上了 checkpoint，本文后面那些与真实权重相关的结论就是在有文件的情况下重测的。
 
 这一处从 74/29 降到 73/28，是因为 `TestEveryRecipeIsDocumented` 的 `t.Skipf` 改成了 `t.Fatalf`：它原先在 `just` 缺席时静默跳过，而 CI 的 `test-darwin` job 只装 Go，于是那个守卫在 macOS 上一直跑着却什么也没检查。改成失败后 `test-darwin` 补装了 just。**这是本轮唯一一个"守卫自己失效"的例子，也是最难从外部发现的一类。**
 `ORBIX_REFERENCE_DIR` 与 `ORBIX_PREDUMP`、`ORBIX_QUANTDUMP`、`ORBIX_ROPEDUMP` 不算在这 14 个里：它们

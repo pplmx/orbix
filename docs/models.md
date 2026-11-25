@@ -325,6 +325,12 @@ curl -sSL -o /tmp/stories15M-q4_0.gguf \
 Every gate taken together leaves no test skipped, so a machine holding the checkpoints can
 check every claim the project makes. `go test ./... -v | grep -c '^--- SKIP'` is the count, and
 it is worth re-measuring rather than trusting these figures -- adding a gated test raises it.
+
+`just skips` runs the same count and prints the gate count beside it (`gates set: N of 14` before
+`skipped: M`), because a skip total without the gate total cannot be read: 13 means one thing on a
+machine with five checkpoints and another on a machine that used to have six. Prefer it to the raw
+grep when quoting a figure.
+
 Measured 2026-11:
 
 | Gates set                                                                                                         | Skipped |

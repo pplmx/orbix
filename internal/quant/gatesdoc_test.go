@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -248,4 +249,51 @@ func readDoc(t *testing.T, name string) string {
 		t.Fatalf("reading docs/%s: %v", name, err)
 	}
 	return string(b)
+}
+
+// TestArchitectureReviewStatesTheSameGateCount keeps the second document honest about a
+// number the first one is already checked on.
+//
+// docs/models.md's gate table has had a go-here since the count last drifted. The same fact
+// is restated in docs/architecture-review.md, with no guard, and it drifted again in the
+// other direction: that page said "11 个环境变量" and named eleven, four of them missing --
+// MODEL_Q4_1, MODEL_Q5_0, MODEL_Q5_1 and MODEL_IQ4_NL, which live in formats_real_test.go's
+// table and are read through os.Getenv(g.env), so a grep for Getenv never saw them.
+//
+// The lesson is in the document itself now, and this is the check that makes it stick: a
+// fact written in two places needs a guard on both, or the unguarded copy is the one that
+// rots. The review is the unguarded copy here.
+func TestArchitectureReviewStatesTheSameGateCount(t *testing.T) {
+	review, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "docs", "architecture-review.md")))
+	if err != nil {
+		t.Fatalf("read architecture-review.md: %v", err)
+	}
+	gateCount := len(modelGateEnvVars(t))
+
+	// The sentence's own wording, so a rewrite is reported as "update this test with the new
+	// sentence" rather than as a wrong number.
+	claim := regexp.MustCompile(`由 \*\*(\d+)\*\* 个环境变量控制`)
+	m := claim.FindStringSubmatch(string(review))
+	if m == nil {
+		t.Fatalf("architecture-review.md no longer states the gate count as " +
+			`"由 **N** 个环境变量控制"; restore that phrasing or update this pattern`)
+	}
+	if got := m[1]; got != strconv.Itoa(gateCount) {
+		t.Errorf("architecture-review.md says %s environment variables gate the skipped tests; "+
+			"the module reads %d", got, gateCount)
+	}
+
+	// The names as well as the number: a count that matches while a name is missing is how
+	// the previous revision failed.
+	sentence := regexp.MustCompile(`由 \*\*\d+\*\* 个环境变量控制[^。]*。`).FindString(string(review))
+	if sentence == "" {
+		t.Fatal("cannot locate the gate sentence to check its names")
+	}
+	for name := range modelGateEnvVars(t) {
+		// ORBIX_* switches are excluded by modelGateEnvVars already; anything else it reports
+		// is a checkpoint gate and belongs in the sentence.
+		if !strings.Contains(sentence, name) {
+			t.Errorf("architecture-review.md's gate sentence omits %s, which the tests read", name)
+		}
+	}
 }

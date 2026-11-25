@@ -305,9 +305,15 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 
    真正修掉这一点的是给新构造逐个补上语料条目，并各做一次注入。四种改动当时**全都不让门槛变红**：`<` 改成 `<=`、切片的负起点当成 0、`split` 按首字符切、`namespace` 写回当前帧。原因是旧语料里没有相等边界、负索引、多字符分隔符，也没有 loop 之外的字段赋值。补上这些用例后再注入，四种都被抓住。语料条目是对照的判别力所在，不是例数。
 
-覆盖率与 checkpoint 门禁：74 处 `t.Skip` 分布在 29 个测试文件里（2026-11-25 复算；上一版写 73 和 28，写下时是 65 和 24），由 11 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`CODER_MODEL`、`ORBIX_REFERENCE_DIR`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
-`ORBIX_PREDUMP`、`ORBIX_QUANTDUMP`、`ORBIX_ROPEDUMP` 不算在这 11 个里：它们不是 checkpoint
-门禁，而是让跨实现对照脚本拿到 Go 侧输出的开关，没有它们时那几个 dump 测试自己跳过。
+覆盖率与 checkpoint 门禁：74 处 `t.Skip` 分布在 29 个测试文件里（2026-11-25 复算；上一版写 73 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+`ORBIX_REFERENCE_DIR` 与 `ORBIX_PREDUMP`、`ORBIX_QUANTDUMP`、`ORBIX_ROPEDUMP` 不算在这 14 个里：它们
+不是 checkpoint 门禁，而是让跨实现对照脚本拿到输入或 Go 侧输出的开关，没有它们时那几个测试自己跳过。
+
+这一句原先写「11 个」，列出的名单也少了 `MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`。
+四个都读不到 `os.Getenv("...")` 的字面量——它们是 `internal/quant/formats_real_test.go` 那张表的行，
+由 `os.Getenv(g.env)` 间接读取——所以只 grep `Getenv` 会漏掉，而 `docs/models.md` 的对照表一直是对的
+（它由 `TestModelsDocGateTableMatchesTheCode` 双向校验）。**同一份事实写在两份文件里，只有一份有守卫，
+另一份就烂了。** 这份文档里的数字没有守卫，这也是它第二次在该节上出错。
 
 **后续（2026-11 同日）：上面「本机没有任何 `.gguf`」是那一轮的事实，不是当前状态。** 本机有
 Hugging Face checkpoint 目录，用仓库自己的转换器就能造出 GGUF，于是真实权重这条路不再依赖下载：

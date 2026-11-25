@@ -54,3 +54,45 @@ func TestDocsCiteRealFiles(t *testing.T) {
 // repoPath matches a path under one of the directories this repository owns. The trailing
 // extension is required so a directory reference does not match a file that does not exist yet.
 var repoPath = regexp.MustCompile(`\b(?:internal|cmd|scripts)/[a-zA-Z0-9_/.]+\.(?:go|py|sh)\b`)
+
+// TestDocLinksResolve checks that a relative Markdown link points at a file.
+//
+// Relative to the document that contains it, not to the repository root: docs/usage.md links to
+// models.md meaning docs/models.md, and resolving from the root reports that as missing. Checking
+// it the wrong way is how a first attempt at this found a broken link that was not broken.
+func TestDocLinksResolve(t *testing.T) {
+	root := filepath.Join("..", "..")
+
+	docs := []string{
+		filepath.Join(root, "README.md"),
+		filepath.Join(root, "AGENTS.md"),
+		filepath.Join(root, "CONTRIBUTING.md"),
+	}
+	extra, err := filepath.Glob(filepath.Join(root, "docs", "*.md"))
+	if err != nil {
+		t.Fatalf("glob docs: %v", err)
+	}
+	docs = append(docs, extra...)
+
+	checked := 0
+	for _, doc := range docs {
+		body, err := os.ReadFile(doc)
+		if err != nil {
+			t.Fatalf("read %s: %v", doc, err)
+		}
+		for _, m := range markdownLink.FindAllStringSubmatch(string(body), -1) {
+			target := filepath.Join(filepath.Dir(doc), m[1])
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("%s links to %s, which does not exist", doc, m[1])
+			}
+			checked++
+		}
+	}
+	if checked < 5 {
+		t.Fatalf("found %d relative links, which is too few to be checking anything", checked)
+	}
+}
+
+// markdownLink captures the target of a relative .md link. An absolute URL is skipped: this
+// checks the repository, not the network.
+var markdownLink = regexp.MustCompile(`\]\(([a-zA-Z0-9_./-]+\.md)\)`)

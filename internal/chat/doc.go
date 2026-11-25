@@ -60,11 +60,13 @@
 // a neutral transcript when a template cannot be parsed, so an unsupported checkpoint
 // degrades to the old behaviour rather than to a broken prompt.
 //
-// The is-tests cover four of Jinja2's, and three of them answer differently from it. A dict
-// and a string are both iterable in Jinja2; here only a sequence is, because that is the only
-// thing {% for %} can walk. And an absent field reads as empty rather than as Undefined, so
-// `field is none` is true here where Jinja2 says false. The answers are pinned by tests rather
-// than left to drift.
+// The is-tests cover four of Jinja2's, and two of the four answer differently from it: iterable
+// and none. "is mapping" and "is string" agree. A dict and a string are both iterable in Jinja2;
+// here only a sequence is, because that is the only thing {% for %} can walk. And an absent field
+// reads as empty rather than as Undefined, so `field is none` is true here where Jinja2 says
+// false. The answers are pinned by tests rather than left to drift, and jinja_diff.py compares
+// the ones that agree against the reference while asserting the divergent pair produces its
+// documented answer.
 //
 // The difference is not dormant: llama 3.2's template guards a tool message with
 // `message.content is mapping or message.content is iterable`, and message.content is a

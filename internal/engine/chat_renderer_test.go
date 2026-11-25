@@ -100,6 +100,16 @@ func TestChatRendererFallsBackOnUnsupportedTemplate(t *testing.T) {
 	if !strings.Contains(r.FallbackReason(), "macro") {
 		t.Errorf("FallbackReason = %q, want it to name the unsupported construct", r.FallbackReason())
 	}
+	// And it has to say what the fallback costs, not only which construct was at fault. The
+	// parser's message is about its own grammar; an operator reading it in the startup banner
+	// needs to know the server still answers, in a format the model was not trained on.
+	//
+	// Measured on Qwen3-0.6B's template, which uses namespace(...): under the neutral
+	// transcript the model answered a question correctly and then went on inventing turns.
+	if !strings.Contains(r.FallbackReason(), "neutral transcript") {
+		t.Errorf("FallbackReason = %q, want it to say what the fallback means for the prompt",
+			r.FallbackReason())
+	}
 }
 
 // TestChatRendererUsesModelTemplate checks the happy path end to end, including that the

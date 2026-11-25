@@ -130,7 +130,17 @@ func NewChatRenderer(f *gguf.File) (*ChatRenderer, error) {
 	}
 	tmpl, err := chat.Parse(src)
 	if err != nil {
-		r.fallbackReason = err.Error()
+		// The parser's message is about its own grammar ("expected \",\" or \")\" in call to
+		// \"namespace\", got \"=\""), which names the construct at fault but not what it means
+		// for the caller. Appending the consequence is what turns it into something an operator
+		// can act on: the server still answers, in a format the model was not trained on.
+		//
+		// Measured on Qwen3-0.6B's own template, which uses namespace(multi_step_tool=...): the
+		// neutral transcript answers a question correctly and then continues inventing turns,
+		// because that is not the shape the model saw in training.
+		r.fallbackReason = err.Error() +
+			" (this template uses a construct outside the supported Jinja subset, so prompts " +
+			"use a neutral transcript instead of the model's own format)"
 		return r, nil
 	}
 	r.tmpl = tmpl

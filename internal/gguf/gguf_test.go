@@ -1035,7 +1035,7 @@ func TestScalarAsFloatToInteger(t *testing.T) {
 // unsigned case was reached before, because the fixture's large value happens to be
 // unsigned; a negative metadata value is the interesting one, since a conversion that
 // routed signed values through the unsigned field would turn -7 into a huge positive.
-// TestReadIntegerTypeOnATruncatedStream covers the read-error arm of every scalar type.
+// TestReadScalarTypeOnATruncatedStream covers the read-error arm of every scalar type.
 //
 // The happy-path test above feeds exactly the bytes each type needs, so r.bytes never fails
 // there and the error return stayed uncovered for all of them. A stream with nothing left is

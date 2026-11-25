@@ -472,6 +472,36 @@ func TestLoadConfigRejects(t *testing.T) {
 			wantAll: []string{"8", "4"},
 		},
 		{
+			// The two softcaps share one guard, and neither key appeared in this table: the
+			// three "must be a finite positive number" cases above all target rope.freq_base,
+			// which is a different check with the same wording. Reading the grep made the
+			// guard look covered.
+			name: "non-positive attention softcap",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.attn_logit_softcapping", f32Val(0)})
+			},
+			want:    "must be a finite positive number",
+			wantAll: []string{"attn_logit_softcapping = 0"},
+		},
+		{
+			// NaN needs its own case: v <= 0 is false for it, so without the IsNaN clause the
+			// value loads and every score becomes NaN at the first cap.
+			name: "NaN attention softcap",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.attn_logit_softcapping", f32Val(float32(math.NaN()))})
+			},
+			want:    "must be a finite positive number",
+			wantAll: []string{"NaN"},
+		},
+		{
+			name: "infinite final softcap",
+			mutate: func(c *tinyConfig) []kv {
+				return append(c.kvs(), kv{"llama.final_logit_softcapping", f32Val(float32(math.Inf(1)))})
+			},
+			want:    "must be a finite positive number",
+			wantAll: []string{"+Inf"},
+		},
+		{
 			name: "hidden not divisible by heads",
 			mutate: func(c *tinyConfig) []kv {
 				return replaceKey(c.kvs(), "llama.attention.head_count", u32Val(3))

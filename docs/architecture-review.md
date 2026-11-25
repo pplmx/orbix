@@ -267,11 +267,11 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 | ------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | 同包内调用   | `kernel.MatMul`、`kernel.Dot`、`llama.LoadWeights` | 脚本只数跨包的 `x.Name`，漏掉包内直接调用                                                        |
 | 接口实现     | `MarshalJSON`、`UnmarshalJSON`、`Unwrap`           | 通过接口调用，永远不会出现字面的 `SelectorExpr`                                                  |
-| 测试对拍基准 | `MatMul`/`MatVec`/`Dot`                            | `ops.go:106` 原话是 "This is the serial reference"；生产走 `Runner` 的并行版，串行版就是拿来比的 |
+| 测试对拍基准 | `MatMul`/`MatVec`/`Dot`                            | `ops.go:112` 原话是 "This is the serial reference"；生产走 `Runner` 的并行版，串行版就是拿来比的 |
 | 测试观察口   | `RefCount`、`BlocksHeld`、`Positions`              | 见上表                                                                                           |
 
-`MatMul` 的例子最典型：整个仓库只有它的定义、`checkMatMul`（校验形状）和 `ops_test.go` 三处提到它，
-一个纯粹的"零调用"信号。而它的文档写着"Tests compare against this one with a tolerance"，删掉它
+`MatMul` 的例子最典型：跨包的 `SelectorExpr` 一个都没有——它的引用全在包内（定义、`checkMatMul`、几处注释）和
+`ops_test.go` 里，所以扫描器把它当成了零引用。一个看上去完全清白的"可删"信号。而它的文档写着"Tests compare against this one with a tolerance"，删掉它
 等于删掉并行实现的正确性基准。
 
 **结论：这类扫描能列出待查清单，不能给出结论。** 判断一个导出符号该不该删，要问的是"删掉之后
@@ -300,7 +300,7 @@ tied 模型的投影矩阵该用 embedding 还是 Output、同长不同内容的
 | `go vet ./...`                           | 通过                                                                                                            |
 | `go test -count=1 ./...`                 | 通过，24 秒；engine 占 22.7 秒                                                                                  |
 | `just lint`                              | 通过，0 issues（自动选中 v2.15.0）                                                                              |
-| `just docs`（rumdl）                     | 通过，10 个文件（含本文）                                                                                       |
+| `just docs`（rumdl）                     | 通过，11 个文件（含本文）                                                                                       |
 | `just hooks`（prek）                     | 通过                                                                                                            |
 | `just cross`（5 目标）                   | 通过                                                                                                            |
 | `just check` 整体                        | **通过**（本文写完后修好了下面两条）                                                                            |

@@ -319,11 +319,16 @@ func cmdServe(args []string) error {
 	// stopped only once no response is waiting on it.
 	//
 	// The select below is the one part of this command without a test, and it stays that way
-	// rather than being restructured for one: the only way in is a process signal, and
-	// signal.Notify is process-wide, so a test that sent SIGTERM would end the test binary. Making
-	// it testable means taking the signal channel as a parameter, which is a change to the command
-	// for the sake of its test. What the branch does -- drain first, stop the pump after -- is
-	// covered through drainAndStop, which has its own tests and 100% of its statements.
+	// rather than being restructured for one.
+	//
+	// The two cases look like two ways in, but only the signal is reachable on its own: the error
+	// case needs Serve to return, and Serve returns ErrServerClosed only after Shutdown, which
+	// only the signal case calls -- a listener that fails on its own is not something this
+	// function can be handed. So the entry point is a process signal, and signal.Notify is
+	// process-wide: a test that sent SIGTERM would end the test binary. Making it testable means
+	// taking the signal channel as a parameter, which is a change to the command for the sake of
+	// its test. What the signal case does -- drain first, stop the pump after -- is covered
+	// through drainAndStop, which has its own tests and full statement coverage.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	errCh := make(chan error, 1)

@@ -2297,10 +2297,16 @@ func finalChoice(chat bool, index int, reason string, calls []toolCall) map[stri
 
 // samplers builds one sampler per choice.
 //
-// Several choices have to differ from each other, or n>1 would return the same text n times.
-// The seed is therefore anchored on the request and offset by the choice index: choice i gets
-// seed+i, so the same request reproduces the same set of completions in the same order, which
-// is what a caller comparing samples needs.
+// Each choice gets its own sampler so that sampled choices differ from one another; the seed is
+// anchored on the request and offset by the choice index, so choice i gets seed+i and the same
+// request reproduces the same set of completions in the same order, which is what a caller
+// comparing samples needs.
+//
+// Distinct seeds do not by themselves make the choices differ: at temperature 0 every sampler
+// here is greedy, and a greedy sampler never reads its seed, so n>1 returns n copies of one
+// completion. Measured, n:4 at the default temperature returned the same six tokens four times,
+// identically across three requests. This comment used to claim the choices differ whenever
+// they are seeded, which is true only once sampling is on.
 //
 // Every seed is resolved here rather than in sampler(), including the clock read for a request
 // that supplied none. That is what makes the choices differ in that case too: reading the clock

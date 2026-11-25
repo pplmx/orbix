@@ -150,9 +150,11 @@
 // with index i, and usage counts completion_tokens across every choice while counting
 // prompt_tokens once -- the prompt was prefilled per sequence but is the same text. Each
 // choice gets its own sampler, seeded from the request's seed plus the choice index, so a
-// seeded request returns the same set in the same order and the choices differ from each
-// other. One limit remains: maxChoices, because every choice holds its own KV blocks at once,
-// and the refusal names the bound.
+// seeded request returns the same set in the same order. The choices differ from each other
+// only when sampling is on: at temperature 0 every sampler is greedy, and a greedy sampler
+// never reads its seed, so n>1 returns n copies of one completion. One limit remains:
+// maxChoices, because every choice holds its own KV blocks at once, and the refusal names the
+// bound.
 //
 // echo on completions returns the prompt ahead of the generated text, and the two properties
 // that are easy to get wrong are both deliberate: the stop list is applied to the generated part

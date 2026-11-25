@@ -2811,6 +2811,66 @@ func TestSeveralChoicesAreGenerated(t *testing.T) {
 	}
 }
 
+// TestGreedyChoicesAreIdentical pins what n>1 does at the default temperature.
+//
+// The per-choice samplers are seeded seed+i so that sampled choices differ, and the documentation
+// once said the choices "still differ from each other" without qualifying that. They do not at
+// temperature 0: every sampler is greedy, and a greedy sampler never reads its seed, so n
+// choices follow the same argmax and come back identical. Measured through the HTTP API against
+// Qwen2.5-0.5B, n:4 at the default returned the same six tokens four times, identically across
+// three requests.
+//
+// This is asserted rather than merely described because the alternative -- choices that differ
+// at temperature 0 -- would mean the greedy path had started consulting a seed, which changes
+// every reply's reproducibility and is not what "greedy" means.
+func TestGreedyChoicesAreIdentical(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Model{NoEOS: true, ContextLen: 512})
+
+	texts := func(t *testing.T) []string {
+		t.Helper()
+		resp := post(t, srv.Handler(), "/v1/completions",
+			`{"prompt": "Once upon a time", "max_tokens": 6, "n": 3}`)
+		if resp.StatusCode != http.StatusOK {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out.Error.Message)
+		}
+		var got struct {
+			Choices []struct {
+				Text string `json:"text"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		_ = resp.Body.Close()
+		out := make([]string, len(got.Choices))
+		for i, c := range got.Choices {
+			out[i] = c.Text
+		}
+		return out
+	}
+
+	first := texts(t)
+	if len(first) != 3 {
+		t.Fatalf("got %d choices, want 3", len(first))
+	}
+	for i := 1; i < len(first); i++ {
+		if first[i] != first[0] {
+			t.Errorf("choice %d is %q but choice 0 is %q; greedy choices must be identical",
+				i, first[i], first[0])
+		}
+	}
+	// And the sameness is stable across requests, which is the part that makes it greedy rather
+	// than n identical draws from a clock-seeded generator.
+	second := texts(t)
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("choice %d changed between identical requests: %q then %q", i, first[i], second[i])
+		}
+	}
+}
+
 // TestSeveralChoicesAreReproducible pins the other half of the seed contract for n>1.
 //
 // A seed makes a request reproducible, and with several choices that has to mean the whole

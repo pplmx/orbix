@@ -1589,7 +1589,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 			if errors.Is(err, engine.ErrQueueFull) {
 				s.refusedQueueFull.Add(1)
 				w.Header().Set("Retry-After", "1")
-				writeError(w, http.StatusServiceUnavailable, err.Error())
+				// Same reasoning as the exhausted-pool refusal below: the engine's sentence
+				// gives the counts an operator needs ("1 queued for 1 active slots") and stops
+				// there. The appended half names the two flags that change it, because a client
+				// logging this body otherwise learns only that something was full.
+				writeError(w, http.StatusServiceUnavailable, err.Error()+
+					"; retrying after the Retry-After delay succeeds once the queue drains, "+
+					"but a backlog that fills repeatedly needs a larger --max-queued or a "+
+					"higher --max-active")
 				return
 			}
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -1710,7 +1717,17 @@ func (s *Server) blockingResponse(w http.ResponseWriter, r *http.Request, chans 
 			if errors.Is(f, engine.ErrPoolExhausted) {
 				s.refusedPool.Add(1)
 				w.Header().Set("Retry-After", "1")
-				writeError(w, http.StatusServiceUnavailable, f.Error())
+				// The storage layer's sentence carries the geometry an operator needs -- "16
+				// blocks of 16 positions" -- but none of it says what to do, and the prefixes
+				// name internal packages a caller cannot see. Both halves are kept: the
+				// original text, because it is the measurement, and an appended sentence with
+				// the two levers and the fact that retrying alone will not help a request that
+				// is simply too large for the pool.
+				writeError(w, http.StatusServiceUnavailable, f.Error()+
+					"; retrying after the Retry-After delay succeeds once another sequence "+
+					"releases its blocks, but a pool that is too small for the traffic it is "+
+					"given needs a larger --blocks, a smaller --block-size, fewer concurrent "+
+					"requests, or a shorter prompt and max_tokens")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, f.Error())

@@ -1653,6 +1653,18 @@ func TestQueueFullReturns503(t *testing.T) {
 	if got := resp.Header.Get("Retry-After"); got == "" {
 		t.Error("no Retry-After on a 503: a client has nothing to back off on")
 	}
+	// The message has to say what the caller can change. "engine: too many requests waiting
+	// (2 queued for 1 active slots)" names the state and stops, so a caller who has read the
+	// body still does not know whether the fix is more capacity, fewer requests, or a shorter
+	// prompt. Both levers are named here; a test on the state alone would pass against the
+	// message that prompted this.
+	body := decodeBody[errorBody](t, resp)
+	for _, want := range []string{"--max-queued", "--max-active"} {
+		if !strings.Contains(body.Error.Message, want) {
+			t.Errorf("the refusal does not name %s, so it does not say what to change: %q",
+				want, body.Error.Message)
+		}
+	}
 }
 
 // TestPoolExhaustionReturns503 checks the status when the paged cache runs out of blocks.
@@ -1695,9 +1707,18 @@ func TestPoolExhaustionReturns503(t *testing.T) {
 	body := `{"prompt": ` + quoteJSON(prompt) + `, "max_tokens": 4}`
 
 	codes := make(chan int, 16)
+	// The refusal messages are collected from the same requests rather than a second batch:
+	// doubling the concurrent requests changed the timing enough that no request succeeded, so
+	// the test could no longer tell a refusal from a broken setup.
+	refusals := make(chan string, 16)
 	for range 16 {
 		go func() {
 			resp := post(t, srv.Handler(), "/v1/completions", body)
+			var got errorBody
+			if resp.StatusCode == http.StatusServiceUnavailable {
+				_ = json.NewDecoder(resp.Body).Decode(&got)
+			}
+			refusals <- got.Error.Message
 			codes <- resp.StatusCode
 			_ = resp.Body.Close()
 		}()
@@ -1721,6 +1742,30 @@ func TestPoolExhaustionReturns503(t *testing.T) {
 	}
 	if sawServerError {
 		t.Error("a request got 5xx other than 503: pool exhaustion is capacity, not a fault")
+	}
+
+	// And the refusals say what to change. The cache's sentence
+	// ("llama: block pool exhausted (96 blocks of 4 positions)") is the geometry an operator
+	// raises --blocks against and is kept, but on its own it names no lever a caller has and
+	// leaks an internal package name. Checked on the bodies collected above rather than on a
+	// second batch of requests, because doubling the concurrency changed the timing enough
+	// that nothing succeeded and the test stopped measuring refusals at all.
+	checked := 0
+	for range 16 {
+		msg := <-refusals
+		if msg == "" {
+			continue
+		}
+		checked++
+		for _, want := range []string{"--blocks", "--block-size", "max_tokens"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the refusal does not name %s, so it does not say what to change: %q",
+					want, msg)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Error("no refusal message was captured, so the wording was not checked")
 	}
 }
 

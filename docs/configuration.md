@@ -262,6 +262,13 @@ differently:
 | A running sequence cannot get a block it needs         | `503` + `Retry-After`          | back off and retry |
 | The request needs more blocks than the pool ever holds | `400`                          | shorten it         |
 
+The `503` for an exhausted pool carries the cache's own geometry -- "N blocks of M positions"
+-- and a sentence naming the levers: a larger `--blocks`, a smaller `--block-size`, fewer
+concurrent requests, or a shorter prompt and `max_tokens`. The geometry is what an operator
+raises the flag against; the levers are what a client can act on when it cannot change the
+deployment. A message with only the first half tells a caller something went wrong without
+telling them what changed.
+
 The first is answered immediately rather than after a wait -- measured, 15 ms for a request
 arriving against a one-slot server whose single queue place was taken. Queueing it behind work
 that is already queued would only lengthen every client's timeout for an answer that is known

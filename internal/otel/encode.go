@@ -140,7 +140,12 @@ func Encode(resourceAttrs []Attribute, spans []Span) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// encodeAttrs converts attributes to their wire form, dropping keys with no value.
+// encodeAttrs converts attributes to their wire form, dropping any whose key is empty.
+//
+// An empty key carries no name for a backend to store the value under, so such an attribute
+// cannot be represented and is dropped rather than sent with "key": "". This said "dropping
+// keys with no value", which describes a different filter -- a value is always present here,
+// since Attribute holds one by construction.
 func encodeAttrs(attrs []Attribute) []keyValue {
 	if len(attrs) == 0 {
 		return nil

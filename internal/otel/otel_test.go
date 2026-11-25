@@ -269,6 +269,47 @@ func TestEncodeAttributes(t *testing.T) {
 	}
 }
 
+// TestEncodeDropsAttributesWithNoKey covers the one attribute filter in encodeAttrs.
+//
+// The comment there said "dropping keys with no value", which is not what the code does: it
+// drops attributes whose key is the empty string, whatever value they carry. An empty key is
+// not something OTLP can key on, so the drop is right and the wording was wrong; the branch
+// also had no test -- removing the continue and emitting the attribute anyway left the package
+// green.
+func TestEncodeDropsAttributesWithNoKey(t *testing.T) {
+	span := testSpan(t, "chat")
+	span.Attributes = []Attribute{
+		StringAttr("", "value-with-no-key"),
+		IntAttr("", 7),
+		StringAttr("gen_ai.request.model", "qwen2"),
+	}
+	body, err := Encode(nil, []Span{span})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	var probe struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					Attributes []struct {
+						Key string `json:"key"`
+					} `json:"attributes"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	attrs := probe.ResourceSpans[0].ScopeSpans[0].Spans[0].Attributes
+	if len(attrs) != 1 {
+		t.Fatalf("%d attributes, want 1: the two with an empty key should be dropped", len(attrs))
+	}
+	if attrs[0].Key != "gen_ai.request.model" {
+		t.Errorf("kept attribute %q, want gen_ai.request.model", attrs[0].Key)
+	}
+}
+
 // TestEncodeSkipsInvalidSpans protects the batch: a collector rejects a request whose
 // trace id is invalid, so one malformed span would discard every good one with it.
 func TestEncodeSkipsInvalidSpans(t *testing.T) {

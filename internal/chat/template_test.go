@@ -141,17 +141,22 @@ func TestRenderLoopVariables(t *testing.T) {
 	}
 }
 
-// TestRenderSet covers assignment and that a set survives its loop, which is what
-// Llama 3's template relies on.
+// TestRenderSet covers assignment: a value bound at the top level is readable, and a set inside
+// a loop body is readable for the rest of that body.
+//
+// It used to assert that a set inside a loop survived the loop, with a comment saying Llama 3's
+// template relies on that. It does not: its assigns and their reads are both inside the body.
+// Jinja2 scopes the body, and the real Qwen2.5 template depends on that scoping to rebind its
+// loop variable, so the rule now matches -- see TestSetIsScopedToTheLoopBody.
 func TestRenderSet(t *testing.T) {
 	src := `{% set x = 'v' %}{{ x }}`
 	if got := render(t, src, nil, Inputs{}); got != "v" {
 		t.Errorf("got %q, want v", got)
 	}
 	msgs := []Message{{Role: "user", Content: "q"}}
-	src = `{% for m in messages %}{% set y = m.content %}{% endfor %}{{ y }}`
+	src = `{% for m in messages %}{% set y = m.content %}{{ y }}{% endfor %}`
 	if got := render(t, src, msgs, Inputs{}); got != "q" {
-		t.Errorf("got %q, want q (set inside a loop must survive it)", got)
+		t.Errorf("got %q, want q (a set is readable for the rest of the body)", got)
 	}
 }
 
@@ -2925,20 +2930,25 @@ func TestToJSONIndentIsBounded(t *testing.T) {
 	}
 }
 
-// TestSetEscapesALoopBody pins where an assignment made inside a for body is visible after the
-// loop, which is the one place this package deliberately differs from Jinja.
+// TestSetIsScopedToTheLoopBody pins where an assignment made inside a for body is visible,
+// against values measured from jinja2 3.1.6.
 //
-// Jinja scopes a for body: an assignment there does not escape it, and a name first assigned
-// inside a loop renders empty afterwards. This package writes to the outermost frame, so the
-// value survives. The comment on scope records the measurement against jinja2 3.1.6 and says
-// the difference is kept because no template in the corpus the package was written for depends
-// on either reading -- Llama 3's assigns and reads are both inside the body, which the two
-// agree on.
+// The rule has two halves and both are needed. A for body is a scope, so an assignment there
+// does not escape the loop and each iteration gets a fresh frame; an if body is not a scope, so
+// an assignment there writes to the enclosing frame and survives. Every "want" below is what
+// Jinja2 printed for the same template, and the pair of if rows is what says the frame is pushed
+// by the loop rather than by any nested block.
 //
-// Nothing tested that, so a change towards Jinja's rule would have been silent. This is the
-// behaviour as it stands, not a claim that it is right: if the decision is ever revisited, the
-// test should be changed in the same commit as the comment that explains it.
-func TestSetEscapesALoopBody(t *testing.T) {
+// This package used to write every assignment to the outermost frame, which is neither half. The
+// difference was recorded as harmless because no template in the corpus depended on it -- until
+// the real Qwen2.5 template arrived, whose tool-call branch does
+// `{% set tool_call = tool_call.function %}` inside a loop. Under the old rule that assignment
+// wrote past the loop frame, so the branch read the outer dict and every tool call rendered as
+// an empty name. TestQwen2ToolConversationMatchesJinja2 is the end-to-end case for that.
+//
+// A change that reverts the rule fails here, which is the point: the two rows that used to say
+// "inside" and "ab-b" now say what Jinja2 says.
+func TestSetIsScopedToTheLoopBody(t *testing.T) {
 	msgs := []Message{{Role: "user", Content: "a"}, {Role: "user", Content: "b"}}
 
 	for _, c := range []struct {
@@ -2950,9 +2960,12 @@ func TestSetEscapesALoopBody(t *testing.T) {
 			want: "before",
 		},
 		{
-			name: "a new name assigned in the body survives the loop",
+			// Jinja2: the name is undefined afterwards, and reading an undefined name is the
+			// one thing this package refuses rather than rendering empty -- see doc.go on
+			// undefined names in output. So the assertion is the refusal, not "".
+			name: "a name first assigned in the body does not survive the loop",
 			src:  `{% for m in messages %}{% set x = "inside" %}{% endfor %}{{ x }}`,
-			want: "inside",
+			want: "",
 		},
 		{
 			name: "the body sees its own assignment",
@@ -2960,20 +2973,49 @@ func TestSetEscapesALoopBody(t *testing.T) {
 			want: "inin",
 		},
 		{
-			name: "the last iteration wins after the loop",
+			name: "the outer value is what remains after the loop",
 			src:  `{% set z = "a" %}{% for m in messages %}{% set z = m.content %}{{ z }}{% endfor %}-{{ z }}`,
-			want: "ab-b",
+			want: "ab-a",
 		},
 		{
-			name: "an if body is not a scope either",
+			name: "an if body is not a scope",
 			src:  `{% if true %}{% set y = "iffed" %}{% endif %}{{ y }}`,
 			want: "iffed",
 		},
+		{
+			// The same if inside a loop: visible for the rest of that iteration, gone after
+			// the loop, because the frame the if wrote to is the loop's.
+			name: "an if body inside a loop writes to the loop's frame",
+			src:  `{% for m in messages %}{% if true %}{% set k = "K" %}{% endif %}{{ k }}{% endfor %}`,
+			want: "KK",
+		},
+		{
+			// Guarded with `is defined` because this package refuses to print an undefined
+			// name where Jinja2 prints nothing; the second iteration is the one that asks.
+			name: "each iteration gets a fresh frame",
+			src:  `{% for m in messages %}{% if loop.first %}{% set q = "Q" %}{% endif %}[{% if q is defined %}{{ q }}{% endif %}]{% endfor %}`,
+			want: "[Q][]",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := render(t, c.src, msgs, Inputs{})
-			if got != c.want {
-				t.Errorf("%q rendered %q, want %q", c.src, got, c.want)
+			got, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := got.Render(msgs, Inputs{})
+			if c.want == "" {
+				if err == nil {
+					t.Errorf("%q rendered %q, want a refusal: the name is undefined after the"+
+						" loop, and rendering it silently is the failure doc.go is written against",
+						c.src, out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Render %q: %v", c.src, err)
+			}
+			if out != c.want {
+				t.Errorf("%q rendered %q, want %q", c.src, out, c.want)
 			}
 		})
 	}

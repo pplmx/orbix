@@ -159,6 +159,10 @@ func TestTemplateAssetsAreExact(t *testing.T) {
 		"gemma2-it.jinja":        {591, "ecd6ae513fe103f0eb62e8ab5bfa8d0fe45c1074fa398b089c93a7e70c15cfd6"},
 		"gemma3-it.jinja":        {1654, "af95fbef33b76a50e5f463ff9766f85ce84f5849d915c4bd6c1619d852ac3231"},
 		"llama32-instruct.jinja": {3827, "5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4"},
+		// Extracted byte-for-byte from /models/Qwen2.5-0.5B-Instruct/tokenizer_config.json
+		// (tokenizer.chat_template), so unlike llama32 this one's provenance is checkable: the
+		// source directory is on the machine the asset was taken from.
+		"qwen2-instruct.jinja": {2507, "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f"},
 	}
 	for name, w := range want {
 		raw, err := os.ReadFile(filepath.Join("testdata", name))
@@ -453,5 +457,85 @@ func TestGemma3TemplateRendersTurnMarkers(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "roles must alternate") {
 		t.Errorf("error = %v, want the template's own reason", err)
+	}
+}
+
+// TestQwen2ToolConversationMatchesJinja2 renders a whole tool-calling exchange through the real
+// Qwen2.5 template and compares against what Jinja2 produced for the same conversation.
+//
+// The expected string is not hand-written from reading the template. It is Jinja2 3.1.6's own
+// output for this exact input, captured with
+//
+//	uv run --with jinja2 python3 -c "…open('/models/Qwen2.5-0.5B-Instruct/tokenizer_config.json')…"
+//
+// and pasted here, because the point of the case is the tool round trip and a hand-transcribed
+// expectation would only restate what this package already does. Anything that drifts -- the
+// arguments JSON's spacing, the tool_response wrapper, the blank line before the generation
+// prompt -- changes the prompt the model is trained to read.
+//
+// It reaches three constructs the earlier tool tests did not: iterating a message's tool_calls,
+// `tool_call.function is defined` on a nested mapping, and `{% set tool_call = tool_call.function %}`
+// rebinding a loop variable. The last one is the reason the case exists: this package's `set`
+// writes to the outermost frame, where Jinja2's writes to the enclosing block, and the two
+// readings disagree on exactly this shape.
+func TestQwen2ToolConversationMatchesJinja2(t *testing.T) {
+	tmpl, err := Parse(loadTestTemplate(t, "qwen2-instruct.jinja"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := tmpl.Render(
+		[]Message{
+			{Role: "user", Content: "What is the weather in Paris?"},
+			{Role: "assistant", ToolCalls: []ToolCall{{
+				ID:        "call_1",
+				Name:      "get_weather",
+				Arguments: `{"city": "Paris"}`,
+			}}},
+			{Role: "tool", Content: `{"temp_c": 21}`},
+		},
+		Inputs{
+			AddGenerationPrompt: true,
+			Tools: []Tool{{
+				Name:        "get_weather",
+				Description: "Current weather for a city",
+				// Sorted keys on purpose: tojson sorts them, and this package emits a
+				// Parameters document verbatim, so the two agree only when the caller's key
+				// order is already Python's. See the note in the test body.
+				Parameters: `{"properties": {"city": {"type": "string"}}, "type": "object"}`,
+			}},
+		})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "<|im_start|>system\n" +
+		"You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n" +
+		"\n" +
+		"# Tools\n" +
+		"\n" +
+		"You may call one or more functions to assist with the user query.\n" +
+		"\n" +
+		"You are provided with function signatures within <tools></tools> XML tags:\n" +
+		"<tools>\n" +
+		"{\"function\": {\"description\": \"Current weather for a city\", \"name\": \"get_weather\", \"parameters\": {\"properties\": {\"city\": {\"type\": \"string\"}}, \"type\": \"object\"}}, \"type\": \"function\"}\n" +
+		"</tools>\n" +
+		"\n" +
+		"For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n" +
+		"<tool_call>\n" +
+		"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n" +
+		"</tool_call><|im_end|>\n" +
+		"<|im_start|>user\n" +
+		"What is the weather in Paris?<|im_end|>\n" +
+		"<|im_start|>assistant\n" +
+		"<tool_call>\n" +
+		"{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n" +
+		"</tool_call><|im_end|>\n" +
+		"<|im_start|>user\n" +
+		"<tool_response>\n" +
+		"{\"temp_c\": 21}\n" +
+		"</tool_response><|im_end|>\n" +
+		"<|im_start|>assistant\n" +
+		"\n"
+	if got != want {
+		t.Errorf("Render =\n%q\nwant (Jinja2's own output)\n%q", got, want)
 	}
 }

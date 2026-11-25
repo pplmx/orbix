@@ -106,21 +106,27 @@ func (v value) truthy() bool {
 	return v.text != ""
 }
 
-// scope is a variable environment with one level of nesting for loops.
+// scope is a variable environment with one level of nesting per loop body.
 //
 // Reading walks inward, so the loop variable shadows an outer name of the same kind.
 //
-// Assignments write to the outermost frame, which is NOT what Jinja 3.1 does and the
-// comment here said it was. Measured against jinja2 3.1.6: "{% set x = 'before' %}{% for
-// m in messages %}{% set x = 'inside' %}{% endfor %}{{ x }}" renders "before" there and
-// "inside" here, and a name first assigned inside a loop renders empty there and survives
-// here. Jinja scopes a for body, so an assignment in one does not escape it.
+// Assignments write to the innermost frame, which follows Jinja 3.1: a for body is a scope, so
+// an assignment there does not escape it, and an if body is not a scope, so one there does. Each
+// iteration gets a fresh frame (renderNodes calls child per item), so a set in iteration 1 is not
+// visible in iteration 2 -- measured against jinja2 3.1.6.
 //
-// Kept as it is because the published templates this package was written for do not
-// depend on either reading: Llama 3's assigns and reads are both inside the body, which
-// the two agree on. Changing it would mean a second frame kind for a difference no
-// template in the corpus shows -- but the disagreement is recorded here rather than
-// described as agreement.
+// This used to write to the outermost frame instead, and the comment here described that as a
+// recorded disagreement that no template depended on. The second half stopped being true when the
+// real Qwen2.5 template arrived: its tool-call branch does
+//
+//	{%- for tool_call in message.tool_calls %}{%- if tool_call.function is defined %}
+//	    {%- set tool_call = tool_call.function %}{%- endif %}
+//	    {{- tool_call.name }} …
+//
+// and under the old rule that set wrote past the loop frame, so the template read the *outer*
+// dict's name -- empty for a call that carries only function.name -- and the prompt lost every
+// tool call. TestQwen2ToolConversationMatchesJinja2 fails on the old rule and
+// TestSetIsScopedToTheLoopBody pins the new one, both against values measured from jinja2 3.1.6.
 type scope struct {
 	vars   map[string]value
 	parent *scope
@@ -139,14 +145,8 @@ func (s *scope) lookup(name string) (value, bool) {
 	return value{}, false
 }
 
-// assign writes a name to the root frame.
-func (s *scope) assign(name string, v value) {
-	root := s
-	for root.parent != nil {
-		root = root.parent
-	}
-	root.vars[name] = v
-}
+// assign writes a name to the innermost frame, which is how a for body scopes its own sets.
+func (s *scope) assign(name string, v value) { s.vars[name] = v }
 
 // child returns a nested scope for a loop iteration.
 func (s *scope) child() *scope { return &scope{vars: map[string]value{}, parent: s} }

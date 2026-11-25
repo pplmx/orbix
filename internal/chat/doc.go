@@ -17,7 +17,12 @@
 //   - {% for %} with loop.index0, loop.index, loop.first, loop.last, loop.length,
 //     loop.revindex, and loop.revindex0
 //
-//   - {% set %}, including assigning to a name another statement reads
+//   - {% set %}, including assigning to a name another statement reads. Scoping follows
+//     Jinja2: a for body is a frame of its own, so an assignment there does not escape the loop
+//     and each iteration starts fresh, while an if body is not a frame and one there survives.
+//     The distinction is not decoration -- Qwen2.5's tool-call branch rebinds its loop variable
+//     with {% set tool_call = tool_call.function %}, and a rule that wrote to the outermost frame
+//     made every call render with an empty name
 //
 //   - {{ expression }} with string and variable operands, + concatenation, - subtraction and
 //     % modulo between integers, and the trim, tojson and length filters. + always concatenates,

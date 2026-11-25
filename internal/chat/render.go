@@ -19,6 +19,28 @@ import (
 type Message struct {
 	Role    string
 	Content string
+	// ToolCalls are the calls the assistant made in this turn, empty for every other role.
+	//
+	// A template renders them back into the conversation so the model sees the call it made
+	// before it reads the result; the Qwen and Llama 3.1 formats both write the call as JSON
+	// inside the assistant turn, and neither has a separate message type for it.
+	ToolCalls []ToolCall
+}
+
+// ToolCall is one call an assistant turn carries.
+//
+// Arguments is the JSON text the model produced, kept verbatim rather than parsed: a template
+// prints it with tojson, and re-encoding a decoded map would reorder keys and change the
+// prompt from what the model wrote. A caller that needs the fields decodes it itself.
+type ToolCall struct {
+	// ID is the identifier the response assigned, or empty when the conversation did not
+	// supply one -- a hand-written conversation, or a model format that numbers calls
+	// itself.
+	ID string
+	// Name is the function the model asked to call.
+	Name string
+	// Arguments is the call's arguments as a JSON object.
+	Arguments string
 }
 
 // Template is a compiled chat template. It is safe for concurrent use.
@@ -157,16 +179,43 @@ func (t *Template) Render(msgs []Message, in Inputs) (string, error) {
 }
 
 // messagesValue converts turns into the list a template iterates.
+//
+// tool_calls is present only when the turn made some. The two real templates that read it ask
+// opposite questions of an absent field: Qwen2 writes `not message.tool_calls` and Llama 3 writes
+// `'tool_calls' in message` to mean "this turn has calls". A field that is always present answers
+// one of them wrongly whichever way it is spelled -- bound to an empty list, Qwen2's guard is
+// satisfied but Llama 3's `in` test is true and its template raises "This model only supports
+// single tool-calls at once!" on every plain conversation; omitted, Qwen2 is right and Llama 3 is
+// right. Omitting is what Jinja2 does for a dict that has no such key, which is the behaviour both
+// templates were written against.
+//
+// Reading an absent field does not fail here: a missing key evaluates as none, which doc.go
+// records as one of the deliberate divergences from Jinja2 and is what makes `not message.tool_calls`
+// true rather than an error.
 func messagesValue(msgs []Message) value {
 	items := make([]value, len(msgs))
 	for i, m := range msgs {
-		items[i] = value{
-			isMap: true,
-			fields: map[string]value{
-				"role":    strValue(m.Role),
-				"content": strValue(m.Content),
-			},
+		fields := map[string]value{
+			"role":    strValue(m.Role),
+			"content": strValue(m.Content),
 		}
+		if len(m.ToolCalls) > 0 {
+			calls := make([]value, len(m.ToolCalls))
+			for j, c := range m.ToolCalls {
+				calls[j] = value{isMap: true, fields: map[string]value{
+					"id":   strValue(c.ID),
+					"type": strValue("function"),
+					"function": {isMap: true, fields: map[string]value{
+						"name": strValue(c.Name),
+						// Verbatim: the template prints this with tojson, and a re-encoded map
+						// would reorder the model's own keys and change the prompt.
+						"arguments": rawJSONValue(c.Arguments),
+					}},
+				}}
+			}
+			fields["tool_calls"] = listValue(calls)
+		}
+		items[i] = value{isMap: true, fields: fields}
 	}
 	return listValue(items)
 }

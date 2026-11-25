@@ -4159,6 +4159,24 @@ func TestCandidateScoreIsPerToken(t *testing.T) {
 	// Compared with a tolerance: the samples hold float32 probabilities, so an average of four
 	// of them is not exactly the decimal it was written as.
 	near := func(got, want float64) bool { return math.Abs(got-want) < 1e-6 }
+	// A candidate whose samples and output disagree in length has no whole-run figure:
+	// samples is only filled when log probabilities were requested, so a caller reaching
+	// there without them would otherwise average over a prefix and call it the mean. The
+	// length half of the guard had no test -- removing it left the package green -- and the
+	// empty half does, from the cases below.
+	mismatched := choiceResult{
+		out:     []int32{1, 2, 3},
+		samples: []sampledToken{{logprob: -0.5}},
+	}
+	if got := mismatched.score(); !math.IsInf(got, -1) {
+		t.Errorf("a candidate with 3 outputs and 1 sample scored %v, want -Inf: its mean would "+
+			"describe a run the response does not report", got)
+	}
+	noSamples := choiceResult{out: []int32{1}}
+	if got := noSamples.score(); !math.IsInf(got, -1) {
+		t.Errorf("a candidate with no samples scored %v, want -Inf", got)
+	}
+
 	if got := short.score(); !near(got, -1) {
 		t.Errorf("two tokens at -1 each scored %v, want -1", got)
 	}

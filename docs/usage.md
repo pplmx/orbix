@@ -16,7 +16,8 @@ code has no `import "C"`, so that build works, but it is not the artifact this p
 
 `./models/` is not in the repository, so `--model` has to point at a checkpoint you already have.
 Anything the architecture table in [Models](models.md) lists will serve; the download snippets on
-that page name a file per family, and stories15M q4_0 (19 MB) is enough to watch a request finish.
+that page name a file per family, and stories15M q4_0 is enough to watch a request finish --
+19 MB, which is the same file `docs/configuration.md` measures as 18 MiB.
 
 The server implements `/v1/chat/completions`, `/v1/completions` (streaming and not),
 `/v1/models` plus `/v1/models/{id}` for `models.retrieve`, `/healthz` and `/metrics`. An

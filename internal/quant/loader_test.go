@@ -659,10 +659,13 @@ func TestTensorRejectsAZeroElementCount(t *testing.T) {
 // TestSizedButUndecodableTypeIsNamed covers the second refusal, which is not the one above.
 //
 // An unrecognised type fails at Size(), so the loader reports "unsupported type" before it reads
-// anything. A type this package can size but has no codec for -- IQ1_S, Q8_K, MXFP4 and thirty others
-// -- passes that check, because the directory has to know every block's width to walk the file, and is
-// refused later with "cannot decode <type>". Both messages must name the type, since a file with
-// several tensors needs to know which one is the problem.
+// anything. A type this package can size but has no codec for -- IQ1_S, Q8_K, MXFP4 and seventeen
+// others -- passes that check, because the directory has to know every block's width to walk the
+// file, and is refused later with "cannot decode <type>". Both messages must name the type, since a
+// file with several tensors needs to know which one is the problem.
+//
+// Seventeen rather than a round number: gguf names 34 types and this package decodes 14, counted
+// from the two tables rather than estimated.
 func TestSizedButUndecodableTypeIsNamed(t *testing.T) {
 	// IQ1_S is 256 weights in 50 bytes; the directory sizes it correctly and the decoder has no entry.
 	ti := gguf.TensorInfo{Name: "odd.weight", Dims: []uint64{256}, Type: gguf.IQ1_S}

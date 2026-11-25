@@ -96,7 +96,7 @@ func parseRecipes(out string) []string {
 	return names
 }
 
-// TestArchitectureReviewCIIobCountMatchesTheWorkflow checks the job count AGENTS.md states
+// TestArchitectureReviewCIJobCountMatchesTheWorkflow checks the job count AGENTS.md states
 // against the workflow it describes.
 //
 // This is the third number in this repository to drift in the same way, and it drifted from
@@ -108,7 +108,7 @@ func parseRecipes(out string) []string {
 // Only the count is checked. Which job checks what is a sentence a person writes, and it has
 // no mechanical form -- but a count that disagrees is proof the sentence is stale, which is
 // enough to make someone read it.
-func TestArchitectureReviewCIIobCountMatchesTheWorkflow(t *testing.T) {
+func TestArchitectureReviewCIJobCountMatchesTheWorkflow(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatalf("read ci.yml: %v", err)

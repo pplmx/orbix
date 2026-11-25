@@ -124,6 +124,43 @@ func TestStringMethodsMatchPython(t *testing.T) {
 	}
 }
 
+// TestStringMethodRefusals covers the error paths of the methods above.
+//
+// TestStringMethodsMatchPython exercises only the successes. Five refusals in evalStringMethod
+// had no test at all: calling a method on a boolean, more than one argument to strip/split,
+// an empty strip set, and an empty split separator. Replacing each return with a value left
+// the whole chat suite green, so the messages a template author would see were never read.
+func TestStringMethodRefusals(t *testing.T) {
+	cases := []struct{ src, wantSubstr string }{
+		// A boolean has no text to strip; saying so is better than rendering "True".
+		{`{% set b = true %}{{ b.strip() }}`, "called on a boolean"},
+		{`{{ 'x'.strip('a', 'b') }}`, "takes at most one argument"},
+		// Python's str.strip("") raises ValueError; this says the same thing in words.
+		{`{{ 'x'.strip('') }}`, "removes nothing"},
+		{`{{ 'x'.split('') }}`, "empty separator"},
+		{`{{ 'x'.split(',', 1) }}`, "split() takes at most one argument"},
+	}
+	for _, c := range cases {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", c.src, err)
+			continue
+		}
+		out, err := tpl.Render(nil, Inputs{})
+		if err == nil {
+			t.Errorf("%q rendered %q, want a refusal", c.src, out)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.wantSubstr) {
+			t.Errorf("%q: error %q does not say %q", c.src, err, c.wantSubstr)
+		}
+		// Rendering nothing alongside an error is the quiet half-render to avoid.
+		if out != "" {
+			t.Errorf("%q produced %q alongside its error", c.src, out)
+		}
+	}
+}
+
 // TestOrderingComparisons covers <, >, <= and >=, which were missing entirely.
 //
 // Qwen3's template writes `{% if start_pos < 0 %}`. Before this, the parser stopped at the "<"

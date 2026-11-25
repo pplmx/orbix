@@ -3552,3 +3552,31 @@ func TestPoolExhaustionReachesTheCallerAsTheSentinelsShape(t *testing.T) {
 		t.Errorf("error %q does not carry the pool's own explanation", failure)
 	}
 }
+
+// TestNegativeLimitsFallBackLikeZero pins the lower half of the limits' guard.
+//
+// maxActive and maxQueued both default on `<= 0`, so a caller passing -1 gets the same engine as
+// one passing 0. Nothing tested the negative side: changing either comparison to `== 0` would
+// leave the suite green while making a negative limit reach the scheduler, where a round that can
+// hold -1 sequences is a different bug.
+//
+// The same guard exists in llama's workers() and has this test for the same reason.
+func TestNegativeLimitsFallBackLikeZero(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 64}.Write(t, t.TempDir())
+
+	e, err := New(path, Options{MaxActive: -1, MaxQueued: -1})
+	if err != nil {
+		t.Fatalf("New with negative limits: %v", err)
+	}
+	if got := e.Stats().MaxActive; got != 8 {
+		t.Errorf("MaxActive with -1 = %d, want the default 8", got)
+	}
+
+	zero, err := New(path, Options{})
+	if err != nil {
+		t.Fatalf("New with zero limits: %v", err)
+	}
+	if got, want := e.Stats().MaxActive, zero.Stats().MaxActive; got != want {
+		t.Errorf("-1 gives MaxActive %d and 0 gives %d; the two have to agree", got, want)
+	}
+}

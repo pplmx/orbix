@@ -2546,6 +2546,38 @@ func TestParseErrorsNameTheOffendingTag(t *testing.T) {
 	}
 }
 
+// TestSubscriptErrors covers the two refusals inside a bracket expression.
+//
+// parseBracket has three exits: a plain index, a slice, and two errors -- an empty subscript
+// and one whose "]" never arrives. Neither error had a test; replacing each with a value or a
+// silent accept left the whole package green, so "xs[]" could have parsed as something.
+func TestSubscriptErrors(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{{ xs[] }}`, "empty index"},
+		{`{{ xs[0 }}`, "missing ']' in index expression"},
+		{`{{ xs['a' }}`, "missing ']' in index expression"},
+		// The slice form has two optional bounds, so the empty subscript above is the only
+		// legal way to write nothing between the brackets.
+		{`{{ xs[0] }}`, ""},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if c.want == "" {
+			if err != nil {
+				t.Errorf("Parse(%q): %v, want it accepted", c.src, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a malformed subscript", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Parse(%q) error = %q, want it to contain %q", c.src, err, c.want)
+		}
+	}
+}
+
 // TestLexerErrorsLocateTheProblem covers the message for a tag that is opened and never closed.
 //
 // It carries two things a reader needs: which of the three delimiters was opened, and where. A

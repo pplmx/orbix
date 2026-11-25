@@ -1225,10 +1225,20 @@ func TestRunWarnsBeforeCuttingABudgetToTheWindow(t *testing.T) {
 		})
 		_ = stdout
 	})
-	for _, want := range []string{"500", "32", "window"} {
+	// The three numbers, not the words around them: the budget asked for, and the count that
+	// will actually be produced. The 32-position window minus the prompt leaves 26 tokens --
+	// "Once" encodes to 6 here, because the fixture vocabulary splits it by character -- and 26
+	// is the figure a caller acts on, where asserting the phrase "window" would pass against a
+	// note that never said how many tokens the run would produce.
+	for _, want := range []string{"500", "26", "at most"} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("the preflight note does not mention %q:\n%s", want, errOut)
 		}
+	}
+	// And it must not claim the window is what stopped this run: generation has not started,
+	// so nothing has been cut yet. That sentence belongs to the --stats note printed after.
+	if strings.Contains(errOut, "was cut to") {
+		t.Errorf("the preflight note reports a cut that has not happened:\n%s", errOut)
 	}
 
 	// A budget that fits: no note, or every run would print one.
@@ -1239,8 +1249,8 @@ func TestRunWarnsBeforeCuttingABudgetToTheWindow(t *testing.T) {
 			}
 		})
 	})
-	if strings.Contains(quiet, "window") {
-		t.Errorf("a budget that fits still produced the window note:\n%s", quiet)
+	if strings.Contains(quiet, "at most") {
+		t.Errorf("a budget that fits still produced the preflight note:\n%s", quiet)
 	}
 }
 

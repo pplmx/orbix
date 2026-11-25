@@ -40,7 +40,8 @@ func runTo(dst io.Writer, args []string) error {
 	echo := fs.Bool("echo", false, "print the prompt before the generated text")
 	fromStdin := fs.Bool("stdin", false, "read the prompt from standard input instead of the arguments")
 	workers := workersFlag(fs)
-	stats := fs.Bool("stats", false, "print timing and token counts to stderr")
+	stats := fs.Bool("stats", false, "print timing and token counts to stderr; the tok/s figure "+
+		"covers generation only, so it is not the wall-clock rate including the load")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -133,11 +134,14 @@ func runTo(dst io.Writer, args []string) error {
 	// prompt; --max-tokens is a cap, so a run that ends early on an end-of-sequence token still
 	// produces fewer. It goes to stderr, so piped stdout continues to carry only the reply.
 	if room := nCtx - len(promptTokens); *maxTokens > room {
+		// Kept short because --stats prints a second, more precise note afterwards ("the
+		// budget was cut to N") that only it can write. This one exists for the case --stats
+		// cannot cover: a run that will spend minutes generating needs to know its budget was
+		// replaced before it starts, not once it finishes.
 		fmt.Fprintf(os.Stderr,
-			"orbix: note: --max-tokens %d exceeds what this model's %d-token window leaves "+
-				"after a %d-token prompt, so generation stops at %d; the reply will report "+
-				"finish_reason length either way\n",
-			*maxTokens, nCtx, len(promptTokens), room)
+			"orbix: note: --max-tokens %d exceeded the %d positions left, so at most %d "+
+				"tokens will be generated\n",
+			*maxTokens, room, room)
 	}
 
 	var sampler llama.Sampler = llama.Greedy{}

@@ -90,10 +90,21 @@ func tensorBytes(ti gguf.TensorInfo) (int64, error) {
 // formats exist. Each call decodes afresh, so the returned slice belongs to the caller and
 // subsequent calls are unaffected by anything done to it.
 //
-// The error distinguishes three cases a caller handles differently: no tensor by that name,
-// a type this package cannot decode, and a shape whose byte count would overflow. Each message
-// names the tensor, because a model file with a bad entry usually has several and the first
-// failure is only useful if it says which one.
+// The errors a caller can see here name different problems, and each says which tensor it is
+// about: a model file with a bad entry usually has several, and the first failure is only
+// useful if it says which one. In order of arrival:
+//
+//   - no tensor by that name;
+//   - an element count of zero, which no layer shape can read;
+//   - a shape tensorBytes refuses -- an undecodable type, an element count that is not a
+//     block multiple, or a byte count that does not fit in int64;
+//   - offset and length, from dataStart, when the tensor does not lie inside the file;
+//   - a read that comes up short, and a decode that rejects the bytes it was given.
+//
+// The comment here used to say "three cases a caller handles differently", and nothing in this
+// package does handle them differently -- every caller checks err != nil and reports it. The
+// list above is what the function actually returns; three was a count of the ones the author
+// had in mind, not of the branches that exist.
 func (l *Loader) Tensor(name string) ([]float32, error) {
 	ti, ok := l.file.Tensor(name)
 	if !ok {

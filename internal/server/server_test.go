@@ -8621,6 +8621,27 @@ func newTemplateServer(t *testing.T, tmpl string) (*Server, *tokenize.Tokenizer)
 // cannot act on is a request whose effect the caller will look for in the reply and not find.
 // The status is 400 with param naming the field, so an SDK surfaces it at the call site.
 func TestChatTemplateKwargsRefusedWhenUnusable(t *testing.T) {
+	t.Run("a null value sets nothing", func(t *testing.T) {
+		// JSON null is not a value: it names a variable and gives it none, so the template
+		// would read a hole. Refused rather than passed through, and this is the only branch
+		// of chatTemplateVars that had no test -- replacing the refusal with `out[name] = nil`
+		// left every package green.
+		srv, _ := newTemplateServer(t, `{{ enable_thinking }}{% for m in messages %}{{ m.content }}{% endfor %}`)
+		resp := post(t, srv.Handler(), "/v1/chat/completions",
+			`{"messages":[{"role":"user","content":"hi"}],"max_tokens":1,
+			  "chat_template_kwargs":{"enable_thinking":null}}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body := readBody(t, resp)
+		for _, want := range []string{"chat_template_kwargs", "enable_thinking", "is null"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the refusal does not mention %q: %s", want, body)
+			}
+		}
+	})
+
 	t.Run("the template does not read the name", func(t *testing.T) {
 		// A template that reads enable_thinking but not this.
 		srv, _ := newTemplateServer(t, `{{ enable_thinking }}{% for m in messages %}{{ m.content }}{% endfor %}`)

@@ -19,6 +19,11 @@ import (
 // without a row leaves it promising a checkpoint that will be refused.
 //
 // Neither breaks a build, and neither is visible unless someone compares the two by hand.
+//
+// internal/arch/archdocs_test.go checks the same pair through the source text, and the two are
+// not interchangeable: this one counts every backticked word in a cell, so the Mixtral row's
+// "`llama` with experts" keeps `llama` documented even if its own row is deleted. That is the
+// case the arch version catches and this one misses; keep both.
 func TestModelsDocListsEverySupportedArchitecture(t *testing.T) {
 	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "models.md"))
 	if err != nil {

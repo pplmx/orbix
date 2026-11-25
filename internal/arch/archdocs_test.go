@@ -18,6 +18,12 @@ import (
 //
 // Read from the source rather than through the package: archSpecs is unexported and the only
 // exported accessor returns a joined string, which would make this a test of the formatting.
+//
+// internal/llama/modelsdoc_test.go checks the same pair and is not a duplicate of this: the two
+// disagree on the document's "`llama` with experts" cell, which this one skips and that one
+// counts. Measured by deleting the Llama row: that test stays green, because the Mixtral cell
+// still supplies the name; this one reports `archSpecs has "llama" and docs/models.md does not
+// list it`. Adding an unknown name to a cell is caught by both.
 func TestModelsDocListsEveryArchitecture(t *testing.T) {
 	root := filepath.Join("..", "..")
 

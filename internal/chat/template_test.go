@@ -1504,6 +1504,12 @@ func TestIfTagErrors(t *testing.T) {
 		// An if closed by the wrong tag. The message names the tag that closed it, which is how a
 		// reader finds the line: "closed by" alone says something is wrong and not what.
 		{`{% if x %}a{% endfor %}`, "closed by {% endfor %}"},
+		// The same pair for a for block, which is a separate function with its own
+		// never-closed and closed-by checks. Only the if versions were here, and parseFor's
+		// closed-by message had no test: replacing its return with nil left every case above
+		// passing, because those cases only ever produced the if message.
+		{`{% for x in xs %}a`, "never closed"},
+		{`{% for x in xs %}a{% endif %}`, "closed by {% endif %}"},
 	}
 	for _, c := range cases {
 		_, err := Parse(c.src)

@@ -436,8 +436,19 @@ skips:
     log=$(mktemp)
     trap 'rm -f "$log"' EXIT
     status=0
+    # The gate count goes with the skip count because the number alone is unreadable: 10 on a
+    # machine with six checkpoints and 10 on a machine that lost one of them are different news,
+    # and the two figures sit in different documents. Printed first, so a run that fails later
+    # still says which shape it was measuring.
+    gates=0
+    for v in MODEL QWEN2_MODEL QWEN3_MODEL GEMMA_MODEL GEMMA2_MODEL GEMMA3_MODEL \
+             MISTRAL_MODEL MIXTRAL_MODEL MODEL_KQUANT MODEL_Q4_1 MODEL_Q5_0 MODEL_Q5_1 \
+             MODEL_IQ4_NL CODER_MODEL; do
+        if [ -n "${!v:-}" ]; then gates=$((gates + 1)); fi
+    done
+    printf 'gates set: %d of 14\n' "$gates"
     go test ./... -count=1 -v >"$log" 2>&1 || status=$?
-    printf '%s\n' "$(grep -ac '^--- SKIP' "$log" || true)"
+    printf 'skipped: %s\n' "$(grep -ac '^--- SKIP' "$log" || true)"
     if [ "$status" -ne 0 ]; then
         echo "just skips: the suite failed (exit $status), so this count describes a broken run" >&2
         exit "$status"

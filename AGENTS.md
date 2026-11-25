@@ -44,10 +44,12 @@ just xcheck-pre # 预分词器与 GPT-2 / Llama 3 的上游正则对照；不需
 just xcheck-quant # 反量化与 ggml quantize.c 的块布局对照，14 种格式
 just xcheck-rope # RoPE 与 numpy 按 RoFormer 定义算出的旋转对照，6 组参数
 just xcheck-fixture # 用 Python gguf 包解析 gguftest 的合成 fixture，比对元数据与张量目录
-just skips   # 数一次运行里实际跳过了多少个测试（当前 31），CI 每轮打印的就是这个数
-             # 本机设齐 5 个 checkpoint 变量（MODEL/QWEN2_MODEL/QWEN3_MODEL/GEMMA2_MODEL/
-             # MODEL_KQUANT）后是 13，设齐 6 个（再加 GEMMA3_MODEL）后是 10（两者均 2026-11-26
-             # 复测）。所以 31 是「没有任何真实权重」的数，不是仓库的常数。5 个那档剩下的 13 个
+just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打印的就是这个数。
+             # 它先打一行 `gates set: N of 14`，再打 `skipped: M`：一个数字单独看没有意义，
+             # 只有配上当时设了几个检查点才知道它说的是什么。实测三档（2026-11-26）：
+             # 0 个 → 31，5 个（MODEL/QWEN2_MODEL/QWEN3_MODEL/GEMMA2_MODEL/MODEL_KQUANT）
+             # → 13，6 个（再加 GEMMA3_MODEL）→ 10。所以 31 是「没有任何真实权重」的数，
+             # 不是仓库的常数。5 个那档剩下的 13 个
              # 要的是这台机器没有的东西：IQ4_NL/Q4_1/Q5_0/Q5_1 四种格式、gemma-1、mistral-v2、
              # 一个 MoE 文件、三个只在设了 ORBIX_*DUMP 时执行的 dump 测试，以及四个需要别的
              # 真实文件的（prefix cache 复用、真实权重矩阵统计、gemma3 的 prompt token ids、

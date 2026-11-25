@@ -396,6 +396,26 @@ func TestIsNotDefinedIsSupported(t *testing.T) {
 			t.Errorf("%q => %q, want %q", c.src, got, c.want)
 		}
 	}
+
+	// The other half: an expression that is not a name, a field or a subscript is refused at
+	// parse time rather than answered with a guess. "is defined" asks whether a *binding*
+	// exists, and a literal or an arithmetic result always does, so answering it would make
+	// the test itself meaningless. No test covered this branch -- returning a node instead of
+	// the error left the package green.
+	for _, src := range []string{
+		`{% if (1 + 2) is defined %}y{% endif %}`,
+		`{% if "a" is defined %}y{% endif %}`,
+		`{% if (x or y) is defined %}y{% endif %}`,
+	} {
+		_, err := Parse(src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted an expression that cannot be tested for definition", src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "needs a variable, field or subscript") {
+			t.Errorf("Parse(%q): error %q does not say what the test applies to", src, err)
+		}
+	}
 }
 
 // TestCloseTagInsideStringLiteral covers a delimiter that appears as data inside a quoted

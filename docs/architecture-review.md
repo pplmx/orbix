@@ -415,9 +415,9 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 ## 十、函数级失控：本轮按当下代码做的分解
 
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
-**19 个函数在 100 行以上**（2026-11-26 复算；本轮拆分前是 18，详见本节末尾的清单；
+**20 个函数在 100 行以上**（2026-11-26 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；761 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；762 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
@@ -432,15 +432,19 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**现存 19 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，761 个函数）：`chat.evalExpr`
+**现存 20 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，762 个函数）：`chat.evalExpr`
 316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
 205、`server.generate` 199、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
 141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`
 122、`server.handleChat` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、`gguf.Read` 107、
-`chat.lex` 103、`cli.validateServeFlags` 101。
+`chat.lex` 103、`cli.validateServeFlags` 101、`chat.parseCompare` 100。
 
 这一份上一版写的是「十九个」，逐项复算后变的不只是总数：
 
+- `chat.parseCompare`（100）是本轮新进入的一项，而且正好卡在线上——多一行就出、少一行就进。
+  它变长是 `is not defined` 的代价：否定形式要在比较运算符的分派里多一个分支。这条最该
+  提醒的是**「>=100 行」这个阈值有多随意**：一个 100 行的函数和一个 99 行的函数在阅读负担
+  上没有区别，而这份清单会对前者计数、对后者视而不见。它的价值在于趋势和命名，不在于数字。
 - `chat.parsePostfix` 上一版新进入清单（113 行）。它后来被拆成 `parsePostfix` 与
   `parseBracket`——加 `[a:b:c]` 都要落在这里，两个函数各管一段比一个函数管三种形式清楚——
   于是它降回 100 行以下、离开清单，而 `chat.evalExpr` 从 310 涨到 316。**这条值得留着**：它是

@@ -26,6 +26,12 @@ func main() {
 	ctx := flag.Int("context", 4096, "context length in positions")
 	flag.Parse()
 
+	if *layers <= 0 || *hidden <= 0 || *ctx <= 0 {
+		fmt.Fprintf(os.Stderr, "genfixture: layers, hidden and context must all be positive (got %d, %d, %d)\n",
+			*layers, *hidden, *ctx)
+		os.Exit(1)
+	}
+
 	m := gguftest.Model{
 		NoEOS:      true,
 		Layers:     *layers,

@@ -1280,3 +1280,23 @@ func TestMatVecRejectsOverflowingShape(t *testing.T) {
 		t.Errorf("error = %q, want it to name which buffer was short", err)
 	}
 }
+
+// TestMatMulRefusesANilOperandItWouldRead covers the case where b is nil and k*n > 0.
+//
+// b is allowed to be nil when nothing would be read, which is what makes k = 0 work without a
+// matrix on the right. The same sign that let that through let a nil reach the inner loop, where
+// it panicked on a slice expression rather than returning an error -- measured before the check:
+// MatMul(dst, a, nil, 2, 2, 2) panicked with "slice bounds out of range [:2] with capacity 0".
+func TestMatMulRefusesANilOperandItWouldRead(t *testing.T) {
+	dst := make([]float32, 4)
+	a := []float32{1, 2, 3, 4}
+
+	if err := MatMul(dst, a, nil, 2, 2, 2); err == nil {
+		t.Fatal("MatMul accepted a nil b with k*n = 4")
+	}
+
+	// The zero case still works: nothing is read, so nothing is required.
+	if err := MatMul(dst, []float32{}, nil, 2, 2, 0); err != nil {
+		t.Errorf("MatMul with k = 0 and a nil b: %v", err)
+	}
+}

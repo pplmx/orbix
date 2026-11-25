@@ -23,6 +23,12 @@ func MatMul(dst, a, b []float32, m, n, k int) error {
 	if err := checkMatMul(dst, a, b, m, n, k); err != nil {
 		return err
 	}
+	// checkMatMul lets a nil b through, which MatMulTransposed relies on: it passes nil there
+	// to reuse the dst and a checks and then validates b itself, as n x k rather than k x n.
+	// Here the nil would be indexed by the loop below, so it is refused only on this path.
+	if b == nil && k*n > 0 {
+		return fmt.Errorf("kernel: b is nil, need %d values", k*n)
+	}
 	for i := range m {
 		dstRow := dst[i*n : (i+1)*n]
 		// Zero the row first: MatMul assigns, it does not accumulate.

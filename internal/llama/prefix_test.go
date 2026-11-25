@@ -17,6 +17,24 @@ import (
 // garbage rather than an error. These tests compare against a run with no reuse at
 // all, so any difference is a bug in the sharing and not in the model.
 
+// TestEnablePrefixCacheKeepsTheFirstIndex pins the idempotency its doc comment promises.
+//
+// A second call must answer the index the pool already has. Two indexes over one pool would
+// each believe they own the block they share, so the same block could be released twice: once
+// by each index's accounting. Nothing tested it -- removing the early return left the package
+// green -- because the one production call site (cmd/orbix/chat.go) calls it once.
+func TestEnablePrefixCacheKeepsTheFirstIndex(t *testing.T) {
+	pool := pagedPool(t, testConfig(), 4)
+	first := pool.EnablePrefixCache()
+	if first == nil {
+		t.Fatal("EnablePrefixCache returned nil")
+	}
+	if second := pool.EnablePrefixCache(); second != first {
+		t.Errorf("a second EnablePrefixCache returned a different index (%p, want %p); two "+
+			"indexes over one pool would both claim the same blocks", second, first)
+	}
+}
+
 func TestPrefixIndexMatch(t *testing.T) {
 	cfg := testConfig()
 	pool := pagedPool(t, cfg, 4)

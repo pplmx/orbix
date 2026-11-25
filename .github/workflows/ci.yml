@@ -135,6 +135,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # just, because the suite needs it. TestEveryRecipeIsDocumented shells out to
+      # `just --list`, and it used to skip when that failed -- so this job ran green having
+      # verified nothing about the justfile. It fails now, which is the point of a guard, and
+      # this step is what keeps that failure from being a macOS-only red.
+      - uses: extractions/setup-just@v4
+
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27"

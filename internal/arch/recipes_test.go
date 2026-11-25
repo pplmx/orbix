@@ -27,7 +27,17 @@ func TestEveryRecipeIsDocumented(t *testing.T) {
 
 	listed, err := exec.Command("just", "--list").Output()
 	if err != nil {
-		t.Skipf("just is not available: %v", err)
+		// A failure rather than a skip. The guard exists to catch a recipe that no document
+		// names, and skipping it when `just` is missing means the CI job that does not install
+		// just -- test-darwin -- runs this and reports green while checking nothing. Measured:
+		// that job installs Go and nothing else, so every recipe in this file was unverified on
+		// macOS.
+		//
+		// The cost is that a contributor without just cannot run the suite. That is already
+		// true of every other gate here -- the justfile is the entry point for all of them --
+		// so this adds a message where there was a silent pass, not a new prerequisite.
+		t.Fatalf("just is not available: %v\nrun `cargo install just` or use your package "+
+			"manager; every gate in this repository is a just recipe", err)
 	}
 	recipes := parseRecipes(string(listed))
 	if len(recipes) == 0 {

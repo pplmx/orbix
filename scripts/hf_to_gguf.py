@@ -188,8 +188,22 @@ def kv_i32s(k, vals):
 # im_end and only uses endoftext as a document separator. Writing the wrong one does
 # not fail to load -- generation simply runs past the end of the answer until it hits
 # the token budget, so the defect shows up as verbose output rather than an error.
-im_start = next(i for i,t in enumerate(vocab) if t == "<|im_start|>")
-im_end   = next(i for i,t in enumerate(vocab) if t == "<|im_end|>")
+def chat_marker(piece):
+    """Return the id of a Qwen2 chat marker, or explain what is missing.
+
+    next() without a default raises StopIteration, and a traceback pointing at this line says
+    nothing about the input: a tokenizer.json whose added_tokens omits the chat markers, or a
+    base model whose vocab predates them, both land here. Naming the token and the file is what
+    lets a caller fix the checkpoint rather than the script.
+    """
+    for i, t in enumerate(vocab):
+        if t == piece:
+            return i
+    sys.exit(f"hf_to_gguf: the vocabulary has no {piece} token, which Qwen2's chat template "
+             f"needs; checked {len(vocab)} entries from {SRC}/tokenizer.json")
+
+im_start = chat_marker("<|im_start|>")
+im_end   = chat_marker("<|im_end|>")
 eos      = im_end
 # Every added special token is a control token, not just the three the model needs to
 # generate. GGUF distinguishes them because a control token never appears in decoded

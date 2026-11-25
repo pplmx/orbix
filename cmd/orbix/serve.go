@@ -317,6 +317,13 @@ func cmdServe(args []string) error {
 	//
 	// Now the drain comes first, which is what the grace period is for, and the pump is
 	// stopped only once no response is waiting on it.
+	//
+	// The select below is the one part of this command without a test, and it stays that way
+	// rather than being restructured for one: the only way in is a process signal, and
+	// signal.Notify is process-wide, so a test that sent SIGTERM would end the test binary. Making
+	// it testable means taking the signal channel as a parameter, which is a change to the command
+	// for the sake of its test. What the branch does -- drain first, stop the pump after -- is
+	// covered through drainAndStop, which has its own tests and 100% of its statements.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	errCh := make(chan error, 1)

@@ -322,11 +322,14 @@ func cmdServe(args []string) error {
 	// rather than being restructured for one.
 	//
 	// The two cases look like two ways in, but only the signal is reachable on its own. The error
-	// case needs Serve to return, and Serve returns ErrServerClosed only after something shuts the
-	// server down. Both cases call Shutdown, but the one here runs after its channel has already
-	// delivered, so the only caller that can precede this select is the signal case's -- and a
-	// listener that fails on its own is not something this function can be handed, since it makes
-	// its own. So the entry point is a process signal, and signal.Notify is
+	// case needs Serve to return before the signal arrives, and the ways Serve returns early are
+	// shutting the server down -- which only the signal case does before this point -- or the
+	// listener breaking under it. The listener is made earlier in this function from *addr and never
+	// leaves this function, so nothing can close it from outside. Measured with a standalone
+	// httptest-shaped program: closing the listener under Serve returns "use of closed network
+	// connection", not ErrServerClosed, so that path would reach the return err below rather than
+	// the nil return -- which is why it is worth saying the listener is unreachable rather than
+	// only that Shutdown comes later. So the entry point is a process signal, and signal.Notify is
 	// process-wide: a test that sent SIGTERM would end the test binary. Making it testable means
 	// taking the signal channel as a parameter, which is a change to the command for the sake of
 	// its test. What the signal case does -- drain first, stop the pump after -- is covered

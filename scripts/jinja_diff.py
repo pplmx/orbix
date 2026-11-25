@@ -201,6 +201,21 @@ SUBSET = {
 # Templates using constructs the package documents as unsupported. The expected Go result is
 # a parse error, which is what makes "unsupported" a designed refusal rather than a wrong
 # render. Jinja2 renders all of them.
+# DIVERGENT holds templates whose Go output is deliberately not what Jinja2 produces. Each entry
+# names what this package does and why, and the script asserts both halves: that the output is the
+# documented one, and that it still differs from Jinja2. Without the second assertion a change that
+# accidentally made the two agree would be reported as an improvement, when it would mean the
+# documented behaviour had changed.
+#
+# The + operator is the one entry: it concatenates rather than adding, so {{ 1 + 2 }} is "12" where
+# Jinja2 says "3". doc.go states it, expr.go states it, and template_test.go pins the Go side -- but
+# nothing compared it against the reference, so the claim "this differs from Jinja2" was untested.
+DIVERGENT = {
+    "plus_concatenates": ("""{{ 1 + 2 }}""", "12"),
+    "plus_concatenates_three": ("""{{ 1 + 2 + 3 }}""", "123"),
+}
+
+
 UNSUPPORTED = {
     # Jinja's short form, which yields Undefined when the condition is false. Jinja2 renders it
     # as the empty string; here it is refused at parse time, which is the documented behaviour:
@@ -266,6 +281,12 @@ def build_cases():
                 "messages": MESSAGES[msgname], "add_generation_prompt": True,
                 "bos_token": "<s>", "eos_token": "</s>", "kind": "subset",
             })
+    for name, (tmpl, want) in DIVERGENT.items():
+        cases.append({
+            "name": f"divergent/{name}", "template": tmpl, "want": want,
+            "messages": MESSAGES["multi"], "tools": TOOLS, "add_generation_prompt": True,
+            "bos_token": "<s>", "eos_token": "</s>", "kind": "divergent",
+        })
     for name, tmpl in UNSUPPORTED.items():
         cases.append({
             "name": f"unsupported/{name}", "template": tmpl,
@@ -470,7 +491,22 @@ def main():
     wrong = []
     refused_ok = []
     refused_bad = []
+    diverged = []
+    diverged_bad = []
     for c, r in zip(cases, results):
+        if c["kind"] == "divergent":
+            # The documented output, and that it is still not what Jinja2 says. Both halves:
+            # agreeing with the reference here would mean the documented behaviour changed.
+            if r["error"]:
+                diverged_bad.append((c["name"], r["error"]))
+            elif r["text"] != c["want"]:
+                diverged_bad.append((c["name"], f"got {r['text']!r}, documented {c['want']!r}"))
+            elif r["text"] == c["oracle"]:
+                diverged_bad.append((c["name"], f"now agrees with Jinja2 ({r['text']!r}); the "
+                                               "documented divergence is gone"))
+            else:
+                diverged.append(c["name"])
+            continue
         if c["kind"] == "unsupported":
             if r["error"]:
                 refused_ok.append(c["name"])
@@ -486,6 +522,8 @@ def main():
             wrong.append((c["name"], r["text"], c["oracle"]))
 
     print(f"{len(cases)} cases compared, {agree} agree with Jinja2")
+    if diverged:
+        print(f"{len(diverged)} diverge by design, each producing its documented output")
     if refused_ok:
         print(f"{len(refused_ok)} unsupported constructs refused, as designed")
     if no_oracle:
@@ -508,6 +546,11 @@ def main():
         print(f"\n{len(refused_bad)} unsupported constructs were RENDERED instead of refused:")
         for name, got in refused_bad:
             print(f"  {name}\n    go {got!r}")
+    if diverged_bad:
+        failed = True
+        print(f"\n{len(diverged_bad)} divergent cases did not behave as documented:")
+        for name, why in diverged_bad:
+            print(f"  {name}\n    {why}")
 
     if args.verbose:
         print("\nagreements:")

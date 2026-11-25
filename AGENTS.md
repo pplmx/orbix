@@ -38,6 +38,7 @@ just clean   # 删 bin/、.rumdl_cache、.cache 和 *.test/*.out/*.prof；不碰
 just isolate # 测试顺序依赖与状态泄漏：-count=2 -shuffle=on；改测试辅助或包级变量后跑
 just stress  # 竞态版二进制跑混合负载（非流式/SSE/中途取消）；要 MODEL=<真实 gguf>，验 active 归零
 just xcheck  # 用 Python 的 gguf 包独立解析同一文件，逐张量比对类型、维度和 SHA-256；要 MODEL= 和 just build
+             # MODEL 不必是真实 checkpoint：just fixture 造的合成文件同样能跑（39 个张量全对）
 just skips   # 数一下这棵树跳过多少个测试，CI 每轮打印的就是这个数
 just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）
 just         # 不带配方等价于 just check

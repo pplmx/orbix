@@ -64,9 +64,19 @@ type cacheFlags struct {
 // workersFlag registers --workers with the one wording every command shares.
 //
 // It is separate from registerCacheFlags because `run` wants it without the cache flags: a
-// one-shot generation has no paged cache to size, but the worker count decides its speed --
-// measured on the fixture, one worker gave 63.6 tok/s on a single stream and 128 gave 248.7,
-// which is the difference between "this is slow" and "this is a usable demo".
+// one-shot generation has no paged cache to size, but the worker count decides its speed.
+//
+// The figures here used to be "one worker gave 63.6 tok/s on a single stream and 128 gave
+// 248.7" -- a 3.9x claim that stopped being true as the fixture and the kernels changed.
+// Re-measured with `orbix run --model .cache/stress.gguf --workers N --max-tokens 64 --stats`,
+// three runs each on the same 128-core host: one worker 707.9, 709.0, 705.1; 128 workers
+// 943.3, 916.6, 984.3. That is 1.34x, not 3.9x.
+//
+// Why 128 workers buy so little is not a bound on the split: `parts()` returns
+// min(workers, work/16384), and this fixture's vocabulary projection is 8192000 multiply-adds,
+// so all 128 are actually used. The 1.34x is what this projection does with them. The old
+// pair was not wrong when written -- the fixture and the kernels have both changed since --
+// but a number in a comment has no way to notice that what it measured has changed.
 func workersFlag(fs *flag.FlagSet) *int {
 	return fs.Int("workers", 0,
 		"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+

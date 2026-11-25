@@ -241,6 +241,14 @@ func (m *Model) normHeads(v []float32, heads int, weight []float32, d int, eps f
 // It differs from attention in one way: the position is not appended. The cache
 // already holds it -- that is what "cached" means here -- and the block may be shared
 // with other sequences, so writing to it would corrupt them.
+//
+// Its six error arms are uncovered and stay that way: each checks a shape that loadConfig
+// already validated, so reaching one needs a Model built some other way. MatVec and
+// RMSNorm refuse a length mismatch, and the weights carry the shapes the config states; the
+// only way to fail them here is to hand this function buffers of the wrong size, which no
+// caller does. The happy path is covered -- TestLogitsForCachedMatchesAFreshPrefill runs it
+// through PrefillWithPrefix on a Qwen2 fixture, which is the family whose query bias this
+// path has to apply for itself.
 func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 	cfg := m.W.Config
 	layer := &m.W.Layers[l]

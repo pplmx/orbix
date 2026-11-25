@@ -303,6 +303,47 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 `ORBIX_PREDUMP`、`ORBIX_QUANTDUMP`、`ORBIX_ROPEDUMP` 不算在这 11 个里：它们不是 checkpoint
 门禁，而是让跨实现对照脚本拿到 Go 侧输出的开关，没有它们时那几个 dump 测试自己跳过。
 
+**后续（2026-11 同日）：上面「本机没有任何 `.gguf`」是那一轮的事实，不是当前状态。** 本机有
+Hugging Face checkpoint 目录，用仓库自己的转换器就能造出 GGUF，于是真实权重这条路不再依赖下载：
+
+`/models/Qwen2.5-0.5B-Instruct`（`model_type` 为 `qwen2`，494,032,768 个参数，
+`tie_word_embeddings: true`，所以安全张量里没有 `lm_head.weight`）。
+
+```bash
+uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
+  /models/Qwen2.5-0.5B-Instruct /tmp/orbixreal/qwen2-f32.gguf
+# loaded 290 tensors / wrote 290 mapped tensors / vocab 151665 / 1979340608 bytes
+```
+
+`QWEN2_MODEL` 指向它之后，与真实权重相关的结论**这一轮全部复测过**，每条都有输出：
+
+| 检查           | 命令                                                                                  | 结果                                                           |
+| -------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| 端到端生成     | `orbix run --model … "The capital of France is"`                                      | `Paris. It is the largest city in Europe…`                     |
+| 服务端 chat    | `curl` 打 `/v1/chat/completions`                                                      | `content: "Paris"`，`finish_reason: stop`，`prompt_tokens: 44` |
+| 模板是真的在用 | `serve` 启动横幅                                                                      | `chat: model template`                                         |
+| 独立解析器对照 | `MODEL=… just xcheck`                                                                 | `290 tensors compared; all agree on type, shape and SHA-256`   |
+| numpy 参考     | `QWEN2_MODEL=… go test ./internal/llama/ -run TestMatchesNumPyReferenceOnRealWeights` | `qwen2` PASS，3 层 residual 全一致                             |
+| 架构门禁       | `QWEN2_MODEL=… go test ./internal/llama/ -run Qwen2`                                  | 6 个 PASS（bias、NeoX rope、prefill 对齐等）                   |
+| 真实模板对照   | `uv run --with jinja2 --with gguf python3 scripts/jinja_diff.py --template-file …`    | `18 cases compared, 18 agree with Jinja2`                      |
+| 竞态混合负载   | `MODEL=… just stress`                                                                 | `ok -- no races, no 5xx, active returned to 0, 3 cancelled`    |
+
+两条数字值得单独记，因为它们以前只有推断：
+
+- **`orbix run --stats` 报 `params: 494032768`**，与 safetensors 头里逐张量求和的参数数一致。
+  转换器写 F32，290 个张量全部 F32，`model inspect` 报 `1.84 GiB`，峰值 RSS 实测 2,787,124 kB
+  （约 2.66 GiB）——即 `docs/configuration.md` 说的「常驻内存跟参数走，不跟文件大小走」在真实
+  checkpoint 上成立，且扩张比 1.4x 是因为这份文件本来就是 F32。
+- **转换出的词表是 151665 个 piece，而 `config.json` 声明 `vocab_size: 151936`。** 差 271 个来自
+  `tokenizer.json` 的 `added_tokens`：最大 id 151664，中间没被定义的位置由转换器补成
+  `<unused{i}>`。生成的 token 落进这些洞里的概率极低，但 `logits` 的宽度是 151936 而不是词表长度，
+  所以两者不是同一个数——`model inspect` 与 `run --stats` 都报 151936，读的人容易以为词表就是那么长。
+
+竞态那一条要看清它证明了什么：`just stress` 的 3 次 cancel 来自排队中被挂断的客户端，判据是
+日志无 `DATA RACE`、无 5xx、`orbix_requests_active` 归零，脚本另外要求取消数非零，否则报失败而
+不是 ok。这台机器 `load average` 在 10–47 之间波动（128 核，`nproc`），所以**这一轮没有做任何
+计时类结论**；18.5 tok/s 是单次观测，不作为性能结论引用。
+
 ## 九、结论与建议的下一步
 
 **本轮已做**（三项小时级的，全部有实测验证）：

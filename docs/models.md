@@ -229,6 +229,33 @@ gates. It is also the one with a visible end-to-end check: `orbix run` on the re
 position window. The file declares `chat_template`, so `serve` reports `chat: model template`
 and the Qwen2.5 Jinja2 template renders the prompt.
 
+Measured on a converted Qwen2.5-0.5B-Instruct, where the source directory was already on the
+machine rather than downloaded (`uv run --offline --with numpy`, 3m22s wall for 290 F32 tensors):
+
+```text
+loaded 290 tensors / wrote 290 mapped tensors / vocab 151665 / 1979340608 bytes
+orbix run --stats:  params 494032768, load 2.873s, gen 32 tokens in 1.726s, cache 38/32768
+orbix serve:        chat: model template
+/v1/chat/completions: content "Paris", finish_reason "stop", prompt_tokens 44
+MODEL=… just xcheck: 290 tensors compared; all agree on type, shape and SHA-256
+```
+
+Two of those numbers are worth reading carefully, because both invite a wrong conclusion:
+
+- **`vocab 151665` is not the vocabulary width.** `config.json` declares `vocab_size: 151936`, and
+  `tokenizer.json` defines 151643 base pieces plus `added_tokens` up to id 151664. The converter
+  fills the 271 undefined ids in between with `<unused{i}>` placeholders, so the file lists 151665
+  pieces while the output projection stays 151936 wide. `model inspect` and `run --stats` both
+  report 151936, which is the logits width.
+- **`params 494032768` matches the safetensors header**, summed per tensor. The converter writes
+  F32 throughout, so `model inspect` reports `1.84 GiB` for the file and the measured peak RSS was
+  2,787,124 kB (2.66 GiB). That is `docs/configuration.md`'s rule -- resident memory follows the
+  parameter count, not the file size -- holding on a real checkpoint, and the 1.4x expansion is
+  small only because this file was already F32.
+
+The `gen 32 tokens in 1.726s` figure is one observation on a machine whose load average moved
+between 10 and 47 during the session; it is not a throughput claim.
+
 `scripts/jinja_diff.py` renders chat templates through both this package and real Jinja2 and
 reports differences. A disagreement is either a bug here or a construct the package documents
 as unsupported; the tool separates the two and exits non-zero on any that render differently

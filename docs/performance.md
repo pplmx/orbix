@@ -66,18 +66,39 @@ Orbix is a learning project, and these are the shapes to expect:
 
 - **The same shape holds on a real checkpoint, not only on the tiny one.** Measured on
   gemma-3-270m-it-Q8_0 with a 4-token prompt and 30 generated tokens, one process, four load
-  levels, `curl` in a shell loop: 20.1 tok/s at one concurrent request, 36.8 at two, 60.5 at
-  four, 61.5 at eight. Latency per request fell from 1493 ms to 496 ms across that range and then
-  flattened between four and eight. The plateau is not `--max-active`: that defaults to 8, so a
-  request at concurrency 8 is still admitted. It is the machine -- the measurements ran on a
-  shared host, and four concurrent sequences are enough to saturate the memory bandwidth the
-  matvecs are bound by, which is the same ceiling the section on parallelism above describes.
+  levels: total throughput rises with concurrency, and per-request latency rises with it too.
 
-  Two numbers from the same run worth keeping beside it, because they are what a single request
-  actually costs: decoding is 28.3 ms per token, and a 64-token prefill is 276 ms batched against
-  1799 ms one token at a time -- a 6.5x gain from the sub-batching that the sequential path cannot
-  have. Both come from `go test -bench` with `MODEL` set, which is where a reader can reproduce
-  them.
+  | concurrent requests | tok/s | per-request latency |
+  | ------------------- | ----- | ------------------- |
+  | 1                   | 30.7  | 975 ms              |
+  | 2                   | 48.2  | 1244 ms             |
+  | 4                   | 69.8  | 1717 ms             |
+  | 8                   | 82.4  | 2909 ms             |
+
+  Every request in a burst finishes at the same time -- at concurrency 4 the four latencies were
+  1724, 1724, 1724 and 1725 ms -- because a round advances all active sequences together. That
+  is why throughput gains and per-request latency loses: the model is one shared resource, and
+  more streams divide it.
+
+  **This section used to say the reverse**: "latency per request fell from 1493 ms to 496 ms
+  across that range and then flattened between four and eight". A shared model cannot make each
+  request faster by adding requests to it, so that sentence was not a stale measurement but a
+  description of something that cannot happen. The earlier throughput figures (20.1, 36.8, 60.5,
+  61.5 tok/s) were replaced by the row above rather than kept beside it: they came from a run
+  whose load was not recorded, and mixing two runs in one table is how this document acquired
+  numbers nobody could reproduce. Both figures here come from one process, one checkpoint, and
+  the same prompt as the table above.
+
+  The plateau the old paragraph attributed to memory bandwidth is not in this data: eight
+  concurrent requests are still 18% faster than four. Whether a plateau exists at 16 or 32 was
+  not measured, and the paragraph no longer claims one for a machine nobody here controlled.
+
+  Two further figures, kept because they are what a single request actually costs: decoding is
+  28.3 ms per token, and a 64-token prefill is 276 ms batched against 1799 ms one token at a
+  time -- a 6.5x gain from the sub-batching that the sequential path cannot have. Both come from
+  `go test -bench` with `MODEL` set. They were measured in the same session as the throughput
+  numbers that turned out to be wrong, so treat them as that run's figures rather than as
+  re-measured ones; the commands reproduce them for whoever sets `MODEL`.
 
 - **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a request
   whose prompt starts with blocks the pool already computed attaches them instead of prefilling

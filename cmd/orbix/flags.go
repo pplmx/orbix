@@ -72,11 +72,16 @@ type cacheFlags struct {
 // three runs each on the same 128-core host: one worker 707.9, 709.0, 705.1; 128 workers
 // 943.3, 916.6, 984.3. That is 1.34x, not 3.9x.
 //
-// Why 128 workers buy so little is not a bound on the split: `parts()` returns
-// min(workers, work/16384), and this fixture's vocabulary projection is 8192000 multiply-adds,
-// so all 128 are actually used. The 1.34x is what this projection does with them. The old
-// pair was not wrong when written -- the fixture and the kernels have both changed since --
-// but a number in a comment has no way to notice that what it measured has changed.
+// 128 workers buy little because the fixture cannot use them. `parts()` returns
+// min(workers, work/16384), and this fixture's vocabulary projection is 363 x 256 = 92928
+// multiply-adds, so the split stops at 5 whatever the flag says -- `--workers 128` runs five.
+// That is also why the flag's help text below reports 8, 32 and 128 within noise of each other.
+//
+// This paragraph has now been wrong twice. It first said 128 workers were 3.9x faster than one;
+// that was true of an earlier fixture and stopped being true as the fixture changed. I replaced
+// it with an explanation that the split was not the bound, computing 32000 x 256 -- 32000 is the
+// vocabulary of the benchmark in internal/kernel, not of this fixture. The original claim's
+// explanation was right and I deleted it while correcting its number.
 func workersFlag(fs *flag.FlagSet) *int {
 	return fs.Int("workers", 0,
 		"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+

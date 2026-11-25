@@ -322,8 +322,13 @@ concurrent requests, 349.6 tok/s at 8 workers, 536.6 at 32, 543.9 at 128 -- a re
 and flat above it, so the default of one per CPU sits at the safe end.
 
 On one stream instead of eight: stories15M q4_0, 128 tokens from one prompt, 64.2-65.1 tok/s at
-one worker against 228.7-236.2 at 32 (3.52x-3.67x). The synthetic fixture reaches 3.9x because
-its projection is large next to the per-round overhead; a 19 MB model does not.
+one worker against 228.7-236.2 at 32 (3.52x-3.67x).
+
+The synthetic fixture from `just fixture` reaches 1.35x, not more, and the reason is the opposite of "large projection": its vocabulary is 363 tokens wide, so its output projection is 363 x 256 = 92928 multiply-adds. `parts()` returns min(workers, work/16384), which caps the split at 5 for that size -- `--workers 128` runs five parts, so every worker count from 5 up measures the same.
+
+Measured with `orbix run --model .cache/stress.gguf --workers N --max-tokens 128 --stats`: one worker 712.4, 714.0, 709.5 tok/s; 32 workers 982.3, 990.7, 902.0.
+
+An earlier version of this paragraph said the fixture reaches 3.9x "because its projection is large next to the per-round overhead". That was the opposite of true and nothing checked it; it is left here as a reminder that a comparison across two models needs the same measurement on both.
 
 Above 32 the plateau is flat measured four ways, not two: 64 greedy tokens from one prompt on the
 same checkpoint took 245-256 ms at 32 workers, 240-255 ms at 64, 234-247 ms at 96 and 243-253 ms

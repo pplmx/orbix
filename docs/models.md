@@ -43,6 +43,15 @@ again with 513 tokens, where its window first binds. `gemma2` is checked by
 TestGemma2MatchesReferenceLogprobs, whose expected values also come from llama.cpp. The MoE
 path has its own real file.
 
+One limit on what the converted files can prove: `scripts/hf_to_gguf.py` writes
+`tokenizer.ggml.model`, `.tokens` and `.token_type` but not `.merges`, so a file it produces
+carries no merge list. That is deliberate -- the script's header calls it a cross-validation
+tool whose point is numerical agreement -- but it means the converted files' tokenizers are
+not the ones their reference values were produced with. Most reference files sidestep this by
+carrying explicit `ids`; `gemma3-513` instead carries a repeated prompt and re-tokenizes it,
+and that file comes from a published checkpoint rather than from this script. The `qwen2`
+entry above is one of the converted ones.
+
 The count was right and the sentence was not: it listed `gemma2` among the six files, but no
 reference file in that directory names gemma2 -- gemma3 has two. Rewriting it this way also
 records why gemma3 appears twice, which the old sentence left out.

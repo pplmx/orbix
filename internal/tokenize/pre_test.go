@@ -3762,3 +3762,32 @@ func TestWhitespaceFamilyKeepsEveryByte(t *testing.T) {
 		}
 	}
 }
+
+// TestRuneClassifiersOnEmptyInput pins the empty-string answer of the four prefix classifiers.
+//
+// Each starts with "if s == \"\" { return false }", and those guards had no test: flipping one
+// to true left the package green. They are reachable -- the classifier families call them with
+// whatever is left of the text, and "whatever is left" is the empty string at the end of a
+// scan -- so an answer of true would make an exhausted position look like it began with a
+// joiner or a word character.
+func TestRuneClassifiersOnEmptyInput(t *testing.T) {
+	if isJoinerAt("") {
+		t.Error("isJoinerAt(\"\") = true; the empty string begins with nothing")
+	}
+	if isWordRuneAt("") {
+		t.Error("isWordRuneAt(\"\") = true; the empty string begins with nothing")
+	}
+	if isLetterAt("") {
+		t.Error("isLetterAt(\"\") = true; the empty string begins with nothing")
+	}
+	if isDigitAt("") {
+		t.Error("isDigitAt(\"\") = true; the empty string begins with nothing")
+	}
+	// And the positive cases, so a classifier that always answered false would fail here.
+	if !isJoinerAt("\u200d") {
+		t.Error("isJoinerAt does not recognise a zero-width joiner")
+	}
+	if !isWordRuneAt("a") {
+		t.Error("isWordRuneAt does not recognise a letter")
+	}
+}

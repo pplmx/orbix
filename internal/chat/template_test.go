@@ -2690,25 +2690,34 @@ func TestRenderIsSafeForConcurrentUse(t *testing.T) {
 	}
 }
 
-// TestPlusConcatenatesRatherThanAdds pins what the + operator means here.
+// TestPlusAddsNumbersAndJoinsEverythingElse pins what the + operator means here.
 //
-// It concatenates, so "1 + 2" renders "12". That is the documented behaviour -- doc.go lists
-// "+ concatenation" among the supported constructs -- and it differs from Jinja2, where the
-// same expression renders "3". Nothing tested either reading: the only arithmetic tests
-// covered subtraction, so an evaluator that started adding numbers would have changed what
-// every prompt says without failing anything.
+// Two integers add; every other pair is joined as text. Both halves are needed and each was
+// arrived at from a different place. The sum is Jinja2's rule and the real Qwen2.5 template
+// depends on it: its tool branch subscripts `messages[loop.index0 + 1]`, which reaches the next
+// message only if the operand is a number -- under concatenation it rendered "01" and indexed a
+// missing element, so every multi-turn tool conversation fell back to the neutral transcript.
 //
-// The mixed-operand cases are the ones real templates write: a literal marker plus a message
-// field, which is why no type check happens before joining.
-func TestPlusConcatenatesRatherThanAdds(t *testing.T) {
+// The join is the documented divergence from Jinja2, which raises TypeError for "a" + 1. Every
+// template in the corpus writes a marker plus a field, and joining is what those need.
+//
+// This test used to assert the opposite of its first three rows: it pinned "12" for 1 + 2 and
+// said that was the documented behaviour, which nothing but the documentation supported.
+func TestPlusAddsNumbersAndJoinsEverythingElse(t *testing.T) {
 	msgs := []Message{{Role: "user", Content: "hi"}}
 	cases := []struct{ name, src, want string }{
-		{"two numbers", `{{ 1 + 2 }}`, "12"},
-		{"three numbers", `{{ 1 + 2 + 3 }}`, "123"},
+		// Jinja2 renders all four of these the same way; measured with jinja2 3.1.6.
+		{"two numbers", `{{ 1 + 2 }}`, "3"},
+		{"three numbers", `{{ 1 + 2 + 3 }}`, "6"},
+		{"a loop index plus one", `{% for m in messages %}{{ loop.index0 + 1 }}{% endfor %}`, "1"},
+		{"a set variable", `{% set x = 1 %}{{ x + 2 }}`, "3"},
+		// The joins, which Jinja2 refuses and real templates write.
 		{"two strings", `{{ "a" + "b" }}`, "ab"},
 		{"literal and field", `{% for m in messages %}{{ "role: " + m.role }}{% endfor %}`, "role: user"},
 		{"number and field", `{% for m in messages %}{{ loop.index + m.content }}{% endfor %}`, "1hi"},
-		{"a set variable", `{% set x = 1 %}{{ x + 2 }}`, "12"},
+		// A number on only one side is a join, not a sum: the string that looks numeric stays
+		// text on both sides, which is what keeps `{{ "1" + m.content }}` from surprising a
+		// template that meant to concatenate.
 		{"subtraction still subtracts", `{{ 1 - 2 }}`, "-1"},
 	}
 	for _, c := range cases {

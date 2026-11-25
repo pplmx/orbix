@@ -539,3 +539,61 @@ func TestQwen2ToolConversationMatchesJinja2(t *testing.T) {
 		t.Errorf("Render =\n%q\nwant (Jinja2's own output)\n%q", got, want)
 	}
 }
+
+// TestQwen2TemplateRangesOverAdjacentToolTurns covers the construct that put integer addition
+// into this package's + operator.
+//
+// The template's tool branch reads `messages[loop.index0 + 1].role` to decide whether the next
+// turn is another tool result, which needs two things at once: a numeric +, and a subscript that
+// is computed from the loop index rather than from a literal. Under the old concatenating +
+// the index became the string "01", the subscript missed, and the whole render failed -- which
+// the renderer turned into the neutral transcript, so a multi-turn tool conversation silently
+// lost the model's own format while the banner still reported "model template".
+//
+// The expected string is Jinja2's own output for this conversation, captured the same way as the
+// test above. Two adjacent tool turns are what exercises the guarded read: the first one sees a
+// following tool turn and stays in the same <|im_start|>user block, the second closes it.
+func TestQwen2TemplateRangesOverAdjacentToolTurns(t *testing.T) {
+	tmpl, err := Parse(loadTestTemplate(t, "qwen2-instruct.jinja"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := tmpl.Render(
+		[]Message{
+			{Role: "user", Content: "weather in Paris and Lyon?"},
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{ID: "call_1", Name: "get_weather", Arguments: `{"city": "Paris"}`},
+				{ID: "call_2", Name: "get_weather", Arguments: `{"city": "Lyon"}`},
+			}},
+			{Role: "tool", Content: `{"temp_c": 21}`},
+			{Role: "tool", Content: `{"temp_c": 18}`},
+			{Role: "user", Content: "compare them"},
+		},
+		Inputs{
+			AddGenerationPrompt: true,
+			Tools: []Tool{{
+				Name:        "get_weather",
+				Description: "Current weather for a city",
+				Parameters:  `{"properties": {"city": {"type": "string"}}, "type": "object"}`,
+			}},
+		})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// The two results share one user turn: the first <|im_start|>user opens it and the second
+	// tool turn does not open another. That is the assertion the guarded read exists for, so it
+	// is stated directly rather than left implicit in a long string comparison.
+	if n := strings.Count(got, "<|im_start|>user\n<tool_response>"); n != 1 {
+		t.Errorf("%d user blocks open a tool response, want 1: adjacent tool results belong to "+
+			"one turn\n%s", n, got)
+	}
+	if n := strings.Count(got, "</tool_response>"); n != 2 {
+		t.Errorf("%d tool responses in the prompt, want 2\n%s", n, got)
+	}
+	// And both calls were rendered, with their arguments.
+	for _, city := range []string{"Paris", "Lyon"} {
+		if !strings.Contains(got, `"city": "`+city+`"`) {
+			t.Errorf("the prompt does not carry the %s call:\n%s", city, got)
+		}
+	}
+}

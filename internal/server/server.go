@@ -382,7 +382,11 @@ type chatRequest struct {
 	// checkpoint declares no fill-in-the-middle markers, which is a statement about the model
 	// rather than about this server; see the handler. docs/usage.md has the reader-facing form.
 	N int `json:"n"`
-	// Function calling. Parsed to be refused: see chatToolFields.
+	// Function calling. Tools and ToolChoice are honoured -- the signatures are rendered into
+	// the prompt by the model's own template and the reply is parsed for the calls it asked for
+	// -- while the legacy functions/function_call pair is still refused, because it is a
+	// different schema (a flat name+parameters list, no tool_choice modes) and translating it
+	// would be this server inventing a mapping the caller did not ask for. See tools.go.
 	Tools        json.RawMessage `json:"tools"`
 	ToolChoice   json.RawMessage `json:"tool_choice"`
 	Functions    json.RawMessage `json:"functions"`
@@ -451,12 +455,23 @@ type streamOptions struct {
 type chatMessage struct {
 	Role    string      `json:"role"`
 	Content chatContent `json:"content"`
-	// The tool fields are parsed so the handler can refuse them by name. They are not part of
-	// the conversation this server renders: a tool result has no place in a prompt for a model
-	// that was never told which tools exist.
-	ToolCalls  json.RawMessage `json:"tool_calls"`
-	ToolCallID string          `json:"tool_call_id"`
-	Name       string          `json:"name"`
+	// ToolCalls is what an assistant turn asked to call, in the wire shape the response also
+	// writes: id, type and a function carrying name and arguments-as-JSON-string. It is decoded
+	// rather than kept raw because the conversation it belongs to has to be rendered back into
+	// the prompt, and a marshalled blob would reach the template as text rather than as calls.
+	//
+	// A malformed entry is refused by name in resolveChatTools, not by the decoder: the
+	// decoder's message would name this Go type rather than messages[i].tool_calls.
+	ToolCalls json.RawMessage `json:"tool_calls"`
+	// ToolCallID names the call a tool result answers. It is checked against the ids the
+	// conversation actually declared: a result for a call the model cannot see is a turn it
+	// cannot place.
+	ToolCallID string `json:"tool_call_id"`
+	Name       string `json:"name"`
+	// parsedToolCalls is ToolCalls after validation, filled by resolveChatTools. The raw field
+	// is kept because the error messages name it and because re-marshalling would be a second
+	// spelling of the same data.
+	parsedToolCalls []engine.ToolCall
 }
 
 // chatContent is a message body: a JSON string, or an array of {"type","text"} parts.
@@ -948,23 +963,70 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if s.rejectShapeFields(w, chatShapeFields, &req) {
 		return
 	}
-	if s.chatToolFields(w, &req) {
+	if s.legacyToolFields(w, &req) {
 		return
 	}
 	if len(req.Messages) == 0 {
 		writeErrorParam(w, http.StatusBadRequest, "messages is required", "messages", "missing_required_parameter")
 		return
 	}
+	// Function calling is resolved before rendering, because the two halves depend on each
+	// other: the tool list goes into the prompt by way of the model's own template, and the
+	// calls in a conversation have to be in the turns the template renders. A model with no
+	// usable template cannot take tools at all, which checkTools and the renderer report.
+	declared, tools, err := checkTools(req.Tools)
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+	choice, err := checkToolChoice(req.ToolChoice, declared)
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := resolveToolCallMessages(req.Messages); err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+	turns, err := checkToolMessages(req.Messages)
+	if err != nil {
+		writeRequestError(w, http.StatusBadRequest, err)
+		return
+	}
+	// A tool_choice that cannot take effect is refused rather than dropped, for the reason the
+	// rest of this file refuses fields: `tool_choice: "required"` promises a call, and a template
+	// here has no way to print that constraint, so honouring it would mean answering with
+	// whatever the model chose while the caller believes the choice was forced. "auto" is served
+	// because it asks for what the server does anyway; "none" is served by rendering the
+	// conversation with no tools, which is the one direction that needs no prompt rewrite.
+	if choice.Mode == modeRequired || choice.Mode == modeNamed {
+		writeRequestError(w, http.StatusBadRequest, newParamError(
+			"tool_choice", "unsupported_parameter",
+			"tool_choice %q cannot be honoured: no chat template in this project's subset has a "+
+				"field that forces a call, so the constraint would reach no prompt and the reply "+
+				"would be whatever the model chose; send \"auto\" (the default), or \"none\" to "+
+				"withhold the tools", choice.Mode))
+		return
+	}
+	if choice.Mode == modeNone {
+		// The tools are still validated above -- a malformed list is an error whatever the
+		// choice says -- but they do not reach the prompt, which is what "none" means.
+		tools = nil
+	}
 	vars, err := chatTemplateVars(req.ChatTemplateKwargs)
 	if err != nil {
 		writeRequestError(w, http.StatusBadRequest, err)
 		return
 	}
-	prompt, err := s.renderChat(req.Messages, vars)
+	prompt, err := s.renderChatTurns(turns, tools, vars)
 	if err != nil {
-		// The model cannot honour a variable the caller sent, so answering would produce a
-		// prompt that ignored it. Naming the field and the variable is what lets a client fix
-		// the request rather than wonder why the reply did not change.
+		// The model cannot honour what the caller sent, so answering would produce a prompt that
+		// ignored it. Naming the field and the reason is what lets a client fix the request
+		// rather than wonder why the reply did not change.
+		//
+		// The param is "chat_template_kwargs" because that is the only field whose value the
+		// renderer rejects on its own; a tools refusal is what this server decides before
+		// rendering, so it never arrives here.
 		writeRequestError(w, http.StatusBadRequest, &paramError{
 			message: err.Error(), param: "chat_template_kwargs", code: "unsupported_parameter"})
 		return
@@ -1008,6 +1070,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		logprobs:            req.Logprobs != nil && *req.Logprobs,
 		topLogprobs:         derefInt(req.TopLogprobs),
 		includeUsage:        req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
+		tools:               tools,
 	})
 }
 
@@ -1025,30 +1088,18 @@ func jsonAsks(raw json.RawMessage) bool {
 	return true
 }
 
-// chatToolFields refuses function calling, in both its current and its legacy spelling.
+// legacyToolFields refuses the deprecated functions/function_call pair.
 //
-// The refusal exists because the alternative is the failure this server refuses everywhere else:
-// tools sent, nothing done with them, and a response that looks like an answer. Measured before
-// this check, a request with a get_weather tool and one without it produced byte-identical
-// responses, and the model answered "Please provide me with the tool you are referring to" --
-// it had never been told the tool existed.
-//
-// A message carrying a tool result is refused for the same reason. Rendering it would put a
-// turn into the prompt with a role the checkpoint's template has no branch for (Gemma's writes
-// "<start_of_turn>tool"), and the model would answer a conversation it cannot see the shape of.
-//
-// The way out is named in every message, because "not implemented" alone leaves a caller
-// guessing whether to drop the field or change servers.
-func (s *Server) chatToolFields(w http.ResponseWriter, req *chatRequest) bool {
-	const why = "function calling is not implemented: the tools a request declares reach no " +
-		"prompt, and the response never carries tool_calls, so the model would answer as though " +
-		"it had never been told the tools exist"
+// Function calling itself is implemented now (see tools.go), so this covers only the older schema
+// OpenAI replaced. Translating it would mean this server inventing a mapping -- a flat
+// {name, parameters} list has no descriptions, no tool_choice modes and no call ids, so a
+// conversion would drop fields the caller sent while looking like it worked. The message names
+// the replacement, which is what a caller sending the old spelling needs.
+func (s *Server) legacyToolFields(w http.ResponseWriter, req *chatRequest) bool {
 	for _, f := range []struct {
 		name string
 		raw  json.RawMessage
 	}{
-		{"tools", req.Tools},
-		{"tool_choice", req.ToolChoice},
 		{"functions", req.Functions},
 		{"function_call", req.FunctionCall},
 	} {
@@ -1056,32 +1107,10 @@ func (s *Server) chatToolFields(w http.ResponseWriter, req *chatRequest) bool {
 			continue
 		}
 		writeRequestError(w, http.StatusBadRequest, newParamError(f.name, "unsupported_parameter",
-			"%s; send the request without %s, or select and carry out the call outside this "+
-				"server", why, f.name))
+			"%s is the deprecated spelling of OpenAI's function calling; send \"tools\" and "+
+				"\"tool_choice\" instead -- this server renders the tool signatures into the "+
+				"prompt and returns the calls it parses back as tool_calls", f.name))
 		return true
-	}
-	for i, m := range req.Messages {
-		switch {
-		case m.Role == "tool":
-			writeRequestError(w, http.StatusBadRequest, newParamError(
-				fmt.Sprintf("messages[%d].role", i), "unsupported_parameter",
-				"%s; send the conversation without its tool turns, or run the call outside this "+
-					"server", why))
-			return true
-		case jsonAsks(m.ToolCalls):
-			writeRequestError(w, http.StatusBadRequest, newParamError(
-				fmt.Sprintf("messages[%d].tool_calls", i), "unsupported_parameter",
-				"%s; sending a previous turn's calls back asks the model to continue a "+
-					"conversation it cannot see the shape of -- drop them, or run the call "+
-					"outside this server", why))
-			return true
-		case m.ToolCallID != "":
-			writeRequestError(w, http.StatusBadRequest, newParamError(
-				fmt.Sprintf("messages[%d].tool_call_id", i), "unsupported_parameter",
-				"%s; a result that answers no call this server issued cannot be rendered, "+
-					"so drop it or run the call outside this server", why))
-			return true
-		}
 	}
 	return false
 }
@@ -1190,22 +1219,33 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// renderChat applies the chat template.
-//
-// The rendering itself lives in engine.RenderChatPrompt so the HTTP server and the REPL
-// cannot drift apart: the same conversation must produce the same tokens however it was
-// asked. See that function for why the template is neutral rather than a model's own.
+// renderChat renders a conversation with no tools declared, which is the shape the tests and the
+// REPL share. It is a wrapper so there is one rendering path: everything below goes through the
+// same ChatRenderer call the tool-carrying endpoint uses.
 func (s *Server) renderChat(msgs []chatMessage, vars map[string]any) (string, error) {
 	turns := make([]engine.Turn, len(msgs))
 	for i, m := range msgs {
 		turns[i] = engine.Turn{Role: m.Role, Text: string(m.Content)}
 	}
+	return s.renderChatTurns(turns, nil, vars)
+}
+
+// renderChatTurns applies the chat template to a conversation that may declare tools.
+//
+// The rendering itself lives in engine.RenderChatPrompt so the HTTP server and the REPL
+// cannot drift apart: the same conversation must produce the same tokens however it was
+// asked. See that function for why the template is neutral rather than a model's own.
+//
+// A model with no usable template cannot take tools, and that comes back as a *paramError naming
+// "tools" rather than as a template-variable failure: the caller's mistake is declaring tools
+// against a model that cannot read them, not setting a variable wrong.
+func (s *Server) renderChatTurns(turns []engine.Turn, tools []engine.ToolSpec, vars map[string]any) (string, error) {
 	// RenderWith reports a variable the model cannot honour and falls back for a template that
 	// fails at render time. The two are different: a render failure still produces a usable
 	// prompt, while a variable this model does not read would produce one that silently ignored
 	// what the caller asked for. vars is nil for every request that sends none, which is the
 	// ordinary case.
-	prompt, err := s.cfg.ChatRenderer.RenderWith(turns, vars)
+	prompt, err := s.cfg.ChatRenderer.RenderConversation(turns, tools, vars)
 	// The fallback is silent otherwise, and the startup banner cannot catch this case: it
 	// reads UsesModelTemplate before any request has rendered, and renderReason is only
 	// written when a render fails. Measured with a template of "{{ messages[99].content }}":
@@ -1353,6 +1393,14 @@ type generateParams struct {
 	// when the checkpoint declares markers for it, which the handler checks.
 	suffix string
 	fim    *tokenize.FIM
+	// tools is the tool list the request declared, empty when it declared none. It is here so
+	// the response can decide whether to parse the reply for calls: a model writing the marker
+	// unasked must not have its text cut out of a reply that never asked to be a call.
+	tools []engine.ToolSpec
+	// responseID is the id this request's response carries. Tool calls are given ids derived
+	// from it, so a call id is unique across responses, which is what a client relies on when
+	// it sends the id back in tool_call_id.
+	responseID string
 }
 
 // choiceCount is how many completions the request asks for, with the omitted field reading
@@ -1482,6 +1530,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request, p generatePara
 		prefix = "chatcmpl-"
 	}
 	id := s.responseID(prefix, time.Now().UnixNano())
+	// Recorded on the params so the response builder can derive per-call ids from it. The id is
+	// created here and nowhere else, so a builder that needs it cannot be handed a different one.
+	p.responseID = id
 	// One timestamp for the whole response. Every chunk of a stream and the final usage chunk
 	// carry this same value, because a client reads it as when the response was created, not
 	// as when each chunk happened to be written. Computing it per chunk made a long stream
@@ -1790,6 +1841,10 @@ type streamItem struct {
 	// builds it because the object needs the token's byte offset in the response, which only
 	// the reader is tracking; the writer would have to duplicate the count.
 	logprobs any
+	// calls, when non-empty, is the tool calls this choice's reply asked for. It is carried on
+	// the terminal item and travels in the same chunk as the finish reason, which is where the
+	// schema puts it: a client accumulates deltas and reads tool_calls once the turn is over.
+	calls []toolCall
 }
 
 // streamResponse writes server-sent events, one per token.
@@ -1839,7 +1894,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 			})
 		}
 		if it.reason != "" {
-			return send(finalChoice(p.chat, it.index, finishReasonFor(it.reason)))
+			return send(finalChoice(p.chat, it.index, finishReasonFor(it.reason), it.calls))
 		}
 		return send(chunkPayload(p.chat, it.index, it.delta, it.logprobs))
 	}
@@ -1989,6 +2044,14 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	dec := s.tok.Seq()
 	reason := "stop"
 	gate := &stopGate{stop: p.stop}
+	// tcg is non-nil only when the request declared tools on the chat endpoint, which is the one
+	// combination whose output has to be withheld until a call can be recognised. With no tools
+	// declared the stream is byte-for-byte what it was, which is why the plain-text tests still
+	// describe it.
+	var tcg *toolCallGate
+	if p.chat && len(p.tools) > 0 {
+		tcg = &toolCallGate{}
+	}
 	// tokenOffset is how many bytes of this choice's text the tokens so far have accounted
 	// for. It is the offset a logprob entry reports, and it is tracked separately from sent
 	// because held-back text has an offset before it has been written.
@@ -2097,6 +2160,20 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				}
 				continue
 			}
+			if tcg != nil {
+				// Tools declared: a call's bytes must not reach the client as content. The gate
+				// holds exactly the part that could still be a call and releases the rest as it
+				// was released before. The logprobs entry travels with the first chunk the gate
+				// releases; a token the gate swallows contributes to the count but not the text,
+				// and its logprob describes bytes the client never sees, so it is dropped.
+				if out := tcg.push(text); out != "" {
+					if !emit(streamItem{index: index, delta: out, logprobs: chunkLogprobs}) {
+						return generated, cancelled, false
+					}
+					continue
+				}
+				continue
+			}
 			if !emit(streamItem{index: index, delta: text, logprobs: chunkLogprobs}) {
 				// The client went away. Its context is cancelled, so the engine
 				// stops the sequence; draining is the caller's job and this loop
@@ -2121,7 +2198,13 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// the same sequence produces without streaming, which breaks the contract
 	// TestStreamingReassemblesToSameText states.
 	if tail := dec.Flush(); tail != "" {
-		if !emit(streamItem{index: index, delta: tail}) {
+		if tcg != nil {
+			if out := tcg.push(tail); out != "" {
+				if !emit(streamItem{index: index, delta: out}) {
+					return generated, cancelled, false
+				}
+			}
+		} else if !emit(streamItem{index: index, delta: tail}) {
 			return generated, cancelled, false
 		}
 	}
@@ -2135,9 +2218,29 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 			}
 		}
 	}
-	// One final chunk carries the finish reason and an empty delta. Clients that accumulate
-	// deltas see no text change from it, and it is what tells a client that this index stopped.
-	if !emit(streamItem{index: index, reason: reason}) {
+	// Whatever the tool gate still holds is decided now that generation has ended: text that was
+	// only ever prose goes out, and a complete call is left to the final chunk's tool_calls.
+	var calls []toolCall
+	if tcg != nil {
+		if rest := tcg.flush(); rest != "" {
+			if !emit(streamItem{index: index, delta: rest}) {
+				return generated, cancelled, false
+			}
+		}
+		if _, parsed := parseToolCalls(tcg.text); len(parsed) > 0 {
+			reason = "tool_calls"
+			calls = assignToolCallIDs(p.responseID, parsed)
+		}
+	}
+	// One final chunk carries the finish reason, the calls when there are any, and an empty
+	// delta. Clients that accumulate deltas see no text change from it, and it is what tells a
+	// client that this index stopped.
+	//
+	// The calls ride here rather than on an item of their own because writeItem classifies an
+	// item as an error, a terminal, or a delta -- a fourth shape would fall through to
+	// chunkPayload and be dropped, which is exactly what an earlier version did: the stream
+	// reported finish_reason "tool_calls" with no tool_calls anywhere in it.
+	if !emit(streamItem{index: index, reason: reason, calls: calls}) {
 		return generated, cancelled, false
 	}
 	return generated, cancelled, true
@@ -2160,12 +2263,29 @@ func chunkPayload(chat bool, index int, text string, logprobs any) map[string]an
 	}}}
 }
 
-// finalChoice builds the chunk that ends one choice, carrying its finish reason and no text.
+// finalChoice builds the chunk that ends one choice: its finish reason, and the tool calls the
+// reply asked for when there are any.
 //
 // Every choice gets one, including under n=1: a client uses it to know that particular index
 // stopped rather than to infer it from the sentinel, which arrives once for the whole stream.
-func finalChoice(chat bool, index int, reason string) map[string]any {
+//
+// The calls ride on the terminal chunk rather than a chunk of their own because a client reads
+// them once, after the deltas: the schema's delta object carries either content or tool_calls, and
+// splitting them across two chunks makes the turn end twice.
+//
+// The delta then carries tool_calls and an empty content, which is the shape the SDKs parse. An
+// empty content string is sent rather than omitted because the same field appears on every other
+// delta of the turn, and a client that indexes it would otherwise have to special-case the last
+// chunk.
+func finalChoice(chat bool, index int, reason string, calls []toolCall) map[string]any {
 	if chat {
+		if len(calls) > 0 {
+			return map[string]any{"choices": []map[string]any{{
+				"index":         index,
+				"delta":         map[string]any{"content": "", "tool_calls": toolCallsJSON(calls)},
+				"finish_reason": reason,
+			}}}
+		}
 		return map[string]any{"choices": []map[string]any{{
 			"index": index, "delta": map[string]string{}, "finish_reason": reason,
 		}}}
@@ -2787,8 +2907,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // streaming and non-streaming paths must agree, and a mapping written twice is a mapping that can
 // disagree.
 func finishReasonFor(reason string) string {
-	if reason == "length" || reason == "cancel" {
+	switch reason {
+	case "length", "cancel":
 		return "length"
+	case "tool_calls":
+		// Passed through rather than folded into "stop": a client branches on this to decide
+		// whether to run a tool, and "stop" tells it the assistant finished speaking.
+		return "tool_calls"
 	}
 	return "stop"
 }
@@ -3109,9 +3234,26 @@ func (s *Server) choiceObject(c *choiceResult, out int, p generateParams) map[st
 	// reads choices[0] as the best one, and leaving a discarded candidate's number there would
 	// name an index that no longer exists.
 	if p.chat {
+		// The reply is parsed for tool calls only when the request declared tools. A model
+		// that writes <tool_call> unasked -- a conversation pasted in from elsewhere, or a
+		// base model imitating the marker -- would otherwise have its text cut out of a reply
+		// nobody asked to be a call.
+		message := map[string]any{"role": "assistant", "content": text}
+		if len(p.tools) > 0 {
+			prose, calls := parseToolCalls(text)
+			if len(calls) > 0 {
+				calls = assignToolCallIDs(p.responseID, calls)
+				message["content"] = prose
+				message["tool_calls"] = toolCallsJSON(calls)
+				// finish_reason is tool_calls, which is what the schema reserves for a turn
+				// that asks the caller to run something. "stop" would tell a client the
+				// assistant finished speaking and nothing is expected of it.
+				reason = "tool_calls"
+			}
+		}
 		return map[string]any{
 			"index":         out,
-			"message":       map[string]string{"role": "assistant", "content": text},
+			"message":       message,
 			"finish_reason": finishReasonFor(reason),
 			"logprobs":      logprobs,
 		}

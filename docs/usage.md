@@ -275,8 +275,10 @@ chat endpoint are worth knowing before pointing a client at it:
 - **The chat template is the model's own, when it can be evaluated.** GGUF stores a
   checkpoint's format as a Jinja2 string under `tokenizer.chat_template`, and
   `internal/chat` evaluates a subset of it: `if`/`elif`/`else`, `for` with the `loop`
-  variables, `set`, `+` concatenation, comparisons, the `is` tests `defined`, `none`,
-  `mapping` and `iterable`, and the `trim`, `tojson` and `length` filters. That covers the
+  variables, `set` scoped the way Jinja2 scopes it (a `for` body is a frame, an `if` body is
+  not), `+` (which adds two integers and joins anything else), `-`, `%`, comparisons, the `is`
+  tests `defined`, `none`, `mapping`, `iterable` and `string`, and the `trim`, `tojson` and
+  `length` filters. That covers the
   published templates for Qwen2.5 and Llama 3.1 exactly, and both are checked against their
   real source: `scripts/jinja_diff.py --template-file <checkpoint.gguf>` reads
   `tokenizer.chat_template` out of the file and renders it through this package and through

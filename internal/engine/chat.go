@@ -24,6 +24,29 @@ type Turn struct {
 	Role string
 	// Text is the message body.
 	Text string
+	// ToolCalls are the calls an assistant turn made, in the order the model made them.
+	//
+	// A template renders them into the assistant turn so the model reads back the call it
+	// made before it reads the result; the neutral transcript has no place for them and
+	// prints Text alone, which is why a conversation carrying calls on a model with no usable
+	// template loses them rather than inventing a format.
+	ToolCalls []ToolCall
+}
+
+// ToolCall is one function call in a conversation, as a template sees it.
+//
+// It mirrors chat.ToolCall rather than re-exporting it, for the same reason Turn mirrors
+// chat.Message: the front ends below this layer should not have to import the template
+// evaluator to describe a conversation.
+type ToolCall struct {
+	// ID is the identifier the response assigned. It is what a tool result names when it
+	// answers this call, and a template that numbers calls itself ignores it.
+	ID string
+	// Name is the function that was called.
+	Name string
+	// Arguments is the call's arguments as the JSON object text the model produced, kept
+	// verbatim so the prompt carries the model's own spelling rather than a re-encoding.
+	Arguments string
 }
 
 // RenderChatPrompt renders a conversation as a neutral "Role: content" transcript.
@@ -185,6 +208,21 @@ func (r *ChatRenderer) Render(turns []Turn) string {
 // chance that a template reads it, while a network endpoint has to answer for every field it
 // accepts. internal/server refuses; the REPL passes none.
 func (r *ChatRenderer) RenderWith(turns []Turn, vars map[string]any) (string, error) {
+	return r.RenderConversation(turns, nil, vars)
+}
+
+// RenderConversation renders a conversation that may declare tools.
+//
+// Tools are separate from vars because they are not a template variable a caller gets to set:
+// they are the list the request declared, and internal/chat binds them as `tools` so a template's
+// tool-calling branch can print each signature. A model without a usable template has nowhere to
+// put them, and that is refused rather than dropped -- see the caller.
+func (r *ChatRenderer) RenderConversation(turns []Turn, tools []ToolSpec, vars map[string]any) (string, error) {
+	if len(tools) > 0 && (r == nil || r.tmpl == nil) {
+		return "", fmt.Errorf("engine: cannot declare tools, because this model declares no chat " +
+			"template this project can evaluate; its calls would reach no prompt and the model " +
+			"would answer as though it had never been told the tools exist")
+	}
 	if len(vars) > 0 {
 		if r == nil || r.tmpl == nil {
 			return "", fmt.Errorf("engine: cannot set template variables (%s), because this model "+
@@ -206,12 +244,19 @@ func (r *ChatRenderer) RenderWith(turns []Turn, vars map[string]any) (string, er
 		if role == "" {
 			role = "user"
 		}
-		msgs[i] = chat.Message{Role: role, Content: strings.TrimSpace(t.Text)}
+		calls := make([]chat.ToolCall, len(t.ToolCalls))
+		for j, c := range t.ToolCalls {
+			calls[j] = chat.ToolCall{ID: c.ID, Name: c.Name, Arguments: c.Arguments}
+		}
+		// Content is trimmed; the arguments are not. A tool call's JSON is machine text the
+		// template re-emits, and trimming it would change the prompt the model reads back.
+		msgs[i] = chat.Message{Role: role, Content: strings.TrimSpace(t.Text), ToolCalls: calls}
 	}
 	out, err := r.tmpl.Render(msgs, chat.Inputs{
 		BOSToken:            r.bos,
 		EOSToken:            r.eos,
 		AddGenerationPrompt: true,
+		Tools:               chatTools(tools),
 		Variables:           vars,
 	})
 	if err != nil {
@@ -226,6 +271,31 @@ func (r *ChatRenderer) RenderWith(turns []Turn, vars map[string]any) (string, er
 		return RenderChatPrompt(turns), nil
 	}
 	return out, nil
+}
+
+// ToolSpec is one function a request declares, in the shape a chat template prints.
+//
+// It is the model-facing description rather than the request's own JSON: Name, Description and
+// Parameters are the three fields every published template reads, and Parameters is the JSON
+// schema as text because a template only ever re-emits it.
+type ToolSpec struct {
+	Name        string
+	Description string
+	// Parameters is the JSON schema object, as text. Empty is allowed -- a tool with no
+	// arguments is a real shape -- and renders as an empty value rather than as an error.
+	Parameters string
+}
+
+// chatTools converts the tool list for the template evaluator.
+func chatTools(specs []ToolSpec) []chat.Tool {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]chat.Tool, len(specs))
+	for i, t := range specs {
+		out[i] = chat.Tool{Name: t.Name, Description: t.Description, Parameters: t.Parameters}
+	}
+	return out
 }
 
 // specialPieceText returns the surface text of a token id, or the empty string.

@@ -480,18 +480,19 @@ func (p *exprParser) parseCompare() (expr, error) {
 	}
 }
 
-// parseConcat handles + between operands, which this package defines as concatenation.
+// parseConcat handles + between operands.
 //
-// The operator does not add. "1 + 2" renders "12", not "3", and that is the documented
-// behaviour (see doc.go: "+ concatenation") rather than an accident of the evaluator: every
-// operand is converted to text and joined. Subtraction is the only arithmetic operator here,
-// which is what makes the two spellings look inconsistent -- they are, and this comment used
-// to claim the opposite, saying "1 + 2 adds" while the evaluator had always concatenated.
+// Two integers add; anything else concatenates by text. That matches Jinja2 for both shapes: it
+// adds 1 + 2, and its templates rely on the addition -- Qwen2.5's tool branch ranges over the
+// messages with `messages[loop.index0 + 1]`, which only reaches the right element if the operand
+// is a number. The evaluator concatenated every operand regardless, which rendered that subscript
+// as the string "01" and made the template index a missing key.
 //
-// A real template writes {{ "user: " + m.content }} far more often than it adds numbers, and
-// a template that does need a count has loop.index rather than arithmetic. A construct this
-// parser does not support is reported at parse time, so a template that added numbers would
-// not quietly render the wrong text -- but + is supported, as concatenation.
+// Concatenation stays the answer when either side is not a number, because that is what every
+// template in the corpus actually writes: {{ "user: " + m.content }}, a marker plus a loop index,
+// a prefix plus a field. Jinja2 raises a TypeError for "a" + 1 instead; rendering it as text here
+// is the documented divergence and the one real templates depend on, since a prompt half-rendered
+// and then abandoned is worse than one whose parts were simply joined.
 func (p *exprParser) parseConcat() (expr, error) {
 	first, err := p.parseArith()
 	if err != nil {

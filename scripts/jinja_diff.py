@@ -207,12 +207,13 @@ SUBSET = {
 # accidentally made the two agree would be reported as an improvement, when it would mean the
 # documented behaviour had changed.
 #
-# The + operator is the one entry: it concatenates rather than adding, so {{ 1 + 2 }} is "12" where
-# Jinja2 says "3". doc.go states it, expr.go states it, and template_test.go pins the Go side -- but
-# nothing compared it against the reference, so the claim "this differs from Jinja2" was untested.
+# None of these is about + any more. Two integers add on both sides now, and the one mixed-pair
+# case -- "a" + 1, which this package renders as "a1" and Jinja2 refuses with TypeError -- cannot
+# live in this table: a DIVERGENT entry is compared against Jinja2's output, and Jinja2 produces
+# none for it. It is asserted by TestPlusAddsNumbersAndJoinsEverythingElse in template_test.go
+# instead, and the skip this table used to generate ("2 cases skipped because Jinja2 itself
+# failed") is the reason: a case that runs neither side reads as coverage and is the opposite.
 DIVERGENT = {
-    "plus_concatenates": ("""{{ 1 + 2 }}""", "12"),
-    "plus_concatenates_three": ("""{{ 1 + 2 + 3 }}""", "123"),
     # A message dict counts as iterable in Jinja2 and not here. doc.go records the reason: Llama
     # 3.2 writes `content is mapping or content is iterable` to mean "encode this as JSON", and a
     # dict matching there would take the record's keys apart instead.

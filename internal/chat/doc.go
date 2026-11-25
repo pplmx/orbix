@@ -24,12 +24,12 @@
 //     with {% set tool_call = tool_call.function %}, and a rule that wrote to the outermost frame
 //     made every call render with an empty name
 //
-//   - {{ expression }} with string and variable operands, + concatenation, - subtraction and
-//     % modulo between integers, and the trim, tojson and length filters. + always concatenates,
-//     including when both operands are integers: {{ 1 + 2 }} renders "12" here and "3" in
-//     Jinja2. No template this package renders adds numbers, and the alternative -- deciding at
-//     render time whether a value came from a literal or a field -- would make + mean two
-//     things depending on where its operands came from.
+//   - {{ expression }} with string and variable operands, +, - subtraction and % modulo between
+//     integers, and the trim, tojson and length filters. + adds two integers and joins anything
+//     else as text, which is Jinja2's behaviour for the first and a divergence for the second:
+//     {{ 1 + 2 }} is "3" on both, while {{ "a" + 1 }} is "a1" here and a TypeError there. The sum
+//     is not optional -- Qwen2.5's tool branch subscripts messages[loop.index0 + 1] -- and the
+//     join is what every template in the corpus writes, a marker concatenated with a field.
 //
 //   - raise_exception, which is the one global implemented
 //

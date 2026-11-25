@@ -457,18 +457,31 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		}
 		return value{list: base.list[start:], isList: true}, nil
 	case concatExpr:
-		// Every part is converted to text and joined, which is what the + operator
-		// means for strings. Templates rely on mixed operands -- a marker plus a
-		// number plus a message field -- so no type check is attempted here.
-		var b strings.Builder
+		// Two integers add; every other combination is joined as text. See parseConcat for why
+		// both shapes are needed: Qwen2.5's tool branch subscripts messages[loop.index0 + 1],
+		// which is a sum, while every template in the corpus also writes marker + field, which
+		// is a join.
+		//
+		// The fold is left to right over the accumulated value, so 1 + 2 + 3 is 6 and not "12"
+		// then "123": each step decides on the running result rather than on the original
+		// operands, which is what Python's own left-to-right evaluation does.
+		var acc *value
 		for _, part := range t.parts {
 			v, err := evalExpr(part, sc)
 			if err != nil {
 				return value{}, err
 			}
-			b.WriteString(v.print())
+			if acc == nil {
+				acc = &v
+				continue
+			}
+			sum, ok := addValues(*acc, v)
+			if !ok {
+				sum = strValue(acc.print() + v.print())
+			}
+			acc = &sum
 		}
-		return strValue(b.String()), nil
+		return *acc, nil
 	case arithExpr:
 		left, err := evalExpr(t.left, sc)
 		if err != nil {
@@ -708,6 +721,33 @@ func evalBinary(b binaryExpr, sc *scope) (value, error) {
 	default:
 		return value{}, fmt.Errorf("chat: unsupported operator %q", b.op)
 	}
+}
+
+// addValues adds two integers, reporting false when either operand is not one.
+//
+// The text form is what is inspected, because that is where a number lives in this value type: a
+// literal, a loop index and a variable from JSON all carry their digits there with isNumber unset
+// in the first two cases. Parsing the text is therefore the check that makes `loop.index0 + 1`
+// reach the right element, which is the whole reason + had to learn to add.
+func addValues(a, b value) (value, bool) {
+	if a.isBool || b.isBool || a.isList || b.isList || a.isMap || b.isMap || a.isNone || b.isNone {
+		return value{}, false
+	}
+	x, err := strconv.Atoi(a.text)
+	if err != nil {
+		return value{}, false
+	}
+	y, err := strconv.Atoi(b.text)
+	if err != nil {
+		return value{}, false
+	}
+	// Overflow to the other sign means the sum did not fit; concatenating that pair would
+	// produce something no template asked for, so it is reported rather than papered over.
+	if (y > 0 && x > math.MaxInt32-y) || (y < 0 && x < math.MinInt32-y) {
+		return value{}, false
+	}
+	v := value{text: strconv.Itoa(x + y), isNumber: true}
+	return v, true
 }
 
 // equalValues compares two values by their string form, except for booleans and lists.

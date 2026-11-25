@@ -330,3 +330,74 @@ func TestNilChatRendererPredicates(t *testing.T) {
 	// Empty rather than a message: a nil renderer is not in a fallback, it is absent, and
 	// the REPL only prints a reason when HasTemplate says a template exists.
 }
+
+// TestRenderConversationCarriesToolsAndCalls covers what RenderWith cannot express: a request
+// that declares tools, and a conversation whose assistant turn carries a call.
+//
+// The template is a miniature of Qwen2.5's, whose tool branch prints the signatures and whose
+// assistant branch prints the call back, including the `{% set %}` rebind that distinguishes this
+// package's scoping from Jinja2's until the previous commit. What matters here is the plumbing:
+// Parameters reaches the template verbatim, and a call's Arguments are not trimmed or re-encoded
+// on the way in.
+func TestRenderConversationCarriesToolsAndCalls(t *testing.T) {
+	const tmpl = `{%- if tools %}<tools>{% for t in tools %}{{ t | tojson }}{% endfor %}</tools>{% endif %}` +
+		`{%- for m in messages %}[{{ m.role }}{% if m.tool_calls %}` +
+		`{%- for tc in m.tool_calls %}{% if tc.function is defined %}{% set tc = tc.function %}{% endif %}` +
+		`{name:{{ tc.name }},args:{{ tc.arguments | tojson }}}{% endfor %}{% endif %}]{% endfor %}`
+	f := buildFileWithMeta([]kvPair{
+		{name: "tokenizer.chat_template", kind: gguf.TypeString, str: tmpl},
+	})
+	r, err := NewChatRenderer(f)
+	if err != nil {
+		t.Fatalf("NewChatRenderer: %v", err)
+	}
+	const params = `{"type": "object"}`
+	got, err := r.RenderConversation(
+		[]Turn{
+			{Role: "user", Text: "weather?"},
+			{Role: "assistant", Text: "  ", ToolCalls: []ToolCall{{
+				ID: "call_1", Name: "get_weather", Arguments: `{"city": "Paris"}`,
+			}}},
+		},
+		[]ToolSpec{{Name: "get_weather", Description: "look it up", Parameters: params}},
+		nil)
+	if err != nil {
+		t.Fatalf("RenderConversation: %v", err)
+	}
+	// The assistant turn's Text is trimmed to empty, which is why the call follows its role
+	// directly. The call itself survives with its arguments intact.
+	want := `<tools>{"function": {"description": "look it up", "name": "get_weather", "parameters": ` +
+		params + `}, "type": "function"}</tools>` +
+		`[user]` +
+		`[assistant{name:get_weather,args:{"city": "Paris"}}]`
+	if got != want {
+		t.Errorf("prompt =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestRenderConversationRefusesToolsWithoutATemplate is the refusal that keeps a declared tool
+// from being silently dropped: a model whose template this project cannot evaluate has nowhere to
+// print the signatures, and answering anyway would be the failure the server refuses everywhere
+// else -- a reply that looks like an answer to a request that was never made.
+func TestRenderConversationRefusesToolsWithoutATemplate(t *testing.T) {
+	f := buildFileWithMeta([]kvPair{
+		// A construct outside the supported subset, so the renderer falls back.
+		{name: "tokenizer.chat_template", kind: gguf.TypeString, str: `{% macro m() %}x{% endmacro %}`},
+	})
+	r, err := NewChatRenderer(f)
+	if err != nil {
+		t.Fatalf("NewChatRenderer: %v", err)
+	}
+	_, err = r.RenderConversation([]Turn{{Role: "user", Text: "hi"}},
+		[]ToolSpec{{Name: "f"}}, nil)
+	if err == nil {
+		t.Fatal("tools were accepted by a model with no usable template")
+	}
+	if !strings.Contains(err.Error(), "no chat template") {
+		t.Errorf("error %q does not say the model has no usable template", err)
+	}
+	// Without tools the same renderer still answers, so the refusal is about the tools.
+	if _, err := r.RenderConversation([]Turn{{Role: "user", Text: "hi"}}, nil, nil); err != nil {
+		t.Errorf("a conversation without tools was refused: %v", err)
+	}
+}

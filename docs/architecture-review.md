@@ -77,7 +77,7 @@ internal/chat, kernel, f16, otel → （无内部依赖）
   `internal/server/imports_test.go` 拒绝任何文件（含测试）导入 `internal/llama`，所以这条边不会悄悄回来。
 
 - `internal/engine` 的 `Request.Sampler` 字段类型曾是 `llama.Sampler`，现在是 engine 自己的 `Sampler`。
-  `ChatRenderer` 仍住在 engine 包里（`chat.go`，246 行），是唯一一个"engine 里不做调度"的文件——那个
+  `ChatRenderer` 仍住在 engine 包里（`chat.go`，330 行），是唯一一个"engine 里不做调度"的文件——那个
   位置保留着，理由在文件头部：渲染器要读 checkpoint 的模板，而它只依赖 `chat` 与 `gguf`，不构成向上依赖。
 
 复算命令：
@@ -94,13 +94,15 @@ grep -rn "llama\.[A-Z][A-Za-z]*" internal/server/*.go
 
 ## 三、最大的结构问题：一次前向被写了三遍
 
-`internal/llama` 有**三条各自独立、逐行重复**的前向实现：
+`internal/llama` 有**三条各自独立、逐行重复**的前向实现（合并进展见本节末尾）：
 
 | 路径         | 入口                                                            | 规模         | 使用方                                                               |
 | ------------ | --------------------------------------------------------------- | ------------ | -------------------------------------------------------------------- |
-| 单 token     | `Forward` → `attention`/`feedForward`/`finish`                  | 77+30+20 行  | 只有 `Model.Generate`，而 `Generate` 只有 `cmd/orbix run` 一个调用方 |
-| 批量 prefill | `Prefill` → `attentionBatch`/`feedForwardBatch`/`finishBatch`   | 133+28+25 行 | engine 的 prefill 阶段                                               |
-| 批量 decode  | `DecodeStep` → `decodeBatch.attention`/`.feedForward`/`.finish` | 84+33+22 行  | engine 的 decode 阶段                                                |
+| 单 token     | `Forward` → `attention`/`feedForward`/`finish`                  | 77+30+11 行  | 只有 `Model.Generate`，而 `Generate` 只有 `cmd/orbix run` 一个调用方 |
+| 批量 prefill | `Prefill` → `attentionBatch`/`feedForwardBatch`/`finishBatch`   | 126+3+16 行  | engine 的 prefill 阶段                                               |
+| 批量 decode  | `DecodeStep` → `decodeBatch.attention`/`.feedForward`/`.finish` | 80+4+18 行   | engine 的 decode 阶段                                                |
+
+（这三组数字是 2026-11-26 复测的。`feedForwardBatch` 只有 3 行，原因见本节末尾的合并记录。）
 
 `feedForward` 三个版本的核心体逐字相同：
 

@@ -67,11 +67,45 @@ func run(args []string) error {
 	case "version", "-v", "--version":
 		return cmdVersion(args[1:])
 	case "help", "-h", "--help":
+		// `orbix help <command>` has to reach that command's own help, not the top-level one.
+		// It used to print the same overview for every argument, so `orbix help serve` and
+		// `orbix help` were the same output and the flags were reachable only by guessing that
+		// `-h` was the form that worked. The argument is turned into the command's own `-h`
+		// rather than printing a second usage table here: the text is the flag package's,
+		// generated from the FlagSet that parses the flags, so there is nothing to keep in step.
+		if len(args) > 1 && !isHelpOnly(args[1]) {
+			return helpFor(args[1])
+		}
 		usage()
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q, run \"orbix help\"", args[0])
 	}
+}
+
+// helpFor prints the help of one command by running it with -h.
+//
+// Errors are not returned: `orbix help serve` is a request for text, and a command whose flags
+// the help cannot be produced for is still an unknown command as far as the caller is concerned.
+// The only case that is not `-h`-able is `model`, whose help lives on the subcommand.
+func helpFor(command string) error {
+	switch command {
+	case "run", "chat", "serve", "bench", "version":
+		return run([]string{command, "-h"})
+	case "model":
+		return run([]string{"model", "-h"})
+	case "help":
+		usage()
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q, run \"orbix help\"", command)
+	}
+}
+
+// isHelpOnly reports whether the argument is one of the help flags, so `orbix --help -h` still
+// prints the overview rather than looking for a command called "-h".
+func isHelpOnly(arg string) bool {
+	return arg == "-h" || arg == "--help"
 }
 
 func usage() {

@@ -106,6 +106,59 @@ func TestCommandHelpIsNotAFailure(t *testing.T) {
 	}
 }
 
+// TestHelpForACommandPrintsThatCommandsFlags covers `orbix help <command>`.
+//
+// It printed the same overview for every argument, so the only way to reach a command's flags
+// was to guess that `-h` was the form that worked -- while `orbix help` advertised itself in the
+// command list as the way to get help. The assertion is the flag list, not the overview: a
+// command's own help names its flags and the overview does not.
+func TestHelpForACommandPrintsThatCommandsFlags(t *testing.T) {
+	// One flag that belongs to the command and appears in no other, so a match cannot come from
+	// the overview or from another command's table.
+	cases := []struct{ command, flag string }{
+		{"run", "-ctx"},
+		{"chat", "-system"},
+		{"serve", "-max-queued"},
+		{"bench", "-suite"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.command, func(t *testing.T) {
+			// The text goes to stderr: the flag package writes its help there, which is the
+			// stream `orbix run -h` has always used. And the error is flag.ErrHelp, which
+			// report turns into exit 0 -- reaching the caller as a non-nil error here is
+			// expected, and treating it as failure would contradict the top-level contract.
+			out := captureStderr(t, func() {
+				if err := run([]string{"help", c.command}); err != nil && !errors.Is(err, flag.ErrHelp) {
+					t.Errorf("help %s: %v", c.command, err)
+				}
+			})
+			if !strings.Contains(out, c.flag) {
+				t.Errorf("help %s does not mention %s, so it is not that command's help:\n%s",
+					c.command, c.flag, out)
+			}
+			if strings.Contains(out, "Commands:") {
+				t.Errorf("help %s printed the top-level overview instead of the command's flags:\n%s",
+					c.command, out)
+			}
+		})
+	}
+}
+
+// TestHelpForAnUnknownCommandFails keeps the new argument handling from swallowing a typo.
+//
+// `orbix help serv` should say the command is unknown, not print the overview and exit 0, which
+// would read as "help for serv" having succeeded.
+func TestHelpForAnUnknownCommandFails(t *testing.T) {
+	err := run([]string{"help", "nosuchcommand"})
+	if err == nil {
+		t.Fatal("help for an unknown command reported success")
+	}
+	if !strings.Contains(err.Error(), "nosuchcommand") {
+		t.Errorf("error %q does not name the command", err)
+	}
+}
+
 func TestRunUnknownCommand(t *testing.T) {
 	err := run([]string{"nope"})
 	if err == nil {
@@ -205,6 +258,64 @@ func TestModelInspectHuman(t *testing.T) {
 	if !strings.Contains(out, "2 x 4") {
 		t.Errorf("output missing the transposed shape %q:\n%s", "2 x 4", out)
 	}
+}
+
+// TestModelInspectPreTokenizerLinesAgree covers a pair of lines that read as a contradiction.
+//
+// The summary printed "pre-tokenizer (none)" for a file with no tokenizer.ggml.pre key, and the
+// next line said "Pre-tokenizer implemented". Both statements are true under this project's
+// rules -- an absent key means llama.cpp applies no pre-tokenizer, which this package implements
+// by not splitting -- but together they read as "there is none" followed by "it works", and both
+// checkpoints tested, a gpt2 vocabulary and a SentencePiece one, displayed exactly that, because
+// neither file declares the key.
+//
+// The test asserts the two lines do not disagree rather than pinning one wording: a file with no
+// key must not be described as having no pre-tokenizer alongside a claim that one is implemented.
+func TestModelInspectPreTokenizerLinesAgree(t *testing.T) {
+	path := writeTestModel(t)
+	out := captureStdout(t, func() {
+		if err := run([]string{"model", "inspect", path}); err != nil {
+			t.Fatalf("inspect: %v", err)
+		}
+	})
+
+	summary := valueOfField(t, out, "Tokenizer")
+	verdict := valueOfField(t, out, "Pre-tokenizer")
+
+	if strings.Contains(summary, "(none)") {
+		t.Errorf("the summary says the file has no pre-tokenizer (%q), which the line below "+
+			"contradicts when it reports one as implemented", summary)
+	}
+	// The property that matters: a summary saying nothing is configured and a verdict saying
+	// something is implemented cannot both be about the same file.
+	if strings.Contains(summary, "(none)") && strings.Contains(verdict, "implemented") {
+		t.Errorf("the two pre-tokenizer lines contradict each other: summary %q, verdict %q",
+			summary, verdict)
+	}
+	if verdict == "" {
+		t.Fatalf("no Pre-tokenizer line in the output:\n%s", out)
+	}
+}
+
+// valueOfField returns the value column of a labelled line, or "" when the label is absent.
+//
+// The output is tabwriter-aligned, so the label and value are separated by runs of spaces rather
+// than by a fixed separator; splitting on the first such run keeps the check independent of the
+// column widths.
+func valueOfField(t *testing.T, out, label string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, label) {
+			continue
+		}
+		rest := strings.TrimPrefix(trimmed, label)
+		if rest == "" || (rest[0] != ' ' && rest[0] != '\t') {
+			continue // a longer label sharing this prefix
+		}
+		return strings.TrimSpace(rest)
+	}
+	return ""
 }
 
 func TestModelInspectJSON(t *testing.T) {

@@ -39,10 +39,14 @@ func (s span) row(i int) []float32 {
 // result into out.
 //
 // This is the inner loop every decoder layer spends its time in once the
-// projections are done, and all three callers -- single-token decode, batched
-// prefill, and batched decode -- need exactly this. Keeping it in one place is
-// what makes paging a change to the caches rather than to three copies of the
-// attention math.
+// projections are done, and all four callers need exactly this: single-token decode through the
+// Cache interface (forward.go), the same step through a concrete PagedKVCache (attentionCached),
+// batched prefill, and batched decode. Keeping it in one place is what makes paging a change to
+// the caches rather than to four copies of the attention math.
+//
+// This said "all three callers -- single-token decode, batched prefill, and batched decode" and
+// counted the two single-token paths as one. They are separate functions because one takes the
+// Cache interface and the other a *PagedKVCache, and both call attend.
 //
 // q is this position's query for the head; scores is scratch at least n long; out
 // is this head's slice of the attention output, which attend overwrites. keys and

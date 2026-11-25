@@ -489,6 +489,16 @@ func (c *PagedKVCache) ensureBlocks(pos int) error {
 // paged cache's runs are not contiguous. Copying them into a contiguous buffer
 // once per token would cost exactly the memory traffic paging is meant to save,
 // so attention walks the spans instead.
+//
+// The two make calls below allocate on every call, which is once per layer per KV
+// head per token. Reusing the slices on the cache looks like the obvious fix and is
+// wrong: the batched paths call this from inside m.run.Parallel, so several
+// goroutines hold spans from here at once and a shared scratch slice would corrupt
+// them. Measured while trying it -- storing the slices on PagedKVCache and taking
+// them back with [:0] made six tests fail at once with "values cover 5 positions,
+// want 6", because one worker's spans overwrote another's. Leaving the allocations
+// alone is the correct choice; a fix would have to give each caller its own buffer,
+// which is what the make calls already do.
 func (c *PagedKVCache) spans(layer, kv, n int) (keys, values []span, err error) {
 	if layer < 0 || layer >= c.cfg.Layers {
 		return nil, nil, fmt.Errorf("llama: layer %d outside the cache (%d)", layer, c.cfg.Layers)

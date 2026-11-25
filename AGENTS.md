@@ -126,9 +126,9 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 - `internal/chat/testdata/*.jinja` 是 checkpoint 里 `tokenizer.chat_template` 的**逐字节副本**，不是源文本。标签外的文本会被渲染，所以多一个换行就进了 prompt。`.gitattributes` 标了 `-text`，`.pre-commit-config.yaml` 把三个空白钩子排除在该路径外，`TestTemplateAssetsAreExact` 用长度与 SHA-256 兜底。新增模板资产时沿用这三处，不要为了让钩子通过而裁剪文件。
 - `just test-race` 只覆盖测试里出现的并发。整机验证用 `just MODEL=<真实 gguf> stress`：它编出竞态版二进制，起 `serve`（`--max-active 1` + 共享缓存），再打混合负载——非流式、SSE 流式，以及排队中被客户端放弃的请求。取消路径最容易暴露竞态，因为它要同时回收 KV block 和 goroutine。判据是日志里没有 `DATA RACE`、没有 5xx、且 `orbix_requests_active` 归零。
 - 那个脚本要求取消/放弃计数非零，否则以失败退出：小 fixture 生成只要几毫秒，取消窗口容易错过，脚本就会在什么都没测到的情况下报 ok。第一次写它时消息里的模型名取错了字段，所有请求都是 404、从未进入引擎，而脚本仍报告「no request was cancelled」——测试没跑起来和测试通过，输出必须能区分。
+- **判定「这里没有测试」之前，先搜完所有测试文件，再搜整个仓库。** 上一轮加了一条「warm prefill 与 cold 的结果要相同」的测试，理由是 `prefix_test.go` 里只测了跳过工作。`batch_test.go:1381` 的 `TestLogitsForCachedMatchesAFreshPrefill` 早就在测同一件事，而且更强——用带 attention bias 的 Qwen2，那才是 `logitsForCached` 与前向真正不同的地方，注释里还附了「去掉 bias 后 351/363 个 logit 不同」的实测。我写的版本用默认 llama、没有 bias，测的是更容易的那个。两个证据确认是重复：加上和删掉它，`logitsForCached` 的覆盖率都是 71.4%；同一个「pos 减一」的注入，已有的两条测试都能抓住。**方法是先 `grep -rn \"func Test\" <包>` 把测试名列全，按被测函数名和断言的性质筛，不要只搜一个词就下结论。**
 
 ## 文档
-
 - README 是门面和索引，权威正文放在各包 `doc.go`。
 - README 里承诺的 CLI 命令和 just 配方必须真的可用；改接口时同步更新 README。
 - Markdown 过 `rumdl check`，表格用对齐样式。

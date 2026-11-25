@@ -1712,6 +1712,33 @@ func TestResolveModelReadsTheEnvironment(t *testing.T) {
 	}
 }
 
+// TestResolveModelRefusesWhenNeitherSourceGivesOne covers the branch that returns an error.
+//
+// The other two branches were tested and this one was not, so the wording of the message -- the
+// only thing a user sees when they forget -- was pinned by nothing, and an implementation that
+// silently left the model empty would have passed. The command name is in the message because
+// five commands share this function and the flag is the thing to fix.
+func TestResolveModelRefusesWhenNeitherSourceGivesOne(t *testing.T) {
+	// An empty variable is the same as an unset one: nothing fills the pointer.
+	t.Setenv("ORBIX_MODEL", "")
+
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	model := fs.String("model", "", "")
+	err := resolveModel(fs, model)
+	if err == nil {
+		t.Fatal("resolveModel accepted an empty model with no environment fallback")
+	}
+	for _, want := range []string{"serve", "--model", "ORBIX_MODEL"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if *model != "" {
+		t.Errorf("model = %q; a refused resolve should not have written anything", *model)
+	}
+}
+
 // TestRunRefusesAFileWithNoTokenizer covers run's startup check, which had no test.
 //
 // serve's equivalent was covered last round; run opens the same file and makes the same assumption

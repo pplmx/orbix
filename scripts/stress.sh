@@ -60,8 +60,19 @@ echo "stress: model $model_name"
 
 # payload builds a request body with the served model name substituted.
 payload() { printf '%s' "${1/__MODEL__/$model_name}"; }
-post() { curl -s -o /dev/null --max-time 30 -X POST "$api" -H 'Content-Type: application/json' -d "$(payload "$1")"; }
-stream() { curl -s -o /dev/null -N --max-time 30 -X POST "$api" -H 'Content-Type: application/json' -d "$(payload "$1")"; }
+# The ceiling is 120s rather than the 30s these two used to carry, for the reason the holder's own
+# ceiling gives below: a race build on a real checkpoint is slow, and a harness that gives up first
+# reports an engine defect that is not there. Measured on the converted Qwen2.5-0.5B-Instruct, a
+# 16-token request against the race binary took 15.4s, 15.5s, 17.4s and 15.7s on an idle engine --
+# already half of 30s with no load -- and under the load this script itself creates it went past
+# it. The failure was three 503s whose durations were exactly 30000ms, which is the client giving
+# up rather than the server answering: the request was still being generated when curl closed it.
+#
+# The value is a bound on a broken run, not a tuning knob. A run that has actually stopped
+# advancing fails on the gauge below and on the holder's timeout; a run that is merely slow must
+# not be reported as either.
+post() { curl -s -o /dev/null --max-time 120 -X POST "$api" -H 'Content-Type: application/json' -d "$(payload "$1")"; }
+stream() { curl -s -o /dev/null -N --max-time 120 -X POST "$api" -H 'Content-Type: application/json' -d "$(payload "$1")"; }
 
 # Requests run one after another rather than in parallel subshells. A background job plus
 # `wait` in a pipeline is unreliable here -- the earlier version of this script hung at the

@@ -382,12 +382,19 @@ Measured peak RSS, one request, `orbix run --max-tokens 1`:
 
 The exact resident figure is four bytes times the parameter count, which is the column to
 read; the file-size column is there only to show how little it predicts. Do not try to derive
-one from the other by a single ratio. Radically compressed files grow more (TinyLlama is 2.6
-bits per weight and expands 9.5x) and lightly compressed ones less (Qwen2.5 Q8_0 is 8.5 bits
-and expands 4.8x), but neither is `32 / bits_per_weight`, because every file also carries
+one from the other by a single ratio. Radically compressed files grow more (TinyLlama 1.1B
+Q2_K is 3.5 bits per weight over the whole file and expands 9.5x) and lightly compressed ones
+less (Qwen2.5-0.5B Q8_0 is 8.6 bits and expands 4.8x), but neither is
+`32 / bits_per_weight`, because every file also carries
 tensors that were never quantized -- the per-layer norms and often the output projection are
-F32 already and do not grow at all. Measured against that formula the four rows above come out
-at 7.1x, 12.3x and 3.8x where 7.6x, 9.5x and 4.8x were observed.
+F32 already and do not grow at all. Applying `32 / bits_per_weight` to the four rows gives
+5.2x, 8.6x, 9.1x and 3.7x where 7.6x, 9.6x, 9.5x and 4.8x were observed. All four are
+under-predicted, by 32%, 11%, 4% and 22% respectively.
+
+Those four predicted figures are computed from the table by `32 / (size * 8 * 2^20 /
+parameters)`, not remembered: an earlier version of this sentence gave "7.1x, 12.3x and
+3.8x" against three of the four rows, and none of the three can be reproduced from the
+sizes and parameter counts in the table above.
 
 A 7B Q4_0 checkpoint is roughly 3.7 GiB on disk and needs about 26 GiB resident **for the
 weights alone**, before any KV cache -- which is more than most hosts have. That is a property

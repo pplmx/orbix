@@ -217,6 +217,12 @@ DIVERGENT = {
     # 3.2 writes `content is mapping or content is iterable` to mean "encode this as JSON", and a
     # dict matching there would take the record's keys apart instead.
     "is_iterable_dict": ("""{{ messages[0] is iterable }}""", "False"),
+    # An absent field is none here and Undefined in Jinja2, where reading a missing key yields
+    # something that is not none. Measured on the reference: False for an absent key, True for an
+    # explicit null. doc.go records which templates depend on it -- Qwen2 writes
+    # `not message.tool_calls` and Llama 3 writes `'tool_calls' in message`, so neither can be
+    # answered by raising.
+    "is_none_absent": ("""{{ messages[0].nosuchfield is none }}""", "True"),
 }
 
 

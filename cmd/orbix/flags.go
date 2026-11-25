@@ -71,8 +71,9 @@ func workersFlag(fs *flag.FlagSet) *int {
 	return fs.Int("workers", 0,
 		"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+
 			"the outputs a pass can split, which for the vocabulary projection is its width "+
-			"rather than the batch size -- measured on a 128-core host, 8 workers give about "+
-			"two thirds of what 32 do, and beyond 32 the difference is inside the noise")
+			"rather than the batch size -- measured on a 128-core host with a 64-token "+
+			"budget, 3 runs each: 8 workers 214 tok/s, 32 workers 240, 128 workers 246, so "+
+			"most of the gain arrives by 32 and the last row is within noise of it")
 }
 
 // registerCacheFlags registers the paged-cache flags, and the worker flag when asked.

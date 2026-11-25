@@ -65,15 +65,21 @@ type indexDefinedExpr struct{ index indexExpr }
 // has to see the boolean rather than a non-empty text.
 type boolLitExpr struct{ val bool }
 
-// sliceExpr takes the elements of a sequence from an index to its end.
-// sliceExpr is a subscript range. Either bound may be absent: `messages[1:]` drops a leading
-// element, and Qwen3's `current_content[:tool_start_length]` keeps a prefix. Both appear in the
-// templates this package targets, so both forms are represented rather than one being desugared
-// into the other.
+// sliceExpr is a subscript range. Any bound may be absent, and so may the step:
+// `messages[:n]` keeps a prefix and `messages[1:]` drops a leading element, both of which the
+// templates this package targets write; `messages[::-1]` walks backwards from the end, which
+// Qwen3 0.6B's released template uses to find the last real user turn.
+//
+// The step is a separate field rather than desugaring into the two bounds because Python's
+// absent-bound rules differ between a forward and a backward step: for a negative step the
+// missing start is the last element and the missing stop is "past the beginning". Treating the
+// absent bounds as 0 and n and then stepping would render an empty loop instead of a reversed
+// one, which is a plausible-looking prompt that is wrong.
 type sliceExpr struct {
 	base expr
 	from expr // nil for the [:n] form
 	to   expr // nil for the [n:] form
+	step expr // nil for a single-colon slice, which is step 1
 }
 
 // isTrueExpr tests whether a value is the boolean true or false.
@@ -630,6 +636,108 @@ func (p *exprParser) parseMul() (expr, error) {
 	return left, nil
 }
 
+// finishSlice reads the optional step of a slice and the closing bracket.
+//
+// It is called once the lower and upper bounds have been parsed, whether either was present. A
+// leading colon was already consumed by the caller when the lower bound was absent, and a
+// second colon means a step follows: `[a:b]` and `[a:b:c]` differ only here.
+func (p *exprParser) finishSlice(s sliceExpr) (sliceExpr, error) {
+	if p.accept("]") {
+		return s, nil
+	}
+	// Not the closing bracket, so a step must be next.
+	if !p.accept(":") {
+		return sliceExpr{}, fmt.Errorf("chat: missing ']' in slice expression")
+	}
+	// `[a:b:]` is legal Python and means step 1, so an absent step after the second colon is
+	// not an error.
+	if p.accept("]") {
+		return s, nil
+	}
+	step, err := p.parseOr()
+	if err != nil {
+		return sliceExpr{}, err
+	}
+	if !p.accept("]") {
+		return sliceExpr{}, fmt.Errorf("chat: missing ']' in slice expression")
+	}
+	s.step = step
+	return s, nil
+}
+
+// parseBracket reads what follows a "[" up to its "]" and builds either an index or a slice.
+//
+// Python writes three forms inside one pair of brackets and this reads all of them with one
+// scanner rather than a branch per shape:
+//
+//	[i]      index
+//	[a:b]    slice, either bound optional
+//	[a:b:c]  slice with a step, any of the three optional: [:], [::2], [::-1], [3:0:-1]
+//
+// Which one it is falls out of which colons are seen: no colon is an index, one is a slice with
+// step 1, two is a slice whose third field is the step. Splitting the shapes into separate
+// branches is what the previous version did, and it left `[:]` and `[::-1]` unreachable because
+// each branch expected a different token next.
+//
+// The base is passed in rather than read from the receiver because a bracket may follow any
+// postfix chain: `messages[1:][0]` is two of these.
+func (p *exprParser) parseBracket(base expr) (expr, error) {
+	// field reads one optional bound. A missing one is nil, which is how an absent bound stays
+	// distinct from a bound that happened to evaluate to 0 -- the two mean different things.
+	//
+	// The stop set is checked against the peeked token rather than the parser position: an
+	// absent field is one where the next token is already a separator, and reading it would
+	// report "unexpected "]"" for the legal form `messages[:]`.
+	field := func() (expr, error) {
+		switch p.peek() {
+		case ":", "]", "":
+			return nil, nil
+		}
+		return p.parseOr()
+	}
+
+	first, err := field()
+	if err != nil {
+		return nil, err
+	}
+	if !p.accept(":") {
+		if first == nil {
+			return nil, fmt.Errorf("chat: empty index")
+		}
+		if !p.accept("]") {
+			return nil, fmt.Errorf("chat: missing ']' in index expression")
+		}
+		return indexExpr{base: base, index: first}, nil
+	}
+
+	// A colon was consumed, so this is a slice. Everything after it is optional.
+	s := sliceExpr{base: base}
+	second, err := field()
+	if err != nil {
+		return nil, err
+	}
+	hasStep := p.accept(":")
+	if hasStep {
+		var step expr
+		if step, err = field(); err != nil {
+			return nil, err
+		}
+		s.step = step
+	}
+	// Position decides what each field meant, which is why the assignment happens after the
+	// scanning rather than during it: [a:b:c] and [:b:c] reach the same place with one fewer
+	// field read, and both have the step last.
+	if !hasStep {
+		s.from, s.to = first, second
+	} else if first != nil || second != nil {
+		s.from, s.to = first, second
+	}
+	if !p.accept("]") {
+		return nil, fmt.Errorf("chat: missing ']' in slice expression")
+	}
+	return s, nil
+}
+
 // parsePostfix handles attribute access, indexing, and filters after a primary.
 func (p *exprParser) parsePostfix() (expr, error) {
 	e, err := p.parsePrimary()
@@ -659,46 +767,10 @@ func (p *exprParser) parsePostfix() (expr, error) {
 				e = cc
 			}
 		case p.accept("["):
-			// The [:n] form has no lower bound, so the colon comes first.
-			if p.accept(":") {
-				to, err := p.parseOr()
-				if err != nil {
-					return nil, err
-				}
-				if !p.accept("]") {
-					return nil, fmt.Errorf("chat: missing ']' in slice expression")
-				}
-				e = sliceExpr{base: e, to: to}
-				continue
-			}
-			idx, err := p.parseOr()
+			e, err = p.parseBracket(e)
 			if err != nil {
 				return nil, err
 			}
-			// [n:] is a slice with no upper bound. Llama 3's template uses messages[1:]
-			// to drop the system message, and a slice is not reachable as an index
-			// expression, so it is a separate form rather than a general one: only the
-			// open tail appears in practice and a full [a:b:step] would be speculation.
-			if p.accept(":") {
-				// The upper bound is optional and an absent one means "to the end".
-				if p.accept("]") {
-					e = sliceExpr{base: e, from: idx}
-					continue
-				}
-				to, err := p.parseOr()
-				if err != nil {
-					return nil, err
-				}
-				if !p.accept("]") {
-					return nil, fmt.Errorf("chat: missing ']' in slice expression")
-				}
-				e = sliceExpr{base: e, from: idx, to: to}
-				continue
-			}
-			if !p.accept("]") {
-				return nil, fmt.Errorf("chat: missing ']' in index expression")
-			}
-			e = indexExpr{base: e, index: idx}
 		case p.accept("|"):
 			name := p.peek()
 			if !isIdentifier(name) {

@@ -33,6 +33,21 @@
 //     Qwen2.5's tool branch subscripts messages[loop.index0 + 1] -- and the join is what every
 //     template in the corpus writes, a marker concatenated with a field.
 //
+//   - Slices of a sequence or a string, in the forms Python writes: [n:], [:n], [a:b], and a
+//     step as [a:b:c]. The step is not decoration -- Qwen3 0.6B's released template opens with
+//     {% for message in messages[::-1] %} to walk a conversation backwards for the last real
+//     user turn, and without it the whole template was refused rather than that branch
+//     mis-rendering. A negative step also needs its own absent-bound rules: the missing start
+//     is the last element rather than 0, so the forward [start:end] arithmetic cannot be reused,
+//     and reusing it was the first attempt (it rendered an empty loop). A zero step is refused
+//     because Python raises ValueError there.
+//
+//   - The string methods strip, lstrip, rstrip and split, with Python's character-set argument
+//     rule for the first three ('xyhixy'.strip('xy') is "hi", not "hixy"), and startswith and
+//     endswith. The predicates guard Qwen3 0.6B's tool-response branch. Python also accepts a
+//     tuple of prefixes there; this package has no tuple type and no published template passes
+//     one, so a second argument is refused rather than silently compared against the first.
+//
 //   - raise_exception, which is the one global implemented
 //
 //   - "x is string", alongside the is tests above, because Gemma 3's template uses it to tell a

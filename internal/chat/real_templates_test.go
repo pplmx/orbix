@@ -163,6 +163,11 @@ func TestTemplateAssetsAreExact(t *testing.T) {
 		// (tokenizer.chat_template), so unlike llama32 this one's provenance is checkable: the
 		// source directory is on the machine the asset was taken from.
 		"qwen2-instruct.jinja": {2507, "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f"},
+		// From /models/Qwen3-0.6B/tokenizer_config.json, same provenance. This one is why the
+		// slice step and the string-method predicates exist: it writes `messages[::-1]` and
+		// guards its tool-response branch with `startswith`/`endswith`, and without them the
+		// whole template was refused rather than falling back per branch.
+		"qwen3-0.6b.jinja": {4168, "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"},
 	}
 	for name, w := range want {
 		raw, err := os.ReadFile(filepath.Join("testdata", name))

@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -257,5 +259,149 @@ func TestJoinIsRefusedAtTheRightStage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not implemented") {
 		t.Errorf("the render error was %q; it should say the method is not implemented", err)
+	}
+}
+
+// TestQwen3ReleasedTemplateRenders covers the checkpoint's own template, not a constructed one.
+//
+// Every other Qwen3 test in this file exercises a single construct against a string typed by
+// hand. That is how the constructs were added, and it left a gap that mattered: /models/Qwen3-0.6B
+// ships a 4168-character template that uses `messages[::-1]` and `.startswith()`, neither of which
+// existed, so it was refused outright and every conversation with that checkpoint silently used
+// the neutral transcript. The construct tests passed the whole time. The difference is that a
+// construct test proves a feature works; only the whole template proves the feature is what the
+// model needed.
+//
+// They were found by pointing the package at the real file and reading the error, which is what
+// this test now does on every run. The expected outputs are the whole prompt, byte for byte,
+// because a chat template's spacing is part of the format and a difference of one newline moves
+// the model off its distribution.
+func TestQwen3ReleasedTemplateRenders(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "qwen3-0.6b.jinja"))
+	if err != nil {
+		t.Fatalf("read the Qwen3 asset: %v", err)
+	}
+	tpl, err := Parse(string(raw))
+	if err != nil {
+		t.Fatalf("the released Qwen3 template does not parse: %v\n"+
+			"This is the failure that matters for a checkpoint: the caller falls back to the "+
+			"neutral transcript, so the model is served a prompt it was not trained on.", err)
+	}
+
+	conversation := []Message{
+		{Role: "system", Content: "You are terse."},
+		{Role: "user", Content: "What is 2+2?"},
+		{Role: "assistant", Content: "4"},
+		{Role: "user", Content: "And times 3?"},
+	}
+	// Verified byte-identical against Jinja2 3.1.6 rendering the same template and messages.
+	want := "<|im_start|>system\nYou are terse.<|im_end|>\n" +
+		"<|im_start|>user\nWhat is 2+2?<|im_end|>\n" +
+		"<|im_start|>assistant\n4<|im_end|>\n" +
+		"<|im_start|>user\nAnd times 3?<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	got, err := tpl.Render(conversation, Inputs{AddGenerationPrompt: true})
+	if err != nil {
+		t.Fatalf("rendering the released template: %v", err)
+	}
+	if got != want {
+		t.Errorf("rendered\n%q\nwant\n%q", got, want)
+	}
+
+	// The tools branch, which is the reason the template is this long. Compared with the
+	// parameters object written the way json.dumps writes it inside tojson -- the package
+	// emits a caller's parameters verbatim rather than re-encoding them, so the input has to
+	// be the text both sides would see.
+	tools := []Tool{{Name: "get", Description: "fetch", Parameters: `{"type": "object"}`}}
+	withTools, err := tpl.Render(conversation[:2], Inputs{AddGenerationPrompt: true, Tools: tools})
+	if err != nil {
+		t.Fatalf("rendering the tools branch: %v", err)
+	}
+	for _, want := range []string{
+		"# Tools\n\nYou may call one or more functions",
+		`{"function": {"description": "fetch", "name": "get", "parameters": {"type": "object"}}, "type": "function"}`,
+		"<tool_call>",
+		"<|im_start|>assistant\n",
+	} {
+		if !strings.Contains(withTools, want) {
+			t.Errorf("the tools branch is missing %q; got:\n%s", want, withTools)
+		}
+	}
+
+	// The reverse walk the template uses to find the last genuine user turn. If [::-1] rendered
+	// empty or in order, the branch below would take the wrong arm and the prompt would still
+	// look plausible -- the failure mode this whole package exists to avoid.
+	reversed := render(t, `{% for m in messages[::-1] %}{{ m.role }} {% endfor %}`, conversation, Inputs{})
+	if reversed != "user assistant user system " {
+		t.Errorf("[::-1] over the conversation rendered %q, want the roles in reverse order", reversed)
+	}
+}
+
+// TestSliceStep covers the third slice field, which Qwen3's template needs to walk a
+// conversation backwards.
+//
+// The expectations are Python's, checked against Jinja2 3.1.6: a negative step reverses and its
+// absent bounds mean the last element and "past the beginning", which is why the implementation
+// cannot reuse the forward [start:end] arithmetic.
+func TestSliceStep(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{% for m in messages[::-1] %}{{ m.role }}{% endfor %}`, "dcba"},
+		{`{% for m in messages[::-2] %}{{ m.role }}{% endfor %}`, "db"},
+		{`{% for m in messages[3:0:-1] %}{{ m.role }}{% endfor %}`, "dcb"},
+		{`{% for m in messages[::2] %}{{ m.role }}{% endfor %}`, "ac"},
+		{`{% for m in messages[:] %}{{ m.role }}{% endfor %}`, "abcd"},
+		{`{% for m in messages[1:3] %}{{ m.role }}{% endfor %}`, "bc"},
+		{`{% for m in messages[-2:] %}{{ m.role }}{% endfor %}`, "cd"},
+		{`{% for m in messages[:-2] %}{{ m.role }}{% endfor %}`, "ab"},
+		{`{{ 'abcdef'[::-1] }}`, "fedcba"},
+		{`{{ 'abcdef'[::2] }}`, "ace"},
+		{`{{ 'abcdef'[4:1:-1] }}`, "edc"},
+		// Out-of-range bounds clamp rather than fail, as in Python.
+		{`{{ 'abcdef'[-99:] }}`, "abcdef"},
+		{`{{ 'abcdef'[:99] }}`, "abcdef"},
+		{`{{ 'abcdef'[99:] }}`, ""},
+		{`{{ 'abcdef'[:-99] }}`, ""},
+	}
+	msgs := []Message{{Role: "a"}, {Role: "b"}, {Role: "c"}, {Role: "d"}}
+	for _, c := range cases {
+		if got := render(t, c.src, msgs, Inputs{}); got != c.want {
+			t.Errorf("%q => %q, want %q", c.src, got, c.want)
+		}
+	}
+
+	// A zero step is Python's ValueError. Rendering an empty loop instead would be a prompt
+	// with a silently missing section, which is the failure this package refuses to produce.
+	tpl, err := Parse(`{% for m in messages[::0] %}{{ m.role }}{% endfor %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := tpl.Render(msgs, Inputs{}); err == nil {
+		t.Fatal("a zero slice step rendered; Python raises ValueError and this must refuse too")
+	}
+}
+
+// TestStartswithEndswith covers the two predicates Qwen3's tool-response guard uses.
+//
+// They are here rather than in evalStringMethod's test because the reason they exist is a
+// released template, and that is what the comment should point at: without them the guard
+// `not (content.startswith('<tool_response>') and content.endswith('</tool_response>'))` fails
+// to evaluate and the whole 4168-character template is refused.
+func TestStartswithEndswith(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`{% if 'abc'.startswith('ab') %}y{% else %}n{% endif %}`, "y"},
+		{`{% if 'abc'.startswith('bc') %}y{% else %}n{% endif %}`, "n"},
+		{`{% if 'abc'.endswith('bc') %}y{% else %}n{% endif %}`, "y"},
+		{`{% if 'abc'.endswith('ab') %}y{% else %}n{% endif %}`, "n"},
+		// The empty prefix is inside every string, which is Python's answer.
+		{`{% if 'abc'.startswith('') %}y{% else %}n{% endif %}`, "y"},
+		// The guard the real template writes, in both directions.
+		{`{% if '<tool_response>x</tool_response>'.startswith('<tool_response>') and ` +
+			`'<tool_response>x</tool_response>'.endswith('</tool_response>') %}wrapped{% endif %}`, "wrapped"},
+		{`{% if 'plain'.startswith('<tool_response>') %}wrapped{% endif %}`, ""},
+	}
+	for _, c := range cases {
+		if got := render(t, c.src, nil, Inputs{}); got != c.want {
+			t.Errorf("%q => %q, want %q", c.src, got, c.want)
+		}
 	}
 }

@@ -507,19 +507,25 @@ func evalExpr(e expr, sc *scope) (value, error) {
 				return value{}, fmt.Errorf("chat: slice applied to a non-sequence")
 			}
 			runes := []rune(base.text)
-			n := len(runes)
-			start, end, err := sliceBounds(t, sc, n)
+			idx, err := sliceIndices(t, sc, len(runes))
 			if err != nil {
 				return value{}, err
 			}
-			return strValue(string(runes[start:end])), nil
+			out := make([]rune, len(idx))
+			for i, j := range idx {
+				out[i] = runes[j]
+			}
+			return strValue(string(out)), nil
 		}
-		n := len(base.list)
-		start, end, err := sliceBounds(t, sc, n)
+		idx, err := sliceIndices(t, sc, len(base.list))
 		if err != nil {
 			return value{}, err
 		}
-		return value{list: base.list[start:end], isList: true}, nil
+		out := make([]value, len(idx))
+		for i, j := range idx {
+			out[i] = base.list[j]
+		}
+		return value{list: out, isList: true}, nil
 	case concatExpr:
 		// Two integers add; every other combination is joined as text. See parseConcat for why
 		// both shapes are needed: Qwen2.5's tool branch subscripts messages[loop.index0 + 1],
@@ -1009,6 +1015,27 @@ func evalStringMethod(t callExpr, recv value, sc *scope) (value, error) {
 			out[i] = strValue(part)
 		}
 		return value{list: out, isList: true}, nil
+	case "startswith", "endswith":
+		// Qwen3's released template guards its tool-response branch with these:
+		// `not (message.content.startswith('<tool_response>') and
+		// message.content.endswith('</tool_response>'))`. Without them the template does not
+		// render at all, so this is what makes that checkpoint's own format usable rather
+		// than a nicety.
+		//
+		// Python's signature also accepts a tuple of prefixes. There is no tuple type in this
+		// package and no published template passes one, so a second argument is refused by
+		// the arity check below rather than silently compared against the first.
+		if len(t.args) != 1 {
+			return value{}, fmt.Errorf("chat: %s() takes one argument", t.name)
+		}
+		arg, err := evalExpr(t.args[0], sc)
+		if err != nil {
+			return value{}, err
+		}
+		if t.name == "startswith" {
+			return boolValue(strings.HasPrefix(s, arg.text)), nil
+		}
+		return boolValue(strings.HasSuffix(s, arg.text)), nil
 	}
 	// Everything else is refused at render time, because a method call parses anywhere: the
 	// receiver is just an expression to the left of the dot, and the parser has no reason to
@@ -1055,38 +1082,94 @@ func compareValues(left, right value) (int, bool) {
 // sequence is clamped rather than refused: the point of messages[1:] on a one-message
 // conversation is "nothing after the first", and a template that guards the length should not
 // also have to guard this. Python clamps too, which is what these templates were written against.
-func sliceBounds(t sliceExpr, sc *scope, n int) (start, end int, err error) {
-	end = n
+// sliceIndices evaluates a slice into the list of indices it selects, which is Python's
+// slice.indices followed by the selection itself.
+//
+// Indices rather than a [start:end] range because a step can be negative, and then the two
+// bounds mean the opposite of what a range needs: `[::-1]` selects every element backwards,
+// while its absent bounds stand for len-1 and "before the first", not 0 and len. Python's own
+// slice object resolves this by clamping in a step-dependent way, and reproducing that here is
+// the only way `messages[::-1]` and `messages[3:0:-1]` both come out right.
+//
+// The alternative -- computing start and end and then walking -- is where this started, and it
+// silently returned an empty result for a negative step because end < start is exactly the
+// condition it used to clamp to empty.
+func sliceIndices(t sliceExpr, sc *scope, n int) ([]int, error) {
+	step := 1
+	if t.step != nil {
+		v, err := evalExpr(t.step, sc)
+		if err != nil {
+			return nil, err
+		}
+		step, err = strconv.Atoi(v.text)
+		if err != nil {
+			return nil, fmt.Errorf("chat: slice step %q is not a number", v.text)
+		}
+		// Python raises ValueError for a zero step rather than returning an empty result.
+		// A template that wrote it meant something; reporting is what lets the caller fall back
+		// instead of rendering a prompt with a silently empty loop.
+		if step == 0 {
+			return nil, fmt.Errorf("chat: slice step is zero")
+		}
+	}
+
+	// Defaults depend on the direction, which is the whole reason this is not a [start:end]
+	// calculation: with a negative step the walk starts at the last element and stops short of
+	// the first, so the absent bounds are n-1 and -1 rather than 0 and n.
+	start, end := 0, n
+	if step < 0 {
+		start, end = n-1, -1
+	}
+
 	if t.from != nil {
-		from, err := evalExpr(t.from, sc)
+		v, err := evalExpr(t.from, sc)
 		if err != nil {
-			return 0, 0, err
+			return nil, err
 		}
-		start, err = strconv.Atoi(from.text)
+		got, err := strconv.Atoi(v.text)
 		if err != nil {
-			return 0, 0, fmt.Errorf("chat: slice start %q is not a number", from.text)
+			return nil, fmt.Errorf("chat: slice start %q is not a number", v.text)
 		}
-		if start < 0 {
-			start += n
-		}
+		start = clampIndex(got, n, step)
 	}
 	if t.to != nil {
-		to, err := evalExpr(t.to, sc)
+		v, err := evalExpr(t.to, sc)
 		if err != nil {
-			return 0, 0, err
+			return nil, err
 		}
-		end, err = strconv.Atoi(to.text)
+		got, err := strconv.Atoi(v.text)
 		if err != nil {
-			return 0, 0, fmt.Errorf("chat: slice end %q is not a number", to.text)
+			return nil, fmt.Errorf("chat: slice end %q is not a number", v.text)
 		}
-		if end < 0 {
-			end += n
+		end = clampIndex(got, n, step)
+	}
+
+	var out []int
+	if step > 0 {
+		for i := start; i < end; i += step {
+			out = append(out, i)
+		}
+	} else {
+		for i := start; i > end; i += step {
+			out = append(out, i)
 		}
 	}
-	start = max(0, min(start, n))
-	end = max(0, min(end, n))
-	if end < start {
-		end = start
+	return out, nil
+}
+
+// clampIndex brings one bound into range for the direction of travel, which is what Python's
+// slice.indices does before the walk.
+//
+// A negative bound counts from the end in both directions, so `[-1:]` is the last element and
+// `[:-1]` is everything but it. The clamps then differ by direction: a forward walk may not
+// start below 0 or go past n, while a backward walk may not start above n-1 or go below -1 --
+// -1 being "past the beginning" for a negative step, not a wrap of the last element.
+func clampIndex(i, n, step int) int {
+	if i < 0 {
+		i += n
 	}
-	return start, end, nil
+	if step > 0 {
+		return max(0, min(i, n))
+	}
+	return max(-1, min(i, n-1))
 }

@@ -420,6 +420,49 @@ func BenchmarkPrefillBatched(b *testing.B) {
 	}
 }
 
+// BenchmarkPrefillByLength sweeps the prompt length and reports the cost per token,
+// which is the figure docs/performance.md quotes when it says prefill throughput
+// improves with prompt length.
+//
+// It exists because no other benchmark varies the length: benchPrompt fixes 64 tokens,
+// so the claim that a longer prompt is cheaper per token had nothing in the repository
+// that could show it. Measured on gemma-3-270m-it-Q8_0, three runs at each length:
+// 5.61, 5.47, 5.21 ms/token at 32; 4.40, 4.36, 4.41 at 64; 4.24, 3.96, 3.91 at 128;
+// 3.51, 3.55, 3.56 at 256; 3.34, 3.31, 3.28 at 512. Monotone in all three runs.
+//
+// The spread inside one length is 0.03 to 0.33 ms, well under the 1.2 ms the whole
+// sweep spans, so the direction is not inside the noise -- which is the check AGENTS.md
+// asks for before a measured trend goes into a document.
+func BenchmarkPrefillByLength(b *testing.B) {
+	m := loadRealB(b)
+	cfg := m.Config()
+	for _, n := range []int{32, 64, 128, 256, 512} {
+		if n > cfg.ContextLen-1 {
+			continue
+		}
+		ids := make([]int32, n)
+		for i := range ids {
+			ids[i] = int32(100 + i)
+		}
+		cache, err := NewKVCache(cfg, n+1)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ResetTimer()
+			for range b.N {
+				if err := cache.Reset(); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := m.Prefill(cache, ids, 0); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Milliseconds())/float64(b.N)/float64(n), "ms/token")
+		})
+	}
+}
+
 // BenchmarkDecode measures one token against an already-filled cache, which is
 // the cost every generated token pays and the batched prefill does not change.
 func BenchmarkDecode(b *testing.B) {

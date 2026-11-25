@@ -4,11 +4,34 @@ Orbix is a learning project, and these are the shapes to expect:
 
 - **CPU-only.** No GPU support. For GPU throughput, use vLLM, SGLang, or TensorRT-LLM.
 
-- **Prefill throughput improves with prompt length, within the window.** On Llama 3.2 1B Q2_K
-  with 32 workers, the per-token cost fell from 52 ms at a 155-token prompt to 40 ms at 614
-  (medians of five interleaved runs). Attention is O(n^2) but parallelises over positions, while
-  the projections are O(n) over columns that do not grow, so the growing term is the one that
-  gains workers.
+- **Prefill throughput improves with prompt length, within the window.** Attention is O(n^2) but
+  parallelises over positions, while the projections are O(n) over columns that do not grow, so
+  the growing term is the one that gains workers.
+
+  Measured on gemma-3-270m-it-Q8_0 with `go test -run '^$' -bench BenchmarkPrefillByLength
+  -benchtime=3s -count=3 ./internal/llama/` and `MODEL` set, three runs at each length:
+
+  | prompt tokens | ms/token, three runs      |
+  | ------------- | ------------------------- |
+  | 32            | 5.61, 5.47, 5.21          |
+  | 64            | 4.40, 4.36, 4.41          |
+  | 128           | 4.24, 3.96, 3.91          |
+  | 256           | 3.51, 3.55, 3.56          |
+  | 512           | 3.34, 3.31, 3.28          |
+
+  Monotone in all three runs. The spread within one length is 0.03 to 0.33 ms and the sweep
+  spans 1.2 ms, so the direction is larger than the noise -- which is the condition for stating
+  a trend at all. **`BenchmarkPrefillByLength` was written for this paragraph**: nothing in the
+  repository varied the prompt length before, because `benchPrompt` fixes 64 tokens, so the claim
+  had no command behind it.
+
+  The figures this replaces came from Llama 3.2 1B Q2_K: 52 ms per token at 155 tokens, 40 ms at
+  614. Same direction, larger model, and no command recorded. The ratio between them is 1.30x
+  over a 4.0x length change; the sweep above is 1.64x over a 16x length change (5.43 to 3.31,
+  the means of three runs). A smaller gain over a larger stretch is not a contradiction -- the
+  per-token cost flattens as the prompt grows, so a sweep that starts at 155 gains less than one
+  that starts at 32 -- but it is the kind of comparison that has to be made between two measured
+  runs, not between one run and a recollection.
 
 - **Treat the numbers here as indicative, not as a benchmark.** They came from a shared machine
   whose load drifted more than the effects measured. `orbix bench` prints its own conditions.

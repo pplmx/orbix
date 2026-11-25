@@ -136,7 +136,8 @@ MatMulTransposed(gate, xn, wGate) → MatMulTransposed(up, xn, wUp)
 
 把三种压进一个函数需要把 mask、cache 归属和并行性都变成参数，而结果会比现在任何一份都更难与参考核对。单 token 的 `feedForward` 同理保持独立：它是另外两条路径的参考。
 
-顺带合并的一处：attention 与 feed-forward 的子层归一化本来是四份（prefill 一份、decode 两份），现在统一走 `normRowWise`（`bceb10c`）。注入错误的 epsilon 会让 11 个测试变红。
+顺带合并的一处：attention 与 feed-forward 的子层归一化本来是四份（prefill 一份、decode 两份），现在统一走 `normRowWise`（`bceb10c`）。注入错误的 epsilon 会让 11 个测试变红（原文没记注入的具体值；2026-11-26 试了 `eps * 1.5` 得 4 个、`eps = 1e-2` 得 14 个，
+落在 11 两侧，说明这个数对 epsilon 的量很敏感。原数保留，注入的参数补记在这里。）
 
 **更正（当轮复查时发现，上一轮的建议是错的）。** 这里原本写着"单 token 路径只剩 `run` 一个用户，把 `run` 迁到 engine 就能删掉这条腿约 190 行，把扇出从 3 降到 2"。前半句关于**生产**调用点是事实，结论却错了：单 token 路径不是遗留物，而是整个包唯一的**独立参考实现**。
 
@@ -535,7 +536,9 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 
 `LoadConfig` 的六段是 `dimensions`、`headGeometry`、`rotation`、`experts`、`window`（含
 `localLayers`）、`vocabulary`。`dimensions` 顺手改成了表驱动；把 `block_count` 映射到错误的字段
-会让 117 个测试变红，这是那张表能改的前提。
+会让 117 个测试变红，这是那张表能改的前提。（这个数依赖具体映射到哪个字段，原文没记；
+2026-11-26 用 `&cfg.Hidden` 重做得到 584 个，`internal/llama` 单包 160 个——量级对得上，
+精确值对不上，所以保留原数并注明出处缺失，而不是拿一个新数替掉它。）
 
 ### 这一轮最重要的两个发现
 

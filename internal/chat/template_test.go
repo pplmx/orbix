@@ -322,9 +322,10 @@ func TestRenderToJSONShape(t *testing.T) {
 // with ~, and the is-tests outside the supported four -- because "we report what we do not
 // support" is only true of the constructs someone thought to list.
 //
-// "is defined" itself is supported, and "x is not defined" is how Jinja spells the
-// negation; the latter is rejected here because it is not in the subset, not because the
-// parser treats "is" as an ordinary name.
+// Both "is defined" and "is not defined" are supported. The negation was listed here until
+// DeepSeek-R1's template needed it: it reads `id is not defined` to decide whether a tool call
+// carries an identifier, so without the negation the whole template was refused. Its test lives
+// beside TestIsDefinedIsSupported now.
 func TestParseRejectsUnsupportedJinja2(t *testing.T) {
 	cases := []string{
 		`{{ x | selectattr('role') }}`,
@@ -335,7 +336,8 @@ func TestParseRejectsUnsupportedJinja2(t *testing.T) {
 		`{% for k, v in d.items() %}{{ k }}{% endfor %}`,
 		`{% for x in y %}{% else %}none{% endfor %}`,
 		`{{ 'a' ~ 'b' }}`,
-		`{{ x is not defined }}`,
+		// "is not defined" used to be here and moved to the supported side when DeepSeek-R1's
+		// template needed it; see TestIsDefinedIsSupported.
 	}
 	for _, src := range cases {
 		if _, err := Parse(src); err == nil {
@@ -357,6 +359,39 @@ func TestIsDefinedIsSupported(t *testing.T) {
 	}
 	if got != "unbound" {
 		t.Errorf("rendered %q for an unbound name, want %q", got, "unbound")
+	}
+}
+
+// TestIsNotDefinedIsSupported covers the negated form, which is how Jinja spells "absent".
+//
+// DeepSeek-R1's template reads `message.tool_call_id is not defined` to decide whether a tool
+// call carries an identifier, so a package without the negation refuses that whole template
+// rather than the one branch. The three shapes are asserted separately because they are three
+// node types: a bare name, a field, and a subscript.
+func TestIsNotDefinedIsSupported(t *testing.T) {
+	// One conversation throughout, so the three shapes differ only in what they test. An empty
+	// list would make the two subscript cases fail on messages[0] rather than on the test.
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	cases := []struct{ src, want string }{
+		{`{% if x is not defined %}absent{% else %}bound{% endif %}`, "absent"},
+		{`{% if messages[0].nosuch is not defined %}absent{% else %}bound{% endif %}`, "absent"},
+		{`{% if messages[0].role is not defined %}absent{% else %}bound{% endif %}`, "bound"},
+		{`{% if x is defined %}bound{% else %}absent{% endif %}`, "absent"},
+	}
+	for _, c := range cases {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", c.src, err)
+			continue
+		}
+		got, err := tpl.Render(msgs, Inputs{})
+		if err != nil {
+			t.Errorf("Render(%q): %v", c.src, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%q => %q, want %q", c.src, got, c.want)
+		}
 	}
 }
 

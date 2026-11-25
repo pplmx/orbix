@@ -533,30 +533,54 @@ func (p *exprParser) parseCompare() (expr, error) {
 					left = isTrueExpr{operand: left, want: true}
 					continue
 				}
-				return nil, fmt.Errorf("chat: only 'is not none', 'is not true' and 'is not false' " +
-					"are supported after 'is not'")
+				// `is not defined` is the negation of a test this package already has, so it is
+				// wrapped in notExpr rather than given a fourth node type. DeepSeek-R1's template
+				// writes it twice to decide whether a tool-call id is present, and without it the
+				// whole 2937-character template was refused.
+				if p.accept("defined") {
+					inner, err := p.definedTest(left)
+					if err != nil {
+						return nil, err
+					}
+					left = notExpr{inner: inner}
+					continue
+				}
+				return nil, fmt.Errorf("chat: only 'is not none', 'is not true', 'is not false' " +
+					"and 'is not defined' are supported after 'is not'")
 			}
 			if !p.accept("defined") {
-				return nil, fmt.Errorf("chat: only 'is defined', 'is none', 'is mapping', " +
-					"'is iterable' and 'is string' are supported after 'is'")
+				return nil, fmt.Errorf("chat: only 'is defined', 'is not defined', 'is none', " +
+					"'is mapping', 'is iterable' and 'is string' are supported after 'is'")
 			}
 			// "x is defined" and "x.y is defined" are both used: the first asks
 			// whether a name is bound, the second whether a mapping has a key.
-			switch v := left.(type) {
-			case varExpr:
-				left = definedExpr(v)
-			case attrExpr:
-				left = attrDefinedExpr(v)
-			case indexExpr:
-				// message['content'] is defined, which Gemma 3's template uses after the string
-				// and iterable branches to reject a content value that is neither.
-				left = indexDefinedExpr{index: v}
-			default:
-				return nil, fmt.Errorf("chat: 'is defined' needs a variable, field or subscript name")
+			left, err = p.definedTest(left)
+			if err != nil {
+				return nil, err
 			}
 		default:
 			return left, nil
 		}
+	}
+}
+
+// definedTest builds the node that answers "is this name, field or subscript present".
+//
+// Shared by `is defined` and `is not defined` so the two cannot drift: the negation wraps this
+// result rather than re-deriving it, and a name that is not a variable, a field or a subscript
+// is refused in one place instead of two.
+func (p *exprParser) definedTest(left expr) (expr, error) {
+	switch v := left.(type) {
+	case varExpr:
+		return definedExpr(v), nil
+	case attrExpr:
+		return attrDefinedExpr(v), nil
+	case indexExpr:
+		// message['content'] is defined, which Gemma 3's template uses after the string and
+		// iterable branches to reject a content value that is neither.
+		return indexDefinedExpr{index: v}, nil
+	default:
+		return nil, fmt.Errorf("chat: 'is defined' needs a variable, field or subscript name")
 	}
 }
 

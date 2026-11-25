@@ -168,6 +168,10 @@ func TestTemplateAssetsAreExact(t *testing.T) {
 		// guards its tool-response branch with `startswith`/`endswith`, and without them the
 		// whole template was refused rather than falling back per branch.
 		"qwen3-0.6b.jinja": {4168, "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"},
+		// From /models/DeepSeek-R1-0528-Qwen3-8B/tokenizer_config.json. It writes `is not
+		// defined` to ask whether a tool call carries an id, which the package refused until
+		// that negation existed.
+		"deepseek-r1.jinja": {3127, "53671bac29bcb3e1f95f51b8c77d85a6011b66dc38bd23dce64eef04384a976b"},
 	}
 	for name, w := range want {
 		raw, err := os.ReadFile(filepath.Join("testdata", name))
@@ -600,5 +604,52 @@ func TestQwen2TemplateRangesOverAdjacentToolTurns(t *testing.T) {
 		if !strings.Contains(got, `"city": "`+city+`"`) {
 			t.Errorf("the prompt does not carry the %s call:\n%s", city, got)
 		}
+	}
+}
+
+// TestDeepSeekR1ReleasedTemplateRenders covers the checkpoint whose template needed `is not
+// defined`.
+//
+// The negation is one line of parser work and the whole 3127-character template depends on it:
+// it reads `message.tool_call_id is not defined` to decide whether a tool call carries an id.
+// Without the negation Parse refused it outright, so every DeepSeek-R1 conversation would have
+// used the neutral transcript -- a model whose entire format is "<｜deepseek_image｜>" markers.
+//
+// The markers are the point of the assertion. This template does not use ChatML or Llama headers
+// but a full-width-bar delimited format, so rendering it with any other template would produce a
+// prompt the model has never seen.
+func TestDeepSeekR1ReleasedTemplateRenders(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "deepseek-r1.jinja"))
+	if err != nil {
+		t.Fatalf("read the DeepSeek-R1 asset: %v", err)
+	}
+	tpl, err := Parse(string(raw))
+	if err != nil {
+		t.Fatalf("the released DeepSeek-R1 template does not parse: %v", err)
+	}
+
+	conversation := []Message{
+		{Role: "system", Content: "You are terse."},
+		{Role: "user", Content: "What is 2+2?"},
+		{Role: "assistant", Content: "4"},
+		{Role: "user", Content: "And times 3?"},
+	}
+	// Verified byte-identical against Jinja2 3.1.6 rendering the same template and messages.
+	// The markers, taken from the render rather than guessed: the first attempt wrote
+	// "|<|Assistant|>" and a second put end_of_sentence in the wrong place. Escaped so the
+	// source stays ASCII-safe through the whitespace hooks.
+	//
+	// A turn opens with "<U+FF5C>role<U+FF5C>" and an assistant turn additionally closes with
+	// end_of_sentence, which is why the third marker appears after "4" and before the next
+	// user turn.
+	wrap := func(role string) string { return "<" + "\uff5c" + role + "\uff5c" + ">" }
+	endOfSentence := "<" + "\uff5c" + "end\u2581of\u2581sentence" + "\uff5c" + ">"
+	want := "You are terse." + wrap("User") + "What is 2+2?" +
+		wrap("Assistant") + "4" + endOfSentence +
+		wrap("User") + "And times 3?" + wrap("Assistant")
+	if got, err := tpl.Render(conversation, Inputs{AddGenerationPrompt: true}); err != nil {
+		t.Fatalf("rendering: %v", err)
+	} else if got != want {
+		t.Errorf("rendered\n%q\nwant\n%q", got, want)
 	}
 }

@@ -329,6 +329,18 @@ chat endpoint are worth knowing before pointing a client at it:
   whole template was refused, and every conversation with that file used the neutral
   transcript while the per-construct tests passed. That asset is now in
   `internal/chat/testdata` and rendered by a test, so this cannot go unnoticed again.
+  DeepSeek-R1's template is there too, and it needed one more thing: `is not defined`, which
+  it reads to ask whether a tool call carries an id.
+
+  Not every published template is in that set, and the gaps are deliberate rather than
+  pending. Qwen3.5-0.8B's template is a multimodal one: 17 of its lines branch on image and
+  video parts, and it wraps them in a `{% macro render_content %}` that also uses `~`
+  concatenation and a default argument. This server refuses image content by design
+  (`unsupported_parameter` on `image_url`), so implementing that machinery would extend the
+  expression language for a feature the engine does not have. A file with that template falls
+  back to the neutral transcript, and the banner says so. The rule for adding to the subset is
+  the one that produced it: a construct is added when a checkpoint that this engine can
+  actually serve needs it.
   Before those it fell back to the neutral transcript, and a two-turn probe answered "What is
   my name?" correctly and then went on inventing further turns. After them `serve` reports
   `chat: model template`, and a request declaring `tools` comes back with

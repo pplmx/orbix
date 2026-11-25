@@ -220,10 +220,10 @@ func (r *Runner) splitRows(parts, n int, fn func(lo, hi int)) error {
 
 // splitCols runs fn over the column range [0,n) in contiguous chunks.
 //
-// It is splitRows under another name, and the name is the point: the two call sites
-// split different axes of different products, and a reader who sees `splitRows` in
-// MatMulTransposed has to work out why a row split is right there. The mechanics are
-// identical, so there is nothing to keep in sync.
+// It is splitRows under another name, and the name is the point: MatMulTransposed chooses
+// between them by axis, splitting rows when the row tiling wins and columns otherwise, and a
+// reader who saw `splitRows` in that choice would have to work out why a row split is right
+// there. The mechanics are identical, so there is nothing to keep in sync.
 func (r *Runner) splitCols(parts, n int, fn func(lo, hi int)) error {
 	return r.splitRows(parts, n, fn)
 }

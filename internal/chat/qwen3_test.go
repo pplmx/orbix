@@ -415,6 +415,24 @@ func TestSliceStep(t *testing.T) {
 	if _, err := tpl.Render(msgs, Inputs{}); err == nil {
 		t.Fatal("a zero slice step rendered; Python raises ValueError and this must refuse too")
 	}
+
+	// And a step that is not a number at all. strconv.Atoi's error used to be swallowed by
+	// falling back to 1, so `xs[::'a']` silently meant `xs[::1]` -- the same shape of quiet
+	// substitution the zero case is guarded against.
+	for _, src := range []string{`{{ 'abcdef'[::'a'] }}`, `{% set s = 'b' %}{{ 'abcdef'[::s] }}`} {
+		tpl, err := Parse(src)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", src, err)
+		}
+		_, err = tpl.Render(msgs, Inputs{})
+		if err == nil {
+			t.Errorf("%q rendered, want a refusal: a non-numeric step is not a stride of 1", src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "is not a number") {
+			t.Errorf("%q: error %q does not say the step is not a number", src, err)
+		}
+	}
 }
 
 // TestStartswithEndswith covers the two predicates Qwen3's tool-response guard uses.

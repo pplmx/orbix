@@ -122,9 +122,15 @@ func printTokenizerLine(tw *tabwriter.Writer, f *gguf.File) {
 		return
 	}
 	model, _ := f.String("tokenizer.ggml.model")
+	// An absent tokenizer.ggml.pre has a meaning of its own rather than being missing
+	// information: llama.cpp applies no pre-tokenizer regex to such a file, and this package
+	// does the same by not splitting. Printing it as "(none)" put a line that read as "there is
+	// no pre-tokenizer" directly above one that read as "implemented", which is the pair a
+	// reader would take as a contradiction. Both ggml models tested -- a `gpt2` vocabulary and a
+	// SentencePiece one -- displayed exactly that, because neither file declares the key.
 	name := tok.PreName()
 	if name == "" {
-		name = "(none)"
+		name = "(absent; llama.cpp applies none for this file, and neither does this package)"
 	}
 	fmt.Fprintf(tw, "\nTokenizer\t%s, pre-tokenizer %s\n", sanitizeCell(model), sanitizeCell(name))
 

@@ -289,7 +289,12 @@ func cmdServe(args []string) error {
 	} else {
 		fmt.Printf("chat:       neutral transcript (%s)\n", renderer.FallbackReason())
 	}
-	fmt.Printf("POST %s/v1/chat/completions\n", url)
+	// The paged cache's lines belong with the contiguous one's, above the address: everything
+	// before "POST" describes what was configured, and that line announces the server is
+	// ready. Printing the pool after it put two configuration figures -- and, worse, the
+	// capacity warning -- below the line a reader takes as "nothing more follows", which is
+	// how a warning that only appears at startup gets missed. The contiguous branch above
+	// already had this order; only the paged one was split.
 	if pool := eng.Pool(); pool != nil {
 		fmt.Printf("kv cache:   paged, %d blocks x %d positions, %s shared\n",
 			pool.Blocks(), pool.BlockSize(), humanBytes(pool.Bytes()))
@@ -303,6 +308,7 @@ func cmdServe(args []string) error {
 			fmt.Printf("%s\n", note)
 		}
 	}
+	fmt.Printf("POST %s/v1/chat/completions\n", url)
 
 	// A signal ends the server the way a caller would: stop accepting new requests, let the
 	// ones in flight finish, then stop the pump and return.
@@ -675,14 +681,21 @@ func validateServeFlags(v serveFlags) error {
 	//
 	// Zero is refused for the same reason, and this is where serve's meaning of zero differs
 	// from run's. run accepts 0 because it generates once into its own output, where "prefill
-	// only" is observable; the server cannot express a zero-token request, because max_tokens
-	// is an int in the request body and 0 is indistinguishable from the field being absent.
-	// Accepting the flag at 0 therefore configures a default no client can observe, which is
-	// the silent substitution this check exists to prevent rather than a budget of zero.
+	// only" is observable. This flag is not a per-request budget: it is the default for
+	// requests that omit max_tokens, and server.Config reads anything below 1 as 256. Accepting
+	// 0 would therefore configure a 256-token default under a flag that says 0, which is the
+	// silent substitution this check exists to prevent.
+	//
+	// A request that sends max_tokens: 0 is unaffected and is served: the field is a pointer on
+	// the wire, so an explicit zero is distinguishable from an absent one, and that request
+	// comes back empty with finish_reason "length". The message below said the server could not
+	// express a zero-token request, which was wrong about the protocol -- measured, an explicit
+	// zero has always been served -- and the reason for refusing the flag is the default, not
+	// expressibility.
 	if v.maxTokens < 1 {
-		return fmt.Errorf("serve: --max-tokens must be at least 1; it is the default for " +
-			"requests that send no max_tokens, and the server cannot express a zero-token " +
-			"request (a request's 0 is indistinguishable from an absent field)")
+		return fmt.Errorf("serve: --max-tokens must be at least 1; it sets the default for " +
+			"requests that omit max_tokens, and 0 there would quietly become the 256-token " +
+			"default rather than a zero-token reply")
 	}
 	// The policy name is parsed here rather than after the model is opened, where it used to
 	// be: a typo cost a full checkpoint load first, and the error then arrived from

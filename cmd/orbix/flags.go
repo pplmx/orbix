@@ -39,10 +39,15 @@ func resolveModel(fs *flag.FlagSet, model *string) error {
 // The commands do not all accept the same values, and the wording says which is which rather
 // than leaving them to be discovered to disagree: run accepts 0, which prefills and generates
 // nothing; bench refuses it, because a measurement of zero generated tokens is not a
-// measurement; serve and chat refuse it too, and for a different reason in each -- the server
-// cannot express a request for zero tokens at all, and a REPL turn that generates nothing is
-// an empty reply. The wording names the two that accept a value the others refuse; the
-// refusals carry their own explanations in the error, which is where a reader can act on them.
+// measurement; serve and chat refuse it too, and for a different reason in each -- serve's is a
+// default for requests that omit the field, and server.Config reads anything below 1 as 256, so
+// 0 there would configure 256 under a flag that says 0; a REPL turn that generates nothing is an
+// empty reply. The wording names the two that accept a value the others refuse; the refusals
+// carry their own explanations in the error, which is where a reader can act on them.
+//
+// Neither of the refusals is about what a request can carry. A request body's own
+// `max_tokens: 0` is a pointer on the wire and is served as a zero-token reply, which is a
+// separate rule from this flag.
 func maxTokensFlag(fs *flag.FlagSet, def int) *int {
 	return fs.Int("max-tokens", def,
 		"cap on generated tokens, not counting the prompt; run accepts 0 (prefill only) and "+

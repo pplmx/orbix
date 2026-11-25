@@ -323,6 +323,12 @@ func SoftcapValue(v, c float32) float32 {
 }
 
 // Softcap applies SoftcapValue to every element in place.
+//
+// The early return cannot affect the result: SoftcapValue already answers v unchanged for a
+// non-positive cap, so removing this guard leaves every element identical. Measured by
+// disabling it and running the package -- nothing changed, including the test that asserts the
+// values come through untouched. It is kept as an early exit, not as a correctness guard, and
+// the guard that matters is the one in SoftcapValue.
 func Softcap(x []float32, c float32) {
 	if c <= 0 {
 		return

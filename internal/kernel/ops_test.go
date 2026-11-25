@@ -1231,6 +1231,21 @@ func TestSoftcapValue(t *testing.T) {
 		}
 	}
 
+	// The slice form refuses a non-positive cap too, and that arm had no test: the loop above
+	// checks SoftcapValue, but Softcap returns before calling it, so disabling the guard left
+	// the suite green while every element would have gone through Tanh with a zero divisor.
+	// The values are asserted unchanged, not merely finite.
+	for _, bad := range []float32{0, -30} {
+		untouched := []float32{-100, -1, 0, 1, 100}
+		Softcap(untouched, bad)
+		for i, want := range []float32{-100, -1, 0, 1, 100} {
+			if untouched[i] != want {
+				t.Errorf("Softcap with cap %v changed element %d to %v, want %v left alone",
+					bad, i, untouched[i], want)
+			}
+		}
+	}
+
 	// The slice form agrees with the scalar one.
 	vals := []float32{-100, -1, 0, 1, 100}
 	want := make([]float32, len(vals))

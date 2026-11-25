@@ -15,8 +15,14 @@ type textNode struct{ text string }
 type exprNode struct{ expr expr }
 
 // setNode assigns a variable for the rest of the enclosing scope.
+//
+// attr is set for the `{% set ns.field = ... %}` form, which assigns through a namespace rather
+// than binding a new name. Qwen3's template uses it to carry loop state (`multi_step_tool`,
+// `last_query_index`) out of a for body, which a plain `set` inside the body cannot do because
+// that body is its own frame.
 type setNode struct {
 	name string
+	attr string
 	expr expr
 }
 
@@ -226,6 +232,19 @@ func parseSet(src string) (node, error) {
 		return nil, fmt.Errorf("chat: {%% set %s %%} has no '='", src)
 	}
 	name = strings.TrimSpace(name)
+	// The dotted form assigns through a namespace. Only one level is accepted, because that is
+	// what the namespace construct produces: a flat bag of fields, with no nesting to walk.
+	base, attr, dotted := strings.Cut(name, ".")
+	if dotted {
+		if !isIdentifier(base) || !isIdentifier(attr) {
+			return nil, fmt.Errorf("chat: {%% set %%} assigns to an invalid name %q", name)
+		}
+		e, err := parseExpr(strings.TrimSpace(rest))
+		if err != nil {
+			return nil, err
+		}
+		return setNode{name: base, attr: attr, expr: e}, nil
+	}
 	if !isIdentifier(name) {
 		return nil, fmt.Errorf("chat: {%% set %%} assigns to an invalid name %q", name)
 	}

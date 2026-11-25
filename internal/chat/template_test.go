@@ -258,7 +258,6 @@ func TestParseRejectsUnsupportedConstructs(t *testing.T) {
 		// caller learns which construct and can decide, so the five below are pinned here as
 		// well as in scripts/jinja_diff.py.
 		`{% filter upper %}x{% endfilter %}`,            // filter block
-		`{% set ns = namespace(x=1) %}`,                 // namespace()
 		`{% for m in messages %}{% else %}{% endfor %}`, // for-else
 		`{% for a, b in pairs %}{% endfor %}`,           // tuple unpacking
 	}
@@ -335,7 +334,6 @@ func TestParseRejectsUnsupportedJinja2(t *testing.T) {
 		`{% with a = 1 %}{{ a }}{% endwith %}`,
 		`{% for k, v in d.items() %}{{ k }}{% endfor %}`,
 		`{% for x in y %}{% else %}none{% endfor %}`,
-		`{{ loop.cycle('a', 'b') }}`,
 		`{{ 'a' ~ 'b' }}`,
 		`{{ x is not defined }}`,
 	}

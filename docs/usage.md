@@ -307,15 +307,26 @@ chat endpoint are worth knowing before pointing a client at it:
   checkpoint's format as a Jinja2 string under `tokenizer.chat_template`, and
   `internal/chat` evaluates a subset of it: `if`/`elif`/`else`, `for` with the `loop`
   variables, `set` scoped the way Jinja2 scopes it (a `for` body is a frame, an `if` body is
-  not), `+` (which adds two integers and joins anything else), `-`, `%`, comparisons, the `is`
-  tests `defined`, `none`, `mapping`, `iterable` and `string`, and the `trim`, `tojson` and
-  `length` filters. That covers the
-  published templates for Qwen2.5 and Llama 3.1 exactly, and both are checked against their
+  not), `set ns.field` through a `namespace(...)`, `+` (which adds two integers and joins
+  anything else), `-`, `%`, comparisons including the ordering ones, `[:n]` and `[n:]` slices
+  of a sequence or a string, the `is` tests `defined`, `none`, `mapping`, `iterable`, `string`,
+  `true` and `false`, the string methods `strip`, `lstrip`, `rstrip` and `split` (with Python's
+  character-set argument rule, not a substring), and the `trim`, `tojson`, `length`, `first`
+  and `last` filters. That covers the
+  published templates for Qwen2.5, Llama 3.1 and Qwen3 exactly, and each is checked against its
   real source: `scripts/jinja_diff.py --template-file <checkpoint.gguf>` reads
   `tokenizer.chat_template` out of the file and renders it through this package and through
   real Jinja2. Measured on Llama 3.2 1B (a 3827-character template that branches on tools, a
-  date and a system message), Qwen2.5 0.5B (2507), a converted Qwen2.5 (2509) and TinyLlama
-  (410): 18 conversation shapes each, every one rendering identically.
+  date and a system message), Qwen2.5 0.5B (2507), a converted Qwen2.5 (2509), TinyLlama
+  (410) and Qwen3 0.6B (4905): 18 conversation shapes each, every one rendering identically.
+
+  Qwen3 0.6B's template is what drove the subset's last expansion. It needs `namespace(...)`
+  to carry `last_query_index` out of a for body, the string methods to strip a `thinking`
+  reasoning block, `[:n]` on a string, the ordering comparisons, and `is true` / `is false`.
+  Before those it fell back to the neutral transcript, and a two-turn probe answered "What is
+  my name?" correctly and then went on inventing further turns. After them `serve` reports
+  `chat: model template`, and a request declaring `tools` comes back with
+  `finish_reason: "tool_calls"`.
   A template using syntax outside the subset is reported at parse time; one calling a
   function this package does not implement fails at render time instead, because the parser
   accepts any call. Either way the server falls back to a neutral `Role: content`

@@ -66,9 +66,25 @@ type indexDefinedExpr struct{ index indexExpr }
 type boolLitExpr struct{ val bool }
 
 // sliceExpr takes the elements of a sequence from an index to its end.
+// sliceExpr is a subscript range. Either bound may be absent: `messages[1:]` drops a leading
+// element, and Qwen3's `current_content[:tool_start_length]` keeps a prefix. Both appear in the
+// templates this package targets, so both forms are represented rather than one being desugared
+// into the other.
 type sliceExpr struct {
 	base expr
-	from expr
+	from expr // nil for the [:n] form
+	to   expr // nil for the [n:] form
+}
+
+// isTrueExpr tests whether a value is the boolean true or false.
+//
+// It is not an equality test: Jinja2's `1 is true` is False, because the test asks whether the
+// value is the boolean rather than whether it is truthy. Qwen3's template uses it on a
+// namespace field it assigned `true` to, so the distinction does not bite there -- but writing
+// it as equality would give the wrong answer the first time a template applies it to a number.
+type isTrueExpr struct {
+	operand expr
+	want    bool
 }
 
 // concatExpr joins its operands, converting each to text.
@@ -132,6 +148,8 @@ var supportedFilters = map[string]bool{
 	"trim":   true,
 	"tojson": true,
 	"length": true,
+	"first":  true,
+	"last":   true,
 }
 
 // callExpr is a function call. It is parsed so a guarded call does not reject the whole
@@ -139,6 +157,14 @@ var supportedFilters = map[string]bool{
 type callExpr struct {
 	name string
 	args []expr
+	// kwNames and kwArgs hold the `name=value` form, in written order. Only namespace() takes
+	// keyword arguments in the templates this package targets, but the parser accepts them for
+	// any call so an unsupported one is reported by the evaluator (which knows the function)
+	// rather than by the parser (which does not).
+	kwNames []string
+	kwArgs  []expr
+	// recv is the receiver of a method call (`s` in `s.strip()`), nil for a plain function.
+	recv expr
 }
 
 // parseCall reads "( expr, ... )" after a function name.
@@ -150,11 +176,24 @@ func (p *exprParser) parseCall(name string) (expr, error) {
 		return c, nil
 	}
 	for {
-		arg, err := p.parseOr()
-		if err != nil {
-			return nil, err
+		// A keyword argument is an identifier followed by "=". The lexer keeps "=" as its own
+		// token, so this is a two-token lookahead rather than a name-mangling rule.
+		if p.isKeywordArg() {
+			name := p.toks[p.pos].text
+			p.pos += 2 // the name and the "="
+			arg, err := p.parseOr()
+			if err != nil {
+				return nil, err
+			}
+			c.kwNames = append(c.kwNames, name)
+			c.kwArgs = append(c.kwArgs, arg)
+		} else {
+			arg, err := p.parseOr()
+			if err != nil {
+				return nil, err
+			}
+			c.args = append(c.args, arg)
 		}
-		c.args = append(c.args, arg)
 		next, ok := p.peekToken()
 		if !ok {
 			return nil, fmt.Errorf("chat: call to %q is not closed", name)
@@ -167,6 +206,18 @@ func (p *exprParser) parseCall(name string) (expr, error) {
 			return nil, fmt.Errorf("chat: expected \",\" or \")\" in call to %q, got %q", name, next.text)
 		}
 	}
+}
+
+// isKeywordArg reports whether the next two tokens are `identifier =`.
+//
+// The "=" has to be checked as its own token: `x == y` lexes as "==", so an identifier
+// followed by "==" is a comparison and not a keyword argument.
+func (p *exprParser) isKeywordArg() bool {
+	if p.pos+1 >= len(p.toks) {
+		return false
+	}
+	name := p.toks[p.pos]
+	return !name.isString && isIdentifier(name.text) && p.toks[p.pos+1].text == "="
 }
 
 // exprParser parses one expression from a token stream.
@@ -414,7 +465,7 @@ func (p *exprParser) parseCompare() (expr, error) {
 	for {
 		op := p.peek()
 		switch op {
-		case "==", "!=":
+		case "==", "!=", "<", ">", "<=", ">=":
 			p.pos++
 			right, err := p.parseConcat()
 			if err != nil {
@@ -453,8 +504,31 @@ func (p *exprParser) parseCompare() (expr, error) {
 				left = isStringExpr{operand: left}
 				continue
 			}
+			// "is true" and "is false" test truth rather than equality with the literal: in
+			// Jinja2 `1 is true` is False because the test asks whether the value *is* the
+			// boolean, and Qwen3's template uses `flag is false` on a value that came from
+			// namespace(), which is always a boolean here.
+			if !negate && p.accept("true") {
+				left = isTrueExpr{operand: left, want: true}
+				continue
+			}
+			if !negate && p.accept("false") {
+				left = isTrueExpr{operand: left, want: false}
+				continue
+			}
 			if negate {
-				return nil, fmt.Errorf("chat: only 'is not none' is supported after 'is not'")
+				// "is not true" / "is not false" invert the same test rather than needing a
+				// second node type, which is how `is not none` is handled below.
+				if p.accept("true") {
+					left = isTrueExpr{operand: left, want: false}
+					continue
+				}
+				if p.accept("false") {
+					left = isTrueExpr{operand: left, want: true}
+					continue
+				}
+				return nil, fmt.Errorf("chat: only 'is not none', 'is not true' and 'is not false' " +
+					"are supported after 'is not'")
 			}
 			if !p.accept("defined") {
 				return nil, fmt.Errorf("chat: only 'is defined', 'is none', 'is mapping', " +
@@ -571,7 +645,32 @@ func (p *exprParser) parsePostfix() (expr, error) {
 			}
 			p.pos++
 			e = attrExpr{base: e, name: name}
+			// A "(" straight after a field name is a method call: `s.strip()`, `s.split(x)`.
+			// Qwen3's template uses four of them to trim the reasoning block out of a reply.
+			// It is parsed here rather than in parsePrimary because the receiver is the
+			// expression to the left, not a name in scope.
+			if next, ok := p.peekToken(); ok && next.text == "(" {
+				call, err := p.parseCall(name)
+				if err != nil {
+					return nil, err
+				}
+				cc := call.(callExpr)
+				cc.recv = e.(attrExpr).base
+				e = cc
+			}
 		case p.accept("["):
+			// The [:n] form has no lower bound, so the colon comes first.
+			if p.accept(":") {
+				to, err := p.parseOr()
+				if err != nil {
+					return nil, err
+				}
+				if !p.accept("]") {
+					return nil, fmt.Errorf("chat: missing ']' in slice expression")
+				}
+				e = sliceExpr{base: e, to: to}
+				continue
+			}
 			idx, err := p.parseOr()
 			if err != nil {
 				return nil, err
@@ -581,10 +680,19 @@ func (p *exprParser) parsePostfix() (expr, error) {
 			// expression, so it is a separate form rather than a general one: only the
 			// open tail appears in practice and a full [a:b:step] would be speculation.
 			if p.accept(":") {
-				if !p.accept("]") {
-					return nil, fmt.Errorf("chat: only [n:] slices are supported")
+				// The upper bound is optional and an absent one means "to the end".
+				if p.accept("]") {
+					e = sliceExpr{base: e, from: idx}
+					continue
 				}
-				e = sliceExpr{base: e, from: idx}
+				to, err := p.parseOr()
+				if err != nil {
+					return nil, err
+				}
+				if !p.accept("]") {
+					return nil, fmt.Errorf("chat: missing ']' in slice expression")
+				}
+				e = sliceExpr{base: e, from: idx, to: to}
 				continue
 			}
 			if !p.accept("]") {

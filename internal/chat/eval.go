@@ -37,6 +37,10 @@ type value struct {
 	isMap bool
 	// isRawJSON marks text that is already JSON, so tojson emits it unquoted.
 	isRawJSON bool
+	// isNamespace marks the mutable bag namespace() returns. It renders as nothing and is only
+	// reachable through attribute reads and `{% set ns.field = ... %}`, so the flag is what
+	// keeps an ordinary map from being written through by mistake.
+	isNamespace bool
 }
 
 // strValue wraps a string.
@@ -147,6 +151,28 @@ func (s *scope) lookup(name string) (value, bool) {
 
 // assign writes a name to the innermost frame, which is how a for body scopes its own sets.
 func (s *scope) assign(name string, v value) { s.vars[name] = v }
+
+// assignAttr writes one field of a namespace, which is what `{% set ns.x = ... %}` does.
+//
+// The bag is shared rather than copied, so the write is visible wherever the variable is. That
+// is the difference between this and an ordinary set, and the reason the construct exists: a
+// `{% set %}` inside a for body binds in that body's frame and vanishes with it, while a
+// namespace field survives the loop.
+//
+// The name has to resolve to a namespace. Falling back to a plain assign would make
+// `{% set ns.x = 1 %}` on an undefined `ns` silently create nothing the template can read,
+// which is the class of failure that produces a prompt that looks right and is not.
+func (r *renderer) assignAttr(sc *scope, name, attr string, v value) error {
+	target, ok := sc.lookup(name)
+	if !ok {
+		return fmt.Errorf("chat: {%% set %s.%s %%} but %q is not defined", name, attr, name)
+	}
+	if !target.isNamespace {
+		return fmt.Errorf("chat: {%% set %s.%s %%} but %q is not a namespace", name, attr, name)
+	}
+	target.fields[attr] = v
+	return nil
+}
 
 // child returns a nested scope for a loop iteration.
 func (s *scope) child() *scope { return &scope{vars: map[string]value{}, parent: s} }
@@ -277,6 +303,15 @@ func (r *renderer) renderNode(n node, sc *scope) error {
 		if err != nil {
 			return err
 		}
+		if t.attr != "" {
+			// Assignment through a namespace. The variable holds a mutable bag, so writing a
+			// field is visible to every scope that can still see the variable -- which is the
+			// whole point of the construct, and why it is not a plain assign.
+			if err := r.assignAttr(sc, t.name, t.attr, v); err != nil {
+				return err
+			}
+			return nil
+		}
 		sc.assign(t.name, v)
 		return nil
 	case ifNode:
@@ -365,6 +400,37 @@ func evalExpr(e expr, sc *scope) (value, error) {
 			}
 			return value{}, fmt.Errorf("chat: template raised: %s", msg)
 		}
+		// A method call dispatches on its receiver. Only the string methods the targeted
+		// templates use are implemented, and each mirrors Python's own semantics for the
+		// argument it takes -- trim characters, not a substring, which is `strip("\n")`.
+		if t.recv != nil {
+			recv, err := evalExpr(t.recv, sc)
+			if err != nil {
+				return value{}, err
+			}
+			return evalStringMethod(t, recv, sc)
+		}
+		// namespace() builds the mutable bag `{% set ns.field = ... %}` writes through. Qwen3's
+		// template uses it to carry state out of a for body, which a plain set there cannot do
+		// because the body is its own frame.
+		//
+		// The fields start at whatever the keyword arguments evaluate to, and the bag itself
+		// renders as nothing -- reading it directly is a template bug, and printing an empty
+		// string is what Jinja2 does with it.
+		if t.name == "namespace" {
+			if len(t.args) > 0 {
+				return value{}, fmt.Errorf("chat: namespace() takes keyword arguments only")
+			}
+			fields := make(map[string]value, len(t.kwNames))
+			for i, name := range t.kwNames {
+				v, err := evalExpr(t.kwArgs[i], sc)
+				if err != nil {
+					return value{}, err
+				}
+				fields[name] = v
+			}
+			return value{isNamespace: true, isMap: true, fields: fields}, nil
+		}
 		// Everything else is unimplemented. A template reaches this only if it does not guard
 		// the call, and then the honest answer is an error rather than a fabricated value:
 		// strftime_now in particular would otherwise put a wrong date in the system prompt.
@@ -432,30 +498,28 @@ func evalExpr(e expr, sc *scope) (value, error) {
 		if err != nil {
 			return value{}, err
 		}
+		// A slice applies to a sequence or to text. Qwen3's template slices a string
+		// (`current_content[:tool_start_length]` to find the payload before the marker), where
+		// Python slices characters; the string case returns text rather than a list so the
+		// result can be concatenated the way the template does.
 		if !base.isList {
-			return value{}, fmt.Errorf("chat: slice applied to a non-sequence")
+			if base.isMap || base.isBool {
+				return value{}, fmt.Errorf("chat: slice applied to a non-sequence")
+			}
+			runes := []rune(base.text)
+			n := len(runes)
+			start, end, err := sliceBounds(t, sc, n)
+			if err != nil {
+				return value{}, err
+			}
+			return strValue(string(runes[start:end])), nil
 		}
-		from, err := evalExpr(t.from, sc)
+		n := len(base.list)
+		start, end, err := sliceBounds(t, sc, n)
 		if err != nil {
 			return value{}, err
 		}
-		start, convErr := strconv.Atoi(from.text)
-		if convErr != nil {
-			return value{}, fmt.Errorf("chat: slice start %q is not a number", from.text)
-		}
-		if start < 0 {
-			start += len(base.list)
-		}
-		// An out-of-range start yields an empty sequence rather than an error: the point of
-		// messages[1:] on a one-message conversation is "nothing after the first", and a
-		// template that guards the length should not also have to guard this.
-		if start < 0 {
-			start = 0
-		}
-		if start > len(base.list) {
-			start = len(base.list)
-		}
-		return value{list: base.list[start:], isList: true}, nil
+		return value{list: base.list[start:end], isList: true}, nil
 	case concatExpr:
 		// Two integers add; every other combination is joined as text. See parseConcat for why
 		// both shapes are needed: Qwen2.5's tool branch subscripts messages[loop.index0 + 1],
@@ -531,6 +595,16 @@ func evalExpr(e expr, sc *scope) (value, error) {
 			return evalExpr(t.then, sc)
 		}
 		return evalExpr(t.otherwise, sc)
+	case isTrueExpr:
+		v, err := evalExpr(t.operand, sc)
+		if err != nil {
+			return value{}, err
+		}
+		// A non-boolean is never "true" or "false": `1 is true` is False in Jinja2.
+		if !v.isBool {
+			return boolValue(false), nil
+		}
+		return boolValue(v.boolean == t.want), nil
 	case isStringExpr:
 		// A string is a value that is neither a sequence nor a dictionary nor a boolean. The
 		// distinction the templates draw is exactly that coarse -- Gemma 3 asks whether content is
@@ -650,6 +724,21 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 			return strValue(toJSONIndent(v, n)), nil
 		}
 		return strValue(toJSON(v)), nil
+	case "first", "last":
+		// Empty input yields none rather than an error: Qwen3's template writes
+		// `content.split('</think>')|last` on a reply that may not contain the marker at all,
+		// and a one-element split is the case that has to keep working. Jinja2 gives undefined
+		// for both, which this package represents as none.
+		if !v.isList {
+			return value{}, fmt.Errorf("chat: %q needs a sequence", f.name)
+		}
+		if len(v.list) == 0 {
+			return value{isNone: true}, nil
+		}
+		if f.name == "first" {
+			return v.list[0], nil
+		}
+		return v.list[len(v.list)-1], nil
 	case "length":
 		if v.isList {
 			return strValue(strconv.Itoa(len(v.list))), nil
@@ -700,6 +789,26 @@ func evalBinary(b binaryExpr, sc *scope) (value, error) {
 		return boolValue(equalValues(left, right)), nil
 	case "!=":
 		return boolValue(!equalValues(left, right)), nil
+	case "<", ">", "<=", ">=":
+		// Ordering compares numbers when both sides are numbers and text otherwise, which is
+		// Python 3's rule. A string comparison is not a fallback for a failed number parse: the
+		// templates this package targets compare `start_pos < 0` (numbers) and nothing else, so
+		// text ordering is here because the alternative -- refusing -- would break a template
+		// that compares two strings for no reason a caller can act on.
+		cmp, ok := compareValues(left, right)
+		if !ok {
+			return boolValue(false), nil
+		}
+		switch b.op {
+		case "<":
+			return boolValue(cmp < 0), nil
+		case ">":
+			return boolValue(cmp > 0), nil
+		case "<=":
+			return boolValue(cmp <= 0), nil
+		default:
+			return boolValue(cmp >= 0), nil
+		}
 	case "in":
 		// A mapping is tested by key, which is what "'tool_calls' in message" means in the
 		// tool-call branches: does this message dict have that field at all.
@@ -836,4 +945,152 @@ func evalArithmetic(op, left, right string) (value, error) {
 	default:
 		return value{}, fmt.Errorf("chat: unsupported arithmetic operator %q", op)
 	}
+}
+
+// evalStringMethod evaluates `s.strip(...)` and its three siblings.
+//
+// The argument semantics are Python's, not Go's, and the difference matters for the templates
+// this package targets: `s.strip("\n")` removes newlines from both ends (a character set), it
+// does not remove the substring "\n". Qwen3's template writes `content.lstrip('\n')` and
+// `m_content.split('</think>')`, so getting this wrong would leave the reasoning block in the
+// prompt or cut it in the wrong place.
+//
+// split() with no argument splits on runs of whitespace, which is Python's rule and not Go's
+// strings.Fields-by-name; it is implemented here rather than delegated because the empty
+// separator has to be rejected as Python does, not silently treated as "no split".
+func evalStringMethod(t callExpr, recv value, sc *scope) (value, error) {
+	if !recv.isList && !recv.isMap && !recv.isNone && recv.isBool {
+		return value{}, fmt.Errorf("chat: method %q called on a boolean", t.name)
+	}
+	s := recv.text
+	switch t.name {
+	case "strip", "lstrip", "rstrip":
+		cut := " \t\r\n\v\f"
+		if len(t.args) > 1 {
+			return value{}, fmt.Errorf("chat: %s() takes at most one argument", t.name)
+		}
+		if len(t.args) == 1 {
+			arg, err := evalExpr(t.args[0], sc)
+			if err != nil {
+				return value{}, err
+			}
+			if arg.text == "" {
+				return value{}, fmt.Errorf("chat: %s of an empty set removes nothing", t.name)
+			}
+			cut = arg.text
+		}
+		switch t.name {
+		case "strip":
+			return strValue(strings.Trim(s, cut)), nil
+		case "lstrip":
+			return strValue(strings.TrimLeft(s, cut)), nil
+		default:
+			return strValue(strings.TrimRight(s, cut)), nil
+		}
+	case "split":
+		var parts []string
+		switch len(t.args) {
+		case 0:
+			parts = strings.Fields(s)
+		case 1:
+			sep, err := evalExpr(t.args[0], sc)
+			if err != nil {
+				return value{}, err
+			}
+			if sep.text == "" {
+				return value{}, fmt.Errorf("chat: split of an empty separator is not supported")
+			}
+			parts = strings.Split(s, sep.text)
+		default:
+			return value{}, fmt.Errorf("chat: split() takes at most one argument")
+		}
+		out := make([]value, len(parts))
+		for i, part := range parts {
+			out[i] = strValue(part)
+		}
+		return value{list: out, isList: true}, nil
+	case "join":
+		if len(t.args) != 1 {
+			return value{}, fmt.Errorf("chat: join() takes one argument")
+		}
+		items, err := evalExpr(t.args[0], sc)
+		if err != nil {
+			return value{}, err
+		}
+		if !items.isList {
+			return value{}, fmt.Errorf("chat: join() needs a sequence")
+		}
+		parts := make([]string, len(items.list))
+		for i, it := range items.list {
+			parts[i] = it.text
+		}
+		return strValue(strings.Join(parts, s)), nil
+	}
+	return value{}, fmt.Errorf("chat: method %q is not implemented", t.name)
+}
+
+// compareValues orders two scalars, reporting whether they are comparable at all.
+//
+// Numbers compare numerically, everything else lexically. NaN and a failed parse give false
+// rather than an error: a template comparing those is asking a question with no answer, and
+// Jinja2 answers False for it.
+func compareValues(left, right value) (int, bool) {
+	if left.isNumber && right.isNumber {
+		l, lerr := strconv.ParseFloat(left.text, 64)
+		r, rerr := strconv.ParseFloat(right.text, 64)
+		if lerr != nil || rerr != nil {
+			return 0, false
+		}
+		switch {
+		case l < r:
+			return -1, true
+		case l > r:
+			return 1, true
+		default:
+			return 0, true
+		}
+	}
+	return strings.Compare(left.text, right.text), true
+}
+
+// sliceBounds resolves a slice expression's two bounds against a length.
+//
+// Either bound may be absent. A negative bound counts from the end, and a bound outside the
+// sequence is clamped rather than refused: the point of messages[1:] on a one-message
+// conversation is "nothing after the first", and a template that guards the length should not
+// also have to guard this. Python clamps too, which is what these templates were written against.
+func sliceBounds(t sliceExpr, sc *scope, n int) (start, end int, err error) {
+	end = n
+	if t.from != nil {
+		from, err := evalExpr(t.from, sc)
+		if err != nil {
+			return 0, 0, err
+		}
+		start, err = strconv.Atoi(from.text)
+		if err != nil {
+			return 0, 0, fmt.Errorf("chat: slice start %q is not a number", from.text)
+		}
+		if start < 0 {
+			start += n
+		}
+	}
+	if t.to != nil {
+		to, err := evalExpr(t.to, sc)
+		if err != nil {
+			return 0, 0, err
+		}
+		end, err = strconv.Atoi(to.text)
+		if err != nil {
+			return 0, 0, fmt.Errorf("chat: slice end %q is not a number", to.text)
+		}
+		if end < 0 {
+			end += n
+		}
+	}
+	start = max(0, min(start, n))
+	end = max(0, min(end, n))
+	if end < start {
+		end = start
+	}
+	return start, end, nil
 }

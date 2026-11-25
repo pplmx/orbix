@@ -15,7 +15,7 @@
 | `internal/chat`     | 3333      | 81             | 41       | 5230      | 1.57      |
 | `internal/engine`   | 2079      | 47             | 20       | 6108      | 2.94      |
 | `internal/gguf`     | 1492      | 51             | 14       | 3060      | 2.05      |
-| `internal/quant`    | 904       | 27             | 20       | 3747      | 4.14      |
+| `internal/quant`    | 911       | 27             | 20       | 3784      | 4.15      |
 | `internal/gguftest` | 817       | 22             | 14       | 372       | 0.46      |
 | `internal/otel`     | 794       | 35             | 14       | 1780      | 2.24      |
 | `internal/kernel`   | 705       | 28             | 20       | 2017      | 2.86      |

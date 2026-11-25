@@ -132,6 +132,43 @@ func TestLoaderRejectsWrappingOffset(t *testing.T) {
 // Tensor, TensorInto and TensorReader each perform their own checks rather than sharing
 // one, so each is driven separately; the assertions name the message because on these paths
 // the message is the entire product.
+// TestTensorBytesNamesTheOverflow covers the third failure tensorBytes can report.
+//
+// TensorInfo.Bytes answers one false for three different problems -- an unknown type, an
+// element count that is not a block multiple, and a byte count that would not fit in int64 --
+// and tensorBytes exists to tell them apart. The first two are covered elsewhere; the third
+// had no test, so its message could have been dropped and the reader sent to the type table
+// for a size problem.
+//
+// Reaching it needs a type whose block is one element, because for any block b the element
+// count is at most MaxInt64 and MaxInt64/b cannot exceed MaxInt64/size once size > b. F32 is
+// {1, 4}, so a saturated N() past MaxInt64/4 overflows.
+func TestTensorBytesNamesTheOverflow(t *testing.T) {
+	ti := gguf.TensorInfo{
+		Name: "huge",
+		// The product saturates at MaxInt64 rather than wrapping, which is what makes the
+		// overflow reachable from a file's declared dimensions at all.
+		Dims: []uint64{1 << 62, 1 << 62},
+		Type: gguf.F32,
+	}
+	if got := ti.N(); got != math.MaxInt64 {
+		t.Fatalf("N() = %d, want it saturated at MaxInt64; the rest of this test assumes it", got)
+	}
+	_, err := tensorBytes(ti)
+	if err == nil {
+		t.Fatal("tensorBytes accepted a tensor whose byte count overflows int64")
+	}
+	for _, want := range []string{"too large", "huge", "do not fit in a byte count"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	// And the message must not blame the type, which is what the three-in-one false used to do.
+	if strings.Contains(err.Error(), "unsupported type") {
+		t.Errorf("error %q reports a size problem as an unsupported type", err)
+	}
+}
+
 func TestLoaderRejectsBadTensor(t *testing.T) {
 	// A file with one F32 tensor of two elements, so a valid name exists alongside the
 	// invalid ones.

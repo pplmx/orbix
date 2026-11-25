@@ -159,6 +159,13 @@ func (l *Loader) TensorInto(name string, dst []float32) error {
 	return Decode(ti.Type, raw, dst)
 }
 
+// A note on the two ReadAt error arms below (in Tensor and TensorInto): they are unreachable
+// through dataStart, which already refuses any tensor whose bytes would run past the file size
+// it recorded at open. The one way to reach them is a file truncated between OpenLoader and the
+// read, which no test can arrange without racing its own fixture. They stay because dropping
+// them would mean trusting a size that another process can change; a test for them would have
+// to delete the file mid-call, and that would test the test.
+//
 // dataStart returns the absolute file offset of a tensor's encoded bytes, or an error
 // describing why it is not inside the file.
 //

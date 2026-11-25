@@ -44,7 +44,10 @@ just xcheck-pre # 预分词器与 GPT-2 / Llama 3 的上游正则对照；不需
 just xcheck-quant # 反量化与 ggml quantize.c 的块布局对照，14 种格式
 just xcheck-rope # RoPE 与 numpy 按 RoFormer 定义算出的旋转对照，6 组参数
 just xcheck-fixture # 用 Python gguf 包解析 gguftest 的合成 fixture，比对元数据与张量目录
-just skips   # 数一下这棵树跳过多少个测试，CI 每轮打印的就是这个数
+just skips   # 数一次运行里实际跳过了多少个测试（当前 31），CI 每轮打印的就是这个数
+             # 它与 architecture-review.md 的「73 处 t.Skip」不是一回事：那是代码里的跳过点，
+             # 这里是运行时真正跳过的。后者少于前者，因为有的跳过点在子测试里、有的在同一轮
+             # 被别的路径覆盖。suite 失败时这条配方会先打印计数再以非零退出。
 just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）
 just         # 不带配方等价于 just check
 ```

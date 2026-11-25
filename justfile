@@ -420,8 +420,28 @@ cross:
 # rather than "does it pass".
 #
 # Counts the tests this tree skips, which is the number CI prints on every run.
+#
+# The `|| true` on the old version made the recipe report zero for two different situations:
+# a run that skipped nothing, and a run that failed before reaching any skip. Measured on a
+# throwaway module with one failing and one skipping test: the pipeline printed `count=1 exit=0`
+# while `go test` alone exited 1. The count itself was unaffected here because grep -c still sees
+# the skip line, but the exit status said the suite was fine.
+#
+# So the test exit is captured before the grep rather than after it. A failing suite still prints
+# its skip count -- that number is what this recipe is for -- and then fails, because a recipe
+# whose whole purpose is to report on a suite must not report on one that did not run.
 skips:
-    @go test ./... -count=1 -v 2>&1 | grep -ac '^--- SKIP' || true
+    #!/usr/bin/env bash
+    set -euo pipefail
+    log=$(mktemp)
+    trap 'rm -f "$log"' EXIT
+    status=0
+    go test ./... -count=1 -v >"$log" 2>&1 || status=$?
+    printf '%s\n' "$(grep -ac '^--- SKIP' "$log" || true)"
+    if [ "$status" -ne 0 ]; then
+        echo "just skips: the suite failed (exit $status), so this count describes a broken run" >&2
+        exit "$status"
+    fi
 
 
 # Prints the version cz would bump to and the changelog section it would write, then stops. The

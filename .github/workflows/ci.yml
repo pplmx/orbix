@@ -71,8 +71,12 @@ jobs:
         # without anything going red: before the fixture existed, a clean runner skipped
         # 74 tests that a developer's machine ran. Printing the number puts it in every
         # run's record instead of leaving it to be discovered.
+        # `just skips`, not a copy of its pipeline. AGENTS.md says CI's Go jobs call the
+        # recipes rather than restating them, and this step was the one place that did not --
+        # so the recipe's `|| true` and this copy could drift apart without either noticing.
+        # The recipe also fails when the suite fails now, which this step could not do before.
         run: |
-          skips="$(go test ./... -count=1 -v 2>&1 | grep -ac '^--- SKIP' || true)"
+          skips="$(just skips)"
           echo "skipped tests: $skips"
           {
             echo "### Skipped tests: $skips"

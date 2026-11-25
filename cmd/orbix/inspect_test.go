@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"math"
 	"os"
 	"path/filepath"
@@ -319,6 +320,24 @@ func TestModelSubcommandDispatch(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "ORBIX_MODEL") {
 			t.Errorf("error %q mentions ORBIX_MODEL with none set", err)
+		}
+	})
+
+	// A path beginning with a dash is reachable through "--", the same escape `run` documents for
+	// a dash-leading prompt. What makes it work is that flag.Parse consumes the separator, so
+	// fs.Args() holds only the path and the ordering check above never sees a leading dash. That
+	// is standard-library behaviour rather than this package's, which is why the assertion is on
+	// the FlagSet: it pins the premise the ordering check depends on, and would fail loudly if a
+	// future refactor stopped parsing through flag.Parse.
+	t.Run("a dash-leading path after -- is a path", func(t *testing.T) {
+		fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
+		fs.Bool("json", false, "unused")
+		if err := fs.Parse([]string{"--", "-weird.gguf"}); err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if fs.NArg() != 1 || fs.Arg(0) != "-weird.gguf" {
+			t.Errorf("after --: NArg=%d Arg(0)=%q, want one argument \"-weird.gguf\"",
+				fs.NArg(), fs.Arg(0))
 		}
 	})
 }

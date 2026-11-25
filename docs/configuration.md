@@ -150,10 +150,18 @@ what they need -- measured, a 202-position prompt with a 32-token budget still a
 against a pool showing one free block -- so the failure is exhaustion on a request larger than
 the pool can ever hold, which is refused with a 400 naming both counts.
 
-`--max-tokens` accepts 0 only on `run`, where "prefill and print nothing" is a result. The
-server cannot express a zero-token request (`max_tokens` is an integer, so 0 is indistinguishable
-from absent), a REPL turn generating nothing answers with an empty line, and a benchmark of zero
+`--max-tokens` accepts 0 only on `run`, where "prefill and print nothing" is a result. On the
+others the flag is refused, and the reason is what the flag means rather than what the protocol
+can carry: `serve --max-tokens` sets the budget for requests that *omit* `max_tokens`, and
+`server.Config` reads any value below 1 as "use 256". Accepting 0 there would therefore configure
+a 256-token default while the operator wrote 0 -- the silent substitution the check exists to
+prevent. A REPL turn generating nothing answers with an empty line, and a benchmark of zero
 tokens is not a measurement. Negative values are refused everywhere.
+
+A request's own `max_tokens: 0` is a different thing and is served: the field is a pointer on the
+wire, so an explicit zero is distinguishable from an absent one, and the reply comes back empty
+with `finish_reason: "length"`. That rule is in
+[Usage](usage.md#serve-a-gguf-model), which covers the request fields.
 
 A config file is a decision this project has not made, not a gap waiting to be filled. The
 roadmap in the performance page is a reading order and is complete; this sentence used to

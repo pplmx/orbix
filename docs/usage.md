@@ -248,7 +248,16 @@ requests, and the body carries `choices[0..n-1]` with `index` set to the positio
 counts `completion_tokens` across all of them and `prompt_tokens` once, which is what the
 figures describe: the prompt was prefilled once per sequence but is the same text. With a
 `seed`, choice *i* is seeded with *seed + i*, so the same request returns the same set in the
-same order; without one, the choices still differ from each other.
+same order.
+
+**The choices differ from each other only when sampling is on.** Greedy decoding is
+deterministic by definition, so at the default `temperature: 0` every choice takes the same
+argmax and `n` copies of one completion come back -- measured, `n: 4` at the default returned the
+same six tokens four times, identically across three requests. That is not a bug in the seed
+handling: the per-choice seeds are distinct, but a greedy sampler never reads one. Set
+`temperature` above zero for `n > 1` to mean anything, and note the same applies to `best_of`,
+whose candidates are only distinguishable once sampling is on -- measured, `best_of: 4, n: 2` at
+`temperature: 0` returned two identical choices, and at `temperature: 0.9` two different ones.
 
 One limit remains on `n`, and it is reported rather than silent: it must be at most 8, since
 each choice holds its own KV blocks and they are all in flight at once. The refusal names the
@@ -272,9 +281,14 @@ caller passed even when it equals the API default, so `completions.create(suffix
 correctly; measured through the OpenAI Python SDK, four such calls went from 400 to 200.
 
 Most of what used to illustrate this rule is now implemented rather than refused -- `n`,
-`logprobs`, `top_logprobs`, `echo`, `max_completion_tokens` and `best_of` all work, and each
-left this list when it did. `suffix` is the one field still refused on completions, and chat's
-`echo` the one on chat.
+`logprobs`, `top_logprobs`, `echo`, `max_completion_tokens`, `best_of` and `suffix` all work,
+and each left this list when it did. Chat's `echo` is the one field still refused.
+
+`suffix` is not refused as a field; it is refused for the checkpoints that cannot use it. A
+model declaring none of the known fill-in-the-middle markers answers 400 naming the sets that
+were looked for, because generating from the prefix alone would drop half of what the caller
+sent. On a code-tuned checkpoint the same request is served -- see
+[the insertion rules](#serve-a-gguf-model) above.
 
 A value the API does not define is reported as malformed rather than unimplemented: `n: -1` is
 400 `invalid_value` naming the number, not `unsupported_parameter` describing `n: 3`. The two ask

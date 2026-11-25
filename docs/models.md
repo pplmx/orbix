@@ -310,7 +310,7 @@ Measured 2026-11:
 
 | Gates set    | Skipped |
 | ------------ | ------- |
-| none         | 25      |
+| none         | 31      |
 | all fourteen | 0       |
 
 Both figures re-measured 2026-11 with `go test -v ./...`. The table names two rows rather than a
@@ -319,9 +319,9 @@ row for "the four original" said something when four was most of them and says n
 number under it moves whenever a gated test is added. What a reader needs is where the count starts
 and that it reaches zero.
 
-There are fourteen gates: nine named directly at the call site, four that
-`internal/quant/formats_real_test.go` looks up from a table, and one added with the FIM prompt check
-that is easy to miss because nothing else reads it.
+There are fourteen gates: ten named directly at the call site, and four that
+`internal/quant/formats_real_test.go` looks up from a table. The four table rows are easy to miss
+because nothing at a call site reads them.
 
 | Variable        | Checkpoint                   | Covers                        |
 | --------------- | ---------------------------- | ----------------------------- |
@@ -342,13 +342,13 @@ that is easy to miss because nothing else reads it.
 
 The four quantization ones are easy to miss when auditing this list: they are not `os.Getenv("...")`
 at the call site but rows in a table that `TestRealWeightMatrixStats` walks, so a search for
-`Getenv("` finds nine gates and the four rows are invisible. Measured both ways -- 24 skipped with no
+`Getenv("` finds ten gates and the four rows are invisible. Measured both ways -- 31 skipped with no
 variables, 0 with all fourteen.
 
 That search is worth trusting only after measuring, because the two answers look equally plausible.
-Setting the nine that `Getenv("` finds leaves exactly one skip, `TestRealWeightMatrixStats`, which is
-the one test the four table rows feed. So nine gates do not reach zero and fourteen do, and the count
-in the table above is the one that was measured rather than derived from a grep.
+Setting those ten leaves exactly one skip, `TestRealWeightMatrixStats`, which is the one test the
+four table rows feed. So ten gates do not reach zero and fourteen do, and the count in the table
+above is the one that was measured rather than derived from a grep.
 
 That paragraph has now been wrong once in each direction, which is worth saying because it is the
 whole point of keeping the count. It first said ten, then sixteen, then thirteen; each figure was

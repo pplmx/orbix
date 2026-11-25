@@ -150,6 +150,14 @@ func cmdServe(args []string) error {
 	}); err != nil {
 		return err
 	}
+	// Timed from the same point `run --stats` times from: the metadata open, not the listen
+	// call. A deployment sizing its readiness timeout is asking how long the process sits
+	// holding no socket, which is this span plus the listener -- and the listener is
+	// microseconds. `run` has always printed this figure and `serve` has never printed it,
+	// which is the gap this closes: usage.md tells an operator that `/healthz` answering means
+	// the weights are resident, and until now the one number that says how long that takes was
+	// reachable only by watching the clock.
+	loadStart := time.Now()
 	// One open for the metadata, the tokenizer, the template and the config. This used to open
 	// the file twice -- once here to check --block-size against the context, once below for the
 	// tokenizer -- and engine.New reached into the loader for a third parse.
@@ -253,6 +261,12 @@ func cmdServe(args []string) error {
 	// gives no hint of.
 	fmt.Printf("weights:    %s resident (4 bytes per parameter, widened from the file at load)\n",
 		humanBytes(weightsResidentBytes(eng.Model().W)))
+	// Beside the weights because the two answer one question together: what this process costs,
+	// and how long it took to cost it. Printed after the listener is up, since the engine is
+	// built before net.Listen -- so the figure is already complete when it is printed, and a
+	// reader timing startup from the log does not have to know the socket came later.
+	fmt.Printf("load:       %v to read the file and build the engine\n",
+		time.Since(loadStart).Round(time.Millisecond))
 	// Say what the contiguous cache costs, which nothing else reports. A paged cache prints
 	// its pool size below from the pool itself; a contiguous one reserves a whole context per
 	// accepted request, so the backlog multiplies whatever one request costs and the model

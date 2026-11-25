@@ -88,7 +88,10 @@ stress:
     @#
     @# Needs a checkpoint: `just MODEL=/path/to.gguf stress`. There is no synthetic fallback,
     @# because the disconnect path this exists to exercise needs a request that takes long
-    @# enough to interrupt, and the in-repo fixtures finish in single-digit milliseconds.
+    @# enough to interrupt, and the default in-repo fixture finishes in single-digit milliseconds.
+    @# A scaled-up one does work: measured with gguftest.Model{Layers: 4, Hidden: 256,
+    @# ContextLen: 4096} written to /tmp, the script reported 3 cancelled on two consecutive
+    @# runs, so the disconnect path is reachable without a real checkpoint.
     @test -n "{{MODEL}}" || { echo "stress: needs MODEL=/path/to.gguf" >&2; exit 1; }
     @CGO_ENABLED=1 go build -race -o .cache/orbix-race ./cmd/orbix
     @scripts/stress.sh .cache/orbix-race "{{MODEL}}"

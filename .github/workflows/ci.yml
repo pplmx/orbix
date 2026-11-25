@@ -286,3 +286,33 @@ jobs:
         with:
           version: "0.3.4"
           report-type: annotations
+
+  # gguf_xcheck parses the same file with the Python gguf package and compares every tensor's
+  # type, shape and SHA-256 against this repository's reader. It is the only check that uses an
+  # implementation nobody on this project wrote, so a reader that agrees with its own fixture
+  # builder cannot hide behind it -- and it ran nowhere automatic until this job.
+  #
+  # The synthetic fixture is enough: what is compared is the container, not the weights.
+  xcheck:
+    name: xcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: just fixture
+        run: just fixture
+
+      - name: just build
+        run: just build
+
+      - name: just xcheck
+        run: just MODEL=.cache/stress.gguf xcheck

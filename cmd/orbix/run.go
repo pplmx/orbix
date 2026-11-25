@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"os"
@@ -17,6 +18,16 @@ import (
 
 // cmdRun implements "orbix run": load a model, generate, print the text.
 func cmdRun(args []string) error {
+	return runTo(os.Stdout, args)
+}
+
+// runTo is cmdRun with the destination as a parameter.
+//
+// The generated text is written as it arrives, which is behaviour a test has to observe while
+// the run is still going: whether an interrupted run left anything behind is the property the
+// streaming exists for, and it cannot be seen from the returned string alone. A parameter
+// rather than os.Stdout, following chatSession, so a failing or recording writer is reachable.
+func runTo(dst io.Writer, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	model := modelFlag(fs)
@@ -104,6 +115,22 @@ func cmdRun(args []string) error {
 	if len(promptTokens) >= nCtx {
 		return fmt.Errorf("run: prompt is %d tokens, context is %d", len(promptTokens), nCtx)
 	}
+	// A budget larger than what the window leaves is cut to fit, and saying so here rather than
+	// only in the --stats report afterwards is the difference between a run the caller can
+	// interrupt and one they wait out. Measured before this: `--max-tokens 40000` against a
+	// 32768-position window sat generating for over two minutes with nothing on screen -- and
+	// now that text streams, the caller does see progress, but still has no way to know the
+	// number they typed was replaced.
+	//
+	// The note states the count that will actually be produced, which is the window minus the
+	// prompt; --max-tokens is a cap, so a run that ends early on an end-of-sequence token still
+	// produces fewer. It goes to stderr, so piped stdout continues to carry only the reply.
+	if room := nCtx - len(promptTokens); *maxTokens > room {
+		fmt.Fprintf(os.Stderr,
+			"orbix: note: --max-tokens %d is past this model's %d-token window, so at most %d "+
+				"tokens can be generated; lower --max-tokens to hear about a cut reply sooner\n",
+			*maxTokens, nCtx, room)
+	}
 
 	var sampler llama.Sampler = llama.Greedy{}
 	if *temp > 0 {
@@ -120,23 +147,25 @@ func cmdRun(args []string) error {
 	}
 
 	if *echo {
-		fmt.Print(prompt)
+		// The prompt is part of the output, so its write failure is reported the same way the
+		// streamed tokens' are rather than discarded: `orbix run --echo ... | head -1` breaks
+		// the pipe at exactly this write, and a run that ignored it would go on generating a
+		// reply nobody will read.
+		if _, werr := io.WriteString(dst, prompt); werr != nil {
+			return fmt.Errorf("run: write prompt: %w", werr)
+		}
 	}
 
-	tGen := time.Now()
 	promptLen := len(promptTokens)
-	out, err := m.Generate(cache, promptTokens, sampler, llama.GenerateOptions{
-		MaxTokens: *maxTokens,
-	})
+	out, genTime, err := generateStreaming(dst, tok, m, cache, promptTokens, sampler, *maxTokens)
 	if err != nil {
 		return err
 	}
-	genTime := time.Since(tGen)
-
-	// Decode only the generated part: the prompt is already on screen when
-	// --echo is set, and repeating it otherwise would be confusing.
+	// Decode only the generated part: the prompt is already on screen when --echo is set, and
+	// repeating it otherwise would be confusing. Only the count is used now that the text has
+	// been streamed, but the slice keeps the stats and the window note below reading the same
+	// quantity they always did.
 	generated := out[promptLen:]
-	fmt.Println(tok.DecodeCompletion(generated))
 
 	if *stats {
 		n := len(generated)
@@ -162,6 +191,52 @@ func cmdRun(args []string) error {
 		}
 	}
 	return nil
+}
+
+// generateStreaming runs generation, writing each token's text to dst as it is produced.
+//
+// The text goes out as it arrives rather than after the whole generation finishes, so a reply
+// that takes a minute shows progress and a reply the user interrupts keeps what had already been
+// generated. Previously the run collected every token and printed once: measured on a 200-token
+// reply against Qwen2.5-0.5B, stdout held 0 bytes after 8 seconds and 1096 at the end, so a
+// SIGTERM lost the reply and a slow run was indistinguishable from a hang.
+//
+// Decoding goes through tokenize.StreamDecoder rather than DecodeCompletion for the reasons that
+// type documents: decoding one token at a time with Decode strips the space before every word
+// (turning "Once upon" into "Onceupon") and renders a character split across tokens as U+FFFD.
+// Flush releases a partial character once generation ends.
+//
+// The returned duration covers generation only, which is what --stats reports; the caller
+// measures load separately.
+func generateStreaming(
+	dst io.Writer,
+	tok *tokenize.Tokenizer,
+	m *llama.Model,
+	cache llama.Cache,
+	prompt []int32,
+	sampler llama.Sampler,
+	maxTokens int,
+) ([]int32, time.Duration, error) {
+	start := time.Now()
+	dec := tok.Seq()
+	out, err := m.Generate(cache, prompt, sampler, llama.GenerateOptions{
+		MaxTokens: maxTokens,
+		OnToken: func(token int32) error {
+			if _, werr := io.WriteString(dst, dec.Token(token)); werr != nil {
+				return fmt.Errorf("run: write output: %w", werr)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	// The flush and the trailing newline go out even when generation produced nothing, so the
+	// shell prompt returns on its own line either way.
+	if _, werr := io.WriteString(dst, dec.Flush()+"\n"); werr != nil {
+		return nil, 0, fmt.Errorf("run: write output: %w", werr)
+	}
+	return out, time.Since(start), nil
 }
 
 // promptFromArgs assembles the prompt from everything after the flags.

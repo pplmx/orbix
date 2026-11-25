@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"runtime"
@@ -14,12 +16,26 @@ import (
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/llama"
+	"github.com/pplmx/orbix/internal/tokenize"
 )
 
 // The suite is a measurement tool, so its tests check the things that make its numbers
 // trustworthy: that every scenario runs, that the pairs meant to isolate a mechanism
 // actually differ, and that the table renders. They do not assert throughput values --
 // those vary with the machine and with whatever else is running on it.
+
+// textModel is a fixture whose generation produces actual characters.
+//
+// suiteModel's default vocabulary includes the 256 single-byte pieces, and the fixture's
+// constructed weights drive generation onto a byte piece that never completes a character --
+// measured: 24 generated tokens whose stream-decoded text is empty and whose DecodeCompletion is
+// a single U+FFFD. That is correct behaviour for such a token run and useless for a test about
+// what gets written, so the byte pieces are left out: every token in this vocabulary is a
+// character, which the NoBytes doc comment names as the shape a stream-comparison test wants.
+func textModel(t *testing.T) string {
+	t.Helper()
+	return gguftest.Model{NoEOS: true, NoBytes: true, ContextLen: 512}.Write(t, t.TempDir())
+}
 
 func suiteModel(t *testing.T) string {
 	t.Helper()
@@ -984,6 +1000,179 @@ func TestRunEchoPrintsThePromptFirst(t *testing.T) {
 	// And the prompt appears exactly once: the generated part must not repeat it.
 	if n := strings.Count(withEcho, prompt); n != 1 {
 		t.Errorf("--echo printed the prompt %d times, want 1: %q", n, withEcho)
+	}
+}
+
+// TestRunWritesWhileItGenerates is the regression test for the output that used to arrive only
+// at the end.
+//
+// Every token was collected and printed once, so a long reply showed nothing for as long as it
+// took and an interrupted one printed nothing at all -- measured on a 200-token reply against
+// Qwen2.5-0.5B: 0 bytes on stdout after 8 seconds, then 1096 bytes at the end. A user watching
+// that cannot tell a slow run from a hung one, and a SIGTERM loses the whole reply.
+//
+// The property is observed from inside the writer, because it is about when the writes happen
+// rather than what they say: a writer that records the byte count on each call must see more
+// than one call, and must see bytes before the run returns. Recording the length at each call
+// rather than the text keeps this independent of the weights -- a fixture's output is
+// meaningless, its write pattern is not.
+func TestRunWritesWhileItGenerates(t *testing.T) {
+	model := textModel(t)
+
+	// Counted separately from the write count: the stream decoder returns "" for a control
+	// token and for a byte token that only completes part of a character, so a call that
+	// carries nothing is ordinary and says nothing about buffering. What distinguishes
+	// streaming from buffering is how many calls carry text.
+	var withText int
+	var total int
+	w := writerFunc(func(p []byte) (int, error) {
+		if len(p) > 0 {
+			withText++
+			total += len(p)
+		}
+		return len(p), nil
+	})
+
+	if err := runTo(w, []string{"--model", model, "--max-tokens", "24", "Once"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if total == 0 {
+		t.Fatal("the run wrote no text at all")
+	}
+	// One text-bearing call means everything was buffered and written once, which is the
+	// behaviour this test exists to prevent. 24 tokens through a stream decoder land in many
+	// pieces; requiring 2 keeps the assertion independent of how the decoder chunks them.
+	if withText < 2 {
+		t.Errorf("text arrived in %d write(s) over a 24-token run; it is flushed only at the end", withText)
+	}
+}
+
+// writerFunc adapts a function to io.Writer, so a test can observe each write without
+// allocating a buffer it never reads.
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// TestRunReportsAWriteFailure covers the streaming path's error handling.
+//
+// A broken pipe is an ordinary outcome here -- `orbix run ... | head -1` produces one as soon as
+// head exits -- and the caller has to be told rather than getting a truncated reply reported as
+// a complete one.
+//
+// The writer accepts a few writes and then fails, which is what makes this about the streaming
+// path rather than about the final flush: a writer that fails on its first call is caught by the
+// flush's own error check even when OnToken's error is thrown away, measured, so the test passed
+// against an OnToken that swallowed failures. Failing after the stream has started means the run
+// has to notice mid-generation.
+func TestRunReportsAWriteFailure(t *testing.T) {
+	model := textModel(t)
+	wantErr := errors.New("broken pipe")
+
+	// Three writes succeed; a 24-token run makes far more than that, so the failure lands
+	// while tokens are still being produced.
+	w := &writeFailer{limit: 3, err: wantErr}
+	err := runTo(w, []string{"--model", model, "--max-tokens", "24", "Once"})
+	if err == nil {
+		t.Fatal("run reported success with a failing writer")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("error %v does not carry the writer's error %v", err, wantErr)
+	}
+	// The count is what separates "the write failure stopped generation" from "generation
+	// ran to completion and the final flush happened to fail too". Both report an error
+	// carrying wantErr, so the error alone cannot tell them apart -- measured: with OnToken's
+	// error discarded, this test still passed. Stopping at the failure costs 4 calls (three
+	// successes and the failure); ignoring it costs one per token the decoder emits, which for
+	// this 24-token run is over 20. A bound of 10 sits well clear of both.
+	if w.calls > 10 {
+		t.Errorf("the writer was called %d times; generation continued after the write failed", w.calls)
+	}
+}
+
+// TestRunOutputMatchesTheBufferedForm pins that streaming did not change the text.
+//
+// The stream decoder decides where to drop a leading space and how to reassemble a character
+// split across tokens, and both rules can drift from DecodeCompletion's. Comparing the written
+// bytes against DecodeCompletion over the same token sequence is the check that they have not:
+// without it, a decoder change could alter every reply while every other test stayed green.
+func TestRunOutputMatchesTheBufferedForm(t *testing.T) {
+	model := textModel(t)
+	const prompt = "Once upon a time"
+
+	var got bytes.Buffer
+	if err := runTo(&got, []string{"--model", model, "--max-tokens", "12", prompt}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// The same generation through the non-streaming API the run used to call.
+	gf, err := gguf.Open(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := llama.New(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := m.Config()
+	cache, err := llama.NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptTokens := tok.Encode(prompt, cfg.BOSID >= 0)
+	out, err := m.Generate(cache, promptTokens, llama.Greedy{}, llama.GenerateOptions{MaxTokens: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := tok.DecodeCompletion(out[len(promptTokens):]) + "\n"
+
+	if got.String() != want {
+		t.Errorf("streamed output differs from DecodeCompletion of the same tokens:\n got %q\nwant %q",
+			got.String(), want)
+	}
+}
+
+// TestRunWarnsBeforeCuttingABudgetToTheWindow covers the preflight note.
+//
+// The cut was reported only in the --stats block after generation, so `--max-tokens 40000`
+// against a 32768-token window generated for minutes with nothing to say the number had been
+// replaced. The note names the budget, the window and the room left, which are the three figures
+// a caller needs to decide whether to lower it.
+//
+// It goes to stderr: stdout carries the reply, and a note mixed into it would corrupt a run
+// whose output is piped into a file.
+func TestRunWarnsBeforeCuttingABudgetToTheWindow(t *testing.T) {
+	// A context small enough that an ordinary budget overshoots it.
+	path := gguftest.Model{NoEOS: true, ContextLen: 32}.Write(t, t.TempDir())
+
+	// --max-tokens well past the window: the note must appear.
+	errOut := captureStderr(t, func() {
+		stdout := captureStdout(t, func() {
+			if err := runTo(io.Discard, []string{"--model", path, "--max-tokens", "500", "Once"}); err != nil {
+				t.Errorf("run: %v", err)
+			}
+		})
+		_ = stdout
+	})
+	for _, want := range []string{"500", "32", "window"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("the preflight note does not mention %q:\n%s", want, errOut)
+		}
+	}
+
+	// A budget that fits: no note, or every run would print one.
+	quiet := captureStderr(t, func() {
+		_ = captureStdout(t, func() {
+			if err := runTo(io.Discard, []string{"--model", path, "--max-tokens", "4", "Once"}); err != nil {
+				t.Errorf("run: %v", err)
+			}
+		})
+	})
+	if strings.Contains(quiet, "window") {
+		t.Errorf("a budget that fits still produced the window note:\n%s", quiet)
 	}
 }
 

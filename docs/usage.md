@@ -76,16 +76,33 @@ possible. Measured on Gemma 3 270M, a reply asked for as JSON came back as a mar
 client calling `json.loads` on it fails somewhere far from the request that caused it. `{"type":
 "text"}` and an absent field are served, because they ask for what the server does anyway.
 
-Only two things are still refused this way. Chat's `echo` is one: OpenAI's chat schema does not
-define it, so there it describes a field the caller sent that the endpoint cannot use. Function
-calling is the other, and it is refused in every spelling a client might use -- `tools`,
-`tool_choice`, and the legacy `functions` and `function_call`, plus any message carrying
-`tool_calls`, `tool_call_id` or `role: "tool"`. Before that check those fields were dropped by the
-decoder and the request was answered as though they had never been sent: measured against a real
-checkpoint, a request declaring a `get_weather` tool and one without it came back byte-identical,
-with the model asking "Please provide me with the tool you are referring to". The empty forms are
-still served, because they ask for what the server would do anyway -- `tools: []` and
-`tool_choice: "none"` answer normally.
+Chat's `echo` is still refused this way: OpenAI's chat schema does not define it, so there it
+describes a field the caller sent that the endpoint cannot use.
+
+Function calling used to be the other, refused in every spelling a client might use. It is
+implemented now, and the model's own template is what renders it:
+
+- `tools` reaches the prompt through the checkpoint's own tool branch, so Qwen2.5 and Llama 3.1
+  each see the signatures in the format they were trained on. A model whose template this project
+  cannot evaluate refuses tools with a 400 rather than accepting and dropping them.
+- A reply carrying the call marker comes back as a `tool_calls` array -- `id`, `type: "function"`,
+  and a `function` with `name` and `arguments` as a JSON **string**, which is the schema's shape
+  and what every SDK unmarshals -- with `finish_reason: "tool_calls"`. Arguments that are not a
+  JSON object are left in the text rather than passed on: a parser that guessed would hand a
+  client a value that fails in its own code, far from the response.
+- A conversation's `tool_calls` on an assistant turn and its `role: "tool"` results are rendered
+  back, so a multi-turn exchange works. `tool_call_id` is checked against the ids the conversation
+  actually declared.
+- Streaming holds back exactly the bytes that could still become a call, so a streamed reply never
+  shows the marker or the JSON as content; the parsed call arrives on the terminal chunk.
+
+Three things are still refused, each with a reason rather than a blanket "not implemented":
+`tool_choice: "required"` and a named `tool_choice` (no template in the supported subset has a
+field that forces a call, so the constraint would reach no prompt), `function.strict` (it promises
+the arguments match the schema exactly, which needs constrained decoding this engine does not
+have), and the deprecated `functions`/`function_call` pair (a different schema; translating it
+would drop fields while looking like it worked). Empty forms are served, because they ask for what
+the server would do anyway -- `tools: []` and `tool_choice: "none"` answer normally.
 
 Everything else that used to be refused has been implemented instead -- `n`, `logprobs`,
 `top_logprobs`, `echo` on completions, `max_completion_tokens`, `best_of` and `suffix` -- each

@@ -81,12 +81,20 @@
 // implemented, and suffix is what remains, where a client reading text with an insertion would
 // fail far from the request that caused it.
 //
-// Function calling is refused in every spelling, on both the request and the messages: tools,
-// tool_choice, functions, function_call, tool_calls, tool_call_id and role "tool". The reason is
-// the same rule as everywhere else in this file -- the fields were once dropped by the decoder and
-// the request answered as though they had not been sent, which meant a model answering a question
-// about a tool it was never told existed. Their empty forms are served, since they ask for what
-// the server would do anyway.
+// Function calling is implemented, and the model's own template is what renders it. tools and
+// tool_choice are validated and handed to the template as the `tools` a checkpoint's tool branch
+// prints, a conversation's tool_calls and role "tool" turns are rendered back into the prompt, and
+// a reply carrying <tool_call>{"name": …, "arguments": …}</tool_call> comes back as an OpenAI
+// tool_calls array with finish_reason "tool_calls". See tools.go for the parse rules, which are
+// deliberately narrow: anything whose arguments are not a JSON object is left as text rather than
+// handed to a client that would fail on it.
+//
+// A model whose chat template this project cannot evaluate refuses tools instead of accepting and
+// dropping them, and two constraint spellings are refused because no template in the subset can
+// honour them: tool_choice "required" or a named function, and function.strict. The deprecated
+// functions/function_call pair is refused too -- it is a different schema, and translating it would
+// drop fields while looking like it worked. Empty forms (tools: [] and tool_choice "none") are
+// served, since they ask for what the server would do anyway.
 //
 // The refused set differs per endpoint, because the two schemas do: chat refuses echo and
 // completions refuses nothing through this path any more -- n, logprobs, top_logprobs, echo,

@@ -35,6 +35,47 @@ func TestEnablePrefixCacheKeepsTheFirstIndex(t *testing.T) {
 	}
 }
 
+// TestMatchStopsAtABlockItAlreadyReported covers the aliasing guard.
+//
+// The key includes the chain, so a repeated block normally gets its own entry and the match
+// walks through it. The guard exists for the case the index cannot rule out: two entries in
+// one chain pointing at the same block, which a pool that rewrote a block under two chains
+// would produce. Reporting that block twice would make two positions alias one block, and the
+// second position's append overwrites the first's keys and values in place -- inside a block
+// every other holder is still reading. Matching less costs a forward pass; matching wrongly
+// costs correctness.
+//
+// Constructed by writing the entries directly, because Remember refuses to build the shape:
+// it is a state the index treats as possible but never creates on its own.
+func TestMatchStopsAtABlockItAlreadyReported(t *testing.T) {
+	pool := pagedPool(t, testConfig(), 4)
+	idx := pool.EnablePrefixCache()
+	size := pool.block
+
+	// Two different runs, both recorded as living in block 0. Each is a whole block long and
+	// the second continues the first, so without the guard Match would report block 0 twice.
+	first := make([]int32, size)
+	second := make([]int32, size)
+	for i := range first {
+		first[i] = 11
+		second[i] = 22
+	}
+	k1 := chainKey(0, hashTokens(first))
+	k2 := chainKey(k1, hashTokens(second))
+	idx.entries[k1] = prefixEntry{tokens: first, block: 0}
+	idx.entries[k2] = prefixEntry{tokens: second, block: 0, parent: k1, hasParent: true}
+
+	query := append(append([]int32(nil), first...), second...)
+	n, blocks := idx.Match(query)
+	if len(blocks) != 1 {
+		t.Errorf("Match reported blocks %v, want only the first: the second position aliases "+
+			"the same block, and two positions in one block corrupt each other", blocks)
+	}
+	if n != size {
+		t.Errorf("Match reported %d positions, want %d (one block)", n, size)
+	}
+}
+
 func TestPrefixIndexMatch(t *testing.T) {
 	cfg := testConfig()
 	pool := pagedPool(t, cfg, 4)

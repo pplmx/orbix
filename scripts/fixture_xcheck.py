@@ -68,6 +68,11 @@ def main() -> int:
     if len(sys.argv) > 1:
         fixture = Path(sys.argv[1])
     else:
+        # NamedTemporaryFile(delete=False) because gguftest writes the file through a Go test,
+        # which needs a path that outlives this call. That means the file is the caller's to
+        # remove, and for a while it was nobody's: measured, one 185 KB fixture was left in
+        # /tmp per run. Harmless while the script was only run by hand, and not harmless once
+        # it ran on every push.
         tmp = tempfile.NamedTemporaryFile(suffix=".gguf", delete=False)
         tmp.close()
         fixture = Path(tmp.name)
@@ -76,7 +81,15 @@ def main() -> int:
         except subprocess.CalledProcessError as e:
             print(f"building the fixture failed: {e.stderr.decode()}", file=sys.stderr)
             return 2
+        try:
+            return compare(fixture)
+        finally:
+            fixture.unlink(missing_ok=True)
 
+    return compare(fixture)
+
+
+def compare(fixture: Path) -> int:
     reader = gguf.GGUFReader(str(fixture))
 
     out = subprocess.run(

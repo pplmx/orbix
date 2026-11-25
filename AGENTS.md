@@ -29,7 +29,7 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外十个是辅助配方，不进门槛，但会用得上：
+上面是门槛和发布入口。另外十四个是辅助配方，不进门槛，但会用得上：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题
@@ -40,6 +40,10 @@ just stress  # 竞态版二进制跑混合负载（非流式/SSE/中途取消）
 just xcheck  # 用 Python 的 gguf 包独立解析同一文件，逐张量比对类型、维度和 SHA-256；要 MODEL= 和 just build
              # MODEL 不必是真实 checkpoint：just fixture 造的合成文件同样能跑（39 个张量全对）
 just jinja-diff # 用真实 Jinja2 渲染 chat 模板与本包的输出逐字比对；不需要 checkpoint，语料在脚本里
+just xcheck-pre # 预分词器与 GPT-2 / Llama 3 的上游正则对照；不需要 checkpoint
+just xcheck-quant # 反量化与 ggml quantize.c 的块布局对照，14 种格式
+just xcheck-rope # RoPE 与 numpy 按 RoFormer 定义算出的旋转对照，6 组参数
+just xcheck-fixture # 用 Python gguf 包解析 gguftest 的合成 fixture，比对元数据与张量目录
 just skips   # 数一下这棵树跳过多少个测试，CI 每轮打印的就是这个数
 just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）
 just         # 不带配方等价于 just check
@@ -47,7 +51,7 @@ just         # 不带配方等价于 just check
 
 配置以单一事实源维护：Go 用 `go.mod`，lint 用 `.golangci.yml`，Markdown 用 `.rumdl.toml`，提交钩子用 `.pre-commit-config.yaml`，行尾与二进制标记用 `.gitattributes`，编辑器约定用 `.editorconfig`，命令入口用 `justfile`，版本与 changelog 用 `.cz.toml`，CI 用 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml`。
 
-CI 的 Go 相关 job 调用 just 配方，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `just test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `justfile` 里的其他变量。十个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建；编译后读回产物里的 `build\tCGO_ENABLED=0` 标记，所以「没带上 cgo」也被验了——不能运行的目标也能这样查，标记在文件里）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`just test-race` 单独覆盖）、stress（`just fixture` 造出够大的合成 checkpoint，再用竞态版二进制跑混合负载；四条判据是 DATA RACE、5xx、active 未归零、以及「什么都没被取消」——最后一条防止在什么都没测到时报 ok）、prek（`just hooks`，补 `check` 看不见的非 Go 文件格式问题）、commits（`just commits`，按提交范围校验信息格式）、docs（`just docs`）、xcheck（`just xcheck`，用 Python 的 gguf 包独立解析同一个文件，逐张量比对类型、维度和 SHA-256；用它是因为这是唯一一个不是本项目写的实现对读，与自己的 fixture 构造器互相印证的 reader 遮不住问题）、jinja-diff（`just jinja-diff`，用真实 Jinja2 渲染 `internal/chat` 的模板子集并逐字比对；加它是因为这个门槛之前只靠手工跑，`2605ec3` 把期望表弄红之后整整一版都没人发现）。
+CI 的 Go 相关 job 调用 just 配方，不另写 `go build` 命令；两处例外各有原因：docs job 用 rumdl 官方 action（它是 linter 本身，不是安装器），test-darwin job 直接跑 `go test ./... -count=1`，因为 `just test` 固定 `CGO_ENABLED=0` 而对 macOS 原生测试没有额外价值，后者也不需要 `justfile` 里的其他变量。十一个 job 各自验证一件事——gate（格式/vet/测试/lint）、cross-build（5 个平台的 CGO_ENABLED=0 构建；编译后读回产物里的 `build\tCGO_ENABLED=0` 标记，所以「没带上 cgo」也被验了——不能运行的目标也能这样查，标记在文件里）、test-darwin（唯一非 Linux 的可执行测试环境）、test-race（需要 cgo，`just test-race` 单独覆盖）、stress（`just fixture` 造出够大的合成 checkpoint，再用竞态版二进制跑混合负载；四条判据是 DATA RACE、5xx、active 未归零、以及「什么都没被取消」——最后一条防止在什么都没测到时报 ok）、prek（`just hooks`，补 `check` 看不见的非 Go 文件格式问题）、commits（`just commits`，按提交范围校验信息格式）、docs（`just docs`）、xcheck（`just xcheck`，用 Python 的 gguf 包独立解析同一个文件，逐张量比对类型、维度和 SHA-256；用它是因为这是唯一一个不是本项目写的实现对读，与自己的 fixture 构造器互相印证的 reader 遮不住问题）、jinja-diff（`just jinja-diff`，用真实 Jinja2 渲染 `internal/chat` 的模板子集并逐字比对；加它是因为这个门槛之前只靠手工跑，`2605ec3` 把期望表弄红之后整整一版都没人发现）、xcheck-parts（`just xcheck-pre`/`-quant`/`-rope`/`-fixture`，把预分词器、反量化、RoPE 和合成 fixture 各自对着仓库外的实现比一遍；四个之前也只在本地跑过，合在一个 job 里是因为每个都只要一两秒，分拆只多出四份 checkout 与 setup）。
 
 本地跑 `just check` 绿了，CI 的 gate 就应该绿；hooks、docs、cross、test-race、test-darwin 是需要额外工具或平台的独立门槛，各自有对应的 just 配方，动到非 Go 文件就加跑 `just hooks`，动到 Markdown 也加跑 `just docs`。
 

@@ -152,6 +152,77 @@ jinja-diff:
     }
     uv run --with jinja2 python3 scripts/jinja_diff.py
 
+# cross-check the pre-tokenizer against the pattern OpenAI published
+xcheck-pre:
+    #!/usr/bin/env bash
+    # The expectations in internal/tokenize come from llama.cpp's expressions, so a misreading
+    # of either the pattern or the reference is repeated in both the code and its test. The
+    # script transcribes GPT-2's regex from openai/gpt-2 and the Llama 3 one from the BPE
+    # tokenizer's source, so the two sides are written from different origins.
+    #
+    # A shebang recipe because this is two commands with a temporary file between them: the
+    # dump test writes the Go side's output and the script compares it. A plain recipe would
+    # not carry the environment variable from one line to the next -- each line of a plain
+    # recipe is its own shell, which is the mistake the `just fuzz` recipe documents at length.
+    #
+    # The dump lands under $TMPDIR rather than in .cache/: the script takes a path, so writing
+    # it into the tree would leave an untracked artifact behind on every run.
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { \
+        echo "uv not found: install it (https://docs.astral.sh/uv/) or skip this check"; \
+        exit 1; \
+    }
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    ORBIX_PREDUMP="$out/pre.json" go test ./internal/tokenize/ -run TestDumpPreSplit -count=1
+    uv run --with regex python3 scripts/pre_xcheck.py "$out/pre.json"
+
+# cross-check the dequantizers against ggml's published block layouts
+xcheck-quant:
+    #!/usr/bin/env bash
+    # internal/quant's own comment says an interleaving mistake yields a "plausible-looking but
+    # completely scrambled matrix", which passes any test written from the same reading. The
+    # script decodes the same bytes from quantize.c's layout, independently.
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { \
+        echo "uv not found: install it (https://docs.astral.sh/uv/) or skip this check"; \
+        exit 1; \
+    }
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    ORBIX_QUANTDUMP="$out/q.json" go test ./internal/quant/ -run TestDumpDequant -count=1
+    uv run --with numpy python3 scripts/quant_xcheck.py "$out/q.json"
+
+# cross-check RoPE against numpy, from the rotation's definition
+xcheck-rope:
+    #!/usr/bin/env bash
+    # A wrong pairing (adjacent versus half-offset) or a wrong frequency produces plausible
+    # floats rather than an error, so the Go tests -- which pin the same reading -- cannot see
+    # it. The script rotates the same input with numpy from the RoFormer definition.
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { \
+        echo "uv not found: install it (https://docs.astral.sh/uv/) or skip this check"; \
+        exit 1; \
+    }
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    ORBIX_ROPEDUMP="$out/rope.json" go test ./internal/llama/ -run TestDumpRope -count=1
+    uv run --with numpy python3 scripts/rope_xcheck.py "$out/rope.json"
+
+# cross-check gguftest's synthetic fixture against the Python gguf parser
+xcheck-fixture:
+    @# The fixture is what most tests in this repository run on, and it is parsed by the same
+    @# reader those tests exercise -- so a wrong field in it is invisible everywhere
+    @# downstream. Parsing the same bytes with an independent implementation is the only way
+    @# to see that. The script writes the fixture through a Go test it generates on the spot,
+    @# so there is nothing to run first -- but it does need ./bin/orbix to read the file back,
+    @# so `just build` has to have run.
+    @command -v uv >/dev/null 2>&1 || { \
+        echo "uv not found: install it (https://docs.astral.sh/uv/) or skip this check"; \
+        exit 1; \
+    }
+    uv run --with gguf python3 scripts/fixture_xcheck.py
+
 vet:
     go vet {{PKG}}
 

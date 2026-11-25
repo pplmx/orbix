@@ -345,3 +345,44 @@ jobs:
 
       - name: just jinja-diff
         run: just jinja-diff
+
+  # The four checks below are the other half of the same idea as xcheck: each compares this
+  # repository's implementation against one written from a source outside it -- GPT-2's
+  # published regex, ggml's quantize.c, the RoFormer definition of the rotation, and the Python
+  # gguf package reading gguftest's fixture. They were all green when this job was added and
+  # all four ran only by hand before it, which is the exact condition `jinja_diff` rotted in.
+  #
+  # They share a job because each is a second or two of work; splitting them buys four checkout
+  # and setup steps for no earlier signal. The steps are separate so a red run names which one.
+  #
+  # xcheck-fixture needs bin/orbix to read the fixture back, so build runs first. The other
+  # three dump their Go side through a `go test -run` inside their own recipe.
+  xcheck-parts:
+    name: xcheck (pre, quant, rope, fixture)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - uses: astral-sh/setup-uv@v10.4.0
+
+      - name: just build
+        run: just build
+
+      - name: just xcheck-pre
+        run: just xcheck-pre
+
+      - name: just xcheck-quant
+        run: just xcheck-quant
+
+      - name: just xcheck-rope
+        run: just xcheck-rope
+
+      - name: just xcheck-fixture
+        run: just xcheck-fixture

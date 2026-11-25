@@ -27,6 +27,10 @@ just cross     # build all five supported platforms with CGo disabled
 just test-race # the suite under the race detector; needs cgo, so it is separate
 just xcheck    # compare a GGUF file against the Python gguf parser, tensor by tensor
 just jinja-diff # compare the chat template subset against real Jinja2; no checkpoint needed
+just xcheck-pre # compare the pre-tokenizer against the regex GPT-2 and Llama 3 publish
+just xcheck-quant # compare the dequantizers against ggml's block layouts; 14 formats
+just xcheck-rope # compare RoPE against numpy's rotation from the RoFormer definition
+just xcheck-fixture # parse gguftest's fixture with the Python gguf package and compare
 just stress    # race binary under mixed load: plain, SSE, and clients that hang up; needs MODEL=
 just fixture   # write a synthetic checkpoint big enough for just stress to interrupt
 just skips     # count the tests that skip for want of a checkpoint, which CI reports too
@@ -78,6 +82,26 @@ This is the check for the assumption a repository cannot test against itself. Th
 fixtures and the converter that wrote them share every assumption, so a wrong one is invisible
 to all three: a dimension order reversed, a block layout misread, or an offset measured from the
 wrong base all produce plausible numbers rather than an error. A second reader is what notices.
+
+## Cross-checking the layers below the server
+
+Four more checks are the same idea applied to the parts that feed the model, and none of them
+needs a checkpoint:
+
+| Recipe                | This side                     | The other side                            |
+| --------------------- | ----------------------------- | ----------------------------------------- |
+| `just xcheck-pre`     | `internal/tokenize` pre-split | GPT-2's and Llama 3's published regexes   |
+| `just xcheck-quant`   | `internal/quant` dequantizers | ggml's `quantize.c` block layouts         |
+| `just xcheck-rope`    | `internal/llama` RoPE         | numpy, from the RoFormer definition       |
+| `just xcheck-fixture` | gguftest's synthetic model    | the Python `gguf` package reading it back |
+
+The failure these exist for is one that produces plausible output rather than an error: a
+nibble interleaving read the wrong way yields a scrambled matrix, and a wrong RoPE pairing
+yields floats of the right magnitude. Both pass every test written from the same reading, which
+is why each script writes its expectations from an outside source instead.
+
+They all run in CI. Each writes its Go side to a temporary directory through a `go test -run`
+inside the recipe, so nothing is left in the tree.
 
 ## Cross-checking the chat template
 

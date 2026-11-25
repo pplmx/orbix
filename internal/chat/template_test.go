@@ -1539,6 +1539,14 @@ func TestSetAndStatementErrors(t *testing.T) {
 		// A name that is not an identifier.
 		{`{% set 1x = 2 %}a`, "invalid name"},
 		{`{% set x-y = 2 %}a`, "invalid name"},
+		// The dotted form takes a separate check, because it cuts the name at "." first and
+		// validates the two halves. Only the plain form was covered: replacing the dotted
+		// check with a silent rename left every case above passing.
+		{`{% set ns.1x = 2 %}a`, "invalid name"},
+		{`{% set 1ns.f = 2 %}a`, "invalid name"},
+		// One level only, which is what the namespace construct produces; a second dot is
+		// part of the attribute name, so the whole thing is not an identifier.
+		{`{% set ns.a.b = 2 %}a`, "invalid name"},
 		// An operand that does not parse.
 		{`{% set x = 1+ %}a`, "expression ends early"},
 		// An empty statement.

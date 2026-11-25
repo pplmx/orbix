@@ -160,10 +160,12 @@ func (e *Exporter) Record(s Span) {
 // Dropped reports how many spans were discarded: for a full queue, for a failed send, because
 // the collector acknowledged the request while rejecting spans inside it, or because the tracer
 // could not build one at all -- the sum below is the two counters that record those. The last of
-// the four is the one no test reaches and no caller can provoke: it needs crypto/rand to fail
-// while constructing an id, which is why it is counted rather than logged. A non-zero value means
-// a trace is incomplete, whether or not the export itself succeeded -- a collector over quota
-// answers 200 and keeps nothing.
+// the four is the one no caller can provoke: it needs crypto/rand to fail while constructing an
+// id, which is why it is counted rather than logged. TestDroppedSumsBothCounters reaches it by
+// raising the tracer's counter directly, which is what pins the addition -- returning only
+// e.dropped would satisfy every other assertion in the package. A non-zero value means a trace is
+// incomplete, whether or not the export itself succeeded -- a collector over quota answers 200 and
+// keeps nothing.
 func (e *Exporter) Dropped() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()

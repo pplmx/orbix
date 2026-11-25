@@ -1538,3 +1538,45 @@ func TestFlushStillWorksAfterClose(t *testing.T) {
 			before, after)
 	}
 }
+
+// TestDroppedSumsBothCounters pins the addition in Dropped, which no existing test could reach.
+//
+// The four ways a span goes missing are recorded in two places: the exporter counts queues, failed
+// sends and partial rejections, while the tracer counts ids it could not build. Dropped reports the
+// sum, and its comment says the tracer's contribution is the one no test reaches because it needs
+// crypto/rand to fail. That is true of the failure and not of the counter: noteDropped is in this
+// package, so a test can raise it directly and check the sum rather than each part alone.
+//
+// Without this, returning only e.dropped would satisfy every other assertion in this file.
+func TestDroppedSumsBothCounters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	exp, err := NewExporter(ExporterOptions{Endpoint: srv.URL, Interval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewExporter: %v", err)
+	}
+	t.Cleanup(func() { _ = exp.Close() })
+
+	if got := exp.Dropped(); got != 0 {
+		t.Fatalf("a fresh exporter reports %d dropped, want 0", got)
+	}
+
+	// The exporter's own counter, through the path a test can drive: a send that fails.
+	exp.Record(testSpan(t, "chat"))
+	if err := exp.Flush(context.Background()); err == nil {
+		t.Fatal("Flush succeeded against a collector returning 500")
+	}
+	if got := exp.Dropped(); got != 1 {
+		t.Fatalf("after one failed send Dropped = %d, want 1", got)
+	}
+
+	// Now the tracer's, which has no reachable failure path. It is the exporter's own tracer,
+	// reached as a field because NewExporter builds it.
+	exp.tracer.noteDropped()
+	exp.tracer.noteDropped()
+	if got := exp.Dropped(); got != 3 {
+		t.Errorf("Dropped = %d after 1 export failure and 2 id failures, want 3", got)
+	}
+}

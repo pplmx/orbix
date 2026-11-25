@@ -14,7 +14,7 @@
 | `cmd/orbix`         | 3905      | 85             | 81       | 8602      | 2.20      |
 | `internal/chat`     | 3327      | 81             | 41       | 5074      | 1.53      |
 | `internal/engine`   | 2079      | 47             | 20       | 6092      | 2.93      |
-| `internal/gguf`     | 1490      | 51             | 14       | 2968      | 1.99      |
+| `internal/gguf`     | 1492      | 51             | 14       | 2968      | 1.99      |
 | `internal/quant`    | 904       | 27             | 20       | 3747      | 4.14      |
 | `internal/gguftest` | 817       | 22             | 14       | 372       | 0.46      |
 | `internal/otel`     | 789       | 35             | 14       | 1681      | 2.13      |

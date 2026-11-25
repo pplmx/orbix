@@ -41,8 +41,10 @@ func (r *reader) bytes(n uint64) ([]byte, error) {
 	// are read, so it must not decide an allocation on its own. Measured: a file of a few
 	// hundred bytes claiming a 1 GiB string made Read allocate 1024 MiB and then report
 	// io.ErrUnexpectedEOF -- eight bytes of input costing a gigabyte, seven times over for a
-	// 64-bit length field. The cap below is the first half of the answer and the chunked read
-	// is the second: with the cap alone, every value just under it is still a free 2 GiB.
+	// 64-bit length field. A cap alone is not enough: it bounds the damage without making the
+	// allocation follow the data. With the old MaxInt32 cap, every claim just under it was a
+	// free 2 GiB. The cap below is the first half of the answer and the chunked read is the
+	// second, and the second is what makes a claim under the limit cost only what arrives.
 	//
 	// maxMetadataBytes bounds one string or byte run. Real GGUF metadata is small -- the
 	// largest strings in a 580 MB checkpoint are a few hundred bytes of chat template, and

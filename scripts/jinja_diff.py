@@ -213,6 +213,10 @@ SUBSET = {
 DIVERGENT = {
     "plus_concatenates": ("""{{ 1 + 2 }}""", "12"),
     "plus_concatenates_three": ("""{{ 1 + 2 + 3 }}""", "123"),
+    # A message dict counts as iterable in Jinja2 and not here. doc.go records the reason: Llama
+    # 3.2 writes `content is mapping or content is iterable` to mean "encode this as JSON", and a
+    # dict matching there would take the record's keys apart instead.
+    "is_iterable_dict": ("""{{ messages[0] is iterable }}""", "False"),
 }
 
 

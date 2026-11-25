@@ -297,7 +297,7 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
    写这段踩了两个 bash 与 just 的交互坑，都记在 justfile 注释里：字符串里的字面换行会**结束 recipe**（just 按缩进读正文），而想用 `$(printf '%s\n' …)` 绕开时，命令替换会**吃掉末尾换行**，最后一行和下一句粘在一起。最终用 bash 数组。
 
 2. **`scripts/jinja_diff.py` 的期望表过期**：`inline_if` 被列在"应当拒绝"里，而 `internal/chat` 在 `6da2e26` 之后已经支持内联条件（Gemma 3 模板需要它）。门槛因此长期出口 1，报的是一个**已经实现**的构造——一个不随功能更新的期望表，会把真实的回归藏在它后面。
-   现在 `inline_if` 移入 SUBSET 并扩成五个用例（两个分支、字段条件、与比较/连接的优先级、嵌套），空出的"应拒绝"位置换成文档确实承诺拒绝的短式 `a if cond`。结果：**598 例，588 与 Jinja2 一致，10 例按设计拒绝，exit 0**（此后补齐 `is none`、`is string` 的缺陷与 `-`、`%` 的对照，现已扩到 712 例、700 一致、2 例按设计发散，数字见第十节后的复算清单）。
+   现在 `inline_if` 移入 SUBSET 并扩成五个用例（两个分支、字段条件、与比较/连接的优先级、嵌套），空出的"应拒绝"位置换成文档确实承诺拒绝的短式 `a if cond`。结果：**598 例，588 与 Jinja2 一致，10 例按设计拒绝，exit 0**（此后补齐 `is none`、`is string` 的缺陷与 `-`、`%` 的对照，现已扩到 713 例、700 一致、3 例按设计发散，数字见第十节后的复算清单）。
 
 覆盖率与 checkpoint 门禁：73 处 `t.Skip` 分布在 28 个测试文件里（2026-11 复算；写下时是 65 和 24，新增的对照脚本和 fixture 测试各带了几处），由 11 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`CODER_MODEL`、`ORBIX_REFERENCE_DIR`。本机没有任何 `.gguf`，所以这一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
 `ORBIX_PREDUMP`、`ORBIX_QUANTDUMP`、`ORBIX_ROPEDUMP` 不算在这 11 个里：它们不是 checkpoint
@@ -308,7 +308,7 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 **本轮已做**（三项小时级的，全部有实测验证）：
 
 1. ~~**删 `PrefixIndex.Key`**~~ — 已删，`Remember` 的注释改成描述真实契约，`internal/llama` 里再无 0% 的函数。
-2. ~~**修 `jinja_diff.py` 的期望表**~~ — 已修，门槛从 exit 1 回到 exit 0（当时 598 例，现 712 例）。顺带把内联条件补成五个用例，并明确写进注释：期望表不随功能更新，是让门槛长期报假回归的原因。
+2. ~~**修 `jinja_diff.py` 的期望表**~~ — 已修，门槛从 exit 1 回到 exit 0（当时 598 例，现 713 例）。顺带把内联条件补成五个用例，并明确写进注释：期望表不随功能更新，是让门槛长期报假回归的原因。
 3. ~~**修 `just lint` 的候选解析**~~ — 已修，`just check` 在这台机器上首次全绿。
 
 **其余建议项**（半天级，有测试面扩张）：
@@ -775,7 +775,7 @@ go test -count=1 ./...                                    # 24s
 go test -cover ./...
 golangci-lint run                                         # 需 v2
 just docs && just cross
-uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # 712 cases, 700 agree, 2 diverge by design, exit 0
+uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # 713 cases, 700 agree, 3 diverge by design, exit 0
 
 # 跨实现对照：三个脚本各自从上游写期望值，不复述 Go 的读法
 ORBIX_PREDUMP=/tmp/pre.json go test ./internal/tokenize/ -run TestDumpPreSplit

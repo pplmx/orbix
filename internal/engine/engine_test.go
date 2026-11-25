@@ -3580,3 +3580,38 @@ func TestNegativeLimitsFallBackLikeZero(t *testing.T) {
 		t.Errorf("-1 gives MaxActive %d and 0 gives %d; the two have to agree", got, want)
 	}
 }
+
+// TestNonPoolErrorsPassThroughUnwrapped pins the other branch of poolAwareErr.
+//
+// Its comment says that branch has no test and that one is not worth constructing, on the grounds
+// that no reachable failure besides exhaustion is one the caller can provoke. That is true of the
+// callers and not of this function, which takes an error and returns one: a plain value costs
+// nothing to pass, and the property worth pinning is that an unrelated error is handed back
+// unchanged rather than wrapped into the pool sentinel's shape. A rewrite that dropped the
+// errors.Is test -- returning the wrapper for everything -- would still satisfy every existing
+// assertion, because they all start from exhaustion.
+func TestNonPoolErrorsPassThroughUnwrapped(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"a plain error", errors.New("context length exceeded")},
+		{"a wrapped plain error", fmt.Errorf("prefill: %w", errors.New("shape mismatch"))},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := poolAwareErr(c.err)
+			if got != c.err {
+				t.Errorf("poolAwareErr(%v) = %T(%v), want the same value back", c.err, got, got)
+			}
+			if errors.Is(got, llama.ErrPoolExhausted) {
+				t.Errorf("poolAwareErr(%v) reports ErrPoolExhausted", c.err)
+			}
+		})
+	}
+
+	// nil is not an error and must not become one.
+	if got := poolAwareErr(nil); got != nil {
+		t.Errorf("poolAwareErr(nil) = %v, want nil", got)
+	}
+}

@@ -693,11 +693,11 @@ func (e *poolExhaustedError) Unwrap() []error {
 // and the assertion it enabled -- "the cause survives the explanation" -- belongs in this package,
 // where the real error is produced, not in a caller that only ever sees the result.
 //
-// TestPoolExhaustionReachesTheCallerAsTheSentinelsShape covers the branch that translates. The
-// other, `return err`, has no test and is not worth constructing one for: every reachable failure
-// out of PrefillWithPrefix besides exhaustion is a cache or shape error the caller cannot provoke,
-// and the startPos refusal needs a caller that prefills from a position other than zero, which
-// this engine never does.
+// TestPoolExhaustionReachesTheCallerAsTheSentinelsShape covers the branch that translates, through
+// a real exhausted pool. TestNonPoolErrorsPassThroughUnwrapped covers the other one: it is true
+// that no caller can provoke a non-exhaustion failure into PrefillWithPrefix, but this function
+// takes an error and returns one, so checking that an unrelated error comes back unwrapped costs a
+// literal rather than a scenario.
 func poolAwareErr(err error) error {
 	if errors.Is(err, llama.ErrPoolExhausted) {
 		return &poolExhaustedError{cause: err}

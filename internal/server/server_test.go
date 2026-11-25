@@ -8616,6 +8616,14 @@ func TestChatTemplateKwargsRefusedWhenUnusable(t *testing.T) {
 		if !strings.Contains(body, "temperature_mode") {
 			t.Errorf("the refusal does not name the variable: %s", body)
 		}
+		// And it reads as a sentence about the request. This message is the renderer's,
+		// passed straight through, and it used to open with "engine:" -- the one response in
+		// the whole envelope that named an internal package. Measured against a live server,
+		// the neighbouring refusals read "temperature must not be negative, got -1" and
+		// "top_p must be between 0 and 1, got 5".
+		if strings.Contains(body, "engine:") {
+			t.Errorf("the refusal names an internal package: %s", body)
+		}
 	})
 
 	t.Run("the model has no template", func(t *testing.T) {

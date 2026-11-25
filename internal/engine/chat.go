@@ -225,12 +225,16 @@ func (r *ChatRenderer) RenderConversation(turns []Turn, tools []ToolSpec, vars m
 	}
 	if len(vars) > 0 {
 		if r == nil || r.tmpl == nil {
-			return "", fmt.Errorf("engine: cannot set template variables (%s), because this model "+
+			// No "engine:" prefix: the server turns this straight into the message of a 400,
+			// so the prefix would be the only place in that response naming an internal
+			// package. Measured against a live server, every other refusal in the same
+			// envelope reads as a sentence about the request.
+			return "", fmt.Errorf("cannot set template variables (%s), because this model "+
 				"declares no chat template this project can evaluate", strings.Join(slices.Sorted(maps.Keys(vars)), ", "))
 		}
 		for _, name := range slices.Sorted(maps.Keys(vars)) {
 			if !r.tmpl.Reads(name) {
-				return "", fmt.Errorf("engine: this model's chat template never reads %q, so "+
+				return "", fmt.Errorf("this model's chat template never reads %q, so "+
 					"setting it would change nothing about the prompt", name)
 			}
 		}

@@ -311,16 +311,21 @@ Measured 2026-11:
 | Gates set                                                                                                         | Skipped |
 | ----------------------------------------------------------------------------------------------------------------- | ------- |
 | none                                                                                                              | 31      |
-| the six that were on hand (`MODEL`, `QWEN2_MODEL`, `QWEN3_MODEL`, `GEMMA2_MODEL`, `GEMMA3_MODEL`, `MODEL_KQUANT`) | 9       |
+| the six that were on hand (`MODEL`, `QWEN2_MODEL`, `QWEN3_MODEL`, `GEMMA2_MODEL`, `GEMMA3_MODEL`, `MODEL_KQUANT`) | 10      |
 | all fourteen                                                                                                      | 0       |
 
 Both end figures re-measured 2026-11 with `go test -v ./...`; the middle row was measured the same
-way on 2026-11-25, with six checkpoints downloaded from ModelScope and set. The nine it leaves are
+way on 2026-11-25, with six checkpoints downloaded from ModelScope and set. The ten it leaves are
 worth naming because they show what the remaining gates buy: three are the `ORBIX_*` dump switches
-(`TestDumpRope`, `TestDumpDequant`, `TestDumpPreSplit`), which read no checkpoint at all, and six
+(`TestDumpRope`, `TestDumpDequant`, `TestDumpPreSplit`), which read no checkpoint at all, and seven
 need a file those six do not cover -- Gemma 1, a MoE checkpoint, a Llama v2 file, a FIM/code model,
-one of the four 32-weight quantizations, and the reference-corpus generator. A machine that has six
+one of the four 32-weight quantizations, `TestRopeMatchesReferenceLogprobs`, and
+`TestGenerateReferenceInputs`, which writes a corpus rather than reading one. A machine that has six
 of the fourteen is therefore closer to covered than the ratio suggests.
+
+This row said nine, and the sentence beneath it listed three plus six -- an arithmetic that added
+up while the run it described did not. Measured with the six set here: ten skips, named above. The
+count is now what the command prints.
 
 The table names three rows rather than a full ladder because a row per gate would mostly restate
 the same fact. What a reader needs is where the count starts, that it reaches zero, and -- from the
@@ -514,14 +519,29 @@ significant figures.
 
 Six reference files are checked, one per property none of the others can see:
 
-| File               | Checkpoint   | What only this one can see                               |
-| ------------------ | ------------ | -------------------------------------------------------- |
-| `gemma3-270m.json` | gemma-3-270m | the numerical range of trained weights                   |
-| `gemma3-513.json`  | gemma-3-270m | the sliding window binding past position 512             |
-| `mistral-v2.json`  | Mistral v0.1 | GGUF **version 2** and K-quant tensors                   |
-| `gemma-1.json`     | Gemma 2B     | a block with no QK norm and no sandwich norms            |
-| `qwen2.json`       | Qwen2.5-0.5B | q/k/v attention biases with NeoX rope                    |
-| `qwen3.json`       | Qwen3-0.6B   | per-head QK norm on a prompt whose tokenizer adds no BOS |
+| File               | Checkpoint   | Precision                 | What only this one can see                               |
+| ------------------ | ------------ | ------------------------- | -------------------------------------------------------- |
+| `gemma3-270m.json` | gemma-3-270m | Q8_0                      | the numerical range of trained weights                   |
+| `gemma3-513.json`  | gemma-3-270m | Q8_0                      | the sliding window binding past position 512             |
+| `mistral-v2.json`  | Mistral v0.1 | K-quant                   | GGUF **version 2** and K-quant tensors                   |
+| `gemma-1.json`     | Gemma 2B     | as distributed            | a block with no QK norm and no sandwich norms            |
+| `qwen2.json`       | Qwen2.5-0.5B | **F32**, converted        | q/k/v attention biases with NeoX rope                    |
+| `qwen3.json`       | Qwen3-0.6B   | Q4_K_M                    | per-head QK norm on a prompt whose tokenizer adds no BOS |
+
+**The precision column is load-bearing, and it was missing.** Each reference was produced from
+one particular file, and the tolerance is 1e-3 relative, so the comparison only holds for that
+file. Feeding `QWEN2_MODEL` a Q4_0 build of Qwen2.5 fails every compared logit by 1e-2 to 1.6e-1:
+that is Q4_0's error on the weights, not an engine defect, and it reads as one. Measured here
+before the column existed -- the run used the Q4_0 file present on the machine, the failure was
+investigated as a numerical bug, and the checkpoint the reference came from turned out to be the
+F32 conversion `scripts/hf_to_gguf.py` writes.
+
+Two precision values were checked by running the gate rather than inferred from the format: a
+Q8_0 gemma-3-270m passes, and a Q4_K_M Qwen3 passes -- so quantization alone does not decide it,
+the amount does, and Q4_K_M is the coarse end that still fits inside 1e-3 here. Q4_0 on Qwen2.5
+does not. The rule a reader should take is "use the file this reference was taken from", not "use
+an F32 one"; the F32 requirement is specific to the Qwen2 row, whose reference predates the
+convenience of a quantized build.
 
 The two Qwen files are the only ones with NeoX rope outside the Gemma family, and between them they
 separate the two features that travel together elsewhere: `qwen2` has the biases without the QK norm,

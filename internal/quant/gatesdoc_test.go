@@ -370,3 +370,119 @@ func TestArchitectureReviewStatesTheSkipCounts(t *testing.T) {
 // declining to run and the document's figure is about that decision rather than about one
 // spelling of it.
 var skipCall = regexp.MustCompile(`\bt\.Skip(f|Now)?\(`)
+
+// TestModelsDocSkipTableRowsAreConsistent checks the skip table's own arithmetic.
+//
+// The middle row counts the skips left when six specific checkpoints are set, and reproducing it
+// in a test would mean downloading six files. What can be checked is that the row exists, that
+// the prose beneath it names that many tests, and that the two numbers in the sentence add up --
+// which is exactly where the previous revision went wrong: it said nine, then explained it as
+// "three dump switches and six others", a sum that matches itself and not the run. Measured with
+// the six checkpoints set: ten.
+//
+// The names are counted rather than compared, because the document is allowed to describe a group
+// ("a MoE checkpoint") instead of naming a test. A row whose number disagrees with the sentence
+// that explains it is still the failure worth catching.
+func TestModelsDocSkipTableRowsAreConsistent(t *testing.T) {
+	doc := readDoc(t, "models.md")
+
+	// The three rows of the gates-set table, in order: none, the six, all fourteen.
+	rows := skipTableRows(t, doc)
+	if len(rows) != 3 {
+		t.Fatalf("the gates-set table has %d rows, want 3 (none / six / all fourteen); the "+
+			"parser probably stopped matching", len(rows))
+	}
+	none, six, all := rows[0], rows[1], rows[2]
+	if all != 0 {
+		t.Errorf("the table says %d tests skip with every gate set; the documented claim is "+
+			"that nothing does", all)
+	}
+	if none <= six {
+		t.Errorf("the table says %d skip with no gates and %d with six; setting gates cannot "+
+			"raise the count", none, six)
+	}
+
+	// The sentence that explains the middle row has to name as many tests as the row counts.
+	// "three are the ORBIX_* dump switches" plus "and N need a file" has to sum to the row.
+	m := skipExplanation.FindStringSubmatch(doc)
+	if m == nil {
+		t.Fatalf("docs/models.md no longer explains the middle row as \"three are the ORBIX_* " +
+			"dump switches ... and N need a file\"; restore that phrasing or update this pattern")
+	}
+	dumpSwitch, others := 3, countWord(t, m[1])
+	if dumpSwitch+others != six {
+		t.Errorf("the table says %d tests skip with six gates set, but the sentence beneath it "+
+			"accounts for %d (%d dump switches + %d needing another file)", six,
+			dumpSwitch+others, dumpSwitch, others)
+	}
+}
+
+// skipTableRows reads the "Skipped" column of the gates-set table, in file order.
+//
+// Located by its header rather than by position: models.md holds several tables and an earlier
+// version of this file read the wrong one. The header row is the one whose first cell is
+// "Gates set".
+func skipTableRows(t *testing.T, doc string) []int {
+	t.Helper()
+	var out []int
+	seenHeader := false
+	for line := range strings.SplitSeq(doc, "\n") {
+		if !strings.HasPrefix(line, "|") {
+			if seenHeader && len(out) > 0 {
+				break
+			}
+			continue
+		}
+		if !seenHeader {
+			if strings.Contains(line, "Gates set") {
+				seenHeader = true
+			}
+			continue
+		}
+		if strings.Contains(line, "---") {
+			continue
+		}
+		cells := strings.Split(strings.Trim(line, "|"), "|")
+		if len(cells) < 2 {
+			continue
+		}
+		out = append(out, atoi(t, strings.TrimSpace(cells[len(cells)-1])))
+	}
+	return out
+}
+
+// skipExplanation captures the count from "and N need a file those six do not cover".
+var skipExplanation = regexp.MustCompile(`and (\d+|[a-z]+)\s+need a file`)
+
+// countWord reads a small count written as digits or as an English word.
+//
+// The sentence spells it out ("and seven need a file"), which reads better than "and 7" and is
+// how it was written. A pattern taking only digits rejected the correct document -- the failure
+// that took three attempts to notice here, because each rewrite of the pattern looked right.
+func countWord(t *testing.T, s string) int {
+	t.Helper()
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	n, ok := englishCounts[s]
+	if !ok {
+		t.Fatalf("%q is neither a number nor a count word this test knows", s)
+	}
+	return n
+}
+
+// englishCounts covers the values a sentence about this table plausibly spells out.
+var englishCounts = map[string]int{
+	"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+	"eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+// atoi parses a table cell that should be a bare number.
+func atoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		t.Fatalf("%q is not a number: %v", s, err)
+	}
+	return n
+}

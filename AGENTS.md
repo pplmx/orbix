@@ -29,7 +29,7 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外八个是辅助配方，不进门槛，但会用得上：
+上面是门槛和发布入口。另外九个是辅助配方，不进门槛，但会用得上：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题
@@ -39,6 +39,7 @@ just isolate # 测试顺序依赖与状态泄漏：-count=2 -shuffle=on；改测
 just stress  # 竞态版二进制跑混合负载（非流式/SSE/中途取消）；要 MODEL=<真实 gguf>，验 active 归零
 just xcheck  # 用 Python 的 gguf 包独立解析同一文件，逐张量比对类型、维度和 SHA-256；要 MODEL= 和 just build
 just skips   # 数一下这棵树跳过多少个测试，CI 每轮打印的就是这个数
+just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）
 just         # 不带配方等价于 just check
 ```
 

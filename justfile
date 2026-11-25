@@ -33,6 +33,7 @@ FUZZTIME := env("FUZZTIME", "30s")
 # no origin/main, so the workflow passes its own range explicitly.
 RANGE := env("RANGE", "origin/main..HEAD")
 MODEL := env("MODEL", "")
+FIXTURE := env("FIXTURE", ".cache/stress.gguf")
 
 # The local gate. `just` with no arguments runs this.
 default: check
@@ -74,6 +75,15 @@ isolate:
     @# is meant to answer yes or no. Run this after touching test helpers, package-level
     @# variables, or anything with a Close.
     go test -count=2 -shuffle=on {{PKG}}
+
+# Writes a synthetic checkpoint big enough for `just stress` to interrupt.
+#
+# The same generator the test suite uses, scaled up. Random weights, so the generated text is
+# meaningless -- the stress script measures whether a disconnect is handled, not what the model
+# said. Pass FIXTURE= elsewhere to keep it out of the tree; the default lands in .cache.
+fixture:
+    @mkdir -p "$(dirname {{FIXTURE}})"
+    @go run ./scripts/genfixture -out {{FIXTURE}}
 
 # drive a race-enabled server with concurrent mixed load
 stress:

@@ -142,8 +142,14 @@ const (
 	//
 	// With it, 41k gives parts() = 2 whatever the runner was configured for, so the sixteen-way
 	// case cannot recur. BenchmarkWorkPerWorker measures that: every worker count from 2 upward
-	// reports 2 parts and the same time within noise, which is the guard working rather than a
-	// measurement of why sixteen would have lost.
+	// reports 2 parts, which is the guard working rather than a measurement of why sixteen would
+	// have lost.
+	//
+	// The 1.18x itself does not reproduce on every host. On a 128-core machine with
+	// -benchtime=2s, two workers are 20-40% slower than one at this shape, repeated three times.
+	// The constant was measured on an EPYC 7742; a host whose cores share a cache differently can
+	// invert the comparison, so the number here is the one that machine produced rather than a
+	// property of the shape.
 	workPerWorker = 1 << 14
 )
 

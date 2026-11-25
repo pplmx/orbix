@@ -602,10 +602,14 @@ func TestPartsPinsTheThresholds(t *testing.T) {
 // measured it: the benchmark above varies the shape at a fixed worker count, so the split the
 // comment is about never appears. Here the shape is fixed and the runner's worker count changes.
 //
-// Measured on a 128-core machine: workers=1 is 34452 ns and workers=2 is 29127 ns, which is the
-// 1.18x. Every count from 2 upward reports the same 2 parts, because workPerWorker caps the split
-// at 41472/16384 -- so this measures the guard holding, not a fan-out comparison. The sixteen-way
-// loss the comment cites cannot be reproduced through the runner any more, which is the point.
+// On a 128-core machine with -benchtime=2s, workers=1 runs 288x144 in about 35 us and workers=2 in
+// about 42-50 us, repeated three times: two workers are slower here, not faster. The 1.18x the
+// constant's comment cites is not reproducible on this host -- it was measured on an EPYC 7742,
+// where the cache topology is different.
+//
+// Every count from 2 upward reports the same 2 parts, because workPerWorker caps the split at
+// 41472/16384. So this measures the guard holding, not a fan-out comparison, and the sixteen-way
+// loss the comment cites cannot be reached through the runner at all.
 //
 // The workers come from NewRunner, not from a field, so this exercises the same parts() decision
 // the kernel path takes.

@@ -66,6 +66,31 @@ func TestNamespaceCarriesStateOutOfALoop(t *testing.T) {
 	}
 }
 
+// TestNamespaceTakesKeywordArgumentsOnly covers the refusal for a positional argument.
+//
+// namespace() is built from keyword arguments because a field with no name is not a field --
+// the construct is a named bag, and `namespace(1)` cannot say which name the 1 belongs to.
+// The refusal had no test: clearing the args instead of refusing left the package green.
+func TestNamespaceTakesKeywordArgumentsOnly(t *testing.T) {
+	for _, src := range []string{
+		`{% set ns = namespace('x') %}{{ ns }}`,
+		`{% set ns = namespace(1, 2) %}{{ ns }}`,
+	} {
+		tpl, err := Parse(src)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", src, err)
+		}
+		_, err = tpl.Render(nil, Inputs{})
+		if err == nil {
+			t.Errorf("%q accepted a positional argument, which cannot name a field", src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "keyword arguments only") {
+			t.Errorf("%q: error %q does not say only keywords are accepted", src, err)
+		}
+	}
+}
+
 // TestNamespaceRefusesAssignmentThroughSomethingElse keeps the dotted set from silently
 // creating a name nobody reads.
 //

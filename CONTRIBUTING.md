@@ -26,6 +26,7 @@ just bench     # run kernel and engine benchmarks
 just cross     # build all five supported platforms with CGo disabled
 just test-race # the suite under the race detector; needs cgo, so it is separate
 just xcheck    # compare a GGUF file against the Python gguf parser, tensor by tensor
+just jinja-diff # compare the chat template subset against real Jinja2; no checkpoint needed
 just stress    # race binary under mixed load: plain, SSE, and clients that hang up; needs MODEL=
 just fixture   # write a synthetic checkpoint big enough for just stress to interrupt
 just skips     # count the tests that skip for want of a checkpoint, which CI reports too
@@ -77,6 +78,24 @@ This is the check for the assumption a repository cannot test against itself. Th
 fixtures and the converter that wrote them share every assumption, so a wrong one is invisible
 to all three: a dimension order reversed, a block layout misread, or an offset measured from the
 wrong base all produce plausible numbers rather than an error. A second reader is what notices.
+
+## Cross-checking the chat template
+
+`just jinja-diff` renders a corpus of templates through `internal/chat` and through real Jinja2,
+and diffs the text. It needs uv but no checkpoint: the corpus is in the script, and the Go side
+is compiled at run time.
+
+The same reasoning as above applies one layer up. The package's own tests assert against strings
+typed by hand, which can share a blind spot with the code they check. Jinja2 is the reference
+that does not.
+
+A template using a construct outside the documented subset is expected to be **refused** rather
+than rendered, and those cases are counted separately from disagreements, so "we declined to
+evaluate this" does not read as a pass. The script's `SUBSET` table is the thing that decides
+what the check can catch: a construct implemented but never given a case is one where a
+regression goes unnoticed. `2605ec3` is the measured example -- `namespace()` shipped while
+still listed as unsupported, so the tool exited 1 from that commit until a later one fixed the
+table.
 
 ## Stressing the server without a checkpoint
 

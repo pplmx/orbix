@@ -132,6 +132,26 @@ xcheck:
     @test -x {{BIN}} || { echo "xcheck: {{BIN}} not found; run \`just build\` first" >&2; exit 1; }
     uv run --with gguf python3 scripts/gguf_xcheck.py "{{MODEL}}" {{BIN}}
 
+# cross-check the chat template subset against real Jinja2
+jinja-diff:
+    @# internal/chat evaluates a subset of Jinja2, and its own tests compare against strings
+    @# typed by hand -- which can share a blind spot with the code. Real Jinja2 is an
+    @# implementation nobody here wrote, so it is the second opinion, the same role gguf plays
+    @# for the container. No model file is needed: the corpus is in the script.
+    @#
+    @# This ran by hand only until 2026-11-26, and the cost of that is measured: `namespace()`
+    @# was implemented in 2605ec3 while still listed as unsupported here, so the tool exited 1
+    @# from that commit onward and nothing noticed. A gate nobody runs is not a gate.
+    @#
+    @# Needs uv for the Python side, for the same reason `docs` and `hooks` are separate
+    @# recipes: a contributor with only the Go toolchain should not be blocked by a check that
+    @# needs Python. It does need `go`, because the Go side is built from the script at run time.
+    @command -v uv >/dev/null 2>&1 || { \
+        echo "uv not found: install it (https://docs.astral.sh/uv/) or skip this check"; \
+        exit 1; \
+    }
+    uv run --with jinja2 python3 scripts/jinja_diff.py
+
 vet:
     go vet {{PKG}}
 

@@ -196,6 +196,73 @@ SUBSET = {
     # one of these is a single expression rather than a parse error.
     "inline_if_precedence": """{{ 'x' if messages and messages[0]['role'] == 'user' else 'y' }}""",
     "inline_if_nested": """{{ 'a' if messages else ('b' if add_generation_prompt else 'c') }}""",
+    # The constructs Qwen3's template needed, one case each so a disagreement names the one
+    # that broke. They were added to the package together, and without corpus entries the only
+    # evidence that they agree with Jinja2 is the whole-template comparison -- which reports
+    # "these two 4 KB strings differ" and leaves the reader to find where.
+    #
+    # namespace() is the one piece of mutable state in the language, and the for-body case is
+    # why it exists: a plain {% set %} there binds in the body's frame and is gone by the time
+    # the template reads it. The field assignment outside a loop is the same rule seen from the
+    # other side -- there is no frame to escape, so the plain set would have worked, and a
+    # renderer that only handled the loop case would pass the interesting test and fail this.
+    "namespace_field": """{% set ns = namespace(x=1) %}{{ ns.x }}""",
+    "namespace_out_of_loop": """{% set ns = namespace(last=-1) %}"""
+                             """{% for m in messages %}{% set ns.last = loop.index0 %}"""
+                             """{% endfor %}{{ ns.last }}""",
+    # Python's strip family takes a character set, not a substring: 'xyhixy'.strip('xy') is
+    # "hi", while a TrimPrefix reading gives "hixy" and a Trim reading gives "hi" by accident.
+    # Measured: changing strings.Trim to strings.TrimPrefix in the evaluator turns seven cases
+    # red, and this is the one that names the rule. The no-argument case is separate because it
+    # defaults to whitespace, and lstrip/rstrip are separate from strip so a rule applied on the
+    # wrong side is caught.
+    "method_strip_charset": """{{ 'xyhixy'.strip('xy') }}""",
+    "method_strip_no_arg": """[{{ '  pad  '.strip() }}]""",
+    "method_lstrip": """[{{ 'xxhixx'.lstrip('x') }}]""",
+    "method_rstrip": """[{{ 'xxhixx'.rstrip('x') }}]""",
+    "method_split": """{{ 'a,b,c'.split(',') | length }}""",
+    "method_split_index": """{{ 'a,b,c'.split(',')[1] }}""",
+    # A separator that is more than one character, and none at all. Found by injection:
+    # replacing the separator with "split on its first rune" left the gate green, because every
+    # case above splits on a single-character comma. Qwen3 splits a reply on a multi-character
+    # marker, where the first-rune reading produces fragments that look plausible.
+    "method_split_multichar": """{{ 'a--b'.split('--') | length }}""",
+    "method_split_no_arg": """{{ '  a  b '.split() | length }}""",
+    # Slices on a string and on a sequence. Jinja2 spells the open end by leaving it out, and
+    # a parser that reads "[:n]" as "the first index expression" has to treat the missing
+    # bound as an absent one rather than as zero -- for [2:] those are not the same.
+    "slice_string_head": """{{ 'abcdef'[:3] }}""",
+    "slice_string_tail": """{{ 'abcdef'[2:] }}""",
+    "slice_list_tail": """{{ messages[1:] | length }}""",
+    # Negative bounds and out-of-range ones, which clamp rather than fail in Python. Found by
+    # injection: removing the `start += n` that turns a negative start into an offset left the
+    # gate green, because every case above uses a non-negative bound. A template that slices
+    # from the end (`current_content[-8:]`) would then render the whole string instead.
+    "slice_negative_start": """{{ 'abcdef'[-2:] }}""",
+    "slice_negative_end": """{{ 'abcdef'[:-2] }}""",
+    "slice_past_end": """{{ 'abcdef'[2:99] }}""",
+    "slice_past_start": """{{ 'abcdef'[-99:] }}""",
+    # The ordering comparisons. They were missing entirely: the parser stopped at the "<" and
+    # reported it as unexpected, so a template branching on `start_pos < 0` was refused whole.
+    # Numbers compare numerically and text lexically, which is two cases rather than one.
+    "cmp_lt": """{{ 1 < 2 }}""",
+    "cmp_gt": """{{ 2 > 3 }}""",
+    "cmp_le": """{{ 2 <= 2 }}""",
+    "cmp_ge": """{{ 3 >= 4 }}""",
+    # Both comparisons at the equality boundary, which is the only place a strict operator
+    # differs from a non-strict one. Found by injection: changing "<" to "<=" in the evaluator
+    # left the gate green, because every case above compares unequal operands. The same kind of
+    # gap it exposes is why each of these four has its own case rather than one shared shape.
+    "cmp_lt_equal": """{{ 2 < 2 }}""",
+    "cmp_gt_equal": """{{ 2 > 2 }}""",
+    "cmp_string": """{% if 'a' < 'b' %}lt{% endif %}""",
+    # "is true" tests that a value *is* the boolean, which is why the first case is False: an
+    # integer 1 is truthy but is not True. A package that answered with a truth test would
+    # pass the three obvious cases and get this one wrong.
+    "is_true_of_int": """{{ 1 is true }}""",
+    "is_true_of_true": """{{ true is true }}""",
+    "is_false_of_false": """{{ false is false }}""",
+    "is_false_of_zero": """{{ 0 is false }}""",
 }
 
 # Templates using constructs the package documents as unsupported. The expected Go result is
@@ -235,7 +302,12 @@ UNSUPPORTED = {
     # inert, so a reader learns which form to write instead.
     "inline_if_no_else": """{{ 'a' if add_generation_prompt }}""",
     "filter_block": """{% filter upper %}x{% endfilter %}""",
-    "namespace": """{% set ns = namespace(x=1) %}{{ ns.x }}""",
+    # The bag itself, not a field of it. Printing a namespace is a template bug, and this
+    # package refuses it rather than emitting Go's map formatting: Jinja2 prints a repr that
+    # no template wants, so there is nothing to agree with. Each field read back is in SUBSET
+    # -- this entry stayed behind when namespace() moved there, which is how the gate spent a
+    # release reporting a refusal for a construct that was implemented.
+    "print_a_namespace": """{% set ns = namespace(x=1) %}{{ ns }}""",
     "macro": """{% macro m() %}x{% endmacro %}{{ m() }}""",
     "for_else": """{% for m in messages %}{{ m }}{% else %}none{% endfor %}""",
     "tuple_unpack": """{% for k, v in tools %}{{ k }}{% endfor %}""",

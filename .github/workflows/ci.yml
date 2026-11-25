@@ -316,3 +316,32 @@ jobs:
 
       - name: just xcheck
         run: just MODEL=.cache/stress.gguf xcheck
+
+  # jinja_diff renders chat templates through internal/chat and through real Jinja2 and
+  # compares the text. The package's own tests assert against strings typed by hand, which
+  # can share a blind spot with the code they check; Jinja2 is the one implementation here
+  # that nobody on this project wrote, so it answers the question the unit tests cannot.
+  #
+  # It ran only by hand until this job, and the cost of that is measured: `namespace()` was
+  # implemented in 2605ec3 while still listed in the script's UNSUPPORTED table, so the tool
+  # exited 1 from that commit onward and nothing noticed. A gate nobody runs is not a gate.
+  #
+  # No checkpoint is needed -- the corpus lives in the script and the Go side is compiled at
+  # run time -- so this is the cheapest non-Go job in the matrix.
+  jinja-diff:
+    name: jinja-diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - uses: astral-sh/setup-uv@v10.4.0
+
+      - name: just jinja-diff
+        run: just jinja-diff

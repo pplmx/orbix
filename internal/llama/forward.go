@@ -25,8 +25,20 @@ type Model struct {
 	// serial kernel.
 	run *kernel.Runner
 
-	// Scratch buffers, sized once. Reusing them across tokens is what keeps
-	// per-token allocation at zero after the first call.
+	// Scratch buffers, sized once. Reusing them across tokens is what keeps the
+	// per-token cost to the kernels' own allocations rather than to growing these.
+	//
+	// It is not zero, and this comment said it was. Measured on the two-layer fixture
+	// (`testing.AllocsPerRun` over Forward at successive positions): 23 allocations per
+	// token. Every one comes from a kernel (MatVec contributes about three per call, and
+	// a layer makes six), because `Runner.splitRows` takes a closure -- the escape
+	// analysis sends that closure to the heap on every call, at every size, including the
+	// serial path. The buffers below do not allocate; the kernels they are handed to do.
+	//
+	// The comment is corrected rather than the code because removing those 23 would mean
+	// changing the kernel's shape, and the measurement to justify that is not this test:
+	// the machine's load average was above 13 throughout, so no timing claim could be made
+	// and only the allocation count is trustworthy.
 	x       []float32 // [hidden] residual stream
 	xn      []float32 // [hidden] normalized input to a sublayer
 	q       []float32 // [heads*headDim]

@@ -70,10 +70,9 @@ a disagreement about the rule but about its boundary:
 | 513 tokens | `brown` -0.0000 | `fox`           | `brown` 42.015  |
 
 The text is one sentence repeated, so the next token at each position is known: at 513 it is
-`brown`. The window is a *distance*, not a count -- llama.cpp masks a key when
-`pos_query - pos_key >= n_swa`, so the key at exactly `p - 512` is still visible, and a query at
-position 512 reaches 513 positions including its own. `windowFor` returned the declared number as a
-count, which dropped the oldest reachable position. One position of context, invisible while the
+`brown`. The window is a *distance*, not a count: a query at position 512 against a declared window of 512
+reaches 513 positions, its own included. `windowFor` returned the declared number as a count,
+which dropped the oldest reachable position. One position of context, invisible while the
 prompt fits in a window, and a different argmax once it does not.
 
 What identified it was a numpy reference written directly against the mask rule, which could be

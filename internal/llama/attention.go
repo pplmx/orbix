@@ -80,11 +80,21 @@ func attentionParams(cfg Config, l int) attnParams {
 
 // windowFor returns how many recent positions layer l may attend to, or 0 for all of them.
 //
-// The window a file declares is a distance, not a count: llama.cpp masks a key when
-// pos_query - pos_key >= n_swa, so a window of 512 leaves positions p-512 through p reachable --
-// 513 of them, including the query's own. Returning the declared number as a count therefore
-// dropped the oldest reachable position, which is one position of context the model was trained
-// to use. Measured on gemma-3-270m-it-Q8_0 with a 513-token prompt: the count reading answered
+// The window a file declares is a distance, not a count, so the number of positions a query
+// reads is one more than the file says: a window of 512 has to leave 513 positions visible.
+//
+// What that costs if it is wrong: `reach` returned the declared number, dropping the oldest
+// position, and on gemma-3-270m-it-Q8_0 with a 513-token prompt the answer was "fox" instead
+// of "brown". testdata/reference/gemma3-513.json records the correct logits, and restoring the
+// off-by-one fails that comparison at logit 8864 with a relative error of 6.8e-02.
+//
+// An earlier version of this comment justified the +1 by quoting llama.cpp's mask rule,
+// `pos_query - pos_key >= n_swa`, and then asserting that rule leaves 513 positions visible.
+// It does not: `>=` with n_swa = 512 masks the key at distance exactly 512 and so leaves 512.
+// The rule and the +1 cannot both be right, and this package does not contain a llama.cpp to
+// settle which one llama.cpp means -- n_swa is read from the file with no adjustment in
+// src/models/gemma3.cpp. What is settled is what this package has to do to match the reference
+// data it is tested against, and that is the +1. Measured on gemma-3-270m-it-Q8_0 with a 513-token prompt: the count reading answered
 // "fox" where llama.cpp and a numpy reference written against the mask rule both answer "brown",
 // and the reference switched to "brown" as soon as the boundary became "> w" instead of ">= w".
 //

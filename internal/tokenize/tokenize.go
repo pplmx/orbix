@@ -907,6 +907,10 @@ func (t *Tokenizer) EncodeWithSpecials(text string, addSpecial bool) []int32 {
 		}
 		_, size := utf8.DecodeRuneInString(text[i:])
 		if size <= 0 {
+			// Unreachable: DecodeRuneInString answers at least 1 for a non-empty string,
+			// including the RuneError it returns for an invalid byte. Kept so a future change to
+			// the loop -- scanning from a different index, or a decoder that reports 0 -- cannot
+			// turn the advance below into an infinite loop.
 			size = 1
 		}
 		i += size

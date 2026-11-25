@@ -86,9 +86,13 @@ What identified it was a numpy reference written directly against the mask rule,
 switched between `>` and `>=` on a prompt that distinguishes them. Five earlier attempts failed on
 worse evidence, and one of them -- comparing every layer against the reference -- was itself wrong
 because the reference's own block wiring had not been checked against a single layer's intermediates.
-The block maths now has that check: `block()` reproduces layer 0 of gemma-3-270m-it-Q8_0 from the
-embedding row to `max|diff| = 2.65e-04`, and the whole forward pass answers the same token and logit
-(41.434) as this engine at the six-token calibration prompt.
+The block maths now has that check, in the numpy reference script rather than in this repository:
+`block()` reproduces layer 0 of gemma-3-270m-it-Q8_0 from the embedding row to `max|diff| = 2.65e-04`,
+and the whole forward pass answers the same token and logit (41.434) as this engine at the
+six-token calibration prompt. The script itself is not committed, so `block()` cannot be rerun
+from this repository -- but both of its figures can be checked against the files it produced:
+41.434 is the first entry of `testdata/reference/gemma3-270m.json` (41.434478) and 42.015 is the
+first entry of `gemma3-513.json` (42.014675). The tests compare this engine against both files.
 
 Not implemented for `gemma3`: the separate rotation frequency for local layers. A file that declares
 `gemma3.rope.freq_base_swa` is refused rather than rotated at the wrong rate. The 270M checkpoint

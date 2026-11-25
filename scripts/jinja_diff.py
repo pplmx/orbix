@@ -321,8 +321,26 @@ UNSUPPORTED = {
 }
 
 
+class JinjaTemplateError(Exception):
+    """Raised by the raise_exception global, mirroring Jinja2's own exception type.
+
+    Jinja2 does not define raise_exception itself; the environment's caller does. A template
+    that calls it is asserting something about the conversation, so the message it wrote is the
+    useful part and this carries it rather than replacing it with a generic failure.
+    """
+
+
 def oracle(template, messages, tools, add_gen, bos, eos):
     env = jinja2.Environment(keep_trailing_newline=True)
+    # raise_exception is the one global a published template calls, and the caller is what
+    # supplies it -- transformers' renderer binds it, and so does this package. Without it in
+    # the reference environment Gemma 2's "System role not supported" guard raises
+    # UndefinedError instead, which reads as a jinja2 failure rather than as the template
+    # refusing the conversation. That made every gemma2 system-prompt case a skip.
+    def raise_exception(msg=""):
+        raise JinjaTemplateError(msg)
+
+    env.globals["raise_exception"] = raise_exception
     ctx = {
         "messages": messages,
         "add_generation_prompt": add_gen,
@@ -337,8 +355,73 @@ def oracle(template, messages, tools, add_gen, bos, eos):
         return False, f"{type(e).__name__}: {e}"
 
 
-def build_cases():
+def asset_cases(repo_root):
+    """Cases from the templates committed under internal/chat/testdata.
+
+    These are not approximations: each is a byte-for-byte copy of a checkpoint's
+    `tokenizer.chat_template`, and the repository's TestTemplateAssetsAreExact pins the hash. So
+    the question here is the strong one -- can this package evaluate what that model ships --
+    without needing the checkpoint on disk.
+
+    They earn their place in a way the hand-written corpus cannot. Qwen3 0.6B's template uses
+    `messages[::-1]` and `.startswith()`, added for it; the construct cases in SUBSET did not
+    catch their absence because they never render the template that needed them. The whole
+    template is what fails when a construct is missing, and that is the failure this reports.
+
+    A missing testdata directory is not an error: the tool is documented to work on a partial
+    checkout too, and the built-in corpus still runs.
+    """
+    root = os.path.join(repo_root, "internal", "chat", "testdata")
+    if not os.path.isdir(root):
+        return []
     cases = []
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".jinja"):
+            continue
+        with open(os.path.join(root, name), encoding="utf-8") as f:
+            tmpl = f.read()
+        for msgname, msgs in MESSAGES.items():
+            cases.append({
+                "name": f"asset/{name}/{msgname}", "template": tmpl, "messages": msgs,
+                "add_generation_prompt": True, "bos_token": "", "eos_token": "",
+                "kind": "asset",
+            })
+        # The Go side takes a tool's parameters as text and prints them verbatim -- documented
+        # in render.go, and deliberate: re-encoding would reorder the model's own keys and
+        # change the prompt. Jinja2 re-serialises the dict it was handed, so the two only agree
+        # if this side supplies the text json.dumps would produce. Supplying the compact
+        # original instead reported the spacing of the input as a rendering difference.
+        cases.append({
+            "name": f"asset/{name}/tools", "template": tmpl, "messages": MESSAGES["multi"],
+            "tools": TOOLS, "add_generation_prompt": True,
+            "bos_token": "", "eos_token": "", "kind": "asset",
+        })
+    return cases
+
+
+# ASSET_DIVERGENT names the asset cases whose Go output is deliberately not what Jinja2
+# produces, with the reason the two cannot agree rather than a note that they do not.
+#
+# There is one, and it is a data-type difference rather than a rendering bug: Llama 3.2's
+# template prints its tools with `tojson(indent=4)`, which re-serialises the whole structure.
+# The Go side holds a tool's parameters as text -- so that a client's schema reaches the model
+# byte for byte instead of being re-encoded and reordered -- and text cannot be re-indented, so
+# the parameters object stays on one line inside an otherwise indented document. Jinja2, having
+# parsed the parameters into a dict, indents them too.
+#
+# The alternative fix is to parse and re-encode every schema, which would change the prompt for
+# every model to make one model's debug formatting match. That is the wrong trade, so the
+# difference is recorded here: this table is what makes "we know" different from "we missed it".
+ASSET_DIVERGENT = {
+    "asset/llama32-instruct.jinja/tools": (
+        "a tool's parameters are text and keep their original spacing, so tojson(indent=4) "
+        "cannot indent them; see chat.Tool.Parameters"
+    ),
+}
+
+
+def build_cases(repo_root="."):
+    cases = asset_cases(repo_root)
     for name, tmpl in TEMPLATES.items():
         for msgname, msgs in MESSAGES.items():
             for add_gen in (False, True):
@@ -392,6 +475,11 @@ def with_oracle(cases):
                          c["add_generation_prompt"], c["bos_token"], c["eos_token"])
         c["oracle"] = out if ok else ""
         c["oracle_ok"] = ok
+        # The reason travels with the case so the skip list names it. Before this the report
+        # printed an empty pair of parentheses, which says "jinja2 failed" and nothing about
+        # why -- and for the gemma2 asset the why is the interesting part: its template refuses
+        # a system turn outright, so there is no prompt for the two sides to disagree about.
+        c["oracle_error"] = "" if ok else out
     return cases
 
 
@@ -405,14 +493,44 @@ import (
 	"github.com/pplmx/orbix/internal/chat"
 )
 
+// openAITool is the shape the case payload carries, which is the same one a client sends:
+// the function nested under "function". chat.Tool is flat, because the template only ever
+// reads name, description and parameters, so the program flattens rather than making the
+// evaluator's type carry a nesting it does not use.
+//
+// Decoding straight into chat.Tool silently produced three empty strings -- its fields have no
+// JSON tags, so "name" never matched "Name" -- and the corpus reported the tools cases as
+// agreeing while both sides rendered a tool with no name. The asset cases are what exposed it:
+// their templates print the parameters, so an empty tool stops matching Jinja2's answer.
+type openAITool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		// Parameters is text in this payload rather than an object: the program passes it to
+		// chat.Tool verbatim, and the corpus supplies the form json.dumps would write. A
+		// RawMessage here would re-encode an object and lose exactly the spacing the
+		// comparison is about.
+		Parameters string `json:"parameters"`
+	} `json:"function"`
+}
+
+func (t openAITool) flat() chat.Tool {
+	return chat.Tool{
+		Name:        t.Function.Name,
+		Description: t.Function.Description,
+		Parameters:  t.Function.Parameters,
+	}
+}
+
 type tc struct {
-	Name     string        `json:"name"`
-	Template string        `json:"template"`
+	Name     string         `json:"name"`
+	Template string         `json:"template"`
 	Messages []chat.Message `json:"messages"`
-	Tools    []chat.Tool    `json:"tools"`
-	AddGen   bool          `json:"add_generation_prompt"`
-	BOS      string        `json:"bos_token"`
-	EOS      string        `json:"eos_token"`
+	Tools    []openAITool   `json:"tools"`
+	AddGen   bool           `json:"add_generation_prompt"`
+	BOS      string         `json:"bos_token"`
+	EOS      string         `json:"eos_token"`
 }
 
 func main() {
@@ -431,11 +549,15 @@ func main() {
 			out[i] = res{Error: err.Error()}
 			continue
 		}
+		tools := make([]chat.Tool, len(c.Tools))
+		for j, t := range c.Tools {
+			tools[j] = t.flat()
+		}
 		text, err := tmpl.Render(c.Messages, chat.Inputs{
 			AddGenerationPrompt: c.AddGen,
 			BOSToken:            c.BOS,
 			EOSToken:            c.EOS,
-			Tools:               c.Tools,
+			Tools:               tools,
 		})
 		if err != nil {
 			out[i] = res{Error: err.Error()}
@@ -450,6 +572,26 @@ func main() {
 	}
 }
 '''
+
+
+def dumped_tools(tools):
+    """Convert a case's tools into the shape the Go program decodes.
+
+    Each parameters object becomes the text json.dumps would write for it, which is what the
+    Go side expects: chat.Tool.Parameters is text, emitted verbatim so the model sees the
+    schema the client sent rather than a re-encoding of it.
+
+    Doing this at the payload boundary keeps both sides honest. Converting inside the Go
+    program would mean the comparison no longer exercises the code that a server reaches, and
+    converting the case would hide the difference rather than account for it.
+    """
+    out = []
+    for t in tools:
+        fn = dict(t.get("function", {}))
+        if "parameters" in fn:
+            fn["parameters"] = json.dumps(fn["parameters"], sort_keys=True)
+        out.append({"type": t.get("type", "function"), "function": fn})
+    return out
 
 
 def run_go(cases, repo_root):
@@ -471,7 +613,13 @@ def run_go(cases, repo_root):
         payload = [
             {
                 "name": c["name"], "template": c["template"], "messages": c["messages"],
-                "tools": c.get("tools", []), "add_generation_prompt": c["add_generation_prompt"],
+                # The Go side takes a tool's parameters as text and prints them verbatim,
+                # while Jinja2 re-serialises the object it is handed. Both are right for their
+                # own caller: a server passes through the schema the client sent, and Jinja2
+                # has only the parsed value. The conversion happens here, at the boundary,
+                # rather than in either implementation.
+                "tools": dumped_tools(c.get("tools", [])),
+                "add_generation_prompt": c["add_generation_prompt"],
                 "bos_token": c["bos_token"], "eos_token": c["eos_token"],
             }
             for c in cases
@@ -556,7 +704,8 @@ def main():
         sys.stderr.write("go not found on PATH\n")
         return 2
 
-    cases = cases_from_checkpoint(args.template_file) if args.template_file else build_cases()
+    cases = (cases_from_checkpoint(args.template_file) if args.template_file
+             else build_cases(args.repo))
     if not cases:
         return 1
     no_oracle = [c for c in cases if not c["oracle_ok"]]
@@ -590,6 +739,17 @@ def main():
             else:
                 diverged.append(c["name"])
             continue
+        if c["kind"] == "asset" and c["name"] in ASSET_DIVERGENT:
+            # Compared for non-equality as well: a change that made the two agree would mean
+            # the verbatim-parameters decision had been reversed, which is worth being told.
+            if r["error"]:
+                diverged_bad.append((c["name"], r["error"]))
+            elif r["text"] == c["oracle"]:
+                diverged_bad.append((c["name"], "now agrees with Jinja2; the documented "+
+                                     "difference is gone"))
+            else:
+                diverged.append(c["name"])
+            continue
         if c["kind"] == "unsupported":
             if r["error"]:
                 refused_ok.append(c["name"])
@@ -616,7 +776,7 @@ def main():
         # this list is only for cases where the oracle itself could not render.
         print(f"{len(no_oracle)} cases skipped because Jinja2 itself failed:")
         for c in no_oracle:
-            print(f"  {c['name']}  ({c['oracle']})")
+            print(f"  {c['name']}  ({c['oracle_error']})")
 
     failed = False
     if wrong:

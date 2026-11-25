@@ -1897,6 +1897,13 @@ func isSpace(r rune) bool { return unicode.IsSpace(r) }
 func isNewline(r rune) bool { return r == '\r' || r == '\n' }
 
 // runeLenAt returns the byte length of the first rune of s, or 0 when s is empty.
+//
+// The empty case matters to the callers that pass a whole string rather than a slice of one --
+// the lookahead helpers near line 1400 ask about s directly, and s may be empty. Inside the
+// scanning loops it cannot arise, because each is guarded by i < len(text); the "if n == 0
+// { n = 1 }" lines beside those loops are therefore defensive, and a per-line coverage run
+// reports them as uncovered. utf8.DecodeRuneInString is what makes the non-empty side safe: it
+// answers size 1 for a bare invalid byte, so no loop can stall on a single position.
 func runeLenAt(s string) int {
 	if s == "" {
 		return 0

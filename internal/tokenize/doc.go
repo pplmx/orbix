@@ -24,6 +24,17 @@
 // split wrong, so the model answered a different question -- while applying the list gives
 // "to establish a new religion".
 //
+// A file that declares `tokenizer.ggml.model = gpt2` and carries no merge list is accepted,
+// and `encodeChunk` then falls back to `t.scores[id]` -- the unigram rule this section opens
+// by rejecting. So such a file is tokenized by the wrong algorithm rather than refused. That
+// is a real state, not a shape to refuse on sight:
+// `scripts/hf_to_gguf.py` produces exactly such a file, because it exists to cross-check
+// forward passes over known token ids rather than to be served. The cost is that a file like
+// that tokenizes text differently from the model it was converted from, and nothing reports
+// it: `tokenize.New` cannot fail on it, and `orbix model inspect` does not print merges for
+// any file -- it names the tokenizer family and the pre-tokenizer, and that is all. A reader
+// who wants to know has to look at the file's metadata keys directly.
+//
 // The score path no longer exists here, and the figures above come from the comparison that
 // settled the question rather than from something a reader can rerun: "roughly a third" was
 // a measurement over a corpus of unusual inputs, not a property this package asserts. What

@@ -2505,6 +2505,13 @@ type typeMismatchError struct {
 
 // Error renders the failure the way the caller has to read it: the field, the type it sent
 // and the type it should have sent.
+//
+// One case reads badly and is left that way: a number outside the range of the Go type it was
+// being decoded into -- {"max_tokens": 1e20} -- reaches this through the same UnmarshalTypeError
+// as a string in a number field, so the message is "max_tokens must be an integer, but it is
+// number", which is true and unhelpful. Telling the two apart means parsing the raw token again
+// to see whether it is a number at all; the caller still gets a 400 naming the field, and a
+// request with a 10^20 token budget is not one with a plausible intended answer.
 func (e *typeMismatchError) Error() string {
 	if e.param() == "" {
 		return fmt.Sprintf("the request body must be a JSON object, but it is %s",

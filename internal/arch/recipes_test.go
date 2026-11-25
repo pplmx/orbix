@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -83,4 +84,83 @@ func parseRecipes(out string) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// TestArchitectureReviewCIIobCountMatchesTheWorkflow checks the job count AGENTS.md states
+// against the workflow it describes.
+//
+// This is the third number in this repository to drift in the same way, and it drifted from
+// two directions in one session: nine jobs became ten when the jinja-diff job was added, and
+// became eleven when the four xcheck recipes were folded into one job. Nobody edits a sentence
+// like "九个 job 各自验证一件事" by hand and gets it right; the sentence has to be rewritten
+// wholesale, and that is when the count is most likely to be copied from the previous version.
+//
+// Only the count is checked. Which job checks what is a sentence a person writes, and it has
+// no mechanical form -- but a count that disagrees is proof the sentence is stale, which is
+// enough to make someone read it.
+func TestArchitectureReviewCIIobCountMatchesTheWorkflow(t *testing.T) {
+	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	jobs := countCIJobs(string(workflow))
+	if jobs < 5 {
+		t.Fatalf("counted %d jobs in ci.yml, too few to be the real matrix -- the parser probably "+
+			"stopped matching", jobs)
+	}
+
+	agents, err := os.ReadFile(filepath.Join("..", "..", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	claim := ciJobCount.FindStringSubmatch(string(agents))
+	if claim == nil {
+		t.Fatalf("AGENTS.md no longer states the job count as \"N 个 job 各自验证一件事\"; " +
+			"restore that phrasing or update this pattern")
+	}
+	if want := chineseNumeral(claim[1]); want != jobs {
+		t.Errorf("AGENTS.md says %s jobs; ci.yml defines %d", claim[1], jobs)
+	}
+}
+
+// countCIJobs counts the entries under the top-level `jobs:` key.
+//
+// A line-based scan rather than a YAML dependency: this repository has none in go.mod, and the
+// shape being read is two spaces of indentation under a single top-level key. A job is a line
+// matching `^  <name>:$` after `jobs:` appears.
+func countCIJobs(src string) int {
+	inJobs := false
+	n := 0
+	for line := range strings.SplitSeq(src, "\n") {
+		if line == "jobs:" {
+			inJobs = true
+			continue
+		}
+		if !inJobs {
+			continue
+		}
+		// Any other column-zero key ends the block.
+		if line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "#") {
+			break
+		}
+		if ciJobLine.MatchString(line) {
+			n++
+		}
+	}
+	return n
+}
+
+var (
+	ciJobLine  = regexp.MustCompile(`^  [a-z][a-z0-9-]*:$`)
+	ciJobCount = regexp.MustCompile(`([一二三四五六七八九十]+|\d+) ?个 job 各自验证一件事`)
+)
+
+// chineseNumeral converts the counts this sentence plausibly uses. The map stops where the
+// matrix would have to be written in digits, which is the form a contributor copies from a tool
+// rather than from prose.
+func chineseNumeral(s string) int {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return chineseNumerals[s]
 }

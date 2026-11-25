@@ -118,16 +118,34 @@ Orbix is a learning project, and these are the shapes to expect:
 
   Two further figures, kept because they are what a single request actually costs: decoding is
   28.3 ms per token, and a 64-token prefill is 276 ms batched against 1799 ms one token at a
-  time -- a 6.5x gain from the sub-batching that the sequential path cannot have. Both come from
-  `go test -bench` with `MODEL` set. They were measured in the same session as the throughput
-  numbers that turned out to be wrong, so treat them as that run's figures rather than as
-  re-measured ones; the commands reproduce them for whoever sets `MODEL`.
+  time -- a 6.5x gain from the sub-batching that the sequential path cannot have.
+
+  Re-measured here on the same checkpoint with `MODEL` set and
+  `go test -run '^$' -bench 'BenchmarkDecode|BenchmarkPrefillSequential|BenchmarkPrefillBatched'
+  -benchtime=3s -count=3 ./internal/llama/`, medians of three: 29.9 ms per token decoding, 283 ms
+  batched against 1782 ms sequential, a 6.30x gain. Every figure lands within 6% of the one
+  above, which is the useful outcome -- these were written in the same session as the throughput
+  numbers that turned out to describe an impossible direction, and they survived re-measurement
+  where those did not.
 
 - **A shared prompt costs almost nothing the second time.** With `--prefix-cache`, a request
   whose prompt starts with blocks the pool already computed attaches them instead of prefilling
-  again: 101.0 tok/s against 139.5 for four sequential requests sharing one prompt, with the 96
-  reused positions reported. This is the case a chat application has -- a system prompt and
-  earlier turns re-sent verbatim.
+  again. This is the case a chat application has -- a system prompt and earlier turns re-sent
+  verbatim.
+
+  The effect is easiest to see where prefill dominates: four sequential requests sharing one
+  prompt against the synthetic fixture, `--max-active 1`, 32 generated tokens each, one request
+  to warm the pool first: 778 tok/s with the flag against 602 tok/s without, a 1.29x gain.
+  `orbix_prefix_positions_reused_total` states the reuse directly, and it is the number to read
+  when a measurement does not match an expectation -- a reuse figure of 0 says the prompt did not
+  share a prefix, whatever the throughput says.
+
+  This paragraph used to give "101.0 tok/s against 139.5 ... with the 96 reused positions
+  reported", without saying which model, prompt or token counts produced it. Those figures could
+  not be reproduced here: on gemma-3-270m the same shape of test shows a 1.08x gain, and no
+  combination tried landed near 101 or 139. A ratio from a run nobody can reconstruct is worse
+  than no number, because it invites a comparison -- 1.29x here against 1.38x there -- that
+  would look like a regression in the flag rather than a difference between two unstated setups.
 
 The intended comparison is not "Orbix vs vLLM on an A100". It is "what does it take to make LLM inference work in pure Go, and what do I learn by building it?"
 

@@ -1035,6 +1035,74 @@ func TestScalarAsFloatToInteger(t *testing.T) {
 // unsigned case was reached before, because the fixture's large value happens to be
 // unsigned; a negative metadata value is the interesting one, since a conversion that
 // routed signed values through the unsigned field would turn -7 into a huge positive.
+// TestReadEveryIntegerType decodes each integer metadata type from its bytes.
+//
+// TestScalarAsIntegerToFloat covers the conversion from a Value that already exists; this
+// covers getting the Value out of the file, which is a different path and had no test for
+// int8, uint16, int16 or int64 -- the fixture uses none of them, so a per-line profile showed
+// the r.bytes error arms of all four as never executed.
+//
+// The sign handling is the part worth pinning: int8 and int16 are stored little-endian and
+// have to come back negative when the top bit is set, and uint64 has to keep the top bit of a
+// 64-bit value that a signed read would turn into -1.
+func TestReadEveryIntegerType(t *testing.T) {
+	// The unsigned types fill Uint and leave Int zero, and the signed ones do the reverse --
+	// which is why each case says which field to check rather than reading both.
+	cases := []struct {
+		typ  ValueType
+		raw  []byte
+		want float64 // Num is filled by both families
+		isU  bool
+		// skipNum is for the one value float64 cannot represent; wantU is its exact form.
+		skipNum bool
+		wantU   uint64
+	}{
+		{typ: TypeUint8, raw: []byte{200}, want: 200, isU: true},
+		{typ: TypeInt8, raw: []byte{0x9c}, want: -100},
+		{typ: TypeUint16, raw: []byte{0xff, 0xff}, want: 65535, isU: true},
+		// -30000 is 0x8ad0 as a uint16, stored little-endian. The top bit has to survive
+		// as a sign rather than being read as the value 35392.
+		{typ: TypeInt16, raw: []byte{0xd0, 0x8a}, want: -30000},
+		{typ: TypeUint32, raw: []byte{0xff, 0xff, 0xff, 0xff}, want: 4294967295, isU: true},
+		{typ: TypeInt32, raw: []byte{0xf9, 0xff, 0xff, 0xff}, want: -7},
+		// All bits set: a signed read would report -1 here. Num cannot hold this exactly --
+		// float64 rounds MaxUint64 to 2^64 -- so the case checks Uint only, which is what the
+		// unsigned field is for; 1<<63 is representable, so that value doubles as the Num case.
+		// wantU carries the exact uint64, since want is a float64 and cannot.
+		{typ: TypeUint64, raw: []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+			wantU: ^uint64(0), isU: true, skipNum: true},
+		{typ: TypeUint64, raw: []byte{0, 0, 0, 0, 0, 0, 0, 0x80}, want: 1 << 63, isU: true},
+		{typ: TypeInt64, raw: []byte{0, 0, 0, 0, 0, 1, 0, 0}, want: 1 << 40},
+	}
+	for _, c := range cases {
+		t.Run(c.typ.String(), func(t *testing.T) {
+			r := &reader{r: bytes.NewReader(c.raw)}
+			v, err := r.value(c.typ)
+			if err != nil {
+				t.Fatalf("value(%s): %v", c.typ, err)
+			}
+			if c.isU {
+				wantU := c.wantU
+				if wantU == 0 {
+					wantU = uint64(c.want)
+				}
+				if v.Uint != wantU {
+					t.Errorf("value(%s).Uint = %d, want %d", c.typ, v.Uint, wantU)
+				}
+				if v.Int != 0 {
+					t.Errorf("value(%s).Int = %d; the unsigned reader fills only Uint, so a "+
+						"non-zero Int means the two fields were mixed up", c.typ, v.Int)
+				}
+			} else if v.Int != int64(c.want) {
+				t.Errorf("value(%s).Int = %d, want %v", c.typ, v.Int, c.want)
+			}
+			if !c.skipNum && v.Num != c.want {
+				t.Errorf("value(%s).Num = %v, want %v", c.typ, v.Num, c.want)
+			}
+		})
+	}
+}
+
 func TestScalarAsIntegerToFloat(t *testing.T) {
 	cases := []struct {
 		name string

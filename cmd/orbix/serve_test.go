@@ -215,6 +215,26 @@ func TestServeRefusesABlockBiggerThanTheContext(t *testing.T) {
 	}
 }
 
+// TestServeStopsBeforeOpeningAnythingWithoutAModel covers serve's first refusal: no --model and no
+// ORBIX_MODEL.
+//
+// resolveModel is tested on its own, but nothing checked that serve calls it before doing anything
+// expensive. The ordering is the point -- an earlier version resolved the model after opening it,
+// so a missing flag cost a full checkpoint load and the error named the wrong layer.
+func TestServeStopsBeforeOpeningAnythingWithoutAModel(t *testing.T) {
+	t.Setenv("ORBIX_MODEL", "")
+
+	err := cmdServe([]string{"--addr", "127.0.0.1:0"})
+	if err == nil {
+		t.Fatal("serve started with no model at all")
+	}
+	for _, want := range []string{"serve", "--model", "ORBIX_MODEL"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
 func TestPoolReservationWarning(t *testing.T) {
 	// Below the threshold: the small fixture's 2048 x 16 pool is 432MiB, which is a normal
 	// thing to configure and should not print a warning.

@@ -155,7 +155,11 @@ grep -rn "\.Forward(\|\.Generate(" --include=*.go internal cmd | grep -v _test
 
 ## 四、entry point 的重复（已处理，见本节末尾的结果）
 
-### 4.1 一次 `serve` 打开模型三次
+### 4.1 一次 `serve` 打开模型三次（已处理，见 4.4）
+
+The line numbers below are from the revision this analysis was written against. After 4.4 they
+no longer point at `gguf.Open` -- `serve.go` has none -- and are kept because they say where the
+problem was, not where the code is.
 
 ```text
 cmd/orbix/serve.go:241   gguf.Open          （--prefix-cache 校验 --block-size）
@@ -165,11 +169,11 @@ engine.New → llama.NewWithOptions → LoadWeights → quant.OpenLoader → ggu
 
 三次解析 GGUF 目录、两次真正的 `os.Open`。`gguf.Open` 在 `gguf.go:84` 读完目录就立刻 `Close`，所以重复打开不是资源泄漏，是**三次同样的解析工作**和**三处可能各自失败的入口**。`serve` 里那段为了提前校验 `--block-size` 而先开一次文件的注释自己写着"the model is opened first"，是把"参数校验要先于加载"的要求翻译成了"多开一次"。
 
-### 4.2 每个命令各写一遍装配
+### 4.2 每个命令各写一遍装配（已处理，见 4.4）
 
 `run`、`chat`、`bench`、`serve` 四处的装配序列几乎相同，但各自手写：`gguf.Open` → `tokenize.New` → `llama.LoadConfig`（其中三处）→ `engine.New` → `NewChatRenderer`（两处）。同一条规则——"`--block-size` 大于模型上下文时拒绝"——在 `serve.go:249`、`bench.go:136`、`chat.go:187` 写了三遍，连错误消息的措辞都几乎一样。`defaultBlockSize = 16` 在 `llama/paged.go:132` 有定义，`chat.go:162` 又硬编码了一次 `blockSize = 16`。
 
-### 4.3 五个 pump 循环
+### 4.3 五个 pump 循环（已处理，见 4.4）
 
 `engine.Pump` 必须由单一 goroutine 驱动，于是每个调用方都自己写循环：
 
@@ -179,6 +183,11 @@ cmd/orbix/chat.go:548               drain-then-pump，带最后的 dec.Flush()
 cmd/orbix/bench.go:240              ↑ 独立 goroutine drain + for eng.Pump() > 0
 cmd/orbix/bench_suite.go:378/464/566   三处几乎相同
 ```
+
+These are historical too: after 4.4 the command-line loops live in `engine.Drive`, `chat.go` is
+shorter than 548 lines, and only `server.go:245` still points at the line it names. What survives
+is the argument, not the offsets -- `grep -rn "eng.Pump()" internal cmd` now finds three sites
+where it found five.
 
 这不是"重复几行"的问题：`server` 那份处理了取消、退避和关闭；`bench` 那几份假定 `chans` 会在 Pump 返回零之前关闭；`chat` 那份多了一个 `Flush()`（丢弃跨 token 的半个字符会改变输出）。这些差异**没有任何测试交叉覆盖**——测 `bench` 的循环不会发现 `server` 的退避写错。
 

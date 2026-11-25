@@ -17,6 +17,15 @@ import (
 // "ok" -- no test matched, and the output says success. Measured: docs/models.md said
 // TestMoEReachesTheExperts while the test is TestMoEReachesTheExpertsOnARealModel, and the
 // documented command reported ok in 0.004s having run nothing.
+//
+// The documents it reads are docs/*.md and internal/*/doc.go -- see docFiles. A comment in an
+// ordinary source file is not covered, and the same failure hides there: renaming a test left
+// gguf_test.go's comment naming the old one, and nothing reported it. Widening the sweep to every
+// .go file is not free: three comments quote names on purpose (testnames_test.go quotes two as
+// the example of this very failure, engine_test.go quotes one while saying no such test exists),
+// so the widened version needs an exclusion list that would itself go stale. The narrow version
+// plus this paragraph was the cheaper trade; if you find a stale name outside these documents,
+// the check to extend is this one.
 func TestDocsCiteRealTestNames(t *testing.T) {
 	root := repoRoot(t)
 	defined := testFuncNames(t, root)

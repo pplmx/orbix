@@ -1093,3 +1093,27 @@ func TestAcquireEvictsARememberedPrefixBeforeRefusing(t *testing.T) {
 		t.Errorf("acquire on an empty pool with an empty index = %v, want ErrPoolExhausted", err)
 	}
 }
+
+// TestNegativeBlockSizeFallsBackLikeZero pins the lower half of the block-size default.
+//
+// The guard is `block <= 0`, and only the zero side was exercised: narrowing it to `== 0` would
+// leave the suite green while a negative size reached the allocation arithmetic, where
+// positions = Blocks * block is negative and the int64 overflow guard above it does not fire.
+//
+// Same shape as workers() in forward.go and the engine's MaxActive, both of which have this test.
+func TestNegativeBlockSizeFallsBackLikeZero(t *testing.T) {
+	cfg := testConfig()
+
+	zero, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 2})
+	if err != nil {
+		t.Fatalf("NewBlockPool with no block size: %v", err)
+	}
+	neg, err := NewBlockPool(cfg, BlockPoolOptions{Blocks: 2, BlockSize: -4})
+	if err != nil {
+		t.Fatalf("NewBlockPool with BlockSize -4: %v", err)
+	}
+	if got, want := neg.BlockSize(), zero.BlockSize(); got != want {
+		t.Errorf("BlockSize -4 gives %d and an omitted one gives %d; the two have to agree",
+			got, want)
+	}
+}

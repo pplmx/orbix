@@ -795,3 +795,220 @@ func TestCheckToolChoiceRefusesNonObject(t *testing.T) {
 		}
 	}
 }
+
+// TestChatRefusesAForcingToolChoice is the handler half of the tool_choice refusals.
+//
+// checkToolChoice parses "required" and a named function without complaint, because parsing them
+// is not the same as honouring them: the handler is what decides they cannot be served, and that
+// decision had no test. The refusal is the point of the whole check -- no template in the subset
+// has a field that forces a call, so accepting "required" would answer with whatever the model
+// chose while the caller believed the choice was forced.
+func TestChatRefusesAForcingToolChoice(t *testing.T) {
+	const tmpl = `{%- if tools %}TOOLS{% endif %}{%- for m in messages %}[{{ m.role }}]{% endfor %}`
+	srv := newTestServerWithTemplate(t, tmpl, Config{})
+	const tool = `{"type": "function", "function": {"name": "get_weather"}}`
+
+	cases := []struct{ name, choice string }{
+		{"required", `"required"`},
+		{"a named function", `{"type": "function", "function": {"name": "get_weather"}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body := `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1,` +
+				` "tools": [` + tool + `], "tool_choice": ` + c.choice + `}`
+			resp := post(t, srv.Handler(), "/v1/chat/completions", body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != 400 {
+				t.Fatalf("status = %d, want 400: a forcing tool_choice cannot be honoured",
+					resp.StatusCode)
+			}
+			out := decodeBody[errorBody](t, resp)
+			if out.Error.Param != "tool_choice" {
+				t.Errorf("param = %q, want tool_choice", out.Error.Param)
+			}
+			if out.Error.Code != "unsupported_parameter" {
+				t.Errorf("code = %q, want unsupported_parameter", out.Error.Code)
+			}
+			// The message has to name the reason and the alternative, or a caller cannot tell
+			// whether to drop the field or change servers.
+			for _, want := range []string{"forces a call", "auto", "none"} {
+				if !strings.Contains(out.Error.Message, want) {
+					t.Errorf("message %q does not mention %q", out.Error.Message, want)
+				}
+			}
+		})
+	}
+
+	// And the two served modes still answer, so the refusal is specific to forcing.
+	for _, choice := range []string{`"auto"`, `"none"`} {
+		body := `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1,` +
+			` "tools": [` + tool + `], "tool_choice": ` + choice + `}`
+		resp := post(t, srv.Handler(), "/v1/chat/completions", body)
+		if resp.StatusCode != 200 {
+			out := decodeBody[errorBody](t, resp)
+			t.Errorf("tool_choice %s = %d, want 200: %s", choice, resp.StatusCode, out.Error.Message)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+// TestChatRefusesToolsItCannotHonour is the handler-level form of the checkTools refusals.
+//
+// The unit test above calls checkTools directly; this asserts that the handler routes its error
+// into the response rather than, say, logging it or continuing with a partially built list. The
+// two cases are the ones a real client hits: a strict schema (OpenAI's structured outputs flag)
+// and two tools under one name.
+func TestChatRefusesToolsItCannotHonour(t *testing.T) {
+	const tmpl = `{%- if tools %}TOOLS{% endif %}{%- for m in messages %}[{{ m.role }}]{% endfor %}`
+	srv := newTestServerWithTemplate(t, tmpl, Config{})
+
+	cases := []struct{ name, tools, param, code string }{
+		{
+			name:  "function.strict",
+			tools: `[{"type": "function", "function": {"name": "f", "strict": true}}]`,
+			param: "tools[0].function.strict", code: "unsupported_parameter",
+		},
+		{
+			name: "a duplicate tool name",
+			tools: `[{"type": "function", "function": {"name": "f"}},
+				{"type": "function", "function": {"name": "f"}}]`,
+			param: "tools[1].function.name", code: "invalid_value",
+		},
+		{
+			name:  "a non-function tool type",
+			tools: `[{"type": "retrieval", "function": {"name": "r"}}]`,
+			param: "tools[0].type", code: "unsupported_parameter",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body := `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1,` +
+				` "tools": ` + c.tools + `}`
+			resp := post(t, srv.Handler(), "/v1/chat/completions", body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != 400 {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			out := decodeBody[errorBody](t, resp)
+			if out.Error.Param != c.param {
+				t.Errorf("param = %q, want %q", out.Error.Param, c.param)
+			}
+			if out.Error.Code != c.code {
+				t.Errorf("code = %q, want %q", out.Error.Code, c.code)
+			}
+		})
+	}
+}
+
+// TestChatRefusesAToolConversationItCannotPlace is the handler-level form of checkToolMessages:
+// a tool result whose call the conversation never declared.
+func TestChatRefusesAToolConversationItCannotPlace(t *testing.T) {
+	const tmpl = `{%- if tools %}TOOLS{% endif %}{%- for m in messages %}[{{ m.role }}]{% endfor %}`
+	srv := newTestServerWithTemplate(t, tmpl, Config{})
+	body := `{"messages": [
+		{"role": "user", "content": "hi"},
+		{"role": "tool", "content": "21", "tool_call_id": "call_never_made"}],
+		"max_tokens": 1}`
+	resp := post(t, srv.Handler(), "/v1/chat/completions", body)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	out := decodeBody[errorBody](t, resp)
+	if out.Error.Param != "messages[1].tool_call_id" {
+		t.Errorf("param = %q, want messages[1].tool_call_id", out.Error.Param)
+	}
+	if !strings.Contains(out.Error.Message, "no earlier assistant turn declared") {
+		t.Errorf("message %q does not say which call is missing", out.Error.Message)
+	}
+}
+
+// TestHandleChatRoutesEveryToolErrorToTheResponse covers the three handler branches that were
+// still uncovered: the checkToolChoice, resolveToolCallMessages and checkToolMessages failures.
+//
+// The point is not that each function refuses -- the unit tests above prove that -- but that the
+// handler turns each refusal into the response instead of dropping it. A handler that called the
+// check and ignored the error would leave every unit test green and every refusal silent.
+func TestHandleChatRoutesEveryToolErrorToTheResponse(t *testing.T) {
+	const tmpl = `{%- if tools %}TOOLS{% endif %}{%- for m in messages %}[{{ m.role }}]{% endfor %}`
+	srv := newTestServerWithTemplate(t, tmpl, Config{})
+	const tool = `{"type": "function", "function": {"name": "get_weather"}}`
+
+	cases := []struct{ name, body, param string }{
+		{
+			// checkToolChoice's error path, sent with a tools list so the choice has something
+			// to be checked against.
+			name: "an unrecognised tool_choice",
+			body: `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1,` +
+				` "tools": [` + tool + `], "tool_choice": "sometimes"}`,
+			param: "tool_choice",
+		},
+		{
+			// resolveToolCallMessages: malformed tool_calls JSON.
+			name: "tool_calls that is not an array",
+			body: `{"messages": [{"role": "assistant", "content": "", "tool_calls": {"id": "c"}}],
+				"max_tokens": 1}`,
+			param: "messages[0].tool_calls",
+		},
+		{
+			// checkToolMessages: an empty tool result.
+			name: "an empty tool result",
+			body: `{"messages": [{"role": "user", "content": "hi"},
+				{"role": "assistant", "content": "", "tool_calls": [{"id": "call_1",
+					"type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+				{"role": "tool", "content": "   ", "tool_call_id": "call_1"}], "max_tokens": 1}`,
+			param: "messages[2].content",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := post(t, srv.Handler(), "/v1/chat/completions", c.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != 400 {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			out := decodeBody[errorBody](t, resp)
+			if out.Error.Param != c.param {
+				t.Errorf("param = %q, want %q", out.Error.Param, c.param)
+			}
+		})
+	}
+}
+
+// TestChatWithholdsToolsForChoiceNoneThroughTheHandler is the handler-level counterpart of the
+// modeNone branch: the tools must not reach the prompt.
+//
+// Asserted through the prompt length rather than the mode, because the mode is what the unit test
+// already covers and the prompt is what a caller actually experiences. The template prints "TOOLS"
+// exactly when the list is non-empty, so its presence is the observable.
+func TestChatWithholdsToolsForChoiceNoneThroughTheHandler(t *testing.T) {
+	// A template whose output is inspectable through the fixture's own completion is not
+	// available, so this asserts on the model name path instead: both requests must be served,
+	// and the prompt-token count is what differs. The fixture tokenizer makes longer prompts
+	// longer in tokens, so the comparison is relative rather than absolute -- the rule AGENTS.md
+	// states for fixture assertions.
+	const tmpl = `{%- if tools %}TOOLS:{% for t in tools %}{{ t | tojson }}{% endfor %}{% endif %}` +
+		`{%- for m in messages %}[{{ m.role }}:{{ m.content }}]{% endfor %}`
+	srv := newTestServerWithTemplate(t, tmpl, Config{})
+	const tool = `{"type": "function", "function": {"name": "get_weather",
+		"description": "a long description so the token counts differ measurably"}}`
+
+	usage := func(t *testing.T, choice string) int {
+		t.Helper()
+		body := `{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1,` +
+			` "temperature": 0, "tools": [` + tool + `], "tool_choice": ` + choice + `}`
+		resp := post(t, srv.Handler(), "/v1/chat/completions", body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != 200 {
+			out := decodeBody[errorBody](t, resp)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out.Error.Message)
+		}
+		return decodeBody[chatResponse](t, resp).Usage.PromptTokens
+	}
+	auto := usage(t, `"auto"`)
+	none := usage(t, `"none"`)
+	if none >= auto {
+		t.Errorf("tool_choice none reported %d prompt tokens and auto %d; the tools were not "+
+			"withheld from the prompt", none, auto)
+	}
+}

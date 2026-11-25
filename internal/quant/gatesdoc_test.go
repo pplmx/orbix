@@ -297,3 +297,76 @@ func TestArchitectureReviewStatesTheSameGateCount(t *testing.T) {
 		}
 	}
 }
+
+// TestArchitectureReviewStatesTheSkipCounts checks the other two figures in that sentence.
+//
+// "74 处 t.Skip 分布在 29 个测试文件里" is the same kind of claim as the gate count beside it,
+// and it has drifted twice already by the document's own admission ("上一版写 73 和 28, 写下时
+// 是 65 和 24"). A number that a person re-measures every release is a number that is wrong
+// between releases; the sentence now sits in a test that counts both.
+//
+// The comparison uses the written skip calls rather than `just skips`' output. That recipe runs
+// the whole suite, which is the slowest thing in CI and this check would then be measuring the
+// suite rather than the tree. `t.Skip` in a `_test.go` file is the definition the document's own
+// number comes from, and the two agreed at 74 and 29 when this was written.
+func TestArchitectureReviewStatesTheSkipCounts(t *testing.T) {
+	review, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "docs", "architecture-review.md")))
+	if err != nil {
+		t.Fatalf("read architecture-review.md: %v", err)
+	}
+	claim := regexp.MustCompile(`(\d+) 处 ` + "`t.Skip`" + ` 分布在 (\d+) 个测试文件里`)
+	m := claim.FindStringSubmatch(string(review))
+	if m == nil {
+		t.Fatalf(`architecture-review.md no longer states the skip counts as "N 处 t.Skip 分布在 ` +
+			`M 个测试文件里"; restore that phrasing or update this pattern`)
+	}
+
+	root := filepath.Join("..", "..")
+	sites, files := 0, 0
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == ".cache" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, rerr := os.ReadFile(filepath.Clean(path))
+		if rerr != nil {
+			return rerr
+		}
+		// Comments are stripped for the same reason the gate walk strips them: a test that
+		// explains "the old code called t.Skip here" is not a skip site.
+		n := len(skipCall.FindAllString(stripGoComments(string(src)), -1))
+		if n > 0 {
+			sites += n
+			files++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	if sites < 20 {
+		t.Fatalf("found %d skip sites in the tree, too few to be real -- the walk probably "+
+			"stopped early", sites)
+	}
+
+	if want := m[1]; want != strconv.Itoa(sites) {
+		t.Errorf("architecture-review.md says %s t.Skip sites; the tree has %d", want, sites)
+	}
+	if want := m[2]; want != strconv.Itoa(files) {
+		t.Errorf("architecture-review.md says the skips are in %s test files; the tree has %d",
+			want, files)
+	}
+}
+
+// skipCall matches the call itself. `t.Skipf` and `t.SkipNow` count, because both are a test
+// declining to run and the document's figure is about that decision rather than about one
+// spelling of it.
+var skipCall = regexp.MustCompile(`\bt\.Skip(f|Now)?\(`)

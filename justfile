@@ -103,6 +103,7 @@ stress:
     @# ContextLen: 4096} written to /tmp, the script reported 3 cancelled on two consecutive
     @# runs, so the disconnect path is reachable without a real checkpoint.
     @test -n "{{MODEL}}" || { echo "stress: needs MODEL=/path/to.gguf" >&2; exit 1; }
+    @mkdir -p .cache
     @CGO_ENABLED=1 go build -race -o .cache/orbix-race ./cmd/orbix
     @scripts/stress.sh .cache/orbix-race "{{MODEL}}"
 

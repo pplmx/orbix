@@ -243,30 +243,43 @@ func TestRenderFilters(t *testing.T) {
 // TestParseRejectsUnsupportedConstructs is the property the whole design rests on: an
 // unsupported construct is reported at parse time, never rendered halfway.
 func TestParseRejectsUnsupportedConstructs(t *testing.T) {
-	cases := []string{
-		`{% macro x() %}{% endmacro %}`,
-		`{% block b %}{% endblock %}`,
-		`{% include 'x' %}`,
-		`{{ x | selectattr('role') }}`,
-		`{{ x | map('y') }}`,
-		`{{ x ** 2 }}`,
-		`{% if x %}`,                        // unclosed
-		`{% for x in y %}`,                  // unclosed
-		`{% endif %}`,                       // stray terminator
-		`{{ }}`,                             // empty expression
-		`{{ 'unterminated }}`,               // unterminated string
-		`{% if x %}{% endfor %}{% endif %}`, // mismatched pair
-		// Constructs the cross-check corpus also probes, each refused with its own message
-		// rather than a bare "syntax error": the point of refusing at parse time is that the
-		// caller learns which construct and can decide, so the five below are pinned here as
-		// well as in scripts/jinja_diff.py.
-		`{% filter upper %}x{% endfilter %}`,            // filter block
-		`{% for m in messages %}{% else %}{% endfor %}`, // for-else
-		`{% for a, b in pairs %}{% endfor %}`,           // tuple unpacking
+	// Each case carries the phrase its message has to contain. The comment above the last
+	// three says the point of refusing at parse time is that the caller learns *which*
+	// construct -- and until this table existed the test only checked that Parse failed.
+	// Measured: collapsing every one of these to "chat: syntax error" left it green.
+	cases := []struct {
+		src    string
+		phrase string
+	}{
+		{`{% macro x() %}{% endmacro %}`, `unsupported template statement "macro"`},
+		{`{% block b %}{% endblock %}`, `unsupported template statement "block"`},
+		{`{% include 'x' %}`, `unsupported template statement "include"`},
+		{`{{ x | selectattr('role') }}`, `unsupported template filter "selectattr"`},
+		{`{{ x | map('y') }}`, `unsupported template filter "map"`},
+		{`{{ x ** 2 }}`, `unexpected "*"`},
+		// Unclosed, stray and empty each report the construct they saw, not a shared word.
+		{`{% if x %}`, `{% if %} opened at offset 0 is never closed`},
+		{`{% for x in y %}`, `{% for %} opened at offset 0 is never closed`},
+		{`{% endif %}`, `unexpected {% endif %} with no open block`},
+		{`{{ }}`, `empty expression`},
+		{`{{ 'unterminated }}`, `unclosed "{{"`},
+		{`{% if x %}{% endfor %}{% endif %}`, `{% if %} opened at offset 0 closed by {% endfor %}`},
+		// The three the cross-check corpus also probes, each with its own sentence rather than
+		// a bare "syntax error" -- they are pinned here as well as in scripts/jinja_diff.py.
+		{`{% filter upper %}x{% endfilter %}`, `unsupported template statement "filter"`},
+		{`{% for m in messages %}{% else %}{% endfor %}`,
+			`{% for %} opened at offset 0 closed by {% else %}`},
+		{`{% for a, b in pairs %}{% endfor %}`, `binds an invalid name "a, b"`},
 	}
-	for _, src := range cases {
-		if _, err := Parse(src); err == nil {
-			t.Errorf("Parse(%q) succeeded, want an error naming the construct", src)
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) succeeded, want an error naming the construct", c.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.phrase) {
+			t.Errorf("Parse(%q) said %q, want it to contain %q -- the caller reads this to "+
+				"learn which construct was refused", c.src, err, c.phrase)
 		}
 	}
 }

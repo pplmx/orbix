@@ -3452,9 +3452,19 @@ func TestInlineConditionalAndStringTest(t *testing.T) {
 
 	// The shorter Jinja form has no else arm and yields undefined; this package cannot express
 	// that, so it is refused rather than guessed at.
-	if _, err := Parse(`{{ 'a' if flag }}`); err == nil {
-		t.Error("a conditional without else parsed; Jinja's shorter form yields an undefined " +
+	//
+	// The message is asserted, not just the failure. Disabling the check in parseConditional
+	// left this passing: the parse still fails, one token later, on the "}}" it did not expect
+	// -- so "it did not parse" was all the old assertion established, and the sentence an
+	// operator would read was never compared to anything.
+	_, err := Parse(`{{ 'a' if flag }}`)
+	if err == nil {
+		t.Fatal("a conditional without else parsed; Jinja's shorter form yields an undefined " +
 			"value and no template here relies on one")
+	}
+	if !strings.Contains(err.Error(), "needs 'else'") {
+		t.Errorf("error = %q, want it to say the inline if needs an else rather than reporting "+
+			"whatever the parser tripped over next", err)
 	}
 }
 

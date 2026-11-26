@@ -12,7 +12,7 @@
 | `internal/tokenize` | 4872      | 138            | 109      | 7102      | 1.46      |
 | `internal/llama`    | 4868      | 135            | 40       | 13302     | 2.73      |
 | `cmd/orbix`         | 3910      | 85             | 81       | 8629      | 2.21      |
-| `internal/chat`     | 3333      | 81             | 41       | 5263      | 1.58      |
+| `internal/chat`     | 3333      | 81             | 41       | 5273      | 1.58      |
 | `internal/engine`   | 2090      | 47             | 20       | 6116      | 2.93      |
 | `internal/gguf`     | 1499      | 51             | 14       | 3060      | 2.04      |
 | `internal/quant`    | 930       | 27             | 20       | 3827      | 4.12      |

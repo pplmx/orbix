@@ -35,6 +35,11 @@ func scalarAs[T Scalar](v Value) (T, bool) {
 		// T is constrained to ~string here, so asserting back to a named string
 		// type through any is well-defined; the fallthrough keeps the compiler
 		// from having to reason about the union.
+		//
+		// The return below is unreachable: this case is entered only when any(zero) is a
+		// builtin string, and v.Str is one too, so the assertion cannot fail. A named type
+		// does not arrive here at all -- any(zero) then carries the named type and the switch
+		// falls to the numeric branch, where a string key is refused.
 		if out, ok := any(v.Str).(T); ok {
 			return out, true
 		}
@@ -43,6 +48,8 @@ func scalarAs[T Scalar](v Value) (T, bool) {
 		if v.Type != TypeBool {
 			return zero, false
 		}
+		// Same shape as the string case above, same reason: any(v.Bool) is a builtin bool
+		// whenever this case runs.
 		if out, ok := any(v.Bool).(T); ok {
 			return out, true
 		}

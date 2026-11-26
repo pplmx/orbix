@@ -39,6 +39,15 @@ jobs:
           go-version: "1.27"
           cache: true
 
+      # golangci-lint has to be installed before `just check`: that recipe runs `just lint`,
+      # which needs the linter on PATH. The CI gate job installs it the same way and pins the
+      # same version -- found the hard way, when the first tag ever pushed ran this job and
+      # failed at "golangci-lint not found" after the tests had already passed.
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+
       # A tag can be pushed at any commit. Publishing artifacts for a tree that does not pass
       # its own gate would put a broken build where people look first.
       - name: just check

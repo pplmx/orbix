@@ -285,7 +285,13 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 谁的断言失去依据"，而不是"有多少个 `x.Name`"。这条和 AGENTS.md 里"判定不可达之前先看函数的参数"
 是同一个道理：静态计数看到的是引用图，不是用途。
 
-覆盖率快照（`go test -cover ./...`，2026-11-26 复测）：kernel 99.0%、f16 98.1%、quant 98.0%、tokenize 96.8%、engine 96.0%、server 95.7%、gguf 94.8%、chat 92.2%、otel 92.9%、llama 90.1%、gguftest 89.1%、cmd/orbix 88.0%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`（39.4%，模型加载后的编排难以在测试里跑完整）；`llama` 已无 0% 的函数，最低是 `feedForwardRows` 的 64.7%、`feedForward` 的 66.7%。
+覆盖率快照（`go test -cover ./...`，2026-11-26 下午复测）：kernel 99.5%、f16 100.0%、quant 99.0%、tokenize 96.9%、server 96.6%、engine 96.5%、chat 94.3%、gguf 96.0%、otel 95.3%、llama 90.8%、gguftest 89.1%、cmd/orbix 88.0%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`
+（39.4%，模型加载后的编排难以在测试里跑完整）。
+
+`llama` 已无 0% 的函数，最低是 `feedForwardRows` 的 64.7%，其次 `forward.go` 里
+`Model.feedForward` 的 66.7%。同名的还有 `batch.go` 的 `decodeBatch.feedForward`，
+那个是 100%，因为它只是把行交给 `feedForwardRows`——不写清楚是哪一个，读的人会在两个
+66.7% 之间找不着北。
 
 这一轮把 `outputWeight`（66.7% → 100%）、`sameTokens`（66.7% → 100%）和 `rememberPrefix`
 （66.7% → 83.3%）补上了测试。三个函数共同点不是"没测"，而是**它们各自的两种输出都说得通**：
@@ -298,7 +304,9 @@ tied 模型的投影矩阵该用 embedding 还是 Output、同长不同内容的
 两组剖面都在当前测试集上跑），即真正删掉的是 7 条永远不及的语句。`cmdServe` 从 39.2% 到
 39.4% 同理。
 
-这一行上一版写的是 2026-11 末的一组数，逐项复算后全部偏低（engine 94.7→96.0、server 94.9→95.7、otel 91.5→92.9），差额来自这段时间新增的测试。**`cmdServe` 是唯一反向的一项：上一版写 50.4%，实测 39.2%**，连续两次 `go tool cover -func` 都是这个数。同段的结论（`cmd/orbix` 的低点集中在 `cmdServe`）仍然成立，错的只是那个百分点。
+这一行上一次（同一天上午）写的是 kernel 99.0、f16 98.1、quant 98.0、tokenize 96.8、engine 96.0、server 95.7、gguf 94.8、chat 92.2、otel 92.9、llama 90.1，逐项复算后**每一项都偏低或持平**（kernel→99.5、f16→100.0、quant→99.0、tokenize→96.9、engine→96.5、server→96.6、gguf→96.0、chat→94.3、otel→95.3、llama→90.8），差额来自当天下午补的测试。`gguftest` 89.1 与 `cmd/orbix` 88.0 未变。
+
+再往前一版写的是 2026-11 末的一组数，也是全部偏低（engine 94.7→96.0、server 94.9→95.7、otel 91.5→92.9），同样的原因。**`cmdServe` 是唯一反向的一项：上一版写 50.4%，实测 39.2%**，连续两次 `go tool cover -func` 都是这个数。同段的结论（`cmd/orbix` 的低点集中在 `cmdServe`）仍然成立，错的只是那个百分点。
 
 ## 八、门禁与验证现状
 

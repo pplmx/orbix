@@ -20,6 +20,39 @@ func renderVars(t *testing.T, src string, vars map[string]any) string {
 	return out
 }
 
+// TestTojsonRendersAnEmptyMapAsBraces covers writeJSONDepth's empty-map arm.
+//
+// A JSON body can carry {} for a chat_template_kwarg -- an object with nothing in it is what
+// a caller sends when the field exists but has no settings. Rendering it needs the
+// two-character answer rather than the map writer's loop, which would emit "{" and then look
+// for keys that are not there. Disabling the arm left the package green: no test rendered an
+// empty object.
+func TestTojsonRendersAnEmptyMapAsBraces(t *testing.T) {
+	got := renderVars(t, `{{ opts | tojson }}`, map[string]any{"opts": map[string]any{}})
+	if got != "{}" {
+		t.Errorf("tojson of an empty object = %q, want {}", got)
+	}
+
+	// With an indent the two paths diverge: the loop writes closeSep, which is a newline and
+	// a level for indented output, so an empty object would come out as two lines. This is
+	// what makes the arm observable -- without it the compact form happened to match anyway,
+	// since "{" + "}" is "{}".
+	if got := renderVars(t, `{{ opts | tojson(indent=4) }}`,
+		map[string]any{"opts": map[string]any{}}); got != "{}" {
+		t.Errorf("tojson(indent=4) of an empty object = %q, want {} on one line", got)
+	}
+
+	// The non-empty case still goes through the writer, so the arm is a special case rather
+	// than the only path. Only the braces and the key are asserted: how a number inside is
+	// rendered is TestVariablesRenderLikeJinja2's subject, and pinning it twice would make
+	// this test fail for a reason it is not about.
+	if got := renderVars(t, `{{ opts | tojson }}`, map[string]any{
+		"opts": map[string]any{"a": float64(1)},
+	}); got != `{"a": "1"}` {
+		t.Errorf("tojson of {a: 1} = %q, want the writer's braced form", got)
+	}
+}
+
 // TestVariablesRenderLikeJinja2 pins the values a request body can carry.
 //
 // The expectation is jinja2 3.1.6 rendering what json.loads makes of the same bytes, because a

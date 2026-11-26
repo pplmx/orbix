@@ -191,13 +191,29 @@ func TestModelShapeOptions(t *testing.T) {
 // TestModelRejectsBadShapes keeps a misconfigured fixture from producing a file that
 // fails later with a slice-bounds panic somewhere unrelated.
 func TestModelRejectsBadShapes(t *testing.T) {
-	for name, m := range map[string]Model{
-		"hidden not divisible by heads": {Hidden: 30, Heads: 4},
-		"heads not divisible by kv":     {Hidden: 32, Heads: 4, KVHeads: 3},
+	// Each case carries the numbers its message has to quote. Two adjacent checks, so a
+	// misconfiguration that tripped the wrong one would still fail -- and the reader would be
+	// told to look at a field that is not the problem.
+	for _, c := range []struct {
+		name    string
+		model   Model
+		phrases []string
+	}{
+		{"hidden not divisible by heads", Model{Hidden: 30, Heads: 4},
+			[]string{"hidden 30", "heads 4"}},
+		{"heads not divisible by kv", Model{Hidden: 32, Heads: 4, KVHeads: 3},
+			[]string{"heads 4", "kv heads 3"}},
 	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := m.Bytes(); err == nil {
-				t.Errorf("%s was accepted; Bytes should reject a shape the loader cannot run", name)
+		t.Run(c.name, func(t *testing.T) {
+			_, err := c.model.Bytes()
+			if err == nil {
+				t.Fatalf("%s was accepted; Bytes should reject a shape the loader cannot run",
+					c.name)
+			}
+			for _, want := range c.phrases {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to state %q", err, want)
+				}
 			}
 		})
 	}

@@ -16,7 +16,7 @@
 | `internal/engine`   | 2090      | 47             | 20       | 6124      | 2.93      |
 | `internal/gguf`     | 1499      | 51             | 14       | 3068      | 2.05      |
 | `internal/quant`    | 930       | 27             | 20       | 3835      | 4.12      |
-| `internal/gguftest` | 817       | 22             | 14       | 372       | 0.46      |
+| `internal/gguftest` | 817       | 22             | 14       | 388       | 0.47      |
 | `internal/otel`     | 794       | 35             | 14       | 1787      | 2.25      |
 | `internal/kernel`   | 711       | 28             | 20       | 2049      | 2.88      |
 | `internal/f16`      | 154       | 4              | 4        | 399       | 2.59      |

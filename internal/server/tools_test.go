@@ -793,8 +793,16 @@ func TestCheckToolsRefusesMalformedConversationJSON(t *testing.T) {
 // rejected the outer document), so it is exercised directly: the check exists so that a future
 // caller passing raw bytes cannot get past it silently.
 func TestArgumentsTextRefusesANonStringJSON(t *testing.T) {
-	if _, err := argumentsText(json.RawMessage(`"unterminated`)); err == nil {
-		t.Error("a string that does not decode was accepted as arguments")
+	// The message has to say the value is not a JSON string, because that is the fact the
+	// caller cannot see from a bool: "arguments" is a field name on the wire, and a value that
+	// failed to decode needs to be told apart from one that decoded but was the wrong shape --
+	// the next case below reports that one differently.
+	_, err := argumentsText(json.RawMessage(`"unterminated`))
+	if err == nil {
+		t.Fatal("a string that does not decode was accepted as arguments")
+	}
+	if !strings.Contains(err.Error(), "is not a JSON string") {
+		t.Errorf("error = %q, want it to name the decoding failure", err)
 	}
 }
 

@@ -842,19 +842,29 @@ func TestForwardRejectsBadArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := m.Forward(cache, cfg.VocabSize, 0); err == nil {
-		t.Error("Forward accepted a token past the vocabulary")
-	}
-	if _, err := m.Forward(cache, -1, 0); err == nil {
-		t.Error("Forward accepted a negative token")
-	}
-	if _, err := m.Forward(cache, 0, 4); err == nil {
-		t.Error("Forward accepted a position past the cache")
-	}
-	// A cache that does not hold exactly pos positions must be refused: silently
-	// accepting it would attend over stale slots.
-	if _, err := m.Forward(cache, 0, 2); err == nil {
-		t.Error("Forward accepted a position ahead of the cache length")
+	// Each case asserts its phrase, not just the failure: the three checks are adjacent, so a
+	// refactor that merged two of them -- or reordered them so the wrong one fires -- would
+	// leave "Forward refused it" true for a different reason than the case is named for.
+	for _, c := range []struct {
+		name   string
+		token  int
+		pos    int
+		phrase string
+	}{
+		{"a token past the vocabulary", cfg.VocabSize, 0, "outside the vocabulary"},
+		{"a negative token", -1, 0, "outside the vocabulary"},
+		{"a position past the cache", 0, 4, "outside the cache"},
+		{"a position ahead of the cache length", 0, 2, "cache holds"},
+	} {
+		_, err := m.Forward(cache, c.token, c.pos)
+		if err == nil {
+			t.Errorf("Forward accepted %s", c.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.phrase) {
+			t.Errorf("Forward(%d, %d) said %q, want it to report %q -- %s should be refused "+
+				"by that check and not by a neighbour", c.token, c.pos, err, c.phrase, c.name)
+		}
 	}
 }
 

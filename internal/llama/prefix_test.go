@@ -76,6 +76,62 @@ func TestMatchStopsAtABlockItAlreadyReported(t *testing.T) {
 	}
 }
 
+// TestRememberReplacesAnEntryUnderTheSameKey covers the replace path.
+//
+// The chain makes the key positional, so a second Remember of the same run under the same
+// parent is the same prefix position -- the block moved (a re-remember after the cache
+// rewrote it) or the same content is being recorded again. The old block has to be released
+// before the entry is overwritten, or the pool loses it: the entry is the only thing holding
+// a reference, and replacing it without releasing leaves a block that no index and no
+// sequence can reach.
+//
+// Nothing exercised this: Remember is called once per block by the normal flow, so the `if
+// old, ok :=` arm never ran.
+func TestRememberReplacesAnEntryUnderTheSameKey(t *testing.T) {
+	pool := pagedPool(t, testConfig(), 4)
+	idx := pool.EnablePrefixCache()
+	size := pool.block
+
+	tokens := make([]int32, size)
+	for i := range tokens {
+		tokens[i] = 7
+	}
+
+	// Two blocks, each retained so Remember has something to record.
+	first := idx.pool.acquireHeld(t)
+	second := idx.pool.acquireHeld(t)
+
+	if err := idx.Remember(tokens, first, 0); err != nil {
+		t.Fatalf("first Remember: %v", err)
+	}
+	if err := idx.Remember(tokens, second, 0); err != nil {
+		t.Fatalf("second Remember: %v", err)
+	}
+
+	// The index's own reference has to be gone, and only the caller's is left. Acquire gave
+	// one, Remember took it, and the replace releases it: skipping that release would leave
+	// this block at 2, which over a long-running server is one leaked block per re-remember.
+	if got := pool.RefCount(first); got != 1 {
+		t.Errorf("the replaced block has %d references, want 1 (the one the caller still "+
+			"holds); a replace that skips its release leaves 2", got)
+	}
+	key := chainKey(0, hashTokens(tokens))
+	if got := idx.entries[key].block; got != second {
+		t.Errorf("the entry points at block %d, want the replacement %d", got, second)
+	}
+}
+
+// acquireHeld takes a block with the reference acquire already gives it, which is what a
+// sequence holds when the index records it.
+func (p *BlockPool) acquireHeld(t *testing.T) int32 {
+	t.Helper()
+	id, err := p.acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	return id
+}
+
 func TestPrefixIndexMatch(t *testing.T) {
 	cfg := testConfig()
 	pool := pagedPool(t, cfg, 4)

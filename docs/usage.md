@@ -589,7 +589,7 @@ executable" and the ELF has no dynamic section, so the runtime needs no libc and
 ```bash
 docker build -t orbix --build-arg VERSION=v0.1.0 --build-arg COMMIT="$(git rev-parse --short HEAD)" .
 docker run --rm -p 8080:8080 -v /path/to/models:/models:ro \
-  orbix --model /models/your-model.gguf
+  orbix serve --model /models/your-model.gguf
 ```
 
 The image does not contain a model. A checkpoint is hundreds of megabytes to several gigabytes

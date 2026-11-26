@@ -979,13 +979,35 @@ func TestParseScalesLinearlyInTagCount(t *testing.T) {
 		return time.Since(start)
 	}
 
+	// The fastest of several runs, not one: a single measurement of a few milliseconds is
+	// mostly whichever GC pause or scheduler preemption landed inside it. Measured on a
+	// two-core runner, this test failed with 1.92ms -> 32.13ms (16.7x) while the same code
+	// here measures 4.9ms -> 12.1ms for a larger step -- the small case had been measured
+	// before the process was warm, so the baseline was an outlier rather than a sample.
+	// Minimum is the right statistic here because interference only ever adds time.
+	best := func(n int) time.Duration {
+		best := time.Duration(0)
+		for range 5 {
+			if d := timeIt(n); best == 0 || d < best {
+				best = d
+			}
+		}
+		return best
+	}
+
 	// Warm up so the first measurement is not paying for lazily-initialised runtime state.
 	timeIt(1000)
 
-	small := timeIt(5000)
-	large := timeIt(20000)
+	// 20000 and 80000 rather than 5000 and 20000: the point of the larger pair is that a
+	// millisecond of interference is 10% of the small measurement instead of 20%, so the
+	// ratio survives a busy runner. Measured here at 10.7ms and 43.7ms.
+	small := best(20000)
+	large := best(80000)
 
-	// 4x the tags. Linear would be 4x the time; quadratic would be 16x.
+	// 4x the tags. Linear would be 4x the time; quadratic would be 16x. The bound is 12
+	// rather than 8: a linear implementation measured at 2.5-4.4x across runs, and the room
+	// above that is for a shared runner, not for a return to quadratic growth, which lands
+	// near 16.
 	if small <= 0 {
 		t.Skip("timer resolution too coarse for the small case")
 	}

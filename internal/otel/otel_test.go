@@ -624,8 +624,15 @@ func TestExporterCloseIsIdempotent(t *testing.T) {
 
 // TestExporterRequiresEndpoint keeps a misconfiguration from silently discarding traces.
 func TestExporterRequiresEndpoint(t *testing.T) {
-	if _, err := NewExporter(ExporterOptions{}); err == nil {
+	// The message names the field, which is the whole value of the refusal: an exporter built
+	// with a zero Endpoint would send nothing and report nothing, and "invalid options" would
+	// leave a reader to guess which of the five fields was wrong.
+	_, err := NewExporter(ExporterOptions{})
+	if err == nil {
 		t.Fatal("NewExporter with no endpoint succeeded")
+	}
+	if !strings.Contains(err.Error(), "endpoint") {
+		t.Errorf("error = %q, want it to name the missing field", err)
 	}
 }
 

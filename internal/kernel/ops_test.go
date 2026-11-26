@@ -488,11 +488,28 @@ func TestAddMulDot(t *testing.T) {
 	if err := AddInPlace(a, []float32{1}); err == nil {
 		t.Error("AddInPlace with mismatched lengths succeeded")
 	}
-	if err := MulInPlace(a, []float32{1}); err == nil {
-		t.Error("MulInPlace with mismatched lengths succeeded")
-	}
-	if _, err := Dot(a, []float32{1}); err == nil {
-		t.Error("Dot with mismatched lengths succeeded")
+	// Each message names its own function and both lengths. Three checks share one shape, so a
+	// copy-paste that left one of them reporting the wrong name would still fail -- the test
+	// has to say which one was meant to speak.
+	for _, c := range []struct {
+		name string
+		call func() error
+	}{
+		{"AddInPlace", func() error { return AddInPlace(a, []float32{1}) }},
+		{"MulInPlace", func() error { return MulInPlace(a, []float32{1}) }},
+		{"Dot", func() error { _, err := Dot(a, []float32{1}); return err }},
+	} {
+		err := c.call()
+		if err == nil {
+			t.Errorf("%s with mismatched lengths succeeded", c.name)
+			continue
+		}
+		// len(a) is 3 in this fixture; the second operand is 1.
+		for _, want := range []string{c.name, "3", "1"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s error = %q, want it to name %q", c.name, err, want)
+			}
+		}
 	}
 }
 

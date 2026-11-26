@@ -222,6 +222,92 @@ jobs:
       - name: just stress
         run: just MODEL=.cache/stress.gguf stress
 
+  # The Dockerfile is the one artifact nothing built. Its parts are checkable by reading -- the
+  # ARG-to-ldflags wiring, the .dockerignore exclusions, the HEALTHCHECK port falling inside the
+  # CMD's -- and that reading is what was done while writing it. What reading cannot settle is
+  # whether the image builds at all: `FROM golang:1.27` names a tag, and a tag either resolves on
+  # the runner or does not, and the scratch stage copies two paths that either exist in the
+  # builder or do not.
+  #
+  # The run step matters as much as the build. A scratch image has no shell, so the HEALTHCHECK
+  # runs /orbix healthcheck -- the whole reason that command exists. Building the image without
+  # starting it would leave the one thing the command was written for unverified.
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # The fixture is a runnable checkpoint, which is what the container needs to reach the
+      # point where /healthz answers: the probe is served only after the engine exists.
+      - name: just fixture
+        run: just fixture
+
+      - name: docker build
+        run: |
+          docker build \
+            --build-arg VERSION="v0.0.0-ci" \
+            --build-arg COMMIT="$(git rev-parse --short HEAD)" \
+            -t orbix:ci .
+
+      # The tag has to reach the binary. `just cross` is verified for this in the release
+      # workflow; the image is built by a different path (the Dockerfile's own ldflags), so it
+      # needs its own check.
+      - name: the image reports the version it was built with
+        run: |
+          got=$(docker run --rm orbix:ci version | head -1 | awk '{print $2}')
+          if [ "$got" != "v0.0.0-ci" ]; then
+            echo "::error::image reports $got, build arg was v0.0.0-ci"
+            exit 1
+          fi
+
+      # Started, then waited on. `docker inspect` reports the healthcheck's own verdict, which
+      # is the thing this job exists to learn: a container that runs but never turns healthy is
+      # the failure mode a start-period is meant to cover, and a plain `docker run` would report
+      # success for it.
+      - name: the container turns healthy
+        run: |
+          export HEALTH_FMT='{{.State.Health.Status}}'
+          cid=$(docker run -d -p 8080:8080 \
+            -v "$PWD/.cache:/models:ro" \
+            orbix:ci serve --model /models/stress.gguf --addr :8080)
+          echo "container $cid"
+          # 90 attempts of 2s, which is 180s against a start-period of 120s plus one 30s
+          # interval. The three numbers are not free choices: waiting less than the
+          # start-period would call a container unhealthy while the image says that much time
+          # is allowed, and waiting less than one interval would report a timeout before the
+          # first verdict exists.
+          for i in $(seq 1 90); do
+            # Through a variable so the Go template syntax is not interleaved with the shell's
+            # own quoting: nested single quotes inside a -f '...' argument are a reading hazard
+            # even where they parse.
+            state=$(docker inspect -f "$HEALTH_FMT" "$cid" 2>/dev/null || echo none)
+            echo "attempt $i: $state"
+            if [ "$state" = "healthy" ]; then
+              docker logs "$cid" | tail -5
+              docker rm -f "$cid" >/dev/null
+              exit 0
+            fi
+            if [ "$state" = "unhealthy" ]; then
+              docker logs "$cid"
+              docker rm -f "$cid" >/dev/null
+              echo "::error::the container never turned healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+          docker logs "$cid"
+          docker rm -f "$cid" >/dev/null
+          echo "::error::the container did not become healthy within 180s"
+          exit 1
+
   # The hooks in .pre-commit-config.yaml check things `just check` does not: trailing
   # whitespace and final newlines in non-Go files, YAML/TOML/JSON syntax, and merge-conflict
   # markers. Measured before adding this job -- appending a whitespace line to

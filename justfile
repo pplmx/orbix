@@ -389,6 +389,18 @@ commits:
         echo "cz not found: install commitizen (https://commitizen-tools.github.io/commitizen/)"; \
         exit 1; \
     }
+    @# An empty range is not a pass. cz exits 3 with "No commit found", which reads as a tool
+    @# failure; the case that produces it here is a checkout whose origin/main is already at
+    @# HEAD -- a local clone made from the working repository, where there is nothing to check.
+    @# Said plainly so the message names the situation rather than the tool's internal code.
+    @# One shell line on purpose: `just` runs each recipe line in its own shell, so an `exit`
+    @# inside a multi-line `if` leaves the rest of the recipe running.
+    @n=$(git rev-list --count {{RANGE}} 2>/dev/null || echo 0); \
+    if [ "$n" = "0" ]; then \
+        echo "commits: {{RANGE}} is empty, so there is nothing to check;"; \
+        echo "         pass RANGE=<base>..HEAD to choose the range (CI uses its push range)"; \
+        exit 0; \
+    fi; \
     cz check --rev-range {{RANGE}}
 
 # build every supported platform with CGo disabled

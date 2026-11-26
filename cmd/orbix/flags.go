@@ -77,18 +77,21 @@ type cacheFlags struct {
 // multiply-adds, so the split stops at 5 whatever the flag says -- `--workers 128` runs five.
 // That is also why the flag's help text below reports 8, 32 and 128 within noise of each other.
 //
-// This paragraph has now been wrong twice. It first said 128 workers were 3.9x faster than one;
-// that was true of an earlier fixture and stopped being true as the fixture changed. I replaced
-// it with an explanation that the split was not the bound, computing 32000 x 256 -- 32000 is the
-// vocabulary of the benchmark in internal/kernel, not of this fixture. The original claim's
-// explanation was right and I deleted it while correcting its number.
+// This paragraph has now been wrong three times. It first said 128 workers were 3.9x faster than
+// one; that was true of an earlier fixture and stopped being true as the fixture changed. I
+// replaced it with an explanation that the split was not the bound, computing 32000 x 256 --
+// 32000 is the vocabulary of the benchmark in internal/kernel, not of this fixture. The original
+// claim's explanation was right and I deleted it while correcting its number. Then the help text
+// carried 214/240/246 tok/s without saying which model or which command, and re-measuring the
+// fixture it named gave 703/937/934/996 -- four times higher, and rising from one worker instead
+// of flat. The numbers below now come with the command that produces them.
 func workersFlag(fs *flag.FlagSet) *int {
 	return fs.Int("workers", 0,
 		"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+
 			"the outputs a pass can split, which for the vocabulary projection is its width "+
-			"rather than the batch size -- measured on a 128-core host with a 64-token "+
-			"budget, 3 runs each: 8 workers 214 tok/s, 32 workers 240, 128 workers 246, so "+
-			"most of the gain arrives by 32 and the last row is within noise of it")
+			"rather than the batch size -- on the checkpoint from just fixture, with a 64-token "+
+			"budget, one 703 tok/s, 8 workers 937, 32 934, 128 996, so most of the gain "+
+			"arrives by 8 and the last two rows are within noise of each other")
 }
 
 // registerCacheFlags registers the paged-cache flags, and the worker flag when asked.

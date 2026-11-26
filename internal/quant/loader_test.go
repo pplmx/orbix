@@ -612,15 +612,23 @@ func TestLoaderRejectsTensorExtendingPastTheEnd(t *testing.T) {
 		t.Errorf("error %q does not say the tensor is past the end", err)
 	}
 
-	// A start at the very end with any positive length is the extreme of the same case.
+	// A start at the very end with any positive length is the extreme of the same case, and it
+	// shares the sentence above: the two are one bounds check, so asserting the phrase here too
+	// keeps a refactor from splitting them apart without saying so.
 	atEnd := gguf.TensorInfo{Name: "w", Offset: 900, Dims: []uint64{4}, Type: gguf.F32}
 	if _, err := l.dataStart(atEnd, 1); err == nil {
 		t.Error("dataStart accepted one byte at the end of the file")
+	} else if !strings.Contains(err.Error(), "past end") {
+		t.Errorf("error %q does not say the tensor is past the end", err)
 	}
 
-	// A negative length is refused rather than treated as zero.
+	// A negative length is refused rather than treated as zero. This one is reported as a
+	// length rather than as an overrun, because -1 is not "past the end" in the direction a
+	// caller would look: the count itself is wrong.
 	if _, err := l.dataStart(inFile, -1); err == nil {
 		t.Error("dataStart accepted a negative byte count")
+	} else if !strings.Contains(err.Error(), "past end") {
+		t.Errorf("error %q does not report the negative length as an out-of-range request", err)
 	}
 }
 

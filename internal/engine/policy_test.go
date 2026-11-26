@@ -214,8 +214,16 @@ func TestPriorityNames(t *testing.T) {
 			t.Errorf("ParsePriority(%q) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	if _, err := ParsePriority("random"); err == nil {
-		t.Error("ParsePriority accepted an unknown policy")
+	// The refusal has to name the value it rejected and the three it would have taken: an
+	// operator reading "unknown scheduling policy" alone has nothing to correct the flag with.
+	_, err := ParsePriority("random")
+	if err == nil {
+		t.Fatal("ParsePriority accepted an unknown policy")
+	}
+	for _, want := range []string{`"random"`, "fifo", "shortest", "fair"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
 	}
 	// The names have to round-trip, since the CLI prints them.
 	for _, p := range []Priority{PriorityFIFO, PriorityShortest, PriorityFair} {

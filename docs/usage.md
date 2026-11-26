@@ -620,6 +620,11 @@ orbix healthcheck --addr http://127.0.0.1:8080          # prints ok and the mode
 orbix healthcheck --addr http://127.0.0.1:8080 --quiet  # exit status only
 ```
 
+The port is the one the `HEALTHCHECK` line uses, and it is not read from the server's own
+`--addr`: the two are separate commands. Changing the server's port therefore means changing
+the probe's, or the container reports unhealthy while serving correctly -- the probe fails with
+a connection error, which reads the same as a dead server.
+
 It checks more than the status code: the body's `status` must be `"ok"`, because a 200 from a
 proxy or a stale process on the same port is "something is listening" rather than "this model is
 ready". The same command works as a Kubernetes exec probe, which avoids needing an `httpGet`

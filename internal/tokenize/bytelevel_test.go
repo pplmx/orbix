@@ -3,6 +3,7 @@ package tokenize
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
@@ -152,8 +153,17 @@ func TestNewRejectsUnknownVocabFamily(t *testing.T) {
 	// An unknown family must be reported rather than guessed: picking the wrong space
 	// convention drops every space in silence, which is the bug this field prevents.
 	f := buildTokenizerGGUF(t, "wordpiece", spmVocab, normalTypes(len(spmVocab)))
-	if _, err := New(f); err == nil {
+	// The message has to name the family it rejected and the ones it takes, for the reason the
+	// comment above gives: a caller who mistyped the model has to be able to fix it from what
+	// they were told.
+	_, err := New(f)
+	if err == nil {
 		t.Fatal("New accepted an unknown tokenizer.ggml.model")
+	}
+	for _, want := range []string{`"wordpiece"`, "llama", "gpt2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
 	}
 }
 

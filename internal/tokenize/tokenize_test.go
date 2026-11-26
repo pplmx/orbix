@@ -239,8 +239,14 @@ func byteTokenName(b int) string {
 func TestNewFromGGUF(t *testing.T) {
 	// New must reject a file without a vocabulary rather than building a
 	// tokenizer that silently maps everything to nothing.
-	if _, err := New(&gguf.File{Metadata: map[string]gguf.Value{}}); err == nil {
+	// The key is what makes the refusal actionable: a file with no vocabulary and a file with
+	// the vocabulary under the wrong name both fail here, and only the message tells them apart.
+	_, err := New(&gguf.File{Metadata: map[string]gguf.Value{}})
+	if err == nil {
 		t.Fatal("New(no tokens) succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "tokenizer.ggml.tokens") {
+		t.Errorf("error = %q, want it to name the key that is missing", err)
 	}
 }
 
@@ -394,8 +400,14 @@ func TestMalformedMergeIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if _, err := New(f); err == nil {
+	// The rank locates the bad entry in a file with thousands of them; without it the caller
+	// knows only that something in the merge list is wrong.
+	_, err = New(f)
+	if err == nil {
 		t.Fatal("New accepted a merge entry with no separator")
+	}
+	if !strings.Contains(err.Error(), "is not a pair") {
+		t.Errorf("error = %q, want it to say the entry is not a pair", err)
 	}
 }
 

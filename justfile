@@ -221,6 +221,7 @@ xcheck-fixture:
         echo "uv not found: install it (https://docs.astral.sh/uv/) or skip this check"; \
         exit 1; \
     }
+    @test -x {{BIN}} || { echo "xcheck-fixture: {{BIN}} not found; run \`just build\` first" >&2; exit 1; }
     uv run --with gguf python3 scripts/fixture_xcheck.py
 
 vet:

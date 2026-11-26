@@ -218,8 +218,12 @@ func TestTensorData(t *testing.T) {
 		}
 	}
 
+	// The name the caller asked for is what makes this actionable; a generic "tensor not found"
+	// would leave a reader unable to tell which of several lookups failed.
 	if _, err := f.TensorData(path, "nope"); err == nil {
 		t.Error("TensorData on a missing tensor succeeded")
+	} else if !strings.Contains(err.Error(), `"nope"`) {
+		t.Errorf("error = %q, want it to quote the tensor name that is missing", err)
 	}
 }
 
@@ -451,8 +455,12 @@ func TestArch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
+	// The message is asserted: "Arch() failed" is not what a caller acts on -- the key it names
+	// is. Rewording it to "missing metadata" would leave the old assertion passing.
 	if _, err := noArch.Arch(); err == nil {
 		t.Error("Arch() on a file without general.architecture succeeded")
+	} else if !strings.Contains(err.Error(), "general.architecture") {
+		t.Errorf("error = %q, want it to name the key that is missing", err)
 	}
 }
 

@@ -106,3 +106,63 @@ func TestGroupedAttentionSharesKeyValueHeads(t *testing.T) {
 	}
 	t.Error("zeroing one KV head's projection left the logits unchanged")
 }
+
+// TestDecodePathAgreesWithPrefillUnderGrouping covers the other half of the mapper.
+//
+// The two tests above go through Prefill, which is batch.go's grouped path. A decode step does
+// not: Model.Forward calls m.attention in forward.go, and that function has its own `kv := h /
+// group`. Only one of the two was ever exercised, so a wrong mapper in the decode half would
+// have left the whole package green -- measured: replacing forward.go's `h / group` with `h %
+// KVHeads` changes all 363 logits and no existing test noticed.
+//
+// Both halves now have to agree with each other bit for bit. That is the property that matters
+// to a served request, where the prefill fills the cache and every generated token goes through
+// the other path: a disagreement here is a model that answers differently depending on how much
+// of the prompt was batched.
+func TestDecodePathAgreesWithPrefillUnderGrouping(t *testing.T) {
+	path := gguftest.Model{
+		Heads: 8, KVHeads: 2, NoEOS: true, ContextLen: 128,
+	}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if cfg.Heads != 8 || cfg.KVHeads != 2 {
+		t.Fatalf("loaded %d query heads over %d KV heads, so this test is not exercising a "+
+			"group of four", cfg.Heads, cfg.KVHeads)
+	}
+	tokens := fixtureTokens(cfg, 5)
+
+	batchedCache, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	batched, err := m.Prefill(batchedCache, tokens, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+
+	stepCache, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	var stepped []float32
+	for pos, tok := range tokens {
+		stepped, err = m.Forward(stepCache, int(tok), pos)
+		if err != nil {
+			t.Fatalf("Forward at %d: %v", pos, err)
+		}
+	}
+
+	if len(stepped) != len(batched) {
+		t.Fatalf("Forward produced %d logits, Prefill produced %d", len(stepped), len(batched))
+	}
+	for i := range batched {
+		if math.Float32bits(batched[i]) != math.Float32bits(stepped[i]) {
+			t.Fatalf("logit %d: Prefill %v (0x%08x), Forward %v (0x%08x) -- the two paths map "+
+				"query heads to KV heads differently", i,
+				batched[i], math.Float32bits(batched[i]), stepped[i], math.Float32bits(stepped[i]))
+		}
+	}
+}

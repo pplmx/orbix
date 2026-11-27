@@ -3631,3 +3631,78 @@ func TestNonPoolErrorsPassThroughUnwrapped(t *testing.T) {
 		t.Errorf("poolAwareErr(nil) = %v, want nil", got)
 	}
 }
+
+// TestPrefixReuseAcrossDivergingPrompts covers the shape a chat server actually produces: one
+// engine, successive requests that share a system prompt and differ after it.
+//
+// TestPrefixCacheSharedWhileConcurrent submits the *same* prompt several times, so it can only show
+// that reuse does not corrupt identical work. The riskier case is reuse across prompts that agree
+// only in their prefix -- if the index hands back blocks from a sequence that then diverged, the
+// answer is wrong in a way no single-request test can see, and the wrong output is plausible
+// English rather than a crash.
+//
+// The prefix lengths are deliberately not multiples of the block size (37 tokens, which leaves 1 or
+// 5 over depending on the block size) because the boundary is where a partial block could be shared
+// by mistake.
+func TestPrefixReuseAcrossDivergingPrompts(t *testing.T) {
+	path := gguftest.Model{NoEOS: true, ContextLen: 512}.Write(t, t.TempDir())
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("gguf.Open: %v", err)
+	}
+	tok, err := tokenize.New(gf)
+	if err != nil {
+		t.Fatalf("tokenize.New: %v", err)
+	}
+	const shared = "Once upon a time there was a little girl named Lily"
+	tails := []string{" who lived", " and she", " who found"}
+
+	// One engine per configuration, so reuse happens across the loop's iterations rather than
+	// within a fresh pool each time.
+	runAll := func(opts Options) ([][]int32, Stats) {
+		t.Helper()
+		e, err := New(path, opts)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		out := make([][]int32, len(tails))
+		for i, tail := range tails {
+			ch, err := e.Submit(Request{Prompt: tok.Encode(shared+tail, true), MaxTokens: 5})
+			if err != nil {
+				t.Fatalf("Submit %q: %v", tail, err)
+			}
+			for e.Pump() > 0 {
+			}
+			ids, _ := collect(t, ch)
+			out[i] = ids
+		}
+		return out, e.Stats()
+	}
+
+	for _, blockSize := range []int{4, 8} {
+		plain, _ := runAll(Options{BlockSize: blockSize, Blocks: 256, MaxActive: 8})
+		warm, stats := runAll(Options{BlockSize: blockSize, Blocks: 256, MaxActive: 8, PrefixCache: true})
+
+		// The premise: without a hit this test would pass by comparing two identical cold runs.
+		// 37 tokens over blocks of 4 is 9 full blocks, reused by the 2nd and 3rd request.
+		if stats.PrefixReused == 0 {
+			t.Fatalf("block size %d: PrefixReused is 0, so no block was shared and this test "+
+				"compares two cold runs", blockSize)
+		}
+		for i, tail := range tails {
+			if len(warm[i]) != len(plain[i]) {
+				t.Errorf("block size %d, tail %q: warm produced %d tokens, cold %d",
+					blockSize, tail, len(warm[i]), len(plain[i]))
+				continue
+			}
+			for j := range plain[i] {
+				if warm[i][j] != plain[i][j] {
+					t.Errorf("block size %d, tail %q token %d: warm %d, cold %d -- the reused "+
+						"prefix came from a sequence that had already diverged",
+						blockSize, tail, j, warm[i][j], plain[i][j])
+					break
+				}
+			}
+		}
+	}
+}

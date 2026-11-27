@@ -52,20 +52,26 @@ notes are a separate piece of writing, and GitHub's generated version is not it:
 three renovate-bot pull requests and `v0.2.0` got one compare link. A release page is what a
 newcomer reads first, and a commit log assumes they already know the project.
 
-Six sections, in this order, and none of them optional:
+The page opens with **one plain sentence** saying what the project is — a reader arriving from a
+link has no other context — and then has these sections:
 
-1. **One sentence saying what the project is.** Someone arriving from a link has no context.
-2. **Install** — the `go install` line and, once there is an image, the `docker run` line. A
+1. **Install** — the `go install` line and, once there is an image, the `docker run` line. A
    version-pinned command, so the page can be copied as written.
-3. **What it does** — capabilities, not commits. Format and architecture counts belong here,
+2. **What it does** — capabilities, not commits. Format and architecture counts belong here,
    with the number checked against `scripts/quant_xcheck.py` and the `archSpecs` map rather than
    remembered.
-4. **In this release** — the delta, described by what changed for a user. `v0.2.0`'s entry is
-   the container image and how its artifact is verified; nothing about the CI plumbing that
-   produced it.
-5. **Sizing or a quick start.** Whichever the reader needs to do anything.
-6. **Known limits** — pre-alpha, no authentication, reference kernels. A release page that
-   omits these reads as a claim the project cannot back.
+3. **In this release** — the delta, described by what changed for a user. `v0.3.0`'s entry is
+   the unprivileged uid and what it costs; nothing about the CI plumbing that produced it.
+4. **Sizing or a quick start** — whichever the reader needs to do anything.
+
+That is the whole page. Two things deliberately do not appear:
+
+- **A tagline or slogan block.** Centred marketing lines at the top of a release page are noise:
+  the sentence above already says what the project is, and a reader who wants the pitch can
+  follow the link to the README.
+- **A "known limits" section.** Pre-alpha status, the absent authentication and the reference
+  kernels are the README's job, where they sit next to the reasoning. Repeating them here made
+  every page end on a disclaimer, and a disclaimer that appears everywhere stops being read.
 
 Keep `CHANGELOG.md` as the commit-level record and link to it rather than reproducing it.
 

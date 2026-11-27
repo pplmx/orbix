@@ -94,3 +94,61 @@ func documentedArchitectures(t *testing.T, text string) map[string]bool {
 
 // tableCode matches a backticked word in a table cell.
 var tableCode = regexp.MustCompile("`([a-z][a-z0-9]*)`")
+
+// TestModelsDocStatesWhichCandidatesTheLogitOffsetRulesOut keeps the offset section from drifting
+// back into a guess.
+//
+// docs/models.md used to say the ~0.5 logit difference from llama.cpp was "a different rounding of
+// the final norm or the output projection". That was a plausible sentence nobody had measured, and
+// measuring it took an afternoon and refuted it: float64 recomputation moves 1e-6, and quantising
+// every projection the way llama.cpp does moves 0.128. What replaced it is a list of five
+// candidates, each with the observation that rules it out.
+//
+// The list is a set of claims about code, so it is exactly the kind that goes stale silently. The
+// guard checks the claims that are cheap to check -- that each candidate is still named, and that
+// the numbers the paragraph quotes still match the ones the experiments produce -- rather than
+// pretending to re-run the experiments.
+func TestModelsDocStatesWhichCandidatesTheLogitOffsetRulesOut(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "models.md"))
+	if err != nil {
+		t.Fatalf("reading docs/models.md: %v", err)
+	}
+	doc := string(raw)
+
+	// The section exists and still says what the offset is, rather than reverting to a guess.
+	if !strings.Contains(doc, "What it is not, checked one candidate at a time") {
+		t.Fatal("docs/models.md no longer carries the section listing what the logit offset is" +
+			" not; if it was rewritten, update this test rather than deleting it")
+	}
+
+	// Each ruled-out candidate, by the name the paragraph uses. A name going missing means either
+	// the reasoning was dropped or the experiment was redone, and both want a human to look.
+	for _, candidate := range []string{
+		"float32 accumulation",
+		"q8_0 activation quantisation",
+		"RMSNorm arithmetic",
+		"the Gemma norm shift",
+		"attention scale",
+	} {
+		if !strings.Contains(doc, candidate) {
+			t.Errorf("docs/models.md no longer rules out %q as the source of the logit offset;"+
+				" either the claim was dropped or the experiment was repeated, and both need the"+
+				" paragraph updated", candidate)
+		}
+	}
+
+	// The two measured numbers that decide the quantisation candidate. They come from a probe that
+	// is not committed, so the document is the only record; a reader who changes one has to change
+	// the other or lose the reason the candidate is excluded.
+	for _, number := range []string{"-0.128", "+0.071"} {
+		if !strings.Contains(doc, number) {
+			t.Errorf("docs/models.md no longer quotes %s from the quantisation experiment", number)
+		}
+	}
+
+	// And the rule that keeps the section honest about what remains.
+	if !strings.Contains(strings.ReplaceAll(doc, "\n", " "), "not worth closing") {
+		t.Error("docs/models.md no longer states whether the offset is worth closing; the" +
+			" paragraph is meant to end in a decision, not in an open question")
+	}
+}

@@ -117,18 +117,50 @@ six-token prompt, reported agreement.
 
 The absolute logits sit above llama.cpp's by roughly half a unit while the log probabilities agree
 to within 0.48 nats. Measured over the whole 262144-wide vector rather than its top eight: the
-difference has mean 0.505 and standard deviation 0.242, fits a constant offset better than a scale
-(slope 1.0084 if one is fitted, residual rms 0.236 against 0.242 for the constant), and is larger at
-the head of the distribution (0.72 for the top hundred) than in the tail (0.50). So it is a small
-global shift plus per-token noise, not a wrong distribution -- and it predates the two-frequency
-work: the old build produced 41.434 where llama.cpp produces 39.602.
+difference has mean 0.505 and standard deviation 0.242, and fits a constant offset far better than a
+scale -- an offset alone leaves rms 0.242, a scale alone 0.945, and fitting both only reaches 0.236
+with the scale coming out at 1.0084. Centred, the two distributions have rms 6.635 and 6.576, so
+their shapes agree to 0.9%. The shift is larger at the head of the distribution (0.72 over the top
+hundred) than in the tail (0.50).
+
+**What it is not, checked one candidate at a time.** This paragraph used to guess "a different
+rounding of the final norm or the output projection"; that guess is wrong, and the measurements that
+rule each candidate out are cheap enough to repeat:
+
+- *float32 accumulation.* Recomputing the final norm and the output projection in float64 moves the
+  logits by 1e-6 and the whole vector's mean by 1e-6. A 0.505 shift is five orders of magnitude too
+  large for rounding here.
+- *q8_0 activation quantisation.* llama.cpp's `ggml_vec_dot_q8_0_q8_0` does not multiply floats: it
+  quantises the activation to int8 per 32 values (`amax/127`, then `roundf`) and accumulates
+  integers, while this engine dequantises the weights at load and multiplies floats. Rebuilding the
+  forward pass with every projection quantised that way gives a mean delta of **-0.128** for q8
+  activations against f32 weights, and **+0.071** for int8 weights against int8 activations. Both
+  are the right order of magnitude and neither is 0.505, so this is a real difference between the
+  two implementations but not the offset.
+- *RMSNorm arithmetic.* ggml's `ggml_compute_forward_rms_norm_f32` computes `mean = sum/n`,
+  `scale = 1/sqrt(mean + eps)`, then `y = x * scale * w` -- the same expression as
+  `kernel.RMSNorm`, including the same float64 accumulation.
+- *the Gemma norm shift.* The `(1 + w)` in the reference model is folded into the norm weights by the
+  converter (`norm_shift` returns 1.0 for `norm.weight`), so a GGUF's `attn_norm.weight` already
+  carries it and both implementations use it as stored.
+- *attention scale.* llama.cpp scales Q by `hparams.f_attention_scale` after RoPE and passes
+  `kq_scale = 1.0f` to attention; this engine folds `1/sqrt(headDim)` into the score. For the 270M
+  checkpoint those are the same number to twelve digits, because `f_attention_scale` is defined as
+  `1/sqrt(n_embd_head_k)` for every size but the 27B.
+
+**What it is.** A constant across the vocabulary that no single stage produces, sitting on two
+implementations that agree on the argmax, on the log probabilities to under half a nat, and on the
+shape of the distribution to 0.9%. What is left is the ordinary numerical distance between two
+independent implementations -- different summation orders, different quantisation on the weight side,
+different evaluation order in an 18-layer stack -- and the honest statement is that it is not worth
+closing: chasing it means making this engine's arithmetic mimic llama.cpp's bug-for-bug, which is
+the opposite of the readable reference implementation this project is for. It predates the
+two-frequency work either way: the old build produced 41.434 where llama.cpp produces 39.602.
 
 It is also not this engine against a reference implementation of the same arithmetic. The committed
 `gemma3-270m.json` agrees with the *old* build to about 1e-6 relative and differs from the new one by
 2.8%, which says the numpy side reproduced the old reading's arithmetic faithfully -- including the
-interpretation that was wrong. A constant offset of this size is what a different rounding of the
-final norm or the output projection looks like, and closing it is a separate question that this
-change neither answers nor depends on.
+interpretation that was wrong.
 
 It does mean the committed `gemma3-270m.json` and `gemma3-513.json` no longer describe this engine.
 Both were produced by a numpy reference that applied a single base to every layer, so the logits they

@@ -83,6 +83,12 @@ type cacheFlags struct {
 // bounded by the pass's smallest dimension, and this flag cannot help a request that is waiting
 // for a slot. The measurements stay here, where the command that produced them is named.
 //
+// It must not name another flag, and my first version of the replacement did: it said a request
+// "queued behind --max-active" waits the same, but this text is shared by run and chat, which
+// have no --max-active at all -- run has no admission limit, and chat's is implied by --blocks.
+// A reader of `orbix run -h` was told about a flag that command does not accept. The wording says
+// "waiting for a slot" now, which is true of every command that registers this.
+//
 // This paragraph has now been wrong three times. It first said 128 workers were 3.9x faster than
 // one; that was true of an earlier fixture and stopped being true as the fixture changed. I
 // replaced it with an explanation that the split was not the bound, computing 32000 x 256 --
@@ -95,8 +101,8 @@ func workersFlag(fs *flag.FlagSet) *int {
 	return fs.Int("workers", 0,
 		"kernel goroutines per batched pass; 0 means one per CPU. Past a point the flag stops "+
 			"helping: a pass can only be split as far as its smallest dimension allows, so a "+
-			"small model does not use a large number, and a request that is queued behind "+
-			"--max-active does not run faster for it either")
+			"small model does not use a large number, and a request that is waiting for a slot "+
+			"does not run faster for it either")
 }
 
 // registerCacheFlags registers the paged-cache flags, and the worker flag when asked.

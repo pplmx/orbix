@@ -40,7 +40,34 @@ just vet       # go vet on one package: just PKG=./internal/gguf vet
 just clean     # remove bin/, .cache and the profiles; leaves the module cache alone
 just docker    # build the container image locally and print its version; needs docker
 just release   # bump the version, write the changelog, tag; a person decides this, not CI
+               # pushing the tag leaves a DRAFT release with the binaries attached; the notes
+               # are written by hand (`gh release edit vX.Y.Z --notes-file <file>`) and then
+               # `gh release edit vX.Y.Z --draft=false`. See "Writing release notes" below.
 ```
+
+## Writing release notes
+
+The tag workflow publishes a **draft** with the artifacts attached and a placeholder body. The
+notes are a separate piece of writing, and GitHub's generated version is not it: `v0.1.0` got
+three renovate-bot pull requests and `v0.2.0` got one compare link. A release page is what a
+newcomer reads first, and a commit log assumes they already know the project.
+
+Six sections, in this order, and none of them optional:
+
+1. **One sentence saying what the project is.** Someone arriving from a link has no context.
+2. **Install** — the `go install` line and, once there is an image, the `docker run` line. A
+   version-pinned command, so the page can be copied as written.
+3. **What it does** — capabilities, not commits. Format and architecture counts belong here,
+   with the number checked against `scripts/quant_xcheck.py` and the `archSpecs` map rather than
+   remembered.
+4. **In this release** — the delta, described by what changed for a user. `v0.2.0`'s entry is
+   the container image and how its artifact is verified; nothing about the CI plumbing that
+   produced it.
+5. **Sizing or a quick start.** Whichever the reader needs to do anything.
+6. **Known limits** — pre-alpha, no authentication, reference kernels. A release page that
+   omits these reads as a claim the project cannot back.
+
+Keep `CHANGELOG.md` as the commit-level record and link to it rather than reproducing it.
 
 ## The gates, and where they differ
 

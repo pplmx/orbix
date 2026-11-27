@@ -195,16 +195,31 @@ jobs:
           # locally built image, and the timing bound has to agree in both.
           scripts/wait_healthy.sh "$ref" .cache/stress.gguf linux/amd64
 
+      # A draft, not a published release. The artifacts are attached here so the workflow still
+      # does the part that benefits from a clean machine, but the notes are written by hand
+      # afterwards (`gh release edit`) and publishing is a separate, deliberate step.
+      #
+      # generate_release_notes is off for the reason both earlier releases demonstrate: it
+      # produces the commit log, which for v0.1.0 was three renovate-bot pull requests and for
+      # v0.2.0 a single compare link. Neither tells a user what the release is or how to start
+      # with it. A release page is the first thing a newcomer reads, and a commit log assumes
+      # they already know the project.
+      #
+      # A body is still set so the draft is not empty if the tag is pushed and forgotten: it
+      # points at the changelog that does ship, without pretending to be a summary.
       - name: publish
         uses: softprops/action-gh-release@v3
         with:
-          # The body is generated from the commits in this tag's range, not read from
-          # CHANGELOG.md: the two would say the same thing, and generating it here means the
-          # workflow does not fail on the first release, where the file does not exist yet.
-          # CHANGELOG.md stays the copy that ships in the repository.
-          generate_release_notes: true
+          # Written once per release. `gh release edit vX.Y.Z --notes-file <file>`, then
+          # `gh release edit vX.Y.Z --draft=false`.
+          draft: true
+          generate_release_notes: false
+          body: |
+            Draft release created by the tag workflow. The notes are written by hand before
+            publishing; `CHANGELOG.md` in the repository has the commit-level detail.
+
+            Full changelog: https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md
           files: |
             bin/orbix-*
           fail_on_unmatched_files: true
-          draft: false
           prerelease: false

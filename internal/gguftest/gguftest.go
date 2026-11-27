@@ -93,6 +93,13 @@ type Model struct {
 	// sliding-window model like Mistral uses. Zero omits the key, which the loader reads as
 	// unbounded -- the same meaning an absent key has in a real file.
 	WindowLen int
+	// HeadDim sets <arch>.attention.key_length and value_length, the explicit per-head widths.
+	//
+	// Zero omits both, which is what most files do -- the loader then derives the width from
+	// hidden/heads. Non-square attention is the reason the keys exist: Gemma 2 2B has 2304 hidden
+	// and 8 heads, so the derived 288 is not the 256 its queries actually use. A fixture that
+	// states them is the only way to exercise a reader that trusts the key over the ratio.
+	HeadDim int
 
 	// AttnBias adds the q, k, and v bias tensors the Qwen2 family uses and Llama does
 	// not. The loader infers the flag from the tensors' presence, so writing them is the
@@ -227,7 +234,17 @@ func (m Model) resolve() Model {
 }
 
 // headDim is the width of one attention head.
-func (m Model) headDim() int { return m.Hidden / m.Heads }
+//
+// HeadDim overrides the hidden/heads ratio, which is what a non-square model states in
+// attention.key_length and what its q, k and v tensors are actually shaped by. A fixture that
+// declared the key without reshaping the tensors would be a file the loader refuses, so both move
+// together.
+func (m Model) headDim() int {
+	if m.HeadDim > 0 {
+		return m.HeadDim
+	}
+	return m.Hidden / m.Heads
+}
 
 // kvDim is the width of the combined key or value projection.
 func (m Model) kvDim() int { return m.KVHeads * m.headDim() }
@@ -475,6 +492,10 @@ func (m Model) kvs() []kv {
 	}
 	if m.WindowLen > 0 {
 		out = append(out, u32KV(a+".attention.sliding_window", m.WindowLen))
+	}
+	if m.HeadDim > 0 {
+		out = append(out, u32KV(a+".attention.key_length", m.HeadDim))
+		out = append(out, u32KV(a+".attention.value_length", m.HeadDim))
 	}
 	model := m.TokenizerModel
 	if model == "" {

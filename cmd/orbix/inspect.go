@@ -78,6 +78,16 @@ func writeHuman(w io.Writer, f *gguf.File, path string) error {
 
 // printHyperparams prints the architecture-specific keys a reader needs to
 // make sense of the tensor shapes.
+//
+// The list is deliberately wider than the shapes. Half of these keys do not change any tensor's
+// dimensions and are still the difference between a model that computes what it was trained to and
+// one that produces fluent, slightly wrong text: a sliding window applied to every layer instead of
+// every second one, a softcap missing, a head width read from hidden/heads instead of
+// attention.key_length. Those are exactly the settings a reader opening a checkpoint is trying to
+// check, and leaving them out made `inspect` answer "here are 26 layers" to a question about the
+// window. This package learned that the hard way twice -- the gemma3 window pattern and the gemma2
+// default both had to be found by reading llama.cpp, because the command that is supposed to
+// describe a file did not mention either.
 func printHyperparams(tw *tabwriter.Writer, f *gguf.File, arch string) {
 	keys := []struct {
 		label string
@@ -88,10 +98,23 @@ func printHyperparams(tw *tabwriter.Writer, f *gguf.File, arch string) {
 		{"Feed-forward dim", arch + ".feed_forward_length"},
 		{"Attention heads", arch + ".attention.head_count"},
 		{"KV heads", arch + ".attention.head_count_kv"},
+		// The per-head widths a file may state explicitly. Gemma 2 2B is the case that makes these
+		// worth printing: it has 2304 hidden and 8 heads, so hidden/heads is 288 while the
+		// queries are 256 wide, and a reader who assumed the ratio would be looking at the wrong
+		// number with no way to notice.
+		{"Head dim (key)", arch + ".attention.key_length"},
+		{"Head dim (value)", arch + ".attention.value_length"},
 		{"Context length", arch + ".context_length"},
+		{"Sliding window", arch + ".attention.sliding_window"},
+		{"Sliding pattern", arch + ".attention.sliding_window_pattern"},
 		{"RoPE dim", arch + ".rope.dimension_count"},
 		{"RoPE base", arch + ".rope.freq_base"},
+		{"RoPE base (SWA)", arch + ".rope.freq_base_swa"},
 		{"RMS norm epsilon", arch + ".attention.layer_norm_rms_epsilon"},
+		{"Attn softcap", arch + ".attn_logit_softcapping"},
+		{"Logit softcap", arch + ".final_logit_softcapping"},
+		{"Expert count", arch + ".expert_count"},
+		{"Experts used", arch + ".expert_used_count"},
 	}
 	printed := false
 	for _, k := range keys {

@@ -883,3 +883,84 @@ func sortedKeys(m map[string]any) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestInspectPrintsTheSettingsThatChangeTheAnswer covers the hyperparameter rows a reader opens the
+// file to check.
+//
+// The table used to list nine keys, all of them describing shapes, and silently omitted every
+// setting that leaves the shapes intact but changes what the model computes: the sliding window,
+// the two softcaps, and the explicit head widths. Those are the ones that matter here. Two real
+// defects in this repository -- gemma3's window pattern and gemma2's window default -- were found
+// by reading llama.cpp, because the command whose job is to describe a checkpoint said "26 layers"
+// and nothing about a window. A reader cannot check a claim they cannot see the data for.
+//
+// The assertion is on the value, not the label. A row that prints the right name beside the wrong
+// number passes a label check, and the number is the whole point.
+func TestInspectPrintsTheSettingsThatChangeTheAnswer(t *testing.T) {
+	// A gemma2-shaped fixture, because that architecture carries every one of these keys at once.
+	path := gguftest.Model{
+		Arch: "gemma2", Layers: 2, Hidden: 32, Heads: 4, FFN: 64, ContextLen: 64,
+		PostNorms: true, WindowLen: 4096, AttnSoftcap: 50, FinalSoftcap: 30,
+		// A non-square head width: 32 hidden over 4 heads is 8, so a file that states 16 is one
+		// where the ratio would give the wrong answer -- which is the whole reason the key exists.
+		HeadDim: 16,
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := inspect(&buf, f, path, inspectOptions{}); err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []struct{ label, value string }{
+		{"Sliding window", "4096"},
+		{"Attn softcap", "50"},
+		{"Logit softcap", "30"},
+		// The per-head widths: gguftest writes key_length and value_length, and they are what a
+		// non-square attention projection has instead of hidden/heads.
+		{"Head dim (key)", "16"},
+		{"Head dim (value)", "16"},
+		// Still there, so widening the table did not replace what it had.
+		{"Layers", "2"},
+		{"Context length", "64"},
+	} {
+		line := findHyperparamLine(out, want.label)
+		if line == "" {
+			t.Errorf("`model inspect` prints no %q row:\n%s", want.label, out)
+			continue
+		}
+		if !strings.Contains(line, want.value) {
+			t.Errorf("the %q row is %q, which does not carry the file's %s", want.label, line, want.value)
+		}
+	}
+
+	// A key the file does not carry must not appear as a row of blanks. The gemma3 file that has
+	// no rope.freq_base_swa is the case: printing "RoPE base (SWA)" with nothing beside it reads as
+	// a zero the file declared rather than a key it omitted.
+	if strings.Contains(out, "RoPE base (SWA)") {
+		t.Errorf("the fixture declares no rope.freq_base_swa, but the output has that row:\n%s", out)
+	}
+}
+
+// findHyperparamLine returns the row whose label is exactly label, or "" when there is none.
+//
+// Matched on the label as the whole first field rather than by substring: "Head dim (key)" and
+// "Head dim (value)" share a prefix, and a substring match would let one row satisfy the other's
+// assertion.
+func findHyperparamLine(out, label string) string {
+	for line := range strings.SplitSeq(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(trimmed, label)
+		if !ok {
+			continue
+		}
+		if rest != "" && rest[0] != ' ' {
+			continue // a longer label that merely starts the same way
+		}
+		return trimmed
+	}
+	return ""
+}

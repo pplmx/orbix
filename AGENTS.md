@@ -52,7 +52,12 @@ just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打�
              # 只有配上当时设了几个检查点才知道它说的是什么。实测三档（2026-11-26）：
              # 0 个 → 31，5 个（MODEL/QWEN2_MODEL/QWEN3_MODEL/GEMMA2_MODEL/MODEL_KQUANT）
              # → 13，6 个（再加 GEMMA3_MODEL）→ 10。所以 31 是「没有任何真实权重」的数，
-             # 不是仓库的常数。5 个那档剩下的 13 个
+             # 不是仓库的常数。**这个 0 档的数已经涨到 34**（2026-11-28 复算）：每加一条
+             # gated 测试它就加一，本会话加了两条（gemma3 的窗口后困惑度、gemma2 的窗口
+             # 影响），而写法让读者以为 31 是固定的。后两档这一轮没能复算——手头只有
+             # gemma2 和 gemma3 两个 checkpoint，用它们冒充 MODEL/QWEN2_MODEL 等会让 suite
+             # 失败，而 `just skips` 在失败时不报数字（这是它该有的行为）。要更新那两档
+             # 得先凑齐六个真文件。5 个那档剩下的 13 个
              # 要的是这台机器没有的东西：IQ4_NL/Q4_1/Q5_0/Q5_1 四种格式、gemma-1、mistral-v2、
              # 一个 MoE 文件、三个只在设了 ORBIX_*DUMP 时执行的 dump 测试，以及四个需要别的
              # 真实文件的（prefix cache 复用、真实权重矩阵统计、gemma3 的 prompt token ids、
@@ -182,7 +187,7 @@ README 承诺每层都有 `doc.go` 解释概念和设计取舍。新增包时必
 
 1. 标准库已经覆盖的，用标准库。`flag`、`encoding/json`、`net/http`、`crypto/rand` 覆盖了 CLI 参数、GGUF 中的 JSON、HTTP 服务端和追踪 id。
 2. 库的能力要有实际去处。viper 的价值在多格式配置文件和配置来源合并；本项目只有 `ORBIX_MODEL` 一个环境变量、没有配置文件，引入它等于让库承担它无从发挥的工作。
-3. 规模匹配。**8** 个命令（`run`/`bench`/`chat`/`serve`/`healthcheck`/`model`/`version`/`help`）、**3907** 行非测试代码的 CLI 不需要命令树框架；`serve` 的 13 个 flag 是单命令最多的一处。命令数或单命令参数数显著增长时重新评估。这一句原来写「6 个命令、约 3400 行」，与同句末尾的 3607 行自相矛盾；命令数漏了 `healthcheck` 和 `model`，而 `model` 还有 `inspect` 子命令。（2026-11-26 复算：`orbix serve -h | grep -cE '^  -[a-z]'` 是 13，未变。行数从记录下的 3607 涨到 3907 —— `ls cmd/orbix/*.go | grep -v _test` 有 **14** 个文件，`model_files.go` 是后来加的；`cgo_enabled.go` 在 `CGO_ENABLED=0` 下不编译，排除它之后是 13 个文件 3907 行，全算上是 3913 行。这两个数都没有守卫，靠人复算，所以复算日期写在这里。）
+3. 规模匹配。**8** 个命令（`run`/`bench`/`chat`/`serve`/`healthcheck`/`model`/`version`/`help`）、**3930** 行非测试代码的 CLI 不需要命令树框架；`serve` 的 13 个 flag 是单命令最多的一处。命令数或单命令参数数显著增长时重新评估。这一句原来写「6 个命令、约 3400 行」，与同句末尾的 3607 行自相矛盾；命令数漏了 `healthcheck` 和 `model`，而 `model` 还有 `inspect` 子命令。（2026-11-26 复算：`orbix serve -h | grep -cE '^  -[a-z]'` 是 13，未变。行数从记录下的 3607 涨到 3930 —— `ls cmd/orbix/*.go | grep -v _test` 有 **14** 个文件，`model_files.go` 是后来加的；`cgo_enabled.go` 在 `CGO_ENABLED=0` 下不编译，排除它之后是 13 个文件 3930 行，全算上是 3936 行。（2026-11-28 复算：`inspect` 的超参数表补了若干 key，行数与上一版记录的 3907/3913 相比各增 23。）这两个数都没有守卫，靠人复算，所以复算日期写在这里。）
 4. 维护状态看**默认分支的最新提交**，不看 `pushed_at`（它会被无关推送刷新）。2026-11 核对：
 
    | 库 | 最新提交 | 判断 |

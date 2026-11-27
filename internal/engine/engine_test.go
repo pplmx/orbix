@@ -743,8 +743,16 @@ func TestCancelStopsASequence(t *testing.T) {
 		t.Errorf("finish reason = %q, want cancel", reason)
 	}
 	// Cancel has to arrive quickly: the sequence must not have run out its budget.
-	if generated >= 1000 {
-		t.Errorf("generated %d tokens despite cancellation", generated)
+	//
+	// The bound used to be "generated >= 1000", which could not fail. Three rounds run before the
+	// cancel and the drain loop is capped at 200, so a build where cancellation never fired still
+	// produced only 64 tokens, and the test passed. Measured by making cancelled() return false
+	// unconditionally. The sequence is advanced once per round, so a cancel that lands on the
+	// round after close costs one or two extra tokens, and 20 runs all produced 2. The bound is
+	// set at 10 to leave room for a scheduling difference without leaving room for cancellation
+	// not happening -- a gap of 64 against 10 is what makes this assertion mean something.
+	if generated > 10 {
+		t.Errorf("generated %d tokens despite cancellation, want at most a few", generated)
 	}
 }
 

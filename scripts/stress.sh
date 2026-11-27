@@ -19,20 +19,35 @@ addr=127.0.0.1:18599
 work=$(mktemp -d)
 trap 'kill "${srv:-}" 2>/dev/null; rm -rf "$work"' EXIT
 
+# The KV pool has to fit the holder's request against the checkpoint's own window. 64 blocks of 16
+# is 1024 slots, which is ample for the 256-position fixture this was written against and is not
+# enough for a real checkpoint: measured on gemma-2-2b-it (ctx 8192) with a 120-token request, the
+# run answered 503 and left orbix_requests_active at 1, and the same run against 512 blocks
+# finished with orbix_requests_refused_pool_total still 0. The pool is sized here rather than in
+# the caller because the number is about this script's own request shapes, not about the model.
+#
+# 512 blocks is 8192 slots -- one full window at block size 16 -- so the holder fits whatever
+# window its checkpoint declares.
 "$bin" serve --model "$model" --addr "$addr" \
-    --max-active 1 --blocks 64 --block-size 16 --prefix-cache --log-format json \
+    --max-active 1 --blocks 512 --block-size 16 --prefix-cache --log-format json \
     >"$work/log" 2>&1 &
 srv=$!
 
 # The wait is generous because the binary is a race build and the checkpoint is read from disk:
-# measured on Gemma 3 270M, the first start took 45.8s while the next two took 2.9s and 2.5s, so
-# page cache rather than the race detector is what the first run pays for. The 20s a previous
-# version allowed was enough on a fixture of a few KB and not on anything real, and the failure
-# read "server did not become ready" on a server that was about to be ready.
+# measured on Gemma 3 270M (291 MB), the first start took 45.8s while the next two took 2.9s and
+# 2.5s, so page cache rather than the race detector is what the first run pays for.
+#
+# The budget is sized for the biggest checkpoint someone would point this at, not for that one.
+# Measured on gemma-2-2b-it-Q3_K_L (1.5 GB, cold page cache): 155s to answer /healthz. The 1200
+# ticks this loop used to allow -- 120 seconds -- is under that, so a real checkpoint failed with
+# "server did not become ready" while the server was merely still reading weights, and the log it
+# printed was empty because nothing is logged until loading finishes. Timeouts scale with file size
+# here, so the limit is 600s: a 3.4 GB per-GB linear extrapolation with room to spare, still
+# bounded, and the loop below exits as soon as the process dies.
 #
 # Waited for on the terminal state rather than a guessed number of seconds: the process either
 # answers or exits, so a dead server fails immediately instead of after the full wait.
-for _ in $(seq 1 1200); do
+for _ in $(seq 1 6000); do
     curl -sf "http://$addr/healthz" >/dev/null 2>&1 && break
     kill -0 "$srv" 2>/dev/null || break
     sleep 0.1
@@ -109,8 +124,17 @@ stream '{"model":"__MODEL__","prompt":"delta","max_tokens":16,"stream":true}'
 #
 # Generous rather than tuned: the run either finishes or the server stops advancing, and
 # waiting too long only makes a broken run slower.
+#
+# The ceiling also has to cover the queue the next three lines create, which is what 300s did not.
+# Measured on gemma-2-2b-it with the race build: this request alone takes 12.9s, and with the three
+# 120-token queued clients behind it on --max-active 1 it took 414.9s. They are not concurrent -- the
+# engine advances one sequence per round -- so the holder pays for all four budgets in sequence.
+# At 300s the holder returned 503 with duration 300038ms, the failure read "the server answered a 5xx"
+# and "orbix_requests_active settled at 3", and neither was true of the engine: watching the gauge
+# afterwards showed it go 3 -> 2 -> 0 on its own. 900s covers four budgets at that rate with room,
+# and a genuine stall still fails on the holder's timeout and on the gauge.
 echo "stress: one long request holds the engine"
-curl -s -o /dev/null --max-time 300 -X POST "$api" -H 'Content-Type: application/json' \
+curl -s -o /dev/null --max-time 900 -X POST "$api" -H 'Content-Type: application/json' \
     -d "$(payload '{"model":"__MODEL__","prompt":"holder","max_tokens":120}')" &
 holder=$!
 # Give the holder a moment to be admitted and to start advancing. Without this the queued
@@ -128,8 +152,18 @@ wait "$holder"
 
 # The engine advances a sequence per round, so the gauge needs a few rounds to reach zero
 # after the last disconnect. Poll rather than sleeping a fixed time.
+#
+# "A few rounds" is cheap only when the sequences are. `wait "$holder"` returns when the holder
+# finishes, and the three queued clients start being advanced after that -- 3 x 120 tokens on a
+# race build against a real checkpoint. Measured: the gauge sat at 1 for 10s (the whole of the
+# 100 x 0.1s this loop used to allow) and reached 0 by 20s, so the run was reported as "a sequence
+# leaked" on an engine that drained. The budget is 120s: two orders of magnitude above the fixture's
+# few rounds, and still a bound, since a real leak stays non-zero however long you watch.
+#
+# A sequence that never finishes would otherwise be waited for forever, so this is a ceiling on
+# patience, not a deadline the engine has to meet.
 active=1
-for _ in $(seq 1 100); do
+for _ in $(seq 1 1200); do
     active=$(curl -s --max-time 5 "http://$addr/metrics" | awk '/^orbix_requests_active /{print $2}')
     [ "$active" = "0" ] && break
     sleep 0.1

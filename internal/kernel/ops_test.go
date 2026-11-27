@@ -1332,3 +1332,58 @@ func TestMatMulRefusesANilOperandItWouldRead(t *testing.T) {
 		t.Errorf("MatMul with k = 0 and a nil b: %v", err)
 	}
 }
+
+// TestParallelKernelsAreBitIdenticalToTheSerialOne pins a claim three comments make and nothing
+// asserted: that a partitioned kernel produces the same bits as the single-threaded one.
+//
+// It is easy to state and easy to lose. The partitioner splits by row, and every row's dot product
+// accumulates in the same order either way, so no float is ever reassociated -- which is why this is
+// an equality rather than a tolerance. A change that split by column, or that summed the parts of a
+// row in a different order, would still produce a plausible answer and would still pass every test
+// that compares two runs of the same configuration.
+//
+// The values are ones float32 cannot represent exactly, and the shapes are far above the
+// partitioning thresholds, because either shortcut makes the comparison vacuous: with binary
+// fractions every sum is exact and any order agrees, and below minParallelWork every shape takes
+// the serial path and the test compares a function with itself. Both premises are asserted rather
+// than assumed, so a threshold change surfaces here as a failure instead of as silence.
+func TestParallelKernelsAreBitIdenticalToTheSerialOne(t *testing.T) {
+	const workers = 8
+	shapes := []struct{ n, k int }{
+		{n: 512, k: 1024},
+		{n: 1024, k: 4096},
+		{n: 4096, k: 288},
+	}
+	serial := NewRunner(1)
+	par := NewRunner(workers)
+	for _, s := range shapes {
+		t.Run(sizeName(s.n, s.k, "shape"), func(t *testing.T) {
+			if got := par.parts(s.n * s.k); got < 2 {
+				t.Fatalf("work %d splits into %d part(s), so this shape never runs in parallel "+
+					"and the comparison is between two serial runs", s.n*s.k, got)
+			}
+			a := make([]float32, s.n*s.k)
+			for i := range a {
+				a[i] = float32(math.Sin(float64(i)+1)) / 3
+			}
+			v := make([]float32, s.k)
+			for i := range v {
+				v[i] = float32(math.Cos(float64(i)+1)) * 0.7
+			}
+			one := make([]float32, s.n)
+			many := make([]float32, s.n)
+			if err := serial.MatVec(one, a, v, s.n, s.k); err != nil {
+				t.Fatalf("serial MatVec: %v", err)
+			}
+			if err := par.MatVec(many, a, v, s.n, s.k); err != nil {
+				t.Fatalf("parallel MatVec: %v", err)
+			}
+			for i := range one {
+				if math.Float32bits(one[i]) != math.Float32bits(many[i]) {
+					t.Fatalf("row %d: serial %v (0x%08x), parallel %v (0x%08x)",
+						i, one[i], math.Float32bits(one[i]), many[i], math.Float32bits(many[i]))
+				}
+			}
+		})
+	}
+}

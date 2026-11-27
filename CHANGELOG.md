@@ -29,6 +29,12 @@ so in the README.
 Binaries for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 and windows/amd64 are built
 with `CGO_ENABLED=0` and ship with per-file SHA-256 sums.
 
+## v0.3.0 (2026-11-27)
+
+### Feat
+
+- **docker**: run unprivileged, and make the image reachable from the repo
+
 ## v0.2.0 (2026-11-27)
 
 ### Feat

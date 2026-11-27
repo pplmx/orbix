@@ -69,6 +69,15 @@ ways that matter:
   are local and every sixth is global. The default is only applied for `gemma3`: Gemma 2's files
   predate the key and are described by the alternating rule (a period of 2), so applying one
   architecture's convention to the other bounds the wrong layers.
+- `attention.sliding_window_pattern` is accepted as either a boolean array or an array of 0/1
+  integers, because the two ends of llama.cpp disagree about which one it is. gguf-py's converter
+  passes a `Sequence[bool]` to `add_array`, which infers the element type and writes BOOL;
+  llama.cpp's own reader is `get_arr<uint32_t>`, which accepts only uint32/int32 and throws
+  "is not a string/float32/uint32/int32/uint64 array" on anything else. Neither side can read what
+  the other writes, and this is a bug upstream rather than a format with two spellings. Reading only
+  one form meant a file in the other form fell through to the architecture's default pattern and
+  loaded with the wrong layers bounded, silently. An array of any other element type is now refused
+  by name, and an integer outside {0, 1} names its position and value.
 - Its local and global layers rotate at different frequencies. Hugging Face's `Gemma3TextConfig`
   carries `{"global": 1e6, "local": 1e4}`, and llama.cpp picks between `rope.freq_base` and
   `rope.freq_base_swa` per layer, on the same predicate that decides which layers are windowed. A

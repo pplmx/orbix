@@ -1998,6 +1998,75 @@ func TestSlidingWindowPatternReachesLocalLayers(t *testing.T) {
 		}
 	})
 
+	t.Run("an integer array is read the way llama.cpp reads it", func(t *testing.T) {
+		// gguf-py writes a BOOL array (add_sliding_window_pattern passes Sequence[bool] to
+		// add_array, which infers the element type), but llama.cpp's own reader is
+		// get_arr<uint32_t> and throws on anything but uint32/int32. A file written by one and
+		// read by the other is an upstream bug, and until this branch existed the integer form
+		// fell through to the architecture's default pattern -- silently bounding the wrong
+		// layers on exactly the files the other implementation can read.
+		pattern := gguf.Value{
+			Type: gguf.TypeArray, ElemType: gguf.TypeUint32,
+			Array: []gguf.Value{
+				{Type: gguf.TypeUint32, Uint: 0},
+				{Type: gguf.TypeUint32, Uint: 1},
+				{Type: gguf.TypeUint32, Uint: 0},
+				{Type: gguf.TypeUint32, Uint: 1},
+			},
+		}
+		cfg, err := load(t, []kv{{"llama.attention.sliding_window_pattern", pattern}})
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		want := []bool{false, true, false, true}
+		if !slices.Equal(cfg.LocalLayers, want) {
+			t.Errorf("LocalLayers = %v, want %v: an integer array is 0/1, not a period",
+				cfg.LocalLayers, want)
+		}
+	})
+
+	t.Run("an integer array with a value other than 0 or 1 is refused", func(t *testing.T) {
+		// Coercing 2 to true would bound a layer the file did not mark, and the file is corrupt.
+		pattern := gguf.Value{
+			Type: gguf.TypeArray, ElemType: gguf.TypeUint32,
+			Array: []gguf.Value{
+				{Type: gguf.TypeUint32, Uint: 1}, {Type: gguf.TypeUint32, Uint: 2},
+				{Type: gguf.TypeUint32, Uint: 1}, {Type: gguf.TypeUint32, Uint: 0},
+			},
+		}
+		_, err := load(t, []kv{{"llama.attention.sliding_window_pattern", pattern}})
+		if err == nil {
+			t.Fatal("LoadConfig accepted a pattern entry of 2")
+		}
+		// Both the position and the value, so a reader can find the entry.
+		for _, want := range []string{"[1]", "2"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
+	t.Run("an array of an unreadable type is refused rather than defaulted", func(t *testing.T) {
+		// The failure this replaces was silent: GetArray[bool] said no, the code fell through to
+		// the architecture's default pattern, and the model loaded with the wrong layers bounded.
+		pattern := gguf.Value{
+			Type: gguf.TypeArray, ElemType: gguf.TypeFloat32,
+			Array: []gguf.Value{
+				{Type: gguf.TypeFloat32, Float: 1}, {Type: gguf.TypeFloat32, Float: 0},
+				{Type: gguf.TypeFloat32, Float: 1}, {Type: gguf.TypeFloat32, Float: 0},
+			},
+		}
+		_, err := load(t, []kv{{"llama.attention.sliding_window_pattern", pattern}})
+		if err == nil {
+			t.Fatal("LoadConfig accepted a float32 array as a layer pattern; it must name the type")
+		}
+		for _, want := range []string{"sliding_window_pattern", "array", "float32"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not state %q", err, want)
+			}
+		}
+	})
+
 	t.Run("an integer period makes every n-th layer global", func(t *testing.T) {
 		cfg, err := load(t, []kv{{"llama.attention.sliding_window_pattern", u32Val(2)}})
 		if err != nil {

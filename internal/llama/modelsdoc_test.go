@@ -218,3 +218,34 @@ func TestGemma2HasAWindowWhenTheFileOmitsTheKey(t *testing.T) {
 		}
 	}
 }
+
+// TestModelsDocExplainsThePatternElementTypes keeps the note about a genuine upstream mismatch from
+// being tidied away.
+//
+// The paragraph it guards describes two implementations that cannot read each other's output: the
+// converter writes a BOOL array, llama.cpp's reader is get_arr<uint32_t> and throws on BOOL. That
+// is the kind of fact a later editor reads as an over-explanation and deletes -- and deleting it
+// loses the reason the loader accepts both forms instead of only the one this repository's own
+// writer produces.
+func TestModelsDocExplainsThePatternElementTypes(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "models.md"))
+	if err != nil {
+		t.Fatalf("reading docs/models.md: %v", err)
+	}
+	// Compared with paragraph wrapping collapsed, because the document caps lines at 88 columns and
+	// every one of these phrases straddles a break. Requiring them on one line would make the guard
+	// fail the moment the prose was re-wrapped for an unrelated reason -- and then it gets deleted
+	// rather than fixed.
+	doc := strings.ToLower(strings.Join(strings.Fields(string(raw)), " "))
+	for _, want := range []string{
+		"attention.sliding_window_pattern",
+		"sequence[bool]",
+		"get_arr<uint32_t>",
+		"neither side can read what the other writes",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("docs/models.md no longer states %q; the loader accepts both element types "+
+				"for a reason, and that reason has to stay written down", want)
+		}
+	}
+}

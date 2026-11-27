@@ -659,6 +659,66 @@ func (p configParser) window(cfg *Config) error {
 // rather than "no window" or "every layer local".
 const gemma3WindowPeriod = 6
 
+// layerPattern reads attention.sliding_window_pattern when the file writes it as an array.
+//
+// Two element types have to be accepted because the two ends of llama.cpp disagree about this key.
+// gguf-py's add_sliding_window_pattern passes a Sequence[bool] to add_array, which infers the
+// element type from the Python values, so the converter writes a BOOL array; llama.cpp's own reader
+// is get_arr<uint32_t>, which accepts only uint32/int32 and throws "is not a string/float32/uint32/
+// int32/uint64 array" on anything else. A file written by one and read by the other is a bug
+// upstream, and a reader that accepts only one of them is a reader that silently rotates the wrong
+// layers on half the corpus.
+//
+// The integer form is also the one an older converter wrote, and 0 and 1 mean the same thing there
+// as false and true. Anything else -- a float, a string, a bool array with a non-bool element -- is
+// refused rather than coerced: the second return value distinguishes "not an array" from "an array
+// this package cannot read", and the caller turns the second into an error naming the type.
+func (p configParser) layerPattern() (pattern []bool, isArray bool, err error) {
+	key := p.arch + ".attention.sliding_window_pattern"
+	v, ok := p.file.Metadata[key]
+	if !ok || v.Type != gguf.TypeArray {
+		return nil, false, nil
+	}
+	// Switch on the declared element type rather than on which conversion happens to succeed.
+	// GetArray[int] widens a float32 array to integers without complaint, so asking it first
+	// would read a corrupt file as a valid pattern of 1s and 0s.
+	switch v.ElemType {
+	case gguf.TypeBool:
+		// What gguf-py writes today.
+		bools, ok := p.file.GetArray[bool](key)
+		if !ok || len(bools) != len(v.Array) {
+			return nil, true, fmt.Errorf("llama: %s holds an array of %s that could not be read "+
+				"as booleans", key, v.ElemType)
+		}
+		return bools, true, nil
+	case gguf.TypeUint8, gguf.TypeInt8, gguf.TypeUint16, gguf.TypeInt16,
+		gguf.TypeUint32, gguf.TypeInt32, gguf.TypeUint64, gguf.TypeInt64:
+		// What llama.cpp's reader expects, and what an older converter wrote. 0 and 1 mean the
+		// same thing here as false and true.
+		ints, ok := p.file.GetArray[int](key)
+		if !ok {
+			return nil, true, fmt.Errorf("llama: %s holds an array of %s that could not be read "+
+				"as integers", key, v.ElemType)
+		}
+		out := make([]bool, len(ints))
+		for i, n := range ints {
+			switch n {
+			case 0:
+				out[i] = false
+			case 1:
+				out[i] = true
+			default:
+				return nil, true, fmt.Errorf("llama: %s[%d] = %d, want 0 or 1", key, i, n)
+			}
+		}
+		return out, true, nil
+	}
+	// Anything else: name the element type rather than falling through to the architecture's
+	// default pattern, which would bound the wrong layers and say nothing.
+	return nil, true, fmt.Errorf("llama: %s holds an array of %s, which is neither booleans nor "+
+		"integers; the pattern cannot be read", key, v.ElemType)
+}
+
 // localLayers decides which layers a windowed model bounds.
 //
 // The key is written three ways and llama.cpp reads them in this order: an array of one boolean
@@ -672,7 +732,9 @@ const gemma3WindowPeriod = 6
 func (p configParser) localLayers(cfg *Config) error {
 	arch, f := p.arch, p.file
 
-	if pattern, ok := f.GetArray[bool](arch + ".attention.sliding_window_pattern"); ok {
+	if pattern, isArray, err := p.layerPattern(); err != nil {
+		return err
+	} else if isArray {
 		if len(pattern) != cfg.Layers {
 			return fmt.Errorf("llama: %s.attention.sliding_window_pattern holds %d "+
 				"entries for %d layers", arch, len(pattern), cfg.Layers)

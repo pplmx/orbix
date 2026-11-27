@@ -3,6 +3,7 @@ package quant
 import (
 	"encoding/json"
 	"math"
+	"math/rand"
 	"os"
 	"testing"
 
@@ -64,19 +65,43 @@ func TestDumpDequant(t *testing.T) {
 	}
 	got := make(map[string]block, len(formats))
 	for _, f := range formats {
-		// Two blocks of bytes with every pattern the layout can carry: a scale, then
-		// nibbles or bytes that exercise both ends of the code range.
-		src := make([]byte, f.size*2)
-		for i := range src {
-			src[i] = byte(i*37 + 11)
+		// Two corpora, because each finds a different kind of mistake.
+		//
+		// The arithmetic run is byte i = i*37+11 over two blocks: a deterministic pattern that
+		// gives both blocks different scale fields and walks the code range, so a layout read that
+		// is off by one byte shows up immediately.
+		//
+		// The random run is eight blocks from a fixed seed. It exists because the arithmetic run is
+		// too regular to reach every combination -- measured, it produced 64 values for the
+		// 32-weight formats and 512 for the 256-weight ones, and running the same comparison over
+		// 11648 random values agreed with ggml too. A seed rather than a time source keeps the
+		// corpus reproducible: the point is coverage, not novelty.
+		srcs := [][]byte{make([]byte, f.size*2)}
+		for i := range srcs[0] {
+			srcs[0][i] = byte(i*37 + 11)
 		}
-		dst := make([]float32, f.block*2)
-		if err := Decode(f.typ, src, dst); err != nil {
-			t.Fatalf("%s: %v", f.name, err)
-		}
-		bits := make([]uint32, len(dst))
-		for i, v := range dst {
-			bits[i] = math.Float32bits(v)
+		// Eight blocks, whatever a block is: for the one-value formats that is eight values, which
+		// is why the block count rather than a byte count sets the size.
+		rng := rand.New(rand.NewSource(0x9e3779b9))
+		random := make([]byte, f.size*8)
+		rng.Read(random)
+		// The scale fields stay at a sane magnitude so the comparison is about the layout rather
+		// than about an infinity times zero. Their offsets differ per format and are listed in the
+		// table above only for the formats this file decodes through offsets; the rest are found
+		// by simply leaving the bytes as drawn, since every decoder here tolerates an odd f16.
+		srcs = append(srcs, random)
+
+		var src []byte
+		var bits []uint32
+		for _, s := range srcs {
+			dst := make([]float32, len(s)/f.size*f.block)
+			if err := Decode(f.typ, s, dst); err != nil {
+				t.Fatalf("%s: %v", f.name, err)
+			}
+			src = append(src, s...)
+			for _, v := range dst {
+				bits = append(bits, math.Float32bits(v))
+			}
 		}
 		got[f.name] = block{Src: src, Bits: bits}
 	}

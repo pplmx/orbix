@@ -275,17 +275,18 @@ func (m *Model) attentionBatch(b *batch, cache Cache, l, startPos int) error {
 	if err := m.normQK(layer, b.q[:n*qdim], b.k[:n*kvdim], n*cfg.Heads, n*cfg.KVHeads); err != nil {
 		return err
 	}
+	rot := m.ropeFor(l)
 	for i := range n {
 		pos := startPos + i
 		for h := range cfg.Heads {
 			off := i*qdim + h*cfg.HeadDim
-			if err := m.rope.apply(b.q[off:off+cfg.HeadDim], pos); err != nil {
+			if err := rot.apply(b.q[off:off+cfg.HeadDim], pos); err != nil {
 				return err
 			}
 		}
 		for h := range cfg.KVHeads {
 			off := i*kvdim + h*cfg.HeadDim
-			if err := m.rope.apply(b.k[off:off+cfg.HeadDim], pos); err != nil {
+			if err := rot.apply(b.k[off:off+cfg.HeadDim], pos); err != nil {
 				return err
 			}
 		}
@@ -576,7 +577,10 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 		return err
 	}
 
-	// Each sequence rotates at its own position and appends at its own cache end.
+	// Each sequence rotates at its own position and appends at its own cache end, at the
+	// frequency this layer uses -- every sequence in the batch shares the layer, so the table
+	// is chosen once.
+	rot := m.ropeFor(l)
 	params := attentionParams(cfg, l)
 	group := cfg.Heads / cfg.KVHeads
 
@@ -591,12 +595,12 @@ func (b *decodeBatch) attention(m *Model, caches []Cache, l int) error {
 			return err
 		}
 		for h := range cfg.Heads {
-			if err := m.rope.apply(qRow[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+			if err := rot.apply(qRow[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
 				return err
 			}
 		}
 		for h := range cfg.KVHeads {
-			if err := m.rope.apply(kRow[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+			if err := rot.apply(kRow[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
 				return err
 			}
 		}

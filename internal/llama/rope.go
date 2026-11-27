@@ -40,6 +40,18 @@ type rope struct {
 // lookups. GGUF stores the base and scale, so the only inputs are the config and
 // the cache length.
 func newRope(cfg Config, nCtx int) (*rope, error) {
+	return newRopeAt(cfg, nCtx, cfg.RopeBase)
+}
+
+// newRopeAt is newRope for one frequency base, which is how a file that rotates its local and
+// global layers at different rates gets two tables from one config.
+//
+// Everything but the base is shared: the same layout, dimension count and head width, so the two
+// tables are interchangeable everywhere a rotation is applied. Only the angle differs, and it
+// differs for every dimension past the first pair -- base 10000 and base 1e6 agree on pair 0
+// (cos 0.5403) and disagree from pair 1 (0.9950 against 0.9995), which is why a model served at
+// the wrong one stays fluent.
+func newRopeAt(cfg Config, nCtx int, base float32) (*rope, error) {
 	if cfg.RopeDim%2 != 0 {
 		return nil, fmt.Errorf("llama: rope dim %d is not even", cfg.RopeDim)
 	}
@@ -51,7 +63,7 @@ func newRope(cfg Config, nCtx int) (*rope, error) {
 	// theta_scale is freq_base^(-2/n_dims): each successive dimension pair
 	// rotates at a geometrically lower frequency. This is the single constant
 	// that defines the whole embedding.
-	thetaScale := math.Pow(float64(cfg.RopeBase), -2.0/float64(cfg.RopeDim))
+	thetaScale := math.Pow(float64(base), -2.0/float64(cfg.RopeDim))
 
 	r := &rope{
 		layout:  cfg.RopeLayout,
@@ -88,6 +100,38 @@ func newRope(cfg Config, nCtx int) (*rope, error) {
 		}
 	}
 	return r, nil
+}
+
+// newLocalRope builds the second table a file asks for when its windowed layers rotate at a
+// different frequency from its full-attention ones, or returns nil when one table covers both.
+//
+// Nil rather than a duplicate table is the common case and the one worth not paying for: a model
+// whose two bases agree has one rotation, and every architecture but Gemma 3 leaves RopeBaseSWA
+// equal to RopeBase -- Gemma 2 included, because llama.cpp copies the global base into Gemma 2's
+// local one before reading the key, so a Gemma 2 file that omits it asks for a single rate.
+func newLocalRope(cfg Config, nCtx int) (*rope, error) {
+	if cfg.RopeBaseSWA == cfg.RopeBase {
+		return nil, nil
+	}
+	return newRopeAt(cfg, nCtx, cfg.RopeBaseSWA)
+}
+
+// ropeFor picks the rotation one layer uses.
+//
+// The predicate is windowFor, which is the same one attention uses to decide whether a layer reads
+// a bounded prefix -- and that is not a coincidence of this package's layout: llama.cpp makes the
+// same call, returning rope_freq_base_train_swa when hparams.is_swa(il) and the global base
+// otherwise, with is_swa set from the sliding-window pattern alone. Tying the two to one predicate
+// is what keeps a layer's window and its rotation from disagreeing.
+//
+// A layer with no window is never the local one, so a file that declares a second base but no
+// window at all rotates every layer at the global base -- which is what llama.cpp does too, since
+// its swa_type stays NONE and is_swa is false everywhere.
+func (m *Model) ropeFor(l int) *rope {
+	if m.ropeLocal != nil && windowFor(m.W.Config, l) > 0 {
+		return m.ropeLocal
+	}
+	return m.rope
 }
 
 // apply rotates one vector of headDim values at the given position, in place.

@@ -80,6 +80,18 @@ type Config struct {
 	// RopeBase is llama.rope.freq_base, the theta of the rotation.
 	RopeBase float32
 
+	// RopeBaseSWA is llama.rope.freq_base_swa, the theta the local layers rotate at. It is
+	// RopeBase unless the file names a different rate or the architecture has a default of its
+	// own, which today only gemma3 does.
+	//
+	// Gemma 2 and Gemma 3 can rotate their windowed layers and their full-attention layers at
+	// different rates. llama.cpp treats that as a property of the layer, not of the model: it
+	// picks rope_freq_base_train_swa for every layer is_swa reports and the global base for the
+	// rest. The same file therefore carries two rotations, and applying one to both layers is
+	// the failure this field exists to prevent -- the output stays fluent and every token is
+	// slightly wrong.
+	RopeBaseSWA float32
+
 	// RopeFreqs is the rope_freqs.weight tensor: one frequency divisor per dimension
 	// pair, or nil when the model has none.
 	//
@@ -232,6 +244,18 @@ type archSpec struct {
 	// before the rotation, which is what Qwen3 adds to Qwen2's layout. The weights are one
 	// vector of head-dim length per layer, shared by every head of that layer.
 	qkNorm bool
+	// swaRopeBase is the frequency a windowed layer rotates at when the file does not name one,
+	// or 0 when the architecture has a single rotation.
+	//
+	// It is a per-architecture default rather than a constant because the two architectures that
+	// have one disagree about the number and about whether it is needed at all. Gemma 2 copies
+	// the global base into it before reading the key, so its files that omit it rotate every
+	// layer alike; Gemma 3's Hugging Face config carries {"global": 1e6, "local": 1e4} and its
+	// converter writes neither into the GGUF, so a Gemma 3 file that omits the key still wants
+	// two rates. Measured on gemma-3-270m-it-Q8_0, which declares only the global base: served at
+	// one rate this engine answered 0 of llama.cpp's first 12 greedy tokens, and at two it
+	// answered all 12.
+	swaRopeBase float32
 }
 
 // archSpecs lists the architectures this package implements.
@@ -281,12 +305,13 @@ var archSpecs = map[string]archSpec{
 	// layer, so a checkpoint whose layers are all local is described exactly rather than rounded to
 	// a rule.
 	//
-	// It also rotates the local and global layers at different frequencies, which is the one piece
-	// this package does not implement: see docs/models.md.
+	// It also rotates its local and global layers at different frequencies -- 10000 and 1000000 by
+	// default -- which is the `swaRopeBase` field above.
 	"gemma3": {
 		rope: RopeNeox, attnBias: false,
 		embedScale: true, ffn: ffnGELU, qkNorm: true,
 		postNorms: true, slidingPattern: true,
+		swaRopeBase: 10000,
 	},
 }
 
@@ -463,6 +488,21 @@ func (p configParser) rotation(cfg *Config) error {
 		}
 		cfg.RopeBase = v
 	}
+	// No local rate named means the architecture's default, and for most of them that is the
+	// global rate itself: a Llama has one rotation and says nothing about a second.
+	cfg.RopeBaseSWA = cfg.RopeBase
+	if p.spec.swaRopeBase > 0 {
+		cfg.RopeBaseSWA = p.spec.swaRopeBase
+	}
+	if v, ok := f.Get[float32](arch + ".rope.freq_base_swa"); ok {
+		// Same guards as the global base, and for the same reasons: a NaN or +Inf base is not
+		// caught by a "<= 0" test, and either one turns every rotation past position 0 into NaN
+		// or into a constant. Named here rather than left to produce gibberish.
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) || v <= 0 {
+			return fmt.Errorf("llama: rope.freq_base_swa %v must be a finite positive number", v)
+		}
+		cfg.RopeBaseSWA = v
+	}
 	cfg.RopeScale = 1
 	if v, ok := f.Get[float32](arch + ".rope.scale_linear"); ok {
 		// A zero or negative scale keeps the default, which is this key's documented
@@ -576,15 +616,6 @@ func (p configParser) window(cfg *Config) error {
 		return err
 	}
 
-	// Gemma 3 can rotate local and global layers at different frequencies, and this package does
-	// not implement that: it keeps one rotation per model. Refused rather than served at the wrong
-	// rate, because a wrong rotation is invisible -- the output stays fluent and every token is
-	// slightly wrong -- and the file says plainly that two rates are wanted.
-	if base, ok := f.Get[float32](arch + ".rope.freq_base_swa"); ok && base != cfg.RopeBase {
-		return fmt.Errorf("llama: %s.rope.freq_base_swa = %g with a global base of %g: "+
-			"two rotation frequencies are not implemented", arch, base, cfg.RopeBase)
-	}
-
 	// Gemma scales the embeddings by sqrt(hidden) on the way in. Computed here, once, so the
 	// three lookup sites multiply by a constant instead of taking a square root per token.
 	if p.spec.embedScale {
@@ -603,6 +634,13 @@ func (p configParser) window(cfg *Config) error {
 
 	return nil
 }
+
+// gemma3WindowPeriod is the sliding-window pattern a Gemma 3 file gets when it declares none.
+//
+// It is llama.cpp's load_swa_pattern(ml, 6) default and Hugging Face's sliding_window_pattern
+// default in Gemma3TextConfig, which is what makes an absent key mean "every sixth layer global"
+// rather than "no window" or "every layer local".
+const gemma3WindowPeriod = 6
 
 // localLayers decides which layers a windowed model bounds.
 //
@@ -635,16 +673,38 @@ func (p configParser) localLayers(cfg *Config) error {
 			cfg.LocalLayers[l] = n == 0 || l%n < n-1
 		}
 	} else if cfg.WindowLen > 0 && arch == "gemma3" {
-		// No pattern key at all: llama.cpp's n_pattern == 0 case, where every layer is local.
+		// No pattern key at all: Gemma 3's default period of 6, not "every layer local".
 		//
-		// This is asserted per architecture rather than for any windowed one, because "the key is
-		// absent" means different things: Gemma 3's converter always writes the array and leaves
-		// it out only when every layer is local, while Gemma 2's files predate the key entirely
-		// and are described by the alternating rule. Applying Gemma 3's reading to Gemma 2
-		// bounded every layer instead of every second one.
+		// This branch used to make every layer local, on the reading that llama.cpp's
+		// load_swa_pattern falls through to its n_pattern == 0 case when the key is absent. It
+		// does not: src/models/gemma3.cpp calls load_swa_pattern(ml, 6), so an absent key keeps
+		// the 6 it was handed and set_swa_pattern turns layers 0-4 of every six local and layer 5
+		// global. Hugging Face's Gemma3TextConfig is the same number from the other side --
+		// sliding_window_pattern defaults to 6, and layer_types marks (i+1) % 6 == 0 as
+		// full_attention.
+		//
+		// Measured on gemma-3-270m-it-Q8_0, which declares this window and no pattern: at 1200
+		// tokens, where the window first separates the two readings, treating every layer as
+		// local put the top-8 log probabilities up to 12.8 nats from llama.cpp's, and the
+		// period-6 reading put them within 0.44. Shorter prompts separate them too, but as a
+		// rotation rather than as a window: at 202 tokens, where nothing is trimmed, the all-local
+		// reading answered none of llama.cpp's first 12 greedy tokens and the period-6 reading
+		// answered all 12, because the pattern is what decides which layers take the second base.
+		// At 513 tokens both readings happen to agree on the first ten greedy tokens while their
+		// log probabilities are 3.1 and 0.9 nats from llama.cpp -- which is why the six-token
+		// comparison this file used to cite reported agreement and was not evidence of anything.
+		//
+		// The checkpoint agrees on its own terms too, which is the measurement that needs no
+		// external reference: perplexity of held-out English past the window is 93.3 under this
+		// pattern and 124.8 under the all-local reading
+		// (TestGemma3PredictsEnglishPastTheWindowBetterThanTheWrongPattern).
+		//
+		// Asserted per architecture rather than for any windowed one, because "the key is absent"
+		// means different things: Gemma 2's files predate the key entirely and are described by
+		// the alternating rule, which is a period of 2 with the same dense_first=false shape.
 		cfg.LocalLayers = make([]bool, cfg.Layers)
 		for l := range cfg.LocalLayers {
-			cfg.LocalLayers[l] = true
+			cfg.LocalLayers[l] = l%gemma3WindowPeriod < gemma3WindowPeriod-1
 		}
 	}
 

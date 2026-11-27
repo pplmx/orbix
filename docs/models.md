@@ -65,11 +65,14 @@ ways that matter:
 - The attention softcap is gone. Gemma 2 bounds its scores with `attn_logit_softcapping`; Gemma 3's
   converter asserts the key is absent. The output softcap stays.
 - The sliding window is per layer, and the file says which. Gemma 3 270M declares a window of 512
-  and no pattern key, which llama.cpp reads as "every layer is local"; reading it as Gemma 2's
-  "every second layer" leaves nine of eighteen layers attending over the whole context. The absence
-  is only read that way for `gemma3`: Gemma 2's files predate the key and are described by the
-  alternating rule, so applying one architecture's convention to the other bounded the wrong
-  layers.
+  and no pattern key, which means the architecture's default period of 6: layers 0-4 of every six
+  are local and every sixth is global. The default is only applied for `gemma3`: Gemma 2's files
+  predate the key and are described by the alternating rule (a period of 2), so applying one
+  architecture's convention to the other bounds the wrong layers.
+- Its local and global layers rotate at different frequencies. Hugging Face's `Gemma3TextConfig`
+  carries `{"global": 1e6, "local": 1e4}`, and llama.cpp picks between `rope.freq_base` and
+  `rope.freq_base_swa` per layer, on the same predicate that decides which layers are windowed. A
+  file may name the local rate, or leave it to the architecture's default of 10000.
 
 Measured on gemma-3-270m-it-Q8_0 against llama.cpp 0.3.37: the prompt encodes to the same six ids
 and the greedy token agrees, with deviations of 0.0001, 0.66, 0.27, 0.08, 0.16, 0.42 and 0.66 nats
@@ -103,9 +106,45 @@ from this repository -- but both of its figures can be checked against the files
 41.434 is the first entry of `testdata/reference/gemma3-270m.json` (41.434478) and 42.015 is the
 first entry of `gemma3-513.json` (42.014675). The tests compare this engine against both files.
 
-Not implemented for `gemma3`: the separate rotation frequency for local layers. A file that declares
-`gemma3.rope.freq_base_swa` is refused rather than rotated at the wrong rate. The 270M checkpoint
-does not declare one, so it is unaffected.
+**The two frequencies and the layer pattern were both wrong here, and the two errors hid each
+other.** This package used to refuse `gemma3.rope.freq_base_swa` outright, and to read an absent
+pattern key as "every layer local". Measured on gemma-3-270m-it-Q8_0 at 1200 tokens, where the window
+first separates the readings, the old behaviour sat up to 12.8 nats from llama.cpp's top-8 log
+probabilities; the period-6 pattern with local layers at 1e4 is within 0.44. At the calibration
+prompts of 513 tokens and below, neither error is visible -- the window never binds, and a uniform
+base only shows up as the low-probability tail -- which is why the earlier comparisons, run on a
+six-token prompt, reported agreement.
+
+The absolute logits sit above llama.cpp's by roughly half a unit while the log probabilities agree
+to within 0.48 nats. Measured over the whole 262144-wide vector rather than its top eight: the
+difference has mean 0.505 and standard deviation 0.242, fits a constant offset better than a scale
+(slope 1.0084 if one is fitted, residual rms 0.236 against 0.242 for the constant), and is larger at
+the head of the distribution (0.72 for the top hundred) than in the tail (0.50). So it is a small
+global shift plus per-token noise, not a wrong distribution -- and it predates the two-frequency
+work: the old build produced 41.434 where llama.cpp produces 39.602.
+
+It is also not this engine against a reference implementation of the same arithmetic. The committed
+`gemma3-270m.json` agrees with the *old* build to about 1e-6 relative and differs from the new one by
+2.8%, which says the numpy side reproduced the old reading's arithmetic faithfully -- including the
+interpretation that was wrong. A constant offset of this size is what a different rounding of the
+final norm or the output projection looks like, and closing it is a separate question that this
+change neither answers nor depends on.
+
+It does mean the committed `gemma3-270m.json` and `gemma3-513.json` no longer describe this engine.
+Both were produced by a numpy reference that applied a single base to every layer, so the logits they
+hold are the old reading's, and `TestMatchesNumPyReferenceOnRealWeights` fails on them now that the
+engine matches llama.cpp. They are left in place rather than regenerated against the new build: a
+fixture rewritten to agree with the code it checks stops being an independent opinion, and the numpy
+script that made them is not in this repository -- see "Regenerating the expected values" for what
+writing one would take, and note that it must implement the per-layer rotation and the
+`is_swa`-shaped pattern for `gemma3` or it will reproduce the same two mistakes.
+
+What replaces them here is a check that needs no reference at all:
+`TestGemma3PredictsEnglishPastTheWindowBetterThanTheWrongPattern` scores the perplexity of held-out
+English past the window and asserts the trained reading is better. On the same checkpoint it is 93.3
+against 124.8. That is a direction rather than a figure, and it is the only form of evidence in this
+repository that a wrong *interpretation* cannot survive, because it does not consult anything that
+could be wrong in the same way.
 `mistral` is not, and the reason is worth stating because it is not a gap this project can close by
 working harder. The `mistral` architecture string is effectively retired upstream: the current
 llama.cpp converter writes `general.architecture = llama` for every Mistral checkpoint it converts

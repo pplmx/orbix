@@ -10,7 +10,7 @@
 | ------------------- | --------- | -------------- | -------- | --------- | --------- |
 | `internal/server`   | 5053      | 109            | 51       | 12605     | 2.49      |
 | `internal/tokenize` | 4872      | 138            | 109      | 7124      | 1.46      |
-| `internal/llama`    | 4868      | 135            | 40       | 13312     | 2.73      |
+| `internal/llama`    | 4991      | 138            | 42       | 13685     | 2.74      |
 | `cmd/orbix`         | 3913      | 85             | 81       | 8629      | 2.21      |
 | `internal/chat`     | 3333      | 81             | 41       | 5332      | 1.60      |
 | `internal/engine`   | 2090      | 47             | 20       | 6124      | 2.93      |
@@ -21,7 +21,7 @@
 | `internal/kernel`   | 711       | 28             | 20       | 2049      | 2.88      |
 | `internal/f16`      | 154       | 4              | 4        | 399       | 2.59      |
 | `internal/arch`     | 14        | 0              | 0        | 1646      | 117.57    |
-| **合计**            | **28696** | **759**        | **427**  | **63470** | **2.21**  |
+| **合计**            | **29171** | **765**        | **430**  | **66671** | **2.29**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -341,7 +341,7 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 
    真正修掉这一点的是给新构造逐个补上语料条目，并各做一次注入。四种改动当时**全都不让门槛变红**：`<` 改成 `<=`、切片的负起点当成 0、`split` 按首字符切、`namespace` 写回当前帧。原因是旧语料里没有相等边界、负索引、多字符分隔符，也没有 loop 之外的字段赋值。补上这些用例后再注入，四种都被抓住。语料条目是对照的判别力所在，不是例数。
 
-覆盖率与 checkpoint 门禁：73 处 `t.Skip` 分布在 28 个测试文件里（2026-11-27 复算；上一版写 72 和 28，再上一版 74 和 29，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+覆盖率与 checkpoint 门禁：74 处 `t.Skip` 分布在 28 个测试文件里（2026-11-28 复算；上一版写 73 和 28，再上一版写 72 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
 
 少掉的那一处是 `TestParseScalesLinearlyInTagCount` 里的计时器精度保护：判据从「两个规模的时间比」改成「20000 个标签的绝对预算」之后，零值分支落进比较本身，不再需要单独 `t.Skip`。那次改写的原因见那条测试的注释——比值形式的阈值在共享 runner 上把机器负载报成了回归，两次。
 
@@ -503,7 +503,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
 **20 个函数在 100 行以上**（2026-11-26 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；762 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；765 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
@@ -518,7 +518,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**现存 20 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，762 个函数）：`chat.evalExpr`
+**现存 20 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，765 个函数）：`chat.evalExpr`
 316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
 205、`server.generate` 208、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
 141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`

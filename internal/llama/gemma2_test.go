@@ -3,11 +3,14 @@ package llama
 import (
 	"math"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/gguftest"
+	"github.com/pplmx/orbix/internal/kernel"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -494,51 +497,421 @@ func TestGemma3MatchesReferenceLogprobs(t *testing.T) {
 	if cfg.WindowLen != 512 {
 		t.Errorf("window = %d, want 512", cfg.WindowLen)
 	}
+	// This file declares no pattern key, so the architecture's default fills the pattern in: layers
+	// 0-4 of every six are local and every sixth is global. The assertion used to be that every
+	// layer was bounded, on the reading that llama.cpp's absent key means "all local"; that is not
+	// what it does -- gemma3.cpp calls load_swa_pattern(ml, 6) -- and the difference is worth 12.8
+	// nats at 1200 tokens, see TestGemma3DefaultWindowPatternIsEverySixthLayer.
+	local := 0
 	for l := range cfg.Layers {
-		if windowFor(cfg, l) == 0 {
-			t.Errorf("layer %d is unbounded; this file declares no pattern, so every layer is"+
-				" local", l)
+		if windowFor(cfg, l) > 0 {
+			local++
+		}
+	}
+	if want := cfg.Layers / gemma3WindowPeriod * (gemma3WindowPeriod - 1); local != want {
+		t.Errorf("%d of %d layers are bounded, want %d: this file declares no pattern and a period"+
+			" of %d bounds all but every %dth", local, cfg.Layers, want,
+			gemma3WindowPeriod, gemma3WindowPeriod)
+	}
+}
+
+// TestEveryForwardPathUsesTheLayerRotation covers the wiring, not the arithmetic.
+//
+// Model has four forward paths -- Forward, attentionCached, Prefill and DecodeStep -- and each has
+// its own loop over heads calling rope.apply. A second table that only Forward consults would
+// leave three paths rotating at the wrong rate, and no test above can see it: they check that
+// ropeFor answers correctly, not that anyone asks it.
+//
+// The check is a value comparison rather than a coverage claim. Each path is run on a model whose
+// two bases are deliberately extreme, and the result is compared against the same path run with
+// the two bases swapped. If a path reads the global table unconditionally, both runs agree.
+func TestEveryForwardPathUsesTheLayerRotation(t *testing.T) {
+	// Every layer local (a two-layer fixture is inside the period-6 default on both layers), so
+	// the local table is the one every path has to reach for.
+	build := func(localBase float32) *Model {
+		path := gguftest.Model{Arch: "gemma3", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
+			QKNorm: true, PostNorms: true, WindowLen: 8, ContextLen: 32, NoEOS: true,
+			ExtraFloatKey: "gemma3.rope.freq_base", ExtraFloatValue: 1000000,
+		}.Write(t, t.TempDir())
+		// The local base is patched on the config rather than written as a second key, because
+		// the fixture writes one extra float and the point here is the selector, not the parsing.
+		m, err := NewWithOptions(path, Options{Workers: 1})
+		if err != nil {
+			t.Fatalf("NewWithOptions: %v", err)
+		}
+		m.W.Config.RopeBaseSWA = localBase
+		r, err := newLocalRope(m.W.Config, m.W.Config.ContextLen)
+		if err != nil {
+			t.Fatalf("newLocalRope: %v", err)
+		}
+		m.ropeLocal = r
+		if r == nil {
+			t.Fatal("the model has one table, so this test cannot tell the paths apart")
+		}
+		return m
+	}
+
+	tokens := []int32{1, 2, 3, 4}
+
+	// Forward: one token at a time.
+	forward := func(m *Model) []float32 {
+		cache, err := NewKVCache(m.Config(), 16)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		var logits []float32
+		for pos, tok := range tokens {
+			logits, err = m.Forward(cache, int(tok), pos)
+			if err != nil {
+				t.Fatalf("Forward: %v", err)
+			}
+		}
+		return slices.Clone(logits)
+	}
+	// Prefill: all four positions in one pass.
+	prefill := func(m *Model) []float32 {
+		cache, err := NewKVCache(m.Config(), 16)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		logits, err := m.Prefill(cache, tokens, 0)
+		if err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		return slices.Clone(logits)
+	}
+	// DecodeStep: four sequences advanced together, each past position 0.
+	//
+	// The two prefixes matter. At position 0 the rotation is the identity for every base, so a
+	// DecodeStep driven on empty caches returns the same logits whatever the table holds; the
+	// first version of this test did exactly that and passed for the wrong reason.
+	decode := func(m *Model) []float32 {
+		cs := make([]Cache, len(tokens))
+		for i := range cs {
+			c, err := NewKVCache(m.Config(), 16)
+			if err != nil {
+				t.Fatalf("NewKVCache: %v", err)
+			}
+			if _, err := m.Prefill(c, []int32{1, 2}, 0); err != nil {
+				t.Fatalf("Prefill: %v", err)
+			}
+			cs[i] = c
+		}
+		logits, err := m.DecodeStep(cs, tokens)
+		if err != nil {
+			t.Fatalf("DecodeStep: %v", err)
+		}
+		return slices.Clone(logits)
+	}
+	// attentionCached: prefill a prefix, then score one more token against the stored positions.
+	cached := func(m *Model) []float32 {
+		pool, err := NewBlockPool(m.Config(), BlockPoolOptions{BlockSize: 4, Blocks: 16})
+		if err != nil {
+			t.Fatalf("NewBlockPool: %v", err)
+		}
+		cache := pool.New()
+		if _, err := m.PrefillWithPrefix(cache, tokens[:3], 0); err != nil {
+			t.Fatalf("PrefillWithPrefix: %v", err)
+		}
+		out, err := m.logitsForCached(cache, tokens, 3)
+		if err != nil {
+			t.Fatalf("logitsForCached: %v", err)
+		}
+		return slices.Clone(out)
+	}
+
+	for _, c := range []struct {
+		name string
+		run  func(*Model) []float32
+	}{
+		{"Forward", forward},
+		{"Prefill", prefill},
+		{"DecodeStep", decode},
+		{"attentionCached", cached},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := c.run(build(1e4))
+			b := c.run(build(7e5))
+			if slices.Equal(a, b) {
+				t.Errorf("%s produced identical logits for local bases 1e4 and 7e5, so it is not "+
+					"reading the local table at all", c.name)
+			}
+		})
+	}
+}
+
+// modelFromWeights builds the scratch buffers a Model needs around already-loaded weights, so a
+// test can vary the Config without re-reading the file. NewWithOptions is the production path and
+// takes a path, not a *Weights; this exists only to run the same model under two configs.
+func modelFromWeights(t *testing.T, w *Weights) *Model {
+	t.Helper()
+	cfg := w.Config
+	r, err := newRope(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("newRope: %v", err)
+	}
+	local, err := newLocalRope(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("newLocalRope: %v", err)
+	}
+	return &Model{
+		W: w, rope: r, ropeLocal: local, run: kernel.NewRunner(1),
+		x: make([]float32, cfg.Hidden), xn: make([]float32, cfg.Hidden),
+		q: make([]float32, cfg.Heads*cfg.HeadDim), k: make([]float32, cfg.kvDim()),
+		v: make([]float32, cfg.kvDim()), attn: make([]float32, cfg.Heads*cfg.HeadDim),
+		attnOut: make([]float32, cfg.Hidden), gate: make([]float32, cfg.FFN),
+		up: make([]float32, cfg.FFN), scores: make([]float32, cfg.ContextLen),
+		logits: make([]float32, cfg.VocabSize),
+	}
+}
+
+// TestGemma3PredictsEnglishPastTheWindowBetterThanTheWrongPattern is the evidence that needs no
+// reference at all.
+//
+// The tests above pin the rotation and the pattern against llama.cpp and against Hugging Face's
+// config, both outside this repository. This one asks the checkpoint: Gemma 3 was trained on text,
+// so the interpretation it was trained with predicts held-out English better than one it was not.
+// A direction, not a figure, and the direction is the thing a comparison against a wrong reference
+// cannot supply -- a wrong reading is fluently wrong, which is what made both defects survive.
+//
+// Only positions past the window are scored, and that restriction is the measurement rather than a
+// convenience. Over the whole passage the two readings are 93.7 and 105.4 perplexity, a nine-tenths
+// ratio that is a real difference but a weak discriminator. Split at the window it is stark:
+// positions 1..511 score 93.9 against 101.3, and positions 512 onwards score 93.3 against 124.8.
+// The first half is a rotation difference seen through a context that never binds; the second is
+// what the window and the local layers actually do. All of the signal is in the second half.
+//
+// Measured on gemma-3-270m-it-Q8_0 with testdata/gemma3-nll.txt, 639 tokens: the trained reading
+// scores 93.3 past the window and the old one -- every layer local, one base of 1e6 -- scores 124.8.
+func TestGemma3PredictsEnglishPastTheWindowBetterThanTheWrongPattern(t *testing.T) {
+	path := os.Getenv("GEMMA3_MODEL")
+	if path == "" {
+		t.Skip("set GEMMA3_MODEL to a Gemma 3 GGUF file")
+	}
+	raw, err := os.ReadFile(filepath.Join("testdata", "gemma3-nll.txt"))
+	if err != nil {
+		t.Fatalf("read the passage: %v", err)
+	}
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	tok, err := tokenize.New(f)
+	if err != nil {
+		t.Fatalf("tokenizer: %v", err)
+	}
+	ids := tok.Encode(string(raw), true)
+
+	// perplexityPastWindow runs the model under one config and returns the perplexity of the
+	// positions after the first window, where the two readings diverge.
+	perplexityPastWindow := func(mutate func(*Config)) (float64, int) {
+		w, err := LoadWeights(path)
+		if err != nil {
+			t.Fatalf("LoadWeights: %v", err)
+		}
+		cfg := w.Config
+		mutate(&cfg)
+		w.Config = cfg
+		m := modelFromWeights(t, w)
+		cache, err := NewKVCache(cfg, len(ids)+8)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		var logits []float32
+		var nll float64
+		counted := 0
+		for pos, id := range ids {
+			// Position pos is predicted by the logits left by position pos-1, so the first
+			// position past the window is the one whose predecessor is at the window's edge.
+			if pos > cfg.WindowLen {
+				nll -= logSoftmax(logits, id)
+				counted++
+			}
+			if logits, err = m.Forward(cache, int(id), pos); err != nil {
+				t.Fatalf("Forward at %d: %v", pos, err)
+			}
+		}
+		if counted < 50 {
+			t.Fatalf("only %d positions past the window; the passage is too short to measure a "+
+				"difference there", counted)
+		}
+		return math.Exp(nll / float64(counted)), counted
+	}
+
+	trained, n := perplexityPastWindow(func(*Config) {})
+	// The reading this package used before the fix: every layer local, one rotation for all.
+	before, _ := perplexityPastWindow(func(c *Config) {
+		all := make([]bool, c.Layers)
+		for i := range all {
+			all[i] = true
+		}
+		c.LocalLayers = all
+		c.RopeBaseSWA = c.RopeBase
+	})
+
+	t.Logf("perplexity past the window over %d positions: trained reading %.1f, the old one %.1f",
+		n, trained, before)
+	// A quarter better, against the measured ratio of 0.747. The margin is set well inside the
+	// measurement so that a tokenizer change or a different quantisation of the same model does not
+	// fail the test, while a reading that is wrong in the way the old one was cannot pass it.
+	if !(trained < before*0.9) {
+		t.Errorf("the trained reading scores %.1f past the window and the old one %.1f; the "+
+			"trained one has to be at least a tenth better, and that direction is what identifies "+
+			"which reading this checkpoint was trained with", trained, before)
+	}
+}
+
+// TestGemma3DefaultWindowPatternIsEverySixthLayer pins the pattern a Gemma 3 file gets when it
+// declares a window and no pattern.
+//
+// The branch used to make every layer local, reading llama.cpp's load_swa_pattern fallthrough as
+// "n_pattern 0 means all local". llama.cpp calls load_swa_pattern(ml, 6) for gemma3, so an absent
+// key keeps the 6 it was handed: layers 0-4 of every six are local and layer 5 is global. Hugging
+// Face's Gemma3TextConfig says the same thing from the other side, with sliding_window_pattern
+// defaulting to 6 and layer_types marking (i+1) % 6 == 0 as full_attention.
+//
+// Measured on gemma-3-270m-it-Q8_0 at 1200 tokens, where the window first separates the readings:
+// all-local put the top-8 log probabilities up to 12.8 nats from llama.cpp's, period-6 within 0.44.
+// Prompts of 513 tokens and below cannot see it, which is why the earlier evidence missed this.
+func TestGemma3DefaultWindowPatternIsEverySixthLayer(t *testing.T) {
+	// Twelve layers, so the pattern repeats twice and a rule that only got the first six right
+	// would still be caught.
+	path := gguftest.Model{Arch: "gemma3", Layers: 12, Hidden: 32, Heads: 4, FFN: 64,
+		QKNorm: true, PostNorms: true, WindowLen: 512,
+	}.Write(t, t.TempDir())
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if len(cfg.LocalLayers) != 12 {
+		t.Fatalf("LocalLayers has %d entries for 12 layers; the file declares no pattern key and "+
+			"the architecture's default should have filled one in", len(cfg.LocalLayers))
+	}
+	// Index 5 and 11 are the global layers: every sixth, counted from zero.
+	want := []bool{
+		true, true, true, true, true, false,
+		true, true, true, true, true, false,
+	}
+	for l := range want {
+		if cfg.LocalLayers[l] != want[l] {
+			t.Errorf("layer %d local = %v, want %v", l, cfg.LocalLayers[l], want[l])
+		}
+		// windowFor is the predicate everything downstream keys off -- attention bounds and, since
+		// the two-frequency change, which rotation table a layer uses -- so the bit and its
+		// consequence are both asserted.
+		bounded := windowFor(cfg, l) > 0
+		if bounded != want[l] {
+			t.Errorf("layer %d windowFor = %d, want a bounded window: %v", l, windowFor(cfg, l), want[l])
 		}
 	}
 }
 
-// TestGemma3RefusesTwoRotationFrequencies covers the one part of Gemma 3 this package leaves out.
+// TestGemma3RotatesLocalAndGlobalLayersAtTheirOwnFrequencies covers the per-layer rotation, which
+// this package used to refuse rather than implement.
 //
-// Gemma 3 can rotate its local layers and its global layers at different rates, declared as
-// gemma3.rope.freq_base_swa alongside the model-wide base. This package keeps one rotation per
-// model, so a file asking for two would be served with the wrong one on half its layers -- and a
-// wrong rotation is invisible: the output stays fluent and every token is slightly wrong.
+// Gemma 3 rotates its windowed layers and its full-attention layers at different rates: Hugging
+// Face's Gemma3TextConfig carries {"global": 1e6, "local": 1e4}, and llama.cpp picks between
+// rope_freq_base_train_swa and the global base per layer, on the same is_swa predicate that decides
+// which layers read a bounded window. A file may name the local rate as rope.freq_base_swa or leave
+// it to the architecture's default.
 //
-// Refused rather than ignored, because a file that says what it needs and does not get it is the
-// failure mode this package is built to avoid. Equal values are not a conflict: a file that repeats
-// the global base for its local layers asks for the single rotation this package has.
-func TestGemma3RefusesTwoRotationFrequencies(t *testing.T) {
-	// The fixture writes no rope.freq_base, so the global base is this package's default of 10000;
-	// the local base has to differ from that to be a second frequency. 10000 would have been the
-	// same single rotation and the test would have passed for the wrong reason.
-	dir := t.TempDir()
-	path := gguftest.Model{Arch: "gemma3", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
-		ExtraFloatKey: "gemma3.rope.freq_base_swa", ExtraFloatValue: 1000000,
-	}.Write(t, dir)
-	_, err := NewWithOptions(path, Options{})
-	if err == nil {
-		t.Fatal("a file with two rotation frequencies loaded; it would rotate half its layers wrongly")
+// What it costs to get wrong is measured on gemma-3-270m-it-Q8_0, which declares only the global
+// base: served at one rate this engine was up to 12.8 nats away from llama.cpp's top-8 log
+// probabilities at 1200 tokens, and at two rates within 0.44. -- see docs/models.md.
+//
+// The test drives the selector directly rather than through a forward pass, because a two-layer
+// fixture's window is wider than its context: nothing in a fixture can make the choice visible in
+// a logit, and a test that claimed to would be measuring something else.
+func TestGemma3RotatesLocalAndGlobalLayersAtTheirOwnFrequencies(t *testing.T) {
+	// A gemma3 fixture with a window narrower than its context, so the period-6 default separates
+	// the layers. The window is what makes a layer local; the base only says which table it uses.
+	// The global base has to differ from gemma3's local default of 10000 for the second table to
+	// exist at all; a fixture that leaves both at the package default has one rotation and would
+	// pass every assertion below for the wrong reason.
+	path := gguftest.Model{Arch: "gemma3", Layers: 6, Hidden: 32, Heads: 4, FFN: 64,
+		QKNorm: true, PostNorms: true, WindowLen: 2,
+		ExtraFloatKey: "gemma3.rope.freq_base", ExtraFloatValue: 1000000,
+	}.Write(t, t.TempDir())
+	m, err := NewWithOptions(path, Options{})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
 	}
-	// The message has to carry both numbers, so an operator can see which two the file asks for.
-	for _, want := range []string{"1e+06", "10000", "two rotation frequencies"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
+	cfg := m.Config()
+
+	// The default: no key in the file, so the architecture's own second rate.
+	if cfg.RopeBaseSWA != 10000 {
+		t.Errorf("RopeBaseSWA = %g on a gemma3 file that names no local rate, want the 10000 its "+
+			"architecture defaults to", cfg.RopeBaseSWA)
+	}
+	if m.ropeLocal == nil {
+		t.Fatal("no second rotation table was built, so every layer would rotate at the global base")
+	}
+
+	// Layers 0..4 of each period are local and layer 5 is global, which is what makes the two
+	// tables reachable at all. Asserted here because the selector's answer is meaningless if the
+	// pattern is wrong: with every layer global, both tables would be correct and unused.
+	wantLocal := []bool{true, true, true, true, true, false}
+	for l, want := range wantLocal {
+		if got := windowFor(cfg, l) > 0; got != want {
+			t.Errorf("layer %d local = %v, want %v", l, got, want)
+		}
+		if got := m.ropeFor(l) == m.ropeLocal; got != want {
+			t.Errorf("layer %d uses the local table = %v, want %v", l, got, want)
 		}
 	}
 
-	// A file repeating the global base is the single rotation this package implements. Checked on
-	// a plain llama fixture rather than a gemma3 one, so the assertion is about the frequency check
-	// and not about the QK-norm tensors a gemma3 file would also need.
-	same := gguftest.Model{Arch: "llama", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
-		ExtraFloatKey: "llama.rope.freq_base_swa", ExtraFloatValue: 10000,
+	// A file that names its own local rate gets that rate, over the architecture's default.
+	explicit := gguftest.Model{Arch: "gemma3", Layers: 6, Hidden: 32, Heads: 4, FFN: 64,
+		QKNorm: true, PostNorms: true,
+		ExtraFloatKey: "gemma3.rope.freq_base_swa", ExtraFloatValue: 500000,
 	}.Write(t, t.TempDir())
-	if _, err := NewWithOptions(same, Options{}); err != nil {
-		t.Errorf("a file whose local and global bases agree was refused: %v", err)
+	got, err := NewWithOptions(explicit, Options{})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
+	}
+	if got.Config().RopeBaseSWA != 500000 {
+		t.Errorf("RopeBaseSWA = %g, want the file's 500000", got.Config().RopeBaseSWA)
+	}
+
+	// A plain llama file has one rotation and must not pay for a second table.
+	plain := gguftest.Model{Arch: "llama", Layers: 2, Hidden: 32, Heads: 4, FFN: 64}.Write(t, t.TempDir())
+	lm, err := NewWithOptions(plain, Options{})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
+	}
+	if lm.ropeLocal != nil {
+		t.Error("a llama model built a second rotation table; it declares one frequency")
+	}
+	if got, want := lm.Config().RopeBaseSWA, lm.Config().RopeBase; got != want {
+		t.Errorf("RopeBaseSWA = %g, want the global base %g", got, want)
+	}
+}
+
+// TestRopeFreqBaseSWAIsRefusedWhenNotFinite covers the guards on the second base.
+//
+// The two values that matter are the ones a "<= 0" test lets through: NaN becomes the base of the
+// exponent and turns every table entry past position 0 into NaN, and +Inf collapses every frequency
+// to 1 so the rotation stops distinguishing positions. Both are refused by name rather than served
+// as a model whose output is silently wrong.
+func TestRopeFreqBaseSWAIsRefusedWhenNotFinite(t *testing.T) {
+	for _, v := range []float64{math.NaN(), math.Inf(1), 0, -1} {
+		path := gguftest.Model{Arch: "gemma3", Layers: 2, Hidden: 32, Heads: 4, FFN: 64,
+			QKNorm: true, PostNorms: true,
+			ExtraFloatKey: "gemma3.rope.freq_base_swa", ExtraFloatValue: float32(v),
+		}.Write(t, t.TempDir())
+		_, err := NewWithOptions(path, Options{})
+		if err == nil {
+			t.Errorf("a file with rope.freq_base_swa = %v loaded", v)
+			continue
+		}
+		if !strings.Contains(err.Error(), "freq_base_swa") {
+			t.Errorf("error %q does not name the key that was wrong", err)
+		}
 	}
 }
 

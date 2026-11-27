@@ -17,6 +17,13 @@ import (
 type Model struct {
 	W    *Weights
 	rope *rope
+	// ropeLocal is the rotation for the layers the file bounds with a sliding window, when it
+	// asks for a different frequency there than everywhere else. Nil on every model that
+	// rotates all layers alike, which today is everything but Gemma 3.
+	//
+	// The two tables are interchangeable -- same layout, dims and head width -- so the choice
+	// is a pointer per layer, and ropeFor is the only place that makes it.
+	ropeLocal *rope
 
 	// run splits the partitionable kernels across goroutines. Decoding a token is a
 	// chain of matrix-vector products bounded by memory bandwidth, not arithmetic, so
@@ -101,19 +108,24 @@ func NewWithOptions(path string, opts Options) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	local, err := newLocalRope(cfg, cfg.ContextLen)
+	if err != nil {
+		return nil, err
+	}
 	return &Model{
-		W:       w,
-		rope:    r,
-		run:     kernel.NewRunner(workers(opts.Workers)),
-		x:       make([]float32, cfg.Hidden),
-		xn:      make([]float32, cfg.Hidden),
-		q:       make([]float32, cfg.Heads*cfg.HeadDim),
-		k:       make([]float32, cfg.kvDim()),
-		v:       make([]float32, cfg.kvDim()),
-		attn:    make([]float32, cfg.Heads*cfg.HeadDim),
-		attnOut: make([]float32, cfg.Hidden),
-		gate:    make([]float32, cfg.FFN),
-		up:      make([]float32, cfg.FFN),
+		W:         w,
+		rope:      r,
+		ropeLocal: local,
+		run:       kernel.NewRunner(workers(opts.Workers)),
+		x:         make([]float32, cfg.Hidden),
+		xn:        make([]float32, cfg.Hidden),
+		q:         make([]float32, cfg.Heads*cfg.HeadDim),
+		k:         make([]float32, cfg.kvDim()),
+		v:         make([]float32, cfg.kvDim()),
+		attn:      make([]float32, cfg.Heads*cfg.HeadDim),
+		attnOut:   make([]float32, cfg.Hidden),
+		gate:      make([]float32, cfg.FFN),
+		up:        make([]float32, cfg.FFN),
 		// Only a MoE model needs these, and their size comes from the config rather
 		// than from a guess: a model with no experts gets nil and never allocates.
 		routerLogits: make([]float32, max(cfg.Experts, 0)),
@@ -240,14 +252,16 @@ func (m *Model) attention(cache Cache, l int, pos int) error {
 	if err := m.normQK(layer, m.q, m.k, cfg.Heads, cfg.KVHeads); err != nil {
 		return err
 	}
-	// Rotate each head's query and the corresponding key at this position.
+	// Rotate each head's query and the corresponding key at this position, at the frequency
+	// this layer uses.
+	rot := m.ropeFor(l)
 	for h := range cfg.Heads {
-		if err := m.rope.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+		if err := rot.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
 			return err
 		}
 	}
 	for h := range cfg.KVHeads {
-		if err := m.rope.apply(m.k[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+		if err := rot.apply(m.k[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
 			return err
 		}
 	}

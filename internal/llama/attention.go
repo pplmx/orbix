@@ -269,8 +269,9 @@ func (m *Model) attentionCached(cache *PagedKVCache, l, pos int) error {
 	if err := m.normQK(layer, m.q, nil, cfg.Heads, 0); err != nil {
 		return err
 	}
+	rot := m.ropeFor(l)
 	for h := range cfg.Heads {
-		if err := m.rope.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
+		if err := rot.apply(m.q[h*cfg.HeadDim:(h+1)*cfg.HeadDim], pos); err != nil {
 			return err
 		}
 	}

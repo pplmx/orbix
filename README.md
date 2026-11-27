@@ -55,6 +55,12 @@ and no package manager to patch -- `orbix healthcheck` is the probe, and it is w
 own `HEALTHCHECK` runs. The process is uid 65534; a checkpoint mounted `600` owned by root will
 not be readable, so either leave it world-readable or chown it to that uid.
 
+**Shutdown has two timeouts and the smaller one wins.** `docker stop` sends SIGTERM, waits ten
+seconds by default, then SIGKILLs; `serve` holds in-flight responses for `--shutdown-grace`,
+default five seconds. Raising the grace above ten needs a matching `docker stop -t`, or the
+process is killed mid-response however the flag is set. [Usage](docs/usage.md) has the
+measured timings, under "Behind a reverse proxy".
+
 `just docker` builds the same image locally and prints the version string inside it.
 
 ## Documentation

@@ -95,5 +95,12 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
     CMD ["/orbix", "healthcheck", "--addr", "http://127.0.0.1:8080", "--quiet"]
 
+# SIGTERM is what `docker stop` sends, and serve already waits on it for --shutdown-grace. The
+# two timeouts interact and the smaller one wins: docker waits 10s by default and then SIGKILLs,
+# so a --shutdown-grace above that has to be matched with `docker stop -t`, or the shutdown is
+# cut at ten seconds however the flag is set. Declared rather than defaulted so the signal is
+# visible in `docker inspect`, and so a future change of default cannot make it implicit.
+STOPSIGNAL SIGTERM
+
 ENTRYPOINT ["/orbix"]
 CMD ["serve", "--model", "/models/model.gguf", "--addr", ":8080"]

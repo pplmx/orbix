@@ -28,6 +28,7 @@ func TestDumpPreSplit(t *testing.T) {
 		"gpt2": preGPT2, "llama3": preLlama3, "qwen2": preQwen2, "tekken": preTekken,
 		"jais2": preJais2, "bailingmoe": preBailingMoE,
 		"superbpe": preSuperBPE, "laguna": preLaguna,
+		"tinyaya": preTinyAya,
 	}
 	inputs := []string{
 		"hello world", "a.b", "it's 42", "  x  ", "", " ", "\n\n", "a\tb",
@@ -66,6 +67,12 @@ func TestDumpPreSplit(t *testing.T) {
 		// laguna runs a newline pass first, so whitespace before a newline is its own chunk rather
 		// than joining the newline: " x \n y " splits as [" x", " ", "\n", " y", " "].
 		" x \n y ", "x \n", "  \n  x", "a\n\nb",
+		// tiny_aya runs a decimal pass before a \p{N} one, so the interesting inputs are the
+		// characters where those two classes disagree: a superscript digit is \p{N} but not \d,
+		// which is why "1\u00b2" cuts after the 1. The rest straddle the three-digit grouping and
+		// the word boundary the first pass requires.
+		"1234", "1234567", "1\u00b2", "1234567890123", "abc123def", "12 345",
+		"HELLOworld", "don't",
 	}
 	got := make(map[string]map[string][]string, len(families))
 	for name, pre := range families {

@@ -92,6 +92,19 @@ PATTERNS = {
 # lookahead -- `(?=(\d{3})+(?!\d))` -- which splits a digit run without consuming anything, and
 # only means "group from the right" because it runs after `\p{N}+` has already isolated the run.
 TWO_PASS = {
+    # tiny_aya's, same file under LLAMA_VOCAB_PRE_TYPE_TINY_AYA. Two expressions whose digit
+    # classes differ: the first cuts a \d run into threes from the right where a word boundary
+    # follows, the second handles what is left with the wider \p{N}{1,3}. Folding them into one
+    # pass gets "1\u00b2" wrong -- \u00b2 is \p{N} but not \d, and a boundary follows the 1, so
+    # the first pass cuts there and the second leaves the superscript alone.
+    "tinyaya": [
+        r"\d{1,3}(?=(?:\d{3})*\b)",
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+"
+        r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+        r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*"
+        r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+        r"|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+    ],
     "superbpe": [r"\p{N}+", r"(?=(\d{3})+(?!\d))"],
     "laguna": [
         r"[^\n]+|[\n]+",

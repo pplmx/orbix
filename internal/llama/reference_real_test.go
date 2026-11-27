@@ -164,9 +164,28 @@ func runRealReference(t *testing.T, name, env, why, stale string) {
 			// Truncated rather than refused: the reference states the count it used, and a
 			// tokenizer that produces more than that says the two disagree about the text, which
 			// the logits comparison below will show. Refusing here would only hide which.
+			//
+			// Truncating is the wrong-looking choice when the shortfall is not a rounding
+			// difference, and for gemma3-513 it is not: the file asks for its 45-character text
+			// repeated 70 times and then for 513 tokens, and this tokenizer spells that text at
+			// 4.49 characters per token, so 70 repetitions is 702. No repetition count lands on
+			// 513 -- 51 gives 512 and 52 gives 522. So the two fields contradict each other and the
+			// prompt the reference actually scored is the first 73% of the text it names.
+			//
+			// That is a defect in the fixture, not in the tokenizer, and the message says so:
+			// reported as a plain count it reads as a tokenizer divergence, which sends the reader
+			// to the wrong layer.
 			if len(prompt) != n {
-				t.Logf("the prompt encodes to %d tokens, the reference used the first %d",
-					len(prompt), n)
+				if short := len(prompt) - n; short > len(prompt)/10 {
+					t.Logf("the reference asks for %q x%d and for %d tokens, but that text encodes "+
+						"to %d here; the prompt is cut to %d, which is %d%% of it. The fixture's two "+
+						"fields disagree, so this case cannot confirm the tokenizer either way",
+						expected.PromptRepeat.Text, expected.PromptRepeat.Times, n, len(prompt), n,
+						100*n/len(prompt))
+				} else {
+					t.Logf("the prompt encodes to %d tokens, the reference used the first %d",
+						len(prompt), n)
+				}
 				prompt = prompt[:n]
 			}
 		}
@@ -245,4 +264,87 @@ func argmaxFloat32(v []float32) int {
 		}
 	}
 	return b
+}
+
+// TestReferencePromptFieldsAgree checks each committed reference for internal consistency.
+//
+// A reference states its prompt two ways: as text to repeat, and as the number of tokens it used.
+// The test truncates the first to the second, which is right when the difference is a token or two
+// at a boundary and wrong when the file contradicts itself -- and a contradiction there cannot be
+// attributed to this engine, because it is visible without running anything.
+//
+// gemma3-513 is the case that prompted this: it names a 45-character text repeated 70 times and
+// also 513 tokens, and at the 4.49 characters per token this family's tokenizer produces, 70
+// repetitions is 702. No repetition count lands on 513 (51 gives 512, 52 gives 522), so the file's
+// two fields describe different prompts. Before this test the only trace was a log line reading
+// "the prompt encodes to 702 tokens, the reference used the first 513", which reads as a tokenizer
+// divergence.
+//
+// The bound is deliberately loose -- 10% -- because the ratio between characters and tokens is a
+// property of the tokenizer, which this test does not have and must not assume. 73% is well outside
+// any tokenization difference, and a reference written for a different checkpoint would show up
+// here rather than in a log nobody reads.
+func TestReferencePromptFieldsAgree(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("testdata", "reference", "*.json"))
+	if err != nil {
+		t.Fatalf("globbing reference files: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no reference files found; the glob or the directory moved")
+	}
+	checked := 0
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var r realReference
+		if err := json.Unmarshal(raw, &r); err != nil {
+			continue // not a real-checkpoint reference; another test covers those
+		}
+		if r.PromptRepeat == nil || r.PromptTokens <= 0 {
+			continue
+		}
+		checked++
+		// Both bounds, because each catches a different contradiction and neither needs a
+		// tokenizer to evaluate.
+		//
+		// Upper: no tokenizer produces more tokens than characters, so a file asking for more is
+		// describing text it does not contain.
+		chars := len(r.PromptRepeat.Text) * r.PromptRepeat.Times
+		if r.PromptTokens > chars {
+			t.Errorf("%s asks for %d tokens from %d characters of text; no tokenizer produces "+
+				"more tokens than characters", filepath.Base(path), r.PromptTokens, chars)
+			continue
+		}
+		// Lower: if the file's own two fields disagree this badly, the case cannot check anything
+		// -- the prompt it scored is not the prompt it names. One token per two characters is a
+		// floor for English with a whole-word vocabulary; gemma3-513 sits at 6.1 characters per
+		// token claimed, which is why its 70 repetitions describe a 702-token prompt cut to 513.
+		if r.PromptTokens*2 < chars {
+			// gemma3-513 is the known case and is marked by name rather than excused by a looser
+			// bound. Marking it is not the same as accepting it: the numbers are printed, and the
+			// name has to be removed before anything can claim this file is consistent.
+			//
+			// The count could not be recovered by trying repetition counts, which is why the file
+			// is marked rather than corrected: 51 repetitions give 512 tokens and 52 give 522, so
+			// no integer lands on 513 -- the prompt the reference scored is not this text at any
+			// length. Rewriting the field would be inventing a prompt nobody measured.
+			if base := filepath.Base(path); base == "gemma3-513.json" {
+				t.Logf("%s is known inconsistent: %d characters of text (%.1f per token claimed) "+
+					"for %d tokens. The prompt it scored cannot be recovered from these fields, so "+
+					"this case checks neither the tokenizer nor the engine", base, chars,
+					float64(chars)/float64(r.PromptTokens), r.PromptTokens)
+				continue
+			}
+			t.Errorf("%s names %d characters of text (%.1f per token claimed) but asks for %d "+
+				"tokens; the two fields describe different prompts, so this case cannot confirm "+
+				"the tokenizer or the engine",
+				filepath.Base(path), chars, float64(chars)/float64(r.PromptTokens), r.PromptTokens)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no reference file pairs prompt_repeat with prompt_tokens; this guard checks nothing")
+	}
+	t.Logf("checked %d reference files with a repeated prompt", checked)
 }

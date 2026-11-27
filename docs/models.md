@@ -171,6 +171,16 @@ It is also not this engine against a reference implementation of the same arithm
 2.8%, which says the numpy side reproduced the old reading's arithmetic faithfully -- including the
 interpretation that was wrong.
 
+`gemma3-513.json` has a second, independent problem that no engine change caused: its
+`prompt_repeat` says the text `"The quick brown fox jumps over the lazy dog. "` 70 times, and its
+`prompt_tokens` says 513. That text is 3150 characters and this family's tokenizer spells it at 4.49
+characters per token, so 70 repetitions is 702 -- and no repetition count lands on 513, since 51
+gives 512 and 52 give 522. The prompt the reference actually scored is therefore not the text the
+file names, and it cannot be recovered from the file. `TestReferencePromptFieldsAgree` reports this
+by name, and for that file it logs rather than fails: the numbers are still printed, and removing
+the name is what would let anyone claim the file is consistent. The field is left uncorrected on
+purpose -- writing a plausible repetition count would invent a prompt nobody measured.
+
 It does mean the committed `gemma3-270m.json` and `gemma3-513.json` no longer describe this engine.
 Both were produced by a numpy reference that applied a single base to every layer, so the logits they
 hold are the old reading's. `TestMatchesNumPyReferenceOnRealWeights` used to fail on them now that

@@ -162,8 +162,12 @@ jobs:
           # --raw gives the OCI manifest list itself. The templated form of this command
           # prints a human-readable summary, so parsing it would mean matching text.
           want="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v}"
+          # Entries whose mediaType is an attestation carry platform "unknown/unknown" and are
+          # not images: build-push-action adds provenance and SBOM manifests by default. Counting
+          # them as architectures made this check fail on a manifest that was correct -- measured,
+          # "amd64 arm64 unknown unknown" against a want of "amd64 arm64".
           have=$(docker buildx imagetools inspect --raw "$want" \
-            | python3 -c 'import json,sys; m=json.load(sys.stdin); print(" ".join(sorted(e["platform"]["architecture"] for e in m["manifests"])))')
+            | python3 -c 'import json,sys; m=json.load(sys.stdin); print(" ".join(sorted({e["platform"]["architecture"] for e in m["manifests"] if e["platform"]["architecture"] not in ("", "unknown")})))')
           echo "manifest architectures: $have"
           if [ "$have" != "amd64 arm64" ]; then
             echo "::error::manifest lists '$have', want 'amd64 arm64'"

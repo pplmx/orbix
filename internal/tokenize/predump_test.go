@@ -28,7 +28,7 @@ func TestDumpPreSplit(t *testing.T) {
 		"gpt2": preGPT2, "llama3": preLlama3, "qwen2": preQwen2, "tekken": preTekken,
 		"jais2": preJais2, "bailingmoe": preBailingMoE,
 		"superbpe": preSuperBPE, "laguna": preLaguna,
-		"tinyaya": preTinyAya,
+		"tinyaya": preTinyAya, "youtu": preYoutu,
 	}
 	inputs := []string{
 		"hello world", "a.b", "it's 42", "  x  ", "", " ", "\n\n", "a\tb",
@@ -73,6 +73,16 @@ func TestDumpPreSplit(t *testing.T) {
 		// the word boundary the first pass requires.
 		"1234", "1234567", "1\u00b2", "1234567890123", "abc123def", "12 345",
 		"HELLOworld", "don't",
+		// youtu cuts four script blocks out before its letter rule. Each entry sits on a
+		// boundary of one of them, with an ASCII letter either side so a rune wrongly inside
+		// changes the split: the first and last of every range, and the rune just outside it.
+		"a\uAC00b", "a\uD7A3b", "a\uAC01b", "a\uD7A2b",
+		"a\u3131b", "a\u318Eb", "a\u3130b", "a\u318Fb",
+		"a\u3000b", "a\u303Fb", "a\u3105b", "a\u312Fb", "a\u3104b", "a\u3130b",
+		"a\u4E00b", "a\u9FA5b", "a\u3040b", "a\u309Fb", "a\u30A0b", "a\u30FFb",
+		"a\u9FA6b", "a\u303Fb", "a\uFE30b", "a\uFE4Fb",
+		// Whole runs, so the "+" on each script alternative is exercised rather than a single rune.
+		"\uAC00\uAC01\uAC02", "\u4E00\u4E01", "\u3105\u3106", "\u3042\u3044",
 	}
 	got := make(map[string]map[string][]string, len(families))
 	for name, pre := range families {

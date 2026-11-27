@@ -92,6 +92,21 @@ PATTERNS = {
 # lookahead -- `(?=(\d{3})+(?!\d))` -- which splits a digit run without consuming anything, and
 # only means "group from the right" because it runs after `\p{N}+` has already isolated the run.
 TWO_PASS = {
+    # youtu's, same file under LLAMA_VOCAB_PRE_TYPE_YOUTU. A leading pass cuts four scripts out
+    # -- Hangul syllables and compatibility jamo, CJK punctuation, bopomofo, and CJK plus kana --
+    # and then runs tiny_aya's expression. Writing the ranges out is the point: they are four
+    # adjacent blocks whose ends are easy to transpose, and a rune wrongly inside one is invisible
+    # in any corpus that does not straddle the boundary.
+    "youtu": [
+        r"[\uAC00-\uD7A3\u3131-\u318E]+|[\uff01\u2026\u201c\u201d\u2018\u2019\u2014"
+        r"\uff1a\uff1b\uff0c\u3001-\u303f\ufe30-\ufe4f]+|[\u3105-\u312F]+"
+        r"|[\u4E00-\u9FA5\u3040-\u309F\u30A0-\u30FF]+",
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+"
+        r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+        r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*"
+        r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+        r"|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+    ],
     # tiny_aya's, same file under LLAMA_VOCAB_PRE_TYPE_TINY_AYA. Two expressions whose digit
     # classes differ: the first cuts a \d run into threes from the right where a word boundary
     # follows, the second handles what is left with the wider \p{N}{1,3}. Folding them into one

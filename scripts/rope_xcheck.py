@@ -26,7 +26,7 @@ def f32(x) -> np.float32:
 
 
 def rotate(x: np.ndarray, pos: int, rope_dim: int, head_dim: int, base: float,
-           scale: float, layout: str) -> np.ndarray:
+           scale: float, layout: str, freqs: list | None = None) -> np.ndarray:
     half = rope_dim // 2
     theta_scale = base ** (-2.0 / rope_dim)
     # Build cos/sin for every pair the same way the Go table does: one multiply per pair,
@@ -39,7 +39,15 @@ def rotate(x: np.ndarray, pos: int, rope_dim: int, head_dim: int, base: float,
     sin = np.empty(half, dtype=np.float32)
     theta = float(pos)
     for k in range(half):
-        t = scale * theta
+        # The frequency factor divides this dimension's angle and nothing else. Dividing the
+        # running theta instead would slow every later dimension too, and the first few pairs
+        # would still agree, so the mistake only shows past the last factored pair -- which is
+        # why the corpus carries a list covering half the pairs as well as all of them. freqs is
+        # indexed by pair, so a shorter list leaves the remaining pairs on the plain rate.
+        dim = theta
+        if freqs is not None and k < len(freqs):
+            dim /= float(freqs[k])
+        t = scale * dim
         cos[k] = f32(np.cos(t))
         sin[k] = f32(np.sin(t))
         theta *= theta_scale
@@ -72,7 +80,10 @@ def main() -> int:
 
     differ = 0
     for c in doc["cases"]:
+        freqs = c.get("freqs")
         name = f'{c["layout"]}-{c["head_dim"]}-{c["rope_dim"]}-{c["base"]:g}-{c["scale"]:g}'
+        if freqs:
+            name += "-freqs" + "".join(f"{f:g}" for f in freqs)
         x = np.array(c["x"], dtype=np.float32)
         want = c["y"]
         positions = c["pos"]
@@ -80,7 +91,7 @@ def main() -> int:
         bad = 0
         first = None
         for i, pos in enumerate(positions):
-            got = rotate(x, pos, c["rope_dim"], head, c["base"], c["scale"], c["layout"])
+            got = rotate(x, pos, c["rope_dim"], head, c["base"], c["scale"], c["layout"], freqs)
             for j in range(head):
                 g, w = bits(got[j]), bits(np.float32(want[i * head + j]))
                 if g != w:

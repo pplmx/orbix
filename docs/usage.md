@@ -325,8 +325,18 @@ chat endpoint are worth knowing before pointing a client at it:
   `selectattr` was added for Mistral rather than for the three families above: `mistralai/Mistral-7B-Instruct-v0.3`
   and `Mistral-Nemo-Instruct-2407` both open with
   `messages|selectattr("role", "equalto", "user")|list`, and before it existed those templates did
-  not parse at all -- not render badly, refuse. They now parse; `Mistral-Nemo` still stops at
-  `{% for key, val in ... %}` tuple unpacking, which this package does not implement.
+  not parse at all -- not render badly, refuse. Both render now, which took three more constructs
+  that Mistral-Nemo uses together in one header:
+  `{% for key, val in tool.items() if key != "return" %}`. The two-name header unpacks a mapping's
+  items, `.items()` yields one pair per key in sorted order, and a loop-level `if` filters the
+  items before the body sees them. Only this repository needs the sorted order -- Python's dicts
+  iterate in insertion order, and any fixed order renders the same prompt.
+
+  One visible difference remains on that template and it is by design: a tool's `parameters`
+  reaches the renderer as JSON text and is printed verbatim, so `val is string` is true for it and
+  Nemo quotes the schema where Jinja2, having parsed it into a dict, emits it as an object. Keeping
+  the text is deliberate -- re-encoding would sort the keys, and `internal/server/tools.go` says why
+  the signature the model reads has to be the one the caller sent.
 
   Qwen3 0.6B's template is what drove the subset's last expansion. It needs `namespace(...)`
   to carry `last_query_index` out of a for body, the string methods to strip a `thinking`

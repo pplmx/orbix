@@ -610,7 +610,11 @@ func collectReads(nodes []node, into map[string]bool) {
 				walkNodes(x.elseBody)
 			case forNode:
 				walkExpr(x.iter)
-				bound[x.varName] = true
+				// The filter sees the loop names, so it is walked after they are marked bound.
+				for _, n := range x.names {
+					bound[n] = true
+				}
+				walkExpr(x.filter)
 				walkNodes(x.body)
 			}
 		}

@@ -268,7 +268,6 @@ func TestParseRejectsUnsupportedConstructs(t *testing.T) {
 		{`{% filter upper %}x{% endfilter %}`, `unsupported template statement "filter"`},
 		{`{% for m in messages %}{% else %}{% endfor %}`,
 			`{% for %} opened at offset 0 closed by {% else %}`},
-		{`{% for a, b in pairs %}{% endfor %}`, `binds an invalid name "a, b"`},
 	}
 	for _, c := range cases {
 		_, err := Parse(c.src)
@@ -350,7 +349,9 @@ func TestParseRejectsUnsupportedJinja2(t *testing.T) {
 		`{% raw %}{{ x }}{% endraw %}`,
 		`{% filter upper %}x{% endfilter %}`,
 		`{% with a = 1 %}{{ a }}{% endwith %}`,
-		`{% for k, v in d.items() %}{{ k }}{% endfor %}`,
+		// A tuple unpacking over three names stays refused: a mapping's items are pairs, and
+		// nothing in the corpus unpacks more.
+		`{% for a, b, c in pairs %}{% endfor %}`,
 		`{% for x in y %}{% else %}none{% endfor %}`,
 		`{{ 'a' ~ 'b' }}`,
 		// "is not defined" used to be here and moved to the supported side when DeepSeek-R1's
@@ -3840,5 +3841,79 @@ func TestANullVariableIsNone(t *testing.T) {
 				t.Errorf("rendered %q, want %q", strings.TrimSpace(got), c.want)
 			}
 		})
+	}
+}
+
+// TestForUnpacksItemsAndFilters covers the construct that blocked Mistral-Nemo: its template walks a
+// tool's fields with
+//
+//	{% for key, val in tool.items() if key != "return" %}
+//
+// which needed three things at once -- a two-name loop header, `.items()` on a mapping, and a
+// loop-level `if`. Each was missing in a different way: the header was refused at parse time, the
+// method raised "not implemented" at render time, and the `if` was read as the ternary form and
+// refused for having no `else`. All three had to work for the template to render at all.
+func TestForUnpacksItemsAndFilters(t *testing.T) {
+	// The three failures this replaced, each producing a different message and each silent about
+	// the others -- so the test checks all three from one template, the way the checkpoint does.
+	src := `{% for key, val in tool.items() if key != "skip" %}{{ key }}={{ val }};{% endfor %}`
+	tpl, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := tpl.Render(nil, Inputs{Variables: map[string]any{
+		"tool": map[string]any{"a": "1", "skip": "2", "b": "3"},
+	}})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got, want := strings.TrimSpace(out), "a=1;b=3;"; got != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
+}
+
+// TestForLoopFilterDoesNotShadowTheBody covers where a loop filter's variables come from.
+//
+// The filter is evaluated per item with the loop names bound, which is what makes `if key != "x"`
+// work at all. Getting that wrong does not fail loudly: the names resolve to nothing, the
+// condition is false for every item, and the loop renders empty -- the same output as a filter that
+// excluded everything, which is why the corpus above asserts a non-empty result.
+func TestForLoopFilterDoesNotShadowTheBody(t *testing.T) {
+	// A string literal in the filter is the part that broke: rebuilding the condition from tokens
+	// stripped the quotes, so `k != "b"` became `k != b` and compared against an unbound name.
+	tpl, err := Parse(`{% for k in xs %}{% if k != "b" %}{{ k }}{% endif %}{% endfor %}` +
+		`|{% for k in xs if k != "b" %}{{ k }}{% endfor %}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := tpl.Render(nil, Inputs{Variables: map[string]any{"xs": []any{"a", "b", "c"}}})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// Both spellings of "skip b" have to agree; the left half never goes through the filter code.
+	if got, want := strings.TrimSpace(out), "ac|ac"; got != want {
+		t.Errorf("rendered %q, want %q -- the loop filter must see the same values the body does",
+			got, want)
+	}
+}
+
+// TestLengthOfAMappingCountsKeys pins a filter answer that was wrong for every dict.
+//
+// A mapping's text form is empty here, so length fell through to the character count and returned
+// 0. Jinja2 returns the number of keys. A template measuring a tool's fields before printing them
+// took the wrong branch, and the observed symptom was a rendered `{}` where an object belonged.
+func TestLengthOfAMappingCountsKeys(t *testing.T) {
+	tpl, err := Parse(`{{ d|length }}|{{ d.items()|length }}|{{ "abc"|length }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := tpl.Render(nil, Inputs{Variables: map[string]any{
+		"d": map[string]any{"a": 1, "b": 2, "c": 3},
+	}})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got, want := strings.TrimSpace(out), "3|3|3"; got != want {
+		t.Errorf("rendered %q, want %q", got, want)
 	}
 }

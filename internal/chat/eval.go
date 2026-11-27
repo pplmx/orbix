@@ -3,7 +3,9 @@ package chat
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -340,12 +342,35 @@ func (r *renderer) renderNode(n node, sc *scope) error {
 			return err
 		}
 		if !seq.isList {
-			return fmt.Errorf("chat: {%% for %s in ... %%} iterates a non-sequence", t.varName)
+			return fmt.Errorf("chat: {%% for %s in ... %%} iterates a non-sequence", t.names[0])
 		}
-		for i, item := range seq.list {
-			inner := sc.child()
-			inner.vars[t.varName] = item
-			inner.vars["loop"] = loopValue(i, len(seq.list))
+		// The loop's `if` filter is evaluated before binding, so a filtered-out item never
+		// reaches the body and `loop.length` counts only what is rendered -- which is what
+		// Jinja2 does.
+		items := seq.list
+		if t.filter != nil {
+			kept := make([]value, 0, len(items))
+			for _, item := range items {
+				bound, err := bindForNames(sc, t.names, item)
+				if err != nil {
+					return err
+				}
+				okv, err := evalCond(t.filter, bound)
+				if err != nil {
+					return err
+				}
+				if okv.truthy() {
+					kept = append(kept, item)
+				}
+			}
+			items = kept
+		}
+		for i, item := range items {
+			inner, err := bindForNames(sc, t.names, item)
+			if err != nil {
+				return err
+			}
+			inner.vars["loop"] = loopValue(i, len(items))
 			if err := r.renderNodes(t.body, inner); err != nil {
 				return err
 			}
@@ -354,6 +379,28 @@ func (r *renderer) renderNode(n node, sc *scope) error {
 	default:
 		return fmt.Errorf("chat: internal error: unknown node %T", n)
 	}
+}
+
+// bindForNames makes a child scope with the loop's names bound to one item.
+//
+// With one name the item is bound as-is. With two, the item has to be a two-element sequence and
+// its halves are bound in order -- that is what a mapping's items() yields, and what Mistral's
+// `{% for key, val in tool.items() %}` unpacks. Unpacking a non-pair is refused with both the shape
+// it got and the names it was asked to fill, because the alternative is binding the first name to
+// something the template then prints as a whole tuple.
+func bindForNames(sc *scope, names []string, item value) (*scope, error) {
+	inner := sc.child()
+	if len(names) == 1 {
+		inner.vars[names[0]] = item
+		return inner, nil
+	}
+	if !item.isList || len(item.list) != 2 {
+		return nil, fmt.Errorf("chat: for %s, %s in ... unpacks a two-element sequence, but the "+
+			"item is not one", names[0], names[1])
+	}
+	inner.vars[names[0]] = item.list[0]
+	inner.vars[names[1]] = item.list[1]
+	return inner, nil
 }
 
 // loopValue builds the loop object for one iteration.
@@ -779,6 +826,14 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 		if v.isList {
 			return strValue(strconv.Itoa(len(v.list))), nil
 		}
+		if v.isMap {
+			// A mapping's length is its number of keys, which is Python's len for a dict.
+			// Without this it fell through to the text branch and answered 0, because a
+			// mapping's text form is empty -- measured against Jinja2 3.1.6, where a
+			// three-field dict is 3 and this said 0. A template that measures a tool's
+			// arguments before deciding how to print them took the wrong branch.
+			return strValue(strconv.Itoa(len(v.fields))), nil
+		}
 		// Runes, not bytes: Jinja2's length is Python's len, which counts characters.
 		// Measured against Jinja2 -- "中文" is 2 there and was 6 here, so a template
 		// branching on a length threshold would have taken the other arm.
@@ -1100,6 +1155,27 @@ func evalArithmetic(op, left, right string) (value, error) {
 func evalStringMethod(t callExpr, recv value, sc *scope) (value, error) {
 	if !recv.isList && !recv.isMap && !recv.isNone && recv.isBool {
 		return value{}, fmt.Errorf("chat: method %q called on a boolean", t.name)
+	}
+	// items() is a mapping method, and the only one here that is not about text: it yields one
+	// two-element sequence per field, which a `for key, val in ...` header unpacks. Mistral's
+	// templates walk a tool's arguments that way. It is dispatched before the string methods so a
+	// mapping is not asked for its text form first.
+	if t.name == "items" {
+		if !recv.isMap {
+			return value{}, fmt.Errorf("chat: items() needs a mapping")
+		}
+		if len(t.args) != 0 {
+			return value{}, fmt.Errorf("chat: items() takes no arguments")
+		}
+		// Sorted, so a prompt is reproducible. Python's dicts iterate in insertion order, which a
+		// template cannot distinguish from any other fixed order as long as it is stable -- and
+		// Go's map order is not. Tool arguments are JSON, whose field order is not meaningful.
+		keys := slices.Sorted(maps.Keys(recv.fields))
+		items := make([]value, len(keys))
+		for i, k := range keys {
+			items[i] = listValue([]value{strValue(k), recv.fields[k]})
+		}
+		return listValue(items), nil
 	}
 	s := recv.text
 	switch t.name {

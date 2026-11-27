@@ -276,6 +276,16 @@ SUBSET = {
     "selectattr_truthy": """{{ messages | selectattr('content') | list | length }}""",
     "list_splits_a_string": """{{ "abc" | list | length }}""",
 
+    # The construct that blocked Mistral-Nemo: a two-name header over a mapping's items, with a
+    # loop-level filter. The three had to work together, and each failed differently.
+    "for_unpack_items": (
+        """{% for m in messages %}{% for k, v in m.items() if k != 'content' %}{{ k }};"""
+        """{% endfor %}{% endfor %}"""),
+    "for_filter_string_literal": (
+        """{% for m in messages if m.role != 'user' %}{{ m.role }};{% endfor %}"""),
+    # A mapping's length is its key count, not the length of its empty text form.
+    "length_of_a_mapping": """{{ messages[0]|length }}""",
+
 }
 
 # Templates using constructs the package documents as unsupported. The expected Go result is

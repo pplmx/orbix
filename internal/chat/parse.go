@@ -2,6 +2,7 @@ package chat
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -43,9 +44,13 @@ type ifBranch struct {
 
 // forNode iterates a sequence bound to a name, exposing the loop variable.
 type forNode struct {
-	varName string
-	iter    expr
-	body    []node
+	// names holds the bound names: one for the ordinary form, two for a tuple unpacking like
+	// `{% for key, val in tool.items() %}`.
+	names []string
+	iter  expr
+	// filter is the loop's `if condition`, evaluated per item; nil when the header has none.
+	filter expr
+	body   []node
 }
 
 // parser turns a piece list into a node tree.
@@ -196,19 +201,101 @@ func (p *parser) parseIf(condSrc string, start int) (node, error) {
 }
 
 // parseFor parses a for loop, having consumed the {% for %}.
+// forNames splits what precedes " in " into the loop's bound names.
+//
+// Jinja2 binds either one name or a tuple of them, and the tuple form unpacks each item --
+// `{% for key, val in tool.items() %}`, which Mistral's templates use to walk a tool's arguments.
+// The names are returned separately rather than as a slice so the single-name case, which is nearly
+// all of them, stays the obvious path.
+func forNames(spec string) (names []string, err error) {
+	for _, part := range strings.Split(spec, ",") {
+		name := strings.TrimSpace(part)
+		if !isIdentifier(name) {
+			return nil, fmt.Errorf("chat: {%% for %%} binds an invalid name %q", name)
+		}
+		names = append(names, name)
+	}
+	if len(names) > 2 {
+		return nil, fmt.Errorf("chat: {%% for %%} binds %d names; at most two are supported, which "+
+			"is what a mapping's items unpack to", len(names))
+	}
+	return names, nil
+}
+
+// splitForIf separates a for header's optional trailing filter.
+//
+// `{% for x in xs if cond %}` is a loop filter, not an inline conditional: the condition decides
+// which items are iterated. Handing the whole header to the expression parser made it read the
+// `if` as the ternary form, which needs an `else`, and refused templates that are valid Jinja2.
+//
+// The split is done on tokens rather than on the string, because a filter expression can contain
+// the word -- a string literal, or a nested comparison -- and searching for " if " would cut in the
+// wrong place.
+func splitForIf(header string) (loop, cond string, err error) {
+	toks, err := lexExpr(header)
+	if err != nil {
+		return "", "", err
+	}
+	depth := 0
+	for i, t := range toks {
+		switch t.text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+		case "if":
+			// The first top-level `if` is the filter. A parenthesised or subscripted one belongs
+			// to an expression being filtered.
+			if depth == 0 {
+				return joinTokens(toks[:i]), joinTokens(toks[i+1:]), nil
+			}
+		}
+	}
+	return header, "", nil
+}
+
+// joinTokens rebuilds source text from tokens for the sub-parsers, which take strings.
+//
+// A string literal has to be re-quoted: the token carries its value with quotes stripped, so
+// emitting the bare value turned `k != "b"` into `k != b`, where `b` is a name rather than a
+// string. Measured before the fix: `{% for k, v in pairs if k != "b" %}` rendered nothing, because
+// the filter compared each key against an unbound name and every item was dropped. Double quotes
+// and escaped backslashes are enough to round-trip any value the lexer produced.
+func joinTokens(toks []token) string {
+	parts := make([]string, len(toks))
+	for i, t := range toks {
+		if t.isString {
+			parts[i] = strconv.Quote(t.text)
+			continue
+		}
+		parts[i] = t.text
+	}
+	return strings.Join(parts, " ")
+}
+
 func (p *parser) parseFor(header string, start int) (node, error) {
-	// The header is "name in expression".
-	name, rest, ok := strings.Cut(header, " in ")
+	// The header is "names in expression", optionally followed by "if condition".
+	spec, rest, ok := strings.Cut(header, " in ")
 	if !ok {
 		return nil, fmt.Errorf("chat: {%% for %s %%} has no 'in' clause", header)
 	}
-	name = strings.TrimSpace(name)
-	if !isIdentifier(name) {
-		return nil, fmt.Errorf("chat: {%% for %%} binds an invalid name %q", name)
-	}
-	iter, err := parseExpr(strings.TrimSpace(rest))
+	names, err := forNames(strings.TrimSpace(spec))
 	if err != nil {
 		return nil, err
+	}
+	iterSrc, filterSrc, err := splitForIf(strings.TrimSpace(rest))
+	if err != nil {
+		return nil, err
+	}
+	iter, err := parseExpr(strings.TrimSpace(iterSrc))
+	if err != nil {
+		return nil, err
+	}
+	var filter expr
+	if strings.TrimSpace(filterSrc) != "" {
+		if filter, err = parseExpr(strings.TrimSpace(filterSrc)); err != nil {
+			return nil, err
+		}
 	}
 	body, t, err := p.parseBody()
 	if err != nil {
@@ -222,7 +309,7 @@ func (p *parser) parseFor(header string, start int) (node, error) {
 			start, t.keyword, t.offset)
 	}
 	p.pos++
-	return forNode{varName: name, iter: iter, body: body}, nil
+	return forNode{names: names, iter: iter, filter: filter, body: body}, nil
 }
 
 // parseSet parses a {% set %} assignment.

@@ -9805,3 +9805,90 @@ func TestZeroBudgetIsNotAnAbsentBudget(t *testing.T) {
 			"two apart and the pointer on the wire is not doing its job")
 	}
 }
+
+// TestConcurrentRequestsMatchTheirSerialResults covers cross-sequence interference, which no test
+// in this repository asserted directly.
+//
+// The engine batches: several sequences advance in one decode round, and their activations share
+// the kernels and the KV pool. A defect there does not crash -- it makes one request's output
+// depend on what else was in the batch, so the same prompt at temperature 0 returns different text
+// depending on its neighbours. Every stop-sequence and sampling test in this file submits one
+// request at a time and cannot see it.
+//
+// Measured against the binary before this test existed: six mixed prompts, serial versus six
+// concurrent, byte-identical on all six. So the engine is right today; the test is what keeps it
+// right, since the property is invisible in any single-request test.
+func TestConcurrentRequestsMatchTheirSerialResults(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Default())
+	work := []struct {
+		prompt   string
+		maxToken int
+	}{
+		{"Once upon a time", 8},
+		{"x", 5},
+		{"the quick brown fox", 10},
+		{"a", 4},
+		{"Once upon a time", 8}, // repeated: two identical requests must agree too
+		{"hello", 6},
+	}
+	body := func(p string, n int) string {
+		return `{"prompt": ` + quoteJSON(p) + `, "max_tokens": ` + strconv.Itoa(n) +
+			`, "temperature": 0}`
+	}
+	// text returns an error rather than calling t.Fatalf, because the concurrent half below runs
+	// it from a goroutine and Fatalf there is undefined -- it calls runtime.Goexit on a goroutine
+	// the test framework is not waiting on, so the failure is reported twice or not at all. vet
+	// does not catch it through an indirection like this one.
+	text := func(resp *http.Response) (string, error) {
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("status %d", resp.StatusCode)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var d completionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+			return "", fmt.Errorf("decode response: %w", err)
+		}
+		if len(d.Choices) == 0 {
+			return "", fmt.Errorf("no choices in the response")
+		}
+		return d.Choices[0].Text, nil
+	}
+
+	serial := make([]string, len(work))
+	for i, w := range work {
+		got, err := text(post(t, srv.Handler(), "/v1/completions", body(w.prompt, w.maxToken)))
+		if err != nil {
+			t.Fatalf("%q: %v", w.prompt, err)
+		}
+		serial[i] = got
+	}
+
+	// Submitted from separate goroutines so the server's handler admits them together. The
+	// handler is served in-process, so the requests do overlap: the engine's queue is what decides
+	// the batching, and it holds them until its next round.
+	concurrent := make([]string, len(work))
+	errs := make([]error, len(work))
+	var wg sync.WaitGroup
+	for i, w := range work {
+		wg.Go(func() {
+			// post is safe here: httptest.NewRecorder per call, and ServeHTTP is what the handler
+			// is for. Only the assertions have to stay on the test goroutine.
+			concurrent[i], errs[i] = text(post(t, srv.Handler(), "/v1/completions",
+				body(w.prompt, w.maxToken)))
+		})
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("%q (concurrent): %v", work[i].prompt, err)
+		}
+	}
+
+	for i := range work {
+		if serial[i] != concurrent[i] {
+			t.Errorf("%q: serial %q, concurrent %q -- a request's output changed with its batch "+
+				"neighbours, which means shared state leaked between sequences",
+				work[i].prompt, serial[i], concurrent[i])
+		}
+	}
+}

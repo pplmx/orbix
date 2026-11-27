@@ -1387,3 +1387,81 @@ func TestParallelKernelsAreBitIdenticalToTheSerialOne(t *testing.T) {
 		})
 	}
 }
+
+// TestMatMulTransposedIsBitIdenticalAcrossItsPaths covers the kernel the previous test left out,
+// and the extra risk it carries: MatMulTransposed chooses between two implementations.
+//
+// splitOverRows decides per shape -- rows when m > n, columns otherwise -- and the two branches are
+// not the same code. The row branch is a plain accumulated loop; the column branch calls
+// matMulTransposedCols, which tiles rows of b across a band of columns. If those two disagreed by a
+// bit, the answer would depend on the shape's aspect ratio, which is the sort of thing no test that
+// fixes one shape can see.
+//
+// So this asserts three things: each branch matches the serial kernel, which is the claim the
+// package's comments make; and the two branches agree with each other on one shape, which is what
+// keeps the choice invisible. The values are sin/cos thirds so a reassociated sum would show, and
+// every shape is above minParallelWork so at least one branch actually parallelizes.
+func TestMatMulTransposedIsBitIdenticalAcrossItsPaths(t *testing.T) {
+	shapes := []struct{ m, n, k int }{
+		{m: 1, n: 512, k: 1024}, // columns: m is 1
+		{m: 4, n: 1024, k: 4096},
+		{m: 7, n: 4096, k: 288},
+		{m: 64, n: 32, k: 2048}, // rows: m > n
+	}
+	serial := NewRunner(1)
+	par := NewRunner(8)
+	for _, s := range shapes {
+		name := strconv.Itoa(s.m) + "x" + strconv.Itoa(s.n) + "x" + strconv.Itoa(s.k)
+		t.Run(name, func(t *testing.T) {
+			if got := par.parts(s.m * s.n * s.k); got < 2 {
+				t.Fatalf("work %d splits into %d part(s); the comparison would be serial against "+
+					"serial", s.m*s.n*s.k, got)
+			}
+			a := make([]float32, s.m*s.k)
+			for i := range a {
+				a[i] = float32(math.Sin(float64(i)+1)) / 3
+			}
+			b := make([]float32, s.n*s.k)
+			for i := range b {
+				b[i] = float32(math.Cos(float64(i)+1)) * 0.7
+			}
+			one := make([]float32, s.m*s.n)
+			many := make([]float32, s.m*s.n)
+			if err := serial.MatMulTransposed(one, a, b, s.m, s.n, s.k); err != nil {
+				t.Fatalf("serial: %v", err)
+			}
+			if err := par.MatMulTransposed(many, a, b, s.m, s.n, s.k); err != nil {
+				t.Fatalf("parallel: %v", err)
+			}
+			for i := range one {
+				if math.Float32bits(one[i]) != math.Float32bits(many[i]) {
+					t.Fatalf("element %d: serial %v (0x%08x), parallel %v (0x%08x)",
+						i, one[i], math.Float32bits(one[i]), many[i], math.Float32bits(many[i]))
+				}
+			}
+
+			// The two branches, both run whole, on this shape.
+			rows := make([]float32, s.m*s.n)
+			cols := make([]float32, s.m*s.n)
+			for j := range s.n {
+				for i := range s.m {
+					var sum float32
+					aRow := a[i*s.k : (i+1)*s.k]
+					bRow := b[j*s.k : (j+1)*s.k]
+					for p := range s.k {
+						sum += aRow[p] * bRow[p]
+					}
+					rows[i*s.n+j] = sum
+				}
+			}
+			matMulTransposedCols(cols, a, b, s.m, s.n, s.k, 0, s.n)
+			for i := range rows {
+				if math.Float32bits(rows[i]) != math.Float32bits(cols[i]) {
+					t.Fatalf("element %d: row branch %v (0x%08x), column branch %v (0x%08x) -- a "+
+						"shape-dependent answer", i, rows[i], math.Float32bits(rows[i]),
+						cols[i], math.Float32bits(cols[i]))
+				}
+			}
+		})
+	}
+}

@@ -75,7 +75,13 @@ type cacheFlags struct {
 // 128 workers buy little because the fixture cannot use them. `parts()` returns
 // min(workers, work/16384), and this fixture's vocabulary projection is 363 x 256 = 92928
 // multiply-adds, so the split stops at 5 whatever the flag says -- `--workers 128` runs five.
-// That is also why the flag's help text below reports 8, 32 and 128 within noise of each other.
+// That is also why the measurements above put 8, 32 and 128 within noise of each other.
+//
+// The help text used to carry those four numbers, prefixed with "on the checkpoint from just
+// fixture". A user reading `--help` has no fixture and cannot reproduce them, and the sentence
+// never said what to do with the figure -- so it now states the behaviour instead: the split is
+// bounded by the pass's smallest dimension, and this flag cannot help a request that is waiting
+// for a slot. The measurements stay here, where the command that produced them is named.
 //
 // This paragraph has now been wrong three times. It first said 128 workers were 3.9x faster than
 // one; that was true of an earlier fixture and stopped being true as the fixture changed. I
@@ -87,11 +93,10 @@ type cacheFlags struct {
 // of flat. The numbers below now come with the command that produces them.
 func workersFlag(fs *flag.FlagSet) *int {
 	return fs.Int("workers", 0,
-		"kernel goroutines per batched pass; 0 means one per CPU. Useful work is bounded by "+
-			"the outputs a pass can split, which for the vocabulary projection is its width "+
-			"rather than the batch size -- on the checkpoint from just fixture, with a 64-token "+
-			"budget, one 703 tok/s, 8 workers 937, 32 934, 128 996, so most of the gain "+
-			"arrives by 8 and the last two rows are within noise of each other")
+		"kernel goroutines per batched pass; 0 means one per CPU. Past a point the flag stops "+
+			"helping: a pass can only be split as far as its smallest dimension allows, so a "+
+			"small model does not use a large number, and a request that is queued behind "+
+			"--max-active does not run faster for it either")
 }
 
 // registerCacheFlags registers the paged-cache flags, and the worker flag when asked.

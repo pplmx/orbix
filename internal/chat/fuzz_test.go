@@ -39,6 +39,20 @@ func FuzzParse(f *testing.F) {
 		"{% for k, v in tools %}{{ k }}{% endfor %}",
 		"{{ a = b }}",
 		"\x00\xff",
+		// The constructs added for Mistral's templates. Each is a new parser path -- a split on a
+		// top-level token, a multi-argument filter, a method that is not about text -- and the
+		// fuzzer only explores from its seeds, so leaving them out left the newest code with the
+		// thinnest coverage.
+		"{% for k, v in d.items() if k != 'x' %}{{ k }}{% endfor %}",
+		"{% for m in xs if %}{% endfor %}",
+		"{% for a, b, c in xs %}{% endfor %}",
+		"{{ d.items() }}",
+		"{{ xs | selectattr('role', 'equalto', 'user') | list }}",
+		"{{ xs | selectattr('role') }}",
+		"{{ xs | selectattr }}",
+		"{{ 'abc' | list }}",
+		"{{ x | string }}",
+		"{{ d | length }}",
 	}
 	for _, s := range seeds {
 		f.Add(s)

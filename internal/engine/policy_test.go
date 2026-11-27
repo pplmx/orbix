@@ -563,12 +563,16 @@ func TestPriorityReachesTheEngine(t *testing.T) {
 // TestPriorityDoesNotChangeOutput is the same safety property the policies have: ranking
 // a request differently changes when it runs, never what it produces.
 func TestPriorityDoesNotChangeOutput(t *testing.T) {
+	// Different prompts, for the reason TestPolicyDoesNotChangeOutput spells out: with one prompt
+	// repeated, every request computes the same distribution, so a priority that changed how often
+	// a sequence was advanced would still leave four identical rows.
+	prompts := []string{"Once upon a time", "The capital of France is", "a", "Hello there"}
+
 	run := func(priorities []int) [][]int32 {
 		e, tok := loadEngine(t, Options{MaxActive: 2, Workers: 2, Policy: PriorityShortest})
-		prompt := tok.Encode("Once upon a time", true)
 		chans := make([]<-chan Event, len(priorities))
 		for i, prio := range priorities {
-			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 6, Priority: prio})
+			ch, err := e.Submit(Request{Prompt: tok.Encode(prompts[i], true), MaxTokens: 6, Priority: prio})
 			if err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
@@ -595,8 +599,8 @@ func TestPriorityDoesNotChangeOutput(t *testing.T) {
 	ranked := run([]int{5, -5, 0, 100})
 	for i := range plain {
 		if fmt.Sprint(plain[i]) != fmt.Sprint(ranked[i]) {
-			t.Errorf("request %d: priority changed the output\n plain  %v\n ranked %v",
-				i, plain[i], ranked[i])
+			t.Errorf("request %d (%q): priority changed the output\n plain  %v\n ranked %v",
+				i, prompts[i], plain[i], ranked[i])
 		}
 	}
 }

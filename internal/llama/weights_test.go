@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // TestTensorNamesCoversTheModelShape pins the list as a contract.
@@ -244,3 +246,132 @@ func TestOutputWeightSelectsTheRightMatrix(t *testing.T) {
 			"cannot tell the two branches apart")
 	}
 }
+
+// TestLoadWeightsFillsWhatTensorNamesAsksFor covers the half TestTensorNamesCoversTheModelShape
+// cannot: that list is right, and LoadWeights actually puts each of its names into a field.
+//
+// The two are separate hand-maintained lists that must agree. A name the list asks for and the
+// loader forgets to assign is a tensor read, dequantized, and thrown away; a field assigned from a
+// name the list omits is nil, because Preload returns only what it was asked for. Neither fails
+// here -- nil does not error -- so the first symptom is a nil slice indexing panic inside attention
+// with nothing pointing at the load, in whichever test happens to run that architecture first.
+//
+// The lengths are checked against the config as well, which catches a tensor present under the
+// right name with the wrong shape: that would pass a non-nil check and then read out of bounds.
+func TestLoadWeightsFillsWhatTensorNamesAsksFor(t *testing.T) {
+	// One shape per branch of tensorNames, so a group added to the wrong half is visible.
+	cases := []struct {
+		name string
+		m    gguftest.Model
+	}{
+		{"plain", gguftest.Model{NoEOS: true, ContextLen: 64}},
+		{"postnorms-qknorm", gguftest.Model{NoEOS: true, ContextLen: 64,
+			PostNorms: true, QKNorm: true}},
+		{"attn-bias", gguftest.Model{NoEOS: true, ContextLen: 64, AttnBias: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w, err := LoadWeights(c.m.Write(t, t.TempDir()))
+			if err != nil {
+				t.Fatalf("LoadWeights: %v", err)
+			}
+			cfg := w.Config
+			qDim := cfg.Heads * cfg.HeadDim
+			kvDim := cfg.KVHeads * cfg.HeadDim
+
+			for _, f := range []struct {
+				name string
+				v    []float32
+				want int
+			}{
+				{"TokenEmbedding", w.TokenEmbedding, cfg.Hidden * cfg.VocabSize},
+				{"OutputNorm", w.OutputNorm, cfg.Hidden},
+				{"Output", w.Output, cfg.Hidden * cfg.VocabSize},
+			} {
+				// Output is nil when embeddings are tied, and that is the one field where nil is
+				// the correct answer.
+				if f.name == "Output" && cfg.TiedEmbeddings {
+					if f.v != nil {
+						t.Errorf("Output is set for a tied model; the embedding serves as it")
+					}
+					continue
+				}
+				if f.v == nil {
+					t.Errorf("%s is nil after LoadWeights", f.name)
+					continue
+				}
+				if len(f.v) != f.want {
+					t.Errorf("%s has %d values, want %d", f.name, len(f.v), f.want)
+				}
+			}
+
+			for i := range w.Layers {
+				l := &w.Layers[i]
+				for _, f := range []struct {
+					name string
+					v    []float32
+					want int
+				}{
+					{"attn_norm", l.attnNorm, cfg.Hidden},
+					{"wq", l.wq, cfg.Hidden * qDim},
+					{"wk", l.wk, cfg.Hidden * kvDim},
+					{"wv", l.wv, cfg.Hidden * kvDim},
+					{"wo", l.wo, qDim * cfg.Hidden},
+					{"ffn_norm", l.ffnNorm, cfg.Hidden},
+				} {
+					if f.v == nil {
+						t.Errorf("layer %d: %s is nil", i, f.name)
+						continue
+					}
+					if len(f.v) != f.want {
+						t.Errorf("layer %d: %s has %d values, want %d", i, f.name, len(f.v), f.want)
+					}
+				}
+
+				// Both directions for the optional groups: present when the config says the
+				// architecture has them, nil when it does not. Checking only presence would pass
+				// for a loader that filled every block regardless.
+				for _, f := range []struct {
+					field   string
+					v       []float32
+					present bool
+				}{
+					{"attnPostNorm", l.attnPostNorm, cfg.PostNorms},
+					{"ffnPostNorm", l.ffnPostNorm, cfg.PostNorms},
+					{"qNorm", l.qNorm, cfg.QKNorm},
+					{"kNorm", l.kNorm, cfg.QKNorm},
+					{"qBias", l.qBias, cfg.AttnBias},
+					{"kBias", l.kBias, cfg.AttnBias},
+					{"vBias", l.vBias, cfg.AttnBias},
+				} {
+					if f.present && f.v == nil {
+						t.Errorf("layer %d: %s is nil but the config says this architecture has it",
+							i, f.field)
+					}
+					if !f.present && f.v != nil {
+						t.Errorf("layer %d: %s is set but the config says this architecture has "+
+							"no such tensor", i, f.field)
+					}
+				}
+
+				if configHasExperts(cfg) {
+					if l.router == nil {
+						t.Errorf("layer %d: router is nil", i)
+					}
+				} else {
+					for _, f := range []struct {
+						name string
+						v    []float32
+					}{{"wGate", l.wGate}, {"wUp", l.wUp}, {"wDown", l.wDown}} {
+						if f.v == nil {
+							t.Errorf("layer %d: %s is nil", i, f.name)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// configHasExperts is a one-line helper so the test above reads as one condition.
+func configHasExperts(cfg Config) bool { return cfg.Experts > 0 }

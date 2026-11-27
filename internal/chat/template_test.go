@@ -970,51 +970,43 @@ func TestParseScalesLinearlyInTagCount(t *testing.T) {
 		}
 		return b.String()
 	}
-	timeIt := func(n int) time.Duration {
-		src := build(n)
+
+	// An absolute bound on 20000 tags rather than a ratio between 5000 and 20000.
+	//
+	// The ratio was the original form and it failed CI twice on code that has not regressed:
+	// 16.7x and then 12.1x against a bound of 12, while the same binary measures 4.0-4.9x in
+	// five consecutive rounds on an idle host. The problem is that both sides of a ratio are
+	// wall-clock measurements taken at different moments, so load during one of them moves the
+	// answer -- and a ratio near its bound cannot tell a slow machine from a slow algorithm.
+	//
+	// The absolute form separates by much more than that. Measured here on 20000 tags, fastest
+	// of five: the linear scanner takes 9-12ms across three runs; the quadratic version -- the
+	// three strings.Index calls this replaced, injected to check -- takes 256ms for the same
+	// input. 60ms sits between them with more than 4x of room on either side, which is what a
+	// threshold on a shared runner needs to be.
+	//
+	// A ratio measured only ~16x between the two implementations; this separates them by 25x,
+	// because the quadratic cost grows with the input and the linear one does not.
+	//
+	// Growth is still what is being tested -- if the scanner went back to three searches per
+	// tag, 20000 tags would cost 256ms again. What is gone is the second measurement, which is
+	// where the noise was coming from.
+	const budget = 60 * time.Millisecond
+
+	src := build(20000)
+	best := time.Duration(0)
+	for range 5 {
 		start := time.Now()
 		if _, err := Parse(src); err != nil {
-			t.Fatalf("Parse(%d tags): %v", n, err)
+			t.Fatalf("Parse(20000 tags): %v", err)
 		}
-		return time.Since(start)
-	}
-
-	// The fastest of several runs, not one: a single measurement of a few milliseconds is
-	// mostly whichever GC pause or scheduler preemption landed inside it. Measured on a
-	// two-core runner, this test failed with 1.92ms -> 32.13ms (16.7x) while the same code
-	// here measures 4.9ms -> 12.1ms for a larger step -- the small case had been measured
-	// before the process was warm, so the baseline was an outlier rather than a sample.
-	// Minimum is the right statistic here because interference only ever adds time.
-	best := func(n int) time.Duration {
-		best := time.Duration(0)
-		for range 5 {
-			if d := timeIt(n); best == 0 || d < best {
-				best = d
-			}
+		if d := time.Since(start); best == 0 || d < best {
+			best = d
 		}
-		return best
 	}
-
-	// Warm up so the first measurement is not paying for lazily-initialised runtime state.
-	timeIt(1000)
-
-	// 20000 and 80000 rather than 5000 and 20000: the point of the larger pair is that a
-	// millisecond of interference is 10% of the small measurement instead of 20%, so the
-	// ratio survives a busy runner. Measured here at 10.7ms and 43.7ms.
-	small := best(20000)
-	large := best(80000)
-
-	// 4x the tags. Linear would be 4x the time; quadratic would be 16x. The bound is 12
-	// rather than 8: a linear implementation measured at 2.5-4.4x across runs, and the room
-	// above that is for a shared runner, not for a return to quadratic growth, which lands
-	// near 16.
-	if small <= 0 {
-		t.Skip("timer resolution too coarse for the small case")
-	}
-	ratio := float64(large) / float64(small)
-	if ratio > 12 {
-		t.Errorf("4x the tags took %.1fx the time (%v -> %v); the delimiter scan is quadratic again",
-			ratio, small, large)
+	if best > budget {
+		t.Errorf("20000 tags took %v (fastest of 5), over the %v budget; "+
+			"the delimiter scan is quadratic again", best, budget)
 	}
 }
 

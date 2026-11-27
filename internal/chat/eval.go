@@ -751,6 +751,30 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 			return v.list[0], nil
 		}
 		return v.list[len(v.list)-1], nil
+	case "list":
+		// `selectattr` yields a generator in Jinja2, and every template that uses one writes
+		// `|list` after it to get a sequence it can index and measure. This package's
+		// selectattr returns a list already, so list is the identity on a sequence and splits a
+		// string into its characters, which is what Jinja2 does for both.
+		if v.isList {
+			return v, nil
+		}
+		runes := []rune(v.text)
+		items := make([]value, len(runes))
+		for i, r := range runes {
+			items[i] = strValue(string(r))
+		}
+		return listValue(items), nil
+	case "string":
+		// Jinja2's string filter renders the value the way `{{ }}` would, except that it turns
+		// none into "None" where printing gives "". Mistral's template uses it to embed a tool
+		// result's content in a JSON-ish frame, so the difference is visible in the prompt.
+		if v.isNone {
+			return strValue("None"), nil
+		}
+		return strValue(v.print()), nil
+	case "selectattr":
+		return evalSelectAttr(f, v, sc)
 	case "length":
 		if v.isList {
 			return strValue(strconv.Itoa(len(v.list))), nil
@@ -762,6 +786,109 @@ func evalFilter(f filterExpr, sc *scope) (value, error) {
 	default:
 		return value{}, fmt.Errorf("chat: unsupported template filter %q", f.name)
 	}
+}
+
+// evalSelectAttr keeps the items of a sequence whose named field passes a test.
+//
+// The three-argument form is the one published templates use --
+// `messages|selectattr("role", "equalto", "user")|list` is how Mistral v0.3 and Nemo pick the
+// turns they render -- and the one-argument form tests the field's truth instead, because Jinja2
+// defaults the missing test to `boolean`. The two-argument form takes any test this package
+// already implements, which is the same set `is` accepts.
+//
+// A field the item does not have is a refusal rather than a skip: Jinja2 raises there, and a
+// template asking about a field it did not set is a template whose branching this package cannot
+// predict.
+func evalSelectAttr(f filterExpr, seq value, sc *scope) (value, error) {
+	if !seq.isList {
+		return value{}, fmt.Errorf("chat: selectattr needs a sequence, got %s", seq.print())
+	}
+	if len(f.args) < 1 || len(f.args) > 3 {
+		return value{}, fmt.Errorf("chat: selectattr takes 1 to 3 arguments, got %d", len(f.args))
+	}
+	if f.kwargs != nil {
+		return value{}, fmt.Errorf("chat: selectattr does not take keyword arguments here")
+	}
+	args := make([]value, len(f.args))
+	for i, a := range f.args {
+		av, err := evalExpr(a, sc)
+		if err != nil {
+			return value{}, err
+		}
+		args[i] = av
+	}
+	field := args[0].print()
+	testName := "boolean"
+	if len(args) >= 2 {
+		testName = args[1].print()
+	}
+
+	var kept []value
+	for _, item := range seq.list {
+		fieldVal, ok := selectAttrField(item, field)
+		if !ok {
+			return value{}, fmt.Errorf("chat: selectattr %q: an item of the sequence has no field %q",
+				field, field)
+		}
+		// args[2:] would panic on a one- or two-argument call: slicing past the end is fine
+		// only when the start is within range, and args has to be at least 2 for that. The
+		// test's own arguments are whatever came after the test name, empty when there is none.
+		var testArgs []value
+		if len(args) > 2 {
+			testArgs = args[2:]
+		}
+		pass, err := applyNamedTest(testName, fieldVal, testArgs)
+		if err != nil {
+			return value{}, err
+		}
+		if pass {
+			kept = append(kept, item)
+		}
+	}
+	return listValue(kept), nil
+}
+
+// selectAttrField reads `field` from one sequence element.
+//
+// Dictionaries are the only elements with named fields in a chat template: a message is a map and
+// a tool call is a map inside it. Attribute access on a plain string or number has no field to
+// read, which is a refusal at the call site rather than a false here.
+func selectAttrField(item value, field string) (value, bool) {
+	if !item.isMap {
+		return value{}, false
+	}
+	v, ok := item.fields[field]
+	return v, ok
+}
+
+// applyNamedTest runs one Jinja2 test by name, with the arguments selectattr passes after it.
+//
+// The set is the same one the `is` operator accepts; see evalTest. Comparing is done here rather
+// than by re-entering the parser because selectattr's arguments are values, not source text.
+func applyNamedTest(name string, subject value, rest []value) (bool, error) {
+	switch name {
+	case "boolean":
+		if len(rest) != 0 {
+			return false, fmt.Errorf("chat: the boolean test takes no argument")
+		}
+		return subject.truthy(), nil
+	case "equalto", "eq", "sameas":
+		if len(rest) != 1 {
+			return false, fmt.Errorf("chat: the %s test takes one argument", name)
+		}
+		return equalValues(subject, rest[0]), nil
+	case "defined":
+		if len(rest) != 0 {
+			return false, fmt.Errorf("chat: the defined test takes no argument")
+		}
+		return !subject.isNone, nil
+	case "none":
+		if len(rest) != 0 {
+			return false, fmt.Errorf("chat: the none test takes no argument")
+		}
+		return subject.isNone, nil
+	}
+	return false, fmt.Errorf("chat: unsupported test %q after selectattr", name)
 }
 
 // evalBinary evaluates a comparison or boolean operator.

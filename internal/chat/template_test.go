@@ -254,7 +254,6 @@ func TestParseRejectsUnsupportedConstructs(t *testing.T) {
 		{`{% macro x() %}{% endmacro %}`, `unsupported template statement "macro"`},
 		{`{% block b %}{% endblock %}`, `unsupported template statement "block"`},
 		{`{% include 'x' %}`, `unsupported template statement "include"`},
-		{`{{ x | selectattr('role') }}`, `unsupported template filter "selectattr"`},
 		{`{{ x | map('y') }}`, `unsupported template filter "map"`},
 		{`{{ x ** 2 }}`, `unexpected "*"`},
 		// Unclosed, stray and empty each report the construct they saw, not a shared word.
@@ -344,7 +343,9 @@ func TestRenderToJSONShape(t *testing.T) {
 // beside TestIsDefinedIsSupported now.
 func TestParseRejectsUnsupportedJinja2(t *testing.T) {
 	cases := []string{
-		`{{ x | selectattr('role') }}`,
+		// selectattr was here until Mistral's published templates needed it; see
+		// TestSelectAttrPicksTheTurnsATemplateRenders.
+		`{{ x | map(attribute='role') }}`,
 		`{{ x ** 2 }}`,
 		`{% raw %}{{ x }}{% endraw %}`,
 		`{% filter upper %}x{% endfilter %}`,
@@ -3667,7 +3668,11 @@ func TestDocumentedFiltersMatchTheParser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read doc.go: %v", err)
 	}
-	m := docFilterList.FindStringSubmatch(string(raw))
+	// Collapsed first: doc.go wraps its prose at a column, so "filters: trim, tojson, ... and
+	// selectattr" straddles a line break and a "//" prefix. Matching the raw text made this guard
+	// depend on where the sentence happened to wrap.
+	flat := strings.Join(strings.Fields(strings.ReplaceAll(string(raw), "//", " ")), " ")
+	m := docFilterList.FindStringSubmatch(flat)
 	if m == nil {
 		t.Fatalf("doc.go no longer enumerates the filters as \"five filters: a, b, c, d and e\"; " +
 			"restore that sentence or update this pattern")
@@ -3689,5 +3694,151 @@ func TestDocumentedFiltersMatchTheParser(t *testing.T) {
 	}
 }
 
-// docFilterList captures the names from doc.go's "five filters: trim, tojson, ..." sentence.
-var docFilterList = regexp.MustCompile(`five filters: ([a-z, ]+and [a-z]+)`)
+// docFilterList captures the names from doc.go's "eight filters: trim, tojson, ... and last"
+// sentence.
+//
+// The count word is matched rather than fixed: it was `five filters: ...` and adding three filters
+// made this guard fail with "no longer enumerates the filters" -- a message about the sentence's
+// shape when the problem was that the sentence was correctly telling readers there are eight. A
+// guard that has to be edited every time the set it guards grows is a guard that gets edited
+// without being read.
+var docFilterList = regexp.MustCompile(`(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) filters: ([a-z, ]+and [a-z]+)`)
+
+// TestSelectAttrPicksTheTurnsATemplateRenders covers selectattr, list and string together,
+// because a template uses them together: Mistral's published chat template opens with
+// `messages|selectattr("role", "equalto", "user")|list`.
+//
+// That template did not parse at all before selectattr existed -- not render wrongly, refuse. It is
+// the second most common template family after the ChatML ones this package already handled, so the
+// whole file was unusable for it. The expected strings below are Jinja2 3.1.6's output for the same
+// source and context, checked one case at a time.
+func TestSelectAttrPicksTheTurnsATemplateRenders(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "the three-argument form takes the matching turns",
+			src: `{% for m in messages|selectattr("role", "equalto", "user")|list %}` +
+				`[{{ m.content }}]{% endfor %}`,
+			want: "[hi][again]",
+		},
+		{
+			name: "no match is an empty sequence, not an error",
+			src:  `{{ messages|selectattr("role", "equalto", "nobody")|list|length }}`,
+			want: "0",
+		},
+		{
+			// Jinja2 defaults the missing test to `boolean`, which is a truth test on the field
+			// rather than on the item: every message here has a non-empty content.
+			name: "one argument keeps the items whose field is truthy",
+			src:  `{{ messages|selectattr("content")|list|length }}`,
+			want: "3",
+		},
+		{
+			// The filter chain is the idiom, but list on its own splits a string into characters
+			// the way Python does.
+			name: "list splits a string",
+			src:  `{{ "abc"|list|length }}`,
+			want: "3",
+		},
+		{
+			// string renders like printing, except that none becomes "None".
+			name: "string renders a value, and none as None",
+			src:  `{{ x|string }}|{{ y|string }}`,
+			want: "5|None",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, err := tpl.Render([]Message{
+				{Role: "system", Content: "be terse"},
+				{Role: "user", Content: "hi"},
+				{Role: "user", Content: "again"},
+			}, Inputs{Variables: map[string]any{"x": 5, "y": nil}})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if strings.TrimSpace(got) != c.want {
+				t.Errorf("rendered %q, want %q", strings.TrimSpace(got), c.want)
+			}
+		})
+	}
+}
+
+// TestSelectAttrRefusesWhatItCannotRead pins the refusals: a field the item lacks, an arity no
+// template writes, and a test this package does not implement.
+//
+// Each names what was wrong, because the message is what a person sees when a checkpoint's template
+// does not fit this subset -- and the alternative to a refusal here is a wrong prompt, since the
+// field being absent is exactly the case where the two implementations would silently disagree.
+func TestSelectAttrRefusesWhatItCannotRead(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{`{{ messages|selectattr("nope", "equalto", "x")|list }}`, "has no field"},
+		{`{{ messages|selectattr|list }}`, "takes 1 to 3 arguments"},
+		{`{{ messages|selectattr("role", "equalto", "x", "y")|list }}`, "takes 1 to 3 arguments"},
+		{`{{ messages|selectattr("role", "startswith", "u")|list }}`, "unsupported test"},
+		{`{{ "abc"|selectattr("role")|list }}`, "needs a sequence"},
+	}
+	for _, c := range cases {
+		tpl, err := Parse(c.src)
+		if err != nil {
+			t.Errorf("Parse(%q): %v -- the refusal belongs at render time, where the data is",
+				c.src, err)
+			continue
+		}
+		_, err = tpl.Render([]Message{{Role: "user", Content: "hi"}}, Inputs{})
+		if err == nil {
+			t.Errorf("Render(%q) succeeded, want a refusal mentioning %q", c.src, c.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Render(%q) said %q, want it to mention %q", c.src, err, c.want)
+		}
+	}
+}
+
+// TestANullVariableIsNone covers the pair of answers a template gets about a JSON null.
+//
+// Both are observable and they disagree with each other if isNone is not set: `is defined` is True
+// because the name is bound, and `is none` was False for the same value because the binding was an
+// empty string in disguise. A template guarding an optional switch with both -- `{% if x is defined
+// and x is not none %}` -- then took the branch for a value the caller had explicitly set to null.
+//
+// The empty string has to stay distinguishable from null: a caller can pass "" and mean it.
+func TestANullVariableIsNone(t *testing.T) {
+	src := `defined={{ x is defined }} none={{ x is none }} empty=[{{ x }}]`
+	tpl, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cases := []struct {
+		name string
+		vars map[string]any
+		want string
+	}{
+		// Printing a boolean goes through value.print, which spells it the way Python does.
+		{"a JSON null", map[string]any{"x": nil}, "defined=True none=True empty=[]"},
+		{"an empty string", map[string]any{"x": ""}, "defined=True none=False empty=[]"},
+		{"a value", map[string]any{"x": "hi"}, "defined=True none=False empty=[hi]"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := tpl.Render(nil, Inputs{Variables: c.vars})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if strings.TrimSpace(got) != c.want {
+				t.Errorf("rendered %q, want %q", strings.TrimSpace(got), c.want)
+			}
+		})
+	}
+}

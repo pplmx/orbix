@@ -314,13 +314,19 @@ chat endpoint are worth knowing before pointing a client at it:
   `[a:b:c]`), the `is` tests `defined`, `none`, `mapping`, `iterable`, `string`,
   `true` and `false`, the string methods `strip`, `lstrip`, `rstrip`, `split` (with Python's
   character-set argument rule, not a substring), `startswith` and `endswith`, and the `trim`,
-  `tojson`, `length`, `first` and `last` filters. That covers the
+  `tojson`, `length`, `first`, `last`, `list`, `string` and `selectattr` filters. That covers the
   published templates for Qwen2.5, Llama 3.1 and Qwen3 exactly, and each is checked against its
   real source: `scripts/jinja_diff.py --template-file <checkpoint.gguf>` reads
   `tokenizer.chat_template` out of the file and renders it through this package and through
   real Jinja2. Measured on Llama 3.2 1B (a 3827-character template that branches on tools, a
   date and a system message), Qwen2.5 0.5B (2507), a converted Qwen2.5 (2509), TinyLlama
   (410) and Qwen3 0.6B (4905): 18 conversation shapes each, every one rendering identically.
+
+  `selectattr` was added for Mistral rather than for the three families above: `mistralai/Mistral-7B-Instruct-v0.3`
+  and `Mistral-Nemo-Instruct-2407` both open with
+  `messages|selectattr("role", "equalto", "user")|list`, and before it existed those templates did
+  not parse at all -- not render badly, refuse. They now parse; `Mistral-Nemo` still stops at
+  `{% for key, val in ... %}` tuple unpacking, which this package does not implement.
 
   Qwen3 0.6B's template is what drove the subset's last expansion. It needs `namespace(...)`
   to carry `last_query_index` out of a for body, the string methods to strip a `thinking`

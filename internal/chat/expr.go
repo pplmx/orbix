@@ -102,6 +102,11 @@ type filterExpr struct {
 	operand expr
 	name    string
 	arg     expr
+	// args holds every positional argument in written order. `arg` is kept for the filters that
+	// take one, because most of them do; a filter that reads `args` is one that takes more
+	// (selectattr takes up to three) and is responsible for checking the count itself, since
+	// only it knows what a valid call looks like.
+	args []expr
 	// kwargs holds name=value arguments. They are parsed so a template that passes one
 	// compiles, and stored so a filter can read the ones it understands; tojson's indent
 	// only selects a whitespace style, and this package emits compact JSON either way.
@@ -151,11 +156,14 @@ type token struct {
 // compile. Discovering it at render time would mean the caller had already committed to
 // a prompt that cannot be finished.
 var supportedFilters = map[string]bool{
-	"trim":   true,
-	"tojson": true,
-	"length": true,
-	"first":  true,
-	"last":   true,
+	"trim":       true,
+	"tojson":     true,
+	"length":     true,
+	"first":      true,
+	"last":       true,
+	"list":       true,
+	"string":     true,
+	"selectattr": true,
 }
 
 // callExpr is a function call. It is parsed so a guarded call does not reject the whole
@@ -800,7 +808,10 @@ func (p *exprParser) parsePostfix() (expr, error) {
 						if err != nil {
 							return nil, err
 						}
-						fe.arg = arg
+						if fe.arg == nil {
+							fe.arg = arg
+						}
+						fe.args = append(fe.args, arg)
 					}
 					if p.accept(")") {
 						break

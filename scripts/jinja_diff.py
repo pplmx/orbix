@@ -263,6 +263,19 @@ SUBSET = {
     "is_true_of_true": """{{ true is true }}""",
     "is_false_of_false": """{{ false is false }}""",
     "is_false_of_zero": """{{ 0 is false }}""",
+    # Mistral's published templates open with this chain, and until selectattr existed they did
+    # not parse at all. SUBSET takes the source alone: the expected output is whatever jinja2
+    # renders it to, computed at run time, so these cannot agree with a wrong expectation the way
+    # a hand-written one can -- the first version of this block carried hard-coded values that
+    # were wrong because the corpus has two user turns, not one.
+    "selectattr_equalto":
+        """{{ messages | selectattr('role', 'equalto', 'user') | list | length }}""",
+    "selectattr_no_match":
+        """{{ messages | selectattr('role', 'equalto', 'nobody') | list | length }}""",
+    # One argument defaults the test to `boolean`, which asks whether the field is truthy.
+    "selectattr_truthy": """{{ messages | selectattr('content') | list | length }}""",
+    "list_splits_a_string": """{{ "abc" | list | length }}""",
+
 }
 
 # Templates using constructs the package documents as unsupported. The expected Go result is
@@ -291,6 +304,11 @@ DIVERGENT = {
     # `not message.tool_calls` and Llama 3 writes `'tool_calls' in message`, so neither can be
     # answered by raising.
     "is_none_absent": ("""{{ messages[0].nosuchfield is none }}""", "True"),
+    # The same divergence, seen through another filter. Jinja2's Undefined stringifies to "" and
+    # its None to "None"; this package treats an absent field as none for the reason above, so
+    # string gives "None" where Jinja2 gives "". Kept here rather than in SUBSET so the pair stays
+    # together: an editor fixing one without the other would make the two disagree.
+    "string_of_absent_field": ("""{{ messages[0].nosuchfield | string }}""", "None"),
 }
 
 
@@ -311,7 +329,6 @@ UNSUPPORTED = {
     "macro": """{% macro m() %}x{% endmacro %}{{ m() }}""",
     "for_else": """{% for m in messages %}{{ m }}{% else %}none{% endfor %}""",
     "tuple_unpack": """{% for k, v in tools %}{{ k }}{% endfor %}""",
-    "selectattr": """{{ messages | selectattr('role', 'equalto', 'user') | list }}""",
     "dict_literal": """{{ {'a': 1} }}""",
     "print_a_message": """{{ messages[0] }}""",
     # Jinja2 iterates a string character by character; this subset does not implement that and

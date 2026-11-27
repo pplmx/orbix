@@ -429,11 +429,20 @@ var reservedVariables = map[string]bool{
 func variableValue(v any) (value, error) {
 	switch x := v.(type) {
 	case nil:
-		// An explicit null prints as nothing and is false in a condition. It is still bound,
-		// so `x is defined` is true for it and `x is none` is true as well -- which is the same
-		// pair of answers Jinja2 gives a None value, and a template that guards a switch with
-		// both gets the same branch here.
-		return strValue(""), nil
+		// An explicit null prints as nothing and is false in a condition. It is still bound, so
+		// `x is defined` is true for it and `x is none` is true as well -- which is the same pair
+		// of answers Jinja2 gives a None value, and a template that guards a switch with both gets
+		// the same branch here.
+		//
+		// isNone has to be set for the second half of that to hold. Without it this returned a
+		// value indistinguishable from the empty string, so `x is none` was False for a JSON null
+		// while the comment claimed True -- measured before the fix: a request with
+		// `chat_template_kwargs: {"x": null}` rendered the else branch of
+		// `{% if x is none %}`. The empty string is a real value a caller can pass, and a template
+		// distinguishing absent from empty would have taken the wrong arm either way.
+		v := strValue("")
+		v.isNone = true
+		return v, nil
 	case string:
 		return strValue(x), nil
 	case bool:

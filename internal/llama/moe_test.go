@@ -653,8 +653,15 @@ func TestParamsMatchesTheTensorElements(t *testing.T) {
 // The search seeds best = -1 and takes the first candidate unconditionally, so expert 0
 // wins even when its logit is NaN: every later comparison is `v > logits[0]`, which is
 // false against a NaN. Measured on {NaN, 3, 2} with k=2, the selection is [0 1] and both
-// weights are NaN. A NaN anywhere else is skipped normally ({1, NaN, 2} selects [2 0]),
-// because there the NaN is the one being compared and the comparison is false.
+// weights are NaN.
+//
+// The seed is what decides, not the position -- an earlier version of this comment said a NaN
+// "anywhere else" was skipped, and {5, NaN, 3} disproves it. Each of the k passes restarts best
+// at -1 and takes the first unchosen index unconditionally while best is still negative, so a
+// NaN seeds every pass that reaches it before a competitor does: pass two of {5, NaN, 3} finds
+// nothing above 5, lands on index 1 with best still -1, keeps the NaN, and then 3 > NaN is
+// false. {1, NaN, 2} skips it because 2 beats the seed within the same pass first; {5, NaN, 3,
+// 9} and {1, NaN, 2, 0} skip it for the same reason.
 //
 // This is the rule Greedy documents and TestGreedyAndNaN pins -- the same shape,
 // reached by a different search. It is not a second bug, and it is unreachable in a served
@@ -672,6 +679,20 @@ func TestSelectExpertsLeadingNaNAreNotSkipped(t *testing.T) {
 		for i, v := range w {
 			if !math.IsNaN(float64(v)) {
 				t.Errorf("weight %d = %v, want NaN: the selected set holds a NaN logit", i, v)
+			}
+		}
+	})
+
+	t.Run("a NaN that seeds a later pass is kept", func(t *testing.T) {
+		// The case that makes "anywhere else" wrong: 5 wins pass one, and pass two reaches the
+		// NaN with best still -1 because nothing beats 5.
+		sel, w := selectExperts([]float32{5, nan, 3}, 2)
+		if len(sel) != 2 || sel[0] != 0 || sel[1] != 1 {
+			t.Fatalf("selectExperts({5,NaN,3}, 2) = %v, want [0 1]", sel)
+		}
+		for i, v := range w {
+			if !math.IsNaN(float64(v)) {
+				t.Errorf("weight %d = %v, want NaN: the NaN seeded pass two", i, v)
 			}
 		}
 	})

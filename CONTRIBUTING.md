@@ -69,6 +69,26 @@ Six sections, in this order, and none of them optional:
 
 Keep `CHANGELOG.md` as the commit-level record and link to it rather than reproducing it.
 
+### Keep the lines short
+
+Aim for **80 columns of display width**, counting a CJK character as two. The first version of
+these notes had a 382-character paragraph; GitHub renders prose at roughly 95 columns, so it
+wrapped twice and read as a wall. Measured across the three rewritten pages, the longest line is
+now 70.
+
+Two shapes help more than the number:
+
+- **Tables instead of prose lists.** Capabilities and sizing figures read faster as rows, and a
+  table forces each cell to be short.
+- **A quoted line (`>`) to open each subsection.** It gives the eye a place to land and gives the
+  scanner something to jump between.
+
+Code blocks and bare URLs are exempt — folding either would break copy-paste. Everywhere else
+the limit applies, including inside list items.
+
+`just docs` does not check release notes: they are not files in the tree. This is a rule to
+follow while writing, not a gate that will catch you.
+
 ## The gates, and where they differ
 
 `just check` is what a contributor runs before pushing; it needs the Go toolchain and

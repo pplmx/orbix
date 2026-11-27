@@ -166,3 +166,156 @@ func TestDecodePathAgreesWithPrefillUnderGrouping(t *testing.T) {
 		}
 	}
 }
+
+// TestCachedPrefillAgreesUnderGrouping covers the paged-cache path's mapper.
+//
+// attentionCached in attention.go has its own `kv := h / group`, and it is the mapper a served
+// request with --blocks actually uses: PrefillWithPrefix routes each position through it. The
+// test that reaches it, TestLogitsForCachedMatchesAFreshPrefill, builds a default fixture, whose
+// KVHeads is Heads -- a group of one. Under a group of one h/group and h%KVHeads agree on
+// everything, so a wrong mapper there is invisible: measured, replacing it with `h % KVHeads`
+// left the whole package green.
+//
+// The comparison is against the unbatchd path on the same model, which is what a cache has to
+// be transparent to.
+func TestCachedPrefillAgreesUnderGrouping(t *testing.T) {
+	path := gguftest.Model{
+		Heads: 8, KVHeads: 2, NoEOS: true, ContextLen: 128,
+	}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if group := cfg.Heads / cfg.KVHeads; group != 4 {
+		t.Fatalf("this fixture has a group of %d, so the two mappers agree by accident", group)
+	}
+
+	const blockSize = 4
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: blockSize, Blocks: 64})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	pool.EnablePrefixCache()
+
+	// Exactly two whole blocks, so the second call matches the entire prompt and runs through
+	// attentionCached rather than the ordinary prefill.
+	prompt := make([]int32, 2*blockSize)
+	for i := range prompt {
+		prompt[i] = int32(3 + i)
+	}
+
+	first := pool.New()
+	if _, err := m.PrefillWithPrefix(first, prompt, 0); err != nil {
+		t.Fatalf("first PrefillWithPrefix: %v", err)
+	}
+	second := pool.New()
+	cached, err := m.PrefillWithPrefix(second, prompt, 0)
+	if err != nil {
+		t.Fatalf("second PrefillWithPrefix: %v", err)
+	}
+	cached = append([]float32(nil), cached...)
+	// The whole prompt has to match for logitsForCached to run; without this the test would be
+	// comparing an ordinary prefill with itself and the mapper would never be exercised.
+	if got := second.ReusedPositions(); got != len(prompt) {
+		t.Fatalf("the second pass reused %d positions of %d, so attentionCached did not run",
+			got, len(prompt))
+	}
+
+	// The same prompt with no paged cache at all.
+	plainCache, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	fresh, err := m.Prefill(plainCache, prompt, 0)
+	if err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+
+	if len(cached) != len(fresh) {
+		t.Fatalf("cached path produced %d logits, fresh produced %d", len(cached), len(fresh))
+	}
+	for i := range fresh {
+		if math.Float32bits(cached[i]) != math.Float32bits(fresh[i]) {
+			t.Fatalf("logit %d: cached %v (0x%08x), fresh %v (0x%08x) -- the paged path maps "+
+				"query heads to KV heads differently", i,
+				cached[i], math.Float32bits(cached[i]), fresh[i], math.Float32bits(fresh[i]))
+		}
+	}
+}
+
+// TestDecodeStepAgreesUnderGrouping covers the fourth mapper, the one in decodeBatch.attention.
+//
+// DecodeStep takes a different function from Forward: it builds a decodeBatch and calls its own
+// attention per block. TestDecodeStepMatchesForward compares the two, but on the default fixture
+// whose KVHeads is Heads -- a group of one, where h/group and h%KVHeads agree on every head. So
+// the same wrong-mapper injection that left the package green in the other two places leaves it
+// green here as well.
+//
+// Compared against Forward one sequence at a time, which is what DecodeStep promises to equal.
+func TestDecodeStepAgreesUnderGrouping(t *testing.T) {
+	path := gguftest.Model{
+		Heads: 8, KVHeads: 2, NoEOS: true, ContextLen: 128,
+	}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if group := cfg.Heads / cfg.KVHeads; group != 4 {
+		t.Fatalf("this fixture has a group of %d, so the two mappers agree by accident", group)
+	}
+
+	ids := fixtureTokens(cfg, 7)
+	histories := [][]int32{
+		{ids[0], ids[1]},
+		{ids[0], ids[1], ids[2], ids[3]},
+		{ids[0], ids[2]},
+	}
+	tokens := ids[4:7]
+
+	// Reference: one Forward per sequence.
+	want := make([][]float32, len(histories))
+	for i, hist := range histories {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		if _, err := m.Prefill(cache, hist, 0); err != nil {
+			t.Fatalf("Prefill %d: %v", i, err)
+		}
+		logits, err := m.Forward(cache, int(tokens[i]), len(hist))
+		if err != nil {
+			t.Fatalf("Forward %d: %v", i, err)
+		}
+		want[i] = append([]float32(nil), logits...)
+	}
+
+	// The same three in one step.
+	batchCaches := make([]Cache, len(histories))
+	for i, hist := range histories {
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		if _, err := m.Prefill(cache, hist, 0); err != nil {
+			t.Fatalf("Prefill %d: %v", i, err)
+		}
+		batchCaches[i] = cache
+	}
+	got, err := m.DecodeStep(batchCaches, tokens)
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+
+	for i := range histories {
+		row := got[i*cfg.VocabSize : (i+1)*cfg.VocabSize]
+		for j := range want[i] {
+			if math.Float32bits(row[j]) != math.Float32bits(want[i][j]) {
+				t.Fatalf("sequence %d logit %d: DecodeStep %v (0x%08x), Forward %v (0x%08x)",
+					i, j, row[j], math.Float32bits(row[j]), want[i][j],
+					math.Float32bits(want[i][j]))
+			}
+		}
+	}
+}

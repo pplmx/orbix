@@ -27,6 +27,7 @@ func TestDumpPreSplit(t *testing.T) {
 	families := map[string]preType{
 		"gpt2": preGPT2, "llama3": preLlama3, "qwen2": preQwen2, "tekken": preTekken,
 		"jais2": preJais2, "bailingmoe": preBailingMoE,
+		"superbpe": preSuperBPE, "laguna": preLaguna,
 	}
 	inputs := []string{
 		"hello world", "a.b", "it's 42", "  x  ", "", " ", "\n\n", "a\tb",
@@ -59,6 +60,12 @@ func TestDumpPreSplit(t *testing.T) {
 		// BailingMoE is llama3's shape with a bare \p{N}, so a plain number separates them and a
 		// mixed-case contraction checks that its spelled-out alternatives fold.
 		"DON'T", "I'LL", "we'VE",
+		// superBPE groups a digit run from the right, so every length around a multiple of three
+		// is worth having, and a digit run inside punctuation shows that only \p{N}+ is grouped.
+		"1", "12", "123", "1234", "12345", "123456", "1234567", "a123456", "3.14159", "000123",
+		// laguna runs a newline pass first, so whitespace before a newline is its own chunk rather
+		// than joining the newline: " x \n y " splits as [" x", " ", "\n", " y", " "].
+		" x \n y ", "x \n", "  \n  x", "a\n\nb",
 	}
 	got := make(map[string]map[string][]string, len(families))
 	for name, pre := range families {

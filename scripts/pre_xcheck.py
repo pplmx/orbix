@@ -86,6 +86,22 @@ PATTERNS = {
 }
 
 
+# Families whose llama.cpp entry lists more than one expression. llama.cpp runs them in order,
+# each over the previous expression's output, so comparing against a single joined alternation
+# would test something the engine does not do. superBPE's second expression is a zero-width
+# lookahead -- `(?=(\d{3})+(?!\d))` -- which splits a digit run without consuming anything, and
+# only means "group from the right" because it runs after `\p{N}+` has already isolated the run.
+TWO_PASS = {
+    "superbpe": [r"\p{N}+", r"(?=(\d{3})+(?!\d))"],
+    "laguna": [
+        r"[^\n]+|[\n]+",
+        r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
+        r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*"
+        r"|\s*[\r\n]+|\s+(?!\S)|\s+",
+    ],
+}
+
+
 def split(pattern: regex.Pattern, text: str) -> list[str]:
     """split returns the chunks the published pattern produces.
 
@@ -98,6 +114,33 @@ def split(pattern: regex.Pattern, text: str) -> list[str]:
     return [m.group(0) for m in pattern.finditer(text)]
 
 
+def split_by(text: str, expr: str) -> list[str]:
+    """split_by applies one expression to text, keeping the matches and what lies between."""
+    out, idx = [], 0
+    for m in regex.finditer(expr, text):
+        if m.start() > idx:
+            out.append(text[idx:m.start()])
+        if m.end() > m.start():
+            out.append(m.group(0))
+        idx = m.end()
+    if idx < len(text):
+        out.append(text[idx:])
+    return out
+
+
+def split_two_pass(exprs: list[str], text: str) -> list[str]:
+    """split_two_pass runs each expression over the previous one's output, as llama.cpp does."""
+    if text == "":
+        return [""]
+    pieces = [text]
+    for expr in exprs:
+        nxt = []
+        for piece in pieces:
+            nxt.extend(split_by(piece, expr))
+        pieces = nxt
+    return pieces
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -108,12 +151,13 @@ def main() -> int:
     total = differ = 0
     for family, cases in go.items():
         pattern = PATTERNS.get(family)
-        if pattern is None:
+        exprs = TWO_PASS.get(family)
+        if pattern is None and exprs is None:
             print(f"unknown family {family!r}: add its published pattern above")
             return 1
         for text, want in cases.items():
             total += 1
-            got = split(pattern, text)
+            got = split_two_pass(exprs, text) if exprs else split(pattern, text)
             if got != want:
                 differ += 1
                 print(f"DIFFER {family} {text!r}\n  python {got}\n  go     {want}")

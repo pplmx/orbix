@@ -364,6 +364,32 @@ func TestParseRejectsUnsupportedJinja2(t *testing.T) {
 	}
 }
 
+// TestAMalformedForFilterIsRefused covers a header that ends with a bare `if`.
+//
+// `{% for m in xs if %}` is a syntax error -- Jinja2 answers "unexpected 'end of statement block'".
+// The splitter here looks for a top-level `if` and treats what follows as the condition, so an
+// empty tail meant "no filter" and the loop rendered every item. A broken template that runs
+// correctly-looking output is worse than one that fails, because nothing about the result says the
+// condition was dropped.
+func TestAMalformedForFilterIsRefused(t *testing.T) {
+	for _, src := range []string{
+		`{% for m in xs if %}x{% endfor %}`,
+		`{% for m in xs if  %}x{% endfor %}`,
+		`{% for k, v in xs if %}{{ k }}{% endfor %}`,
+	} {
+		_, err := Parse(src)
+		if err == nil {
+			t.Errorf("Parse(%q) succeeded; a filter with no condition must be refused", src)
+			continue
+		}
+		// The message names the construct rather than a position, so a template author knows
+		// which header to fix.
+		if !strings.Contains(err.Error(), "bare 'if'") {
+			t.Errorf("Parse(%q) said %q, want it to name the bare 'if'", src, err)
+		}
+	}
+}
+
 // TestIsDefinedIsSupported pins the other side: "is defined" is in the subset, and it
 // renders the binding state rather than a parse error.
 func TestIsDefinedIsSupported(t *testing.T) {

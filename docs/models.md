@@ -173,8 +173,12 @@ interpretation that was wrong.
 
 It does mean the committed `gemma3-270m.json` and `gemma3-513.json` no longer describe this engine.
 Both were produced by a numpy reference that applied a single base to every layer, so the logits they
-hold are the old reading's, and `TestMatchesNumPyReferenceOnRealWeights` fails on them now that the
-engine matches llama.cpp. They are left in place rather than regenerated against the new build: a
+hold are the old reading's. `TestMatchesNumPyReferenceOnRealWeights` used to fail on them now that
+the engine matches llama.cpp; the two cases are marked as recording a superseded reading, so the
+comparison still runs and still prints the distance it measures (2.8% relative on `gemma3-270m`),
+but it logs instead of failing. The marker is a field on the case, not a skip: deleting it makes the
+same measurements fail again, and the other four cases are unaffected -- a regression in any of them
+is still a red run. They are left in place rather than regenerated against the new build: a
 fixture rewritten to agree with the code it checks stops being an independent opinion, and the numpy
 script that made them is not in this repository -- see "Regenerating the expected values" for what
 writing one would take, and note that it must implement the per-layer rotation and the

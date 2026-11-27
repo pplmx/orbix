@@ -247,6 +247,14 @@ func splitForIf(header string) (loop, cond string, err error) {
 			// The first top-level `if` is the filter. A parenthesised or subscripted one belongs
 			// to an expression being filtered.
 			if depth == 0 {
+				if i == len(toks)-1 {
+					// A filter with no condition is a syntax error, not the absence of a filter.
+					// Jinja2 refuses it ("unexpected 'end of statement block'"); rendering the
+					// loop unfiltered instead made a broken template work, which is the one
+					// outcome that hides itself.
+					return "", "", fmt.Errorf("chat: {%% for %%} ends with a bare 'if'; it needs " +
+						"a condition")
+				}
 				return joinTokens(toks[:i]), joinTokens(toks[i+1:]), nil
 			}
 		}

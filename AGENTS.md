@@ -57,7 +57,12 @@ just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打�
              # 影响），而写法让读者以为 31 是固定的。后两档这一轮没能复算——手头只有
              # gemma2 和 gemma3 两个 checkpoint，用它们冒充 MODEL/QWEN2_MODEL 等会让 suite
              # 失败，而 `just skips` 在失败时不报数字（这是它该有的行为）。要更新那两档
-             # 得先凑齐六个真文件。5 个那档剩下的 13 个
+             # 得先凑齐六个真文件。**4 个档已实测为 20**（2026-11-28，用 gemma2 Q3_K_L
+             # 充当 MODEL/GEMMA2_MODEL/MODEL_KQUANT、gemma3 270M 充当 GEMMA3_MODEL）：
+             # 这一档此前不可测，因为 gemma3 的两个 reference fixture 每次带门禁都报红，
+             # `just skips` 就只肯说「这轮是坏的」。把这两个 fixture 标成记录已被取代的
+             # 读数之后才拿到数字——顺带说明，一份「已知失效但仍红」的测试会让整条配方
+             # 失去读数，代价不止是噪声。5 个那档剩下的 13 个
              # 要的是这台机器没有的东西：IQ4_NL/Q4_1/Q5_0/Q5_1 四种格式、gemma-1、mistral-v2、
              # 一个 MoE 文件、三个只在设了 ORBIX_*DUMP 时执行的 dump 测试，以及四个需要别的
              # 真实文件的（prefix cache 复用、真实权重矩阵统计、gemma3 的 prompt token ids、

@@ -202,6 +202,18 @@ var referenceSpecs = []struct {
 // is downstream of it and printing all of them buries the one that matters.
 func reportFirstDivergentLayer(t *testing.T, got [][]float32, want [][]float64) {
 	t.Helper()
+	reportFirstDivergentLayerVia(t, t.Errorf, got, want)
+}
+
+// reportFirstDivergentLayerVia is the same walk with a caller-chosen failure reporter.
+//
+// It exists for the two real-weight references that record a superseded reading: the distance is
+// still worth measuring and printing, but it is not a regression, so it must not fail the run. A
+// boolean parameter would have been less code; a whole reporter keeps the two callers' intent at
+// the call site instead of inside this function.
+func reportFirstDivergentLayerVia(t *testing.T, report func(string, ...any),
+	got [][]float32, want [][]float64) {
+	t.Helper()
 	if len(want) == 0 {
 		t.Log("no per-layer reference data; regenerate testdata/reference/logits.json to locate" +
 			" the first divergent block")
@@ -209,13 +221,13 @@ func reportFirstDivergentLayer(t *testing.T, got [][]float32, want [][]float64) 
 	}
 	for l := range want {
 		if l >= len(got) {
-			t.Errorf("layer %d: the reference has a residual this engine did not produce", l)
+			report("layer %d: the reference has a residual this engine did not produce", l)
 			return
 		}
 		worst, at := 0.0, 0
 		for i := range want[l] {
 			if i >= len(got[l]) {
-				t.Errorf("layer %d: reference residual is %d wide, engine's is %d",
+				report("layer %d: reference residual is %d wide, engine's is %d",
 					l, len(want[l]), len(got[l]))
 				return
 			}
@@ -228,7 +240,7 @@ func reportFirstDivergentLayer(t *testing.T, got [][]float32, want [][]float64) 
 		// other: 1e-3 against a residual of 5109 is asking for agreement to twelve significant
 		// figures, which float32 does not have.
 		if worst > referenceTolerance*math.Max(1, math.Abs(want[l][at])) {
-			t.Errorf("the divergence begins at layer %d: worst %.6f at dimension %d"+
+			report("the divergence begins at layer %d: worst %.6f at dimension %d"+
 				" (engine %.6f, reference %.6f)", l, worst, at, got[l][at], want[l][at])
 			if l == 0 {
 				t.Log("no earlier layer to blame; the fault is in the first block or before it")

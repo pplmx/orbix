@@ -85,6 +85,28 @@ fixture:
     @mkdir -p "$(dirname {{FIXTURE}})"
     @go run ./scripts/genfixture -out {{FIXTURE}}
 
+# The release workflow builds through docker/build-push-action, which handles buildx, QEMU and
+# the manifest list. This recipe builds one architecture on the machine it runs on, which is what
+# a developer wants to test with -- reproducing a two-platform manifest locally would need an
+# emulator for no benefit.
+#
+# The image is not published anywhere: this is for checking that the Dockerfile still builds and
+# that the version string inside agrees with the checkout.
+#
+# build the container image locally, with the same metadata a release passes
+docker:
+    @command -v docker >/dev/null 2>&1 || { \
+        echo "docker not found: the container image cannot be built here" >&2; \
+        exit 1; \
+    }
+    docker build \
+        --build-arg VERSION={{VERSION}} \
+        --build-arg COMMIT={{COMMIT}} \
+        --build-arg DATE={{DATE}} \
+        -t orbix:dev \
+        .
+    @docker run --rm orbix:dev version
+
 # drive a race-enabled server with concurrent mixed load
 stress:
     @# The race detector needs cgo, and the server it instruments is the thing under test, so

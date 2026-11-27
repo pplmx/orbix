@@ -37,6 +37,26 @@ has the measured figures and says why every quantized file grows by a different 
 The server implements `/v1/chat/completions`, `/v1/completions` (streaming and not),
 `/v1/models`, `/healthz` and `/metrics`, and any OpenAI client library works against it.
 
+## Container
+
+A published image carries no model -- a checkpoint belongs in a volume, not an image:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -v /path/to/models:/models:ro \
+  ghcr.io/pplmx/orbix:0.2.0 \
+  serve --model /models/your-model.gguf
+```
+
+Tags are `0.2.0`, `0.2` and `latest`; `linux/amd64` and `linux/arm64` are both in the manifest.
+
+The image is `scratch` plus the static binary and a CA bundle, so there is no shell to exec into
+and no package manager to patch -- `orbix healthcheck` is the probe, and it is what the image's
+own `HEALTHCHECK` runs. The process is uid 65534; a checkpoint mounted `600` owned by root will
+not be readable, so either leave it world-readable or chown it to that uid.
+
+`just docker` builds the same image locally and prints the version string inside it.
+
 ## Documentation
 
 | Document                                  | What it covers                                               |

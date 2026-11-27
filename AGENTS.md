@@ -44,6 +44,9 @@ just xcheck-pre # 预分词器与 GPT-2 / Llama 3 的上游正则对照；不需
 just xcheck-quant # 反量化与 ggml quantize.c 的块布局对照，14 种格式
 just xcheck-rope # RoPE 与 numpy 按 RoFormer 定义算出的旋转对照，6 组参数
 just xcheck-fixture # 用 Python gguf 包解析 gguftest 的合成 fixture，比对元数据与张量目录
+just docker  # 本地构建容器镜像并打印里面的版本号；发布镜像是 build-push-action 走 buildx 出的双架构
+             # 清单，这个配方只建本机架构——本地复现双架构要模拟器，换不到什么。它不推任何地方，
+             # 用途是确认 Dockerfile 还能建、且镜像里的 version 与当前 checkout 一致。
 just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打印的就是这个数。
              # 它先打一行 `gates set: N of 14`，再打 `skipped: M`：一个数字单独看没有意义，
              # 只有配上当时设了几个检查点才知道它说的是什么。实测三档（2026-11-26）：

@@ -272,6 +272,23 @@ jobs:
       # is the thing this job exists to learn: a container that runs but never turns healthy is
       # the failure mode a start-period is meant to cover, and a plain `docker run` would report
       # success for it.
+      # The image declares a non-root uid, and this checks the declaration rather than assuming
+      # it: a `USER` line that named a missing account would still show up in the config while
+      # the process ran as a different uid, and `scratch` has no /etc/passwd to fall back on.
+      - name: the image runs as a non-root user
+        env:
+          # Through a variable for the same reason as the health status below: docker inspect -f
+          # takes a Go template, and its braces in the middle of the shell quoting are a reading
+          # hazard.
+          USER_FMT: '{{.Config.User}}'
+        run: |
+          id=$(docker inspect -f "$USER_FMT" orbix:ci)
+          echo "image user: $id"
+          if [ "$id" != "65534:65534" ]; then
+            echo "::error::image declares user '$id', want 65534:65534"
+            exit 1
+          fi
+
       - name: the container turns healthy
         run: |
           # One script for both workflows: this job checks the locally built image and the

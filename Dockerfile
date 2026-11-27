@@ -70,6 +70,18 @@ COPY --from=build /out/orbix /orbix
 # port mapping needs, so it is left alone -- but note that the server has no authentication
 # (docs/usage.md, "No CORS and no authentication"), so publish it only on a network you trust or
 # put an authenticating proxy in front.
+# A container process runs as root unless told otherwise, and root in a container is root on
+# the host's kernel. The binary needs no privileges: it reads a checkpoint, holds a port above
+# 1024, and writes nothing. A numeric uid is used because `scratch` has no /etc/passwd -- a name
+# would resolve to nothing and `docker run --user nobody` would silently fall back to root's
+# filesystem view while still reporting a name.
+#
+# 65534 is nobody:nogroup, conventional for "a process that needs no identity". Exported so a
+# volume can be given matching ownership without guessing the number.
+ARG UID=65534
+ARG GID=65534
+USER $UID:$GID
+
 EXPOSE 8080
 
 # `orbix healthcheck` is the probe, not a shell one-liner: `scratch` has no curl, no wget and no

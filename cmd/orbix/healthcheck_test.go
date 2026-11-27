@@ -56,6 +56,39 @@ func TestHealthcheckReportsSuccessAndFailure(t *testing.T) {
 	}
 }
 
+// TestHealthcheckQuietStillFails covers the one pairing the container's health probe depends on.
+//
+// --quiet means "print nothing on success", not "print nothing and report success". The Dockerfile
+// runs `healthcheck --quiet` as its HEALTHCHECK, so a --quiet that swallowed the error would make
+// every container report healthy while its server was down -- the one signal an orchestrator acts
+// on, inverted. The success cases above check the silence; nothing checked that the failure
+// survives it.
+//
+// Measured against the built binary before writing this: a dead port exits 1 with and without
+// --quiet, a live one exits 0 with and without it. Don't read $? after a pipe to head -- it reports
+// head's status, and that mistake made this gap look like a defect for a few minutes.
+func TestHealthcheckQuietStillFails(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := dead.URL
+	dead.Close() // nothing is listening now, which is the case that must fail
+
+	for _, args := range [][]string{
+		{"--addr", addr},
+		{"--addr", addr, "--quiet"},
+	} {
+		var err error
+		_ = captureStdout(t, func() { err = cmdHealthcheck(args) })
+		if err == nil {
+			t.Errorf("healthcheck %v against a dead server returned no error; --quiet must not "+
+				"turn a failure into a success", args)
+			continue
+		}
+		if !strings.Contains(err.Error(), "healthcheck") {
+			t.Errorf("healthcheck %v: error %q does not name the command", args, err)
+		}
+	}
+}
+
 // TestTrimTrailingSlash removes every trailing slash, not just one.
 //
 // The loop it replaced this shape of was untested: trimming a single slash instead left every

@@ -839,10 +839,18 @@ func (e *Engine) decode(batch []pending) {
 		// advanced, so decoding cannot continue for any of them: finish them all
 		// with the error rather than leaving some in the active set with a cache
 		// that no longer matches its position.
+		// Uncovered, and deliberately: this arm needs DecodeStep to fail, and every argument it
+		// receives comes from engine state -- a cache the engine built and a token the sampler
+		// chose from that cache's own logits. Unlike the prefill arm above, where a prompt can
+		// name a token outside the vocabulary, there is no request a client can send that
+		// reaches this. Stubbing one would mean handing the engine a cache it did not make,
+		// which is a different function's contract. A mislabelled reason here would go
+		// unnoticed: injecting "mislabelled" for "error" at this line leaves the package green.
+		//
+		// Done for the same reason as the prefill failure above: without it the channel
+		// closes without a finish_reason, and a caller cannot tell a truncated answer from
+		// a failed one.
 		for _, p := range batch {
-			// Done for the same reason as the prefill failure above: without it the channel
-			// closes without a finish_reason, and a caller cannot tell a truncated answer from
-			// a failed one.
 			e.finish(p.s, Event{Done: true, FinishReason: "error", Err: err})
 		}
 		return

@@ -44,11 +44,11 @@ A published image carries no model -- a checkpoint belongs in a volume, not an i
 ```bash
 docker run --rm -p 8080:8080 \
   -v /path/to/models:/models:ro \
-  ghcr.io/pplmx/orbix:0.2.0 \
+  ghcr.io/pplmx/orbix:0.3.0 \
   serve --model /models/your-model.gguf
 ```
 
-Tags are `0.2.0`, `0.2` and `latest`; `linux/amd64` and `linux/arm64` are both in the manifest.
+Tags are `0.3.0`, `0.3` and `latest`; `linux/amd64` and `linux/arm64` are both in the manifest.
 
 The image is `scratch` plus the static binary and a CA bundle, so there is no shell to exec into
 and no package manager to patch -- `orbix healthcheck` is the probe, and it is what the image's

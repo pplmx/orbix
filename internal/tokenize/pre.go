@@ -983,6 +983,14 @@ type preRule struct {
 	// The leading-character alternative does not cover this case -- it excludes punctuation --
 	// which is why the rule has to exist separately rather than falling out of it.
 	punctLetterRun bool
+	// cliticAnyCase is whether the contraction alternative folds case.
+	//
+	// It is not one rule across the families, which is why it is a field: llama.cpp spells
+	// llama3's as "(?i:'s|'t|...)" and gpt2's and starcoder's as "'s|'t|..." with no flag, so
+	// "DON'T" is ["DON", "'T"] for one family and ["DON", "'", "T"] for the others. This code
+	// folded unconditionally, so gpt2 and starcoder split a capitalised clitic the way llama3
+	// does.
+	cliticAnyCase bool
 	// noContraction removes the expression's leading contraction alternative. ufakzeka is the
 	// only family without it, and the removal is what keeps a Turkish apostrophe suffix
 	// whole: "'da" is one chunk there and "'d" plus "a" with the alternative present.
@@ -1080,14 +1088,20 @@ const (
 func preFamilyOf(p preType) (preRule, bool) {
 	switch p {
 	case preQwen2:
+		// "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|..." -- every letter spelled
+		// both ways rather than with a flag, which is the same set of accepted strings as folding
+		// and is why this sets cliticAnyCase. Written out here rather than left to the matcher's
+		// default so the rule is visible at the family it belongs to.
 		return preRule{
 			digits: 1, lead: leadAnyNonLetter,
-			newlinesAfterPunct: true, newlineChunk: true,
+			newlinesAfterPunct: true, newlineChunk: true, cliticAnyCase: true,
 		}, true
 	case preLlama3:
+		// "(?i:'s|'t|'re|'ve|'m|'ll|'d)|..." -- the only family in this file whose contraction
+		// alternative carries the case-insensitive flag, so it is the only one that sets it.
 		return preRule{
 			digits: 3, lead: leadAnyNonLetter,
-			newlinesAfterPunct: true, newlineChunk: true,
+			newlinesAfterPunct: true, newlineChunk: true, cliticAnyCase: true,
 		}, true
 	case preGPT2:
 		// "'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)"
@@ -1362,7 +1376,7 @@ func chunkLen(s string, fam preRule) int {
 	// alternative -- but only for families that have it. ufakzeka is qwen2 with that
 	// alternative removed precisely so an apostrophe suffix stays whole.
 	if !fam.noContraction && !fam.noContractionAlt {
-		if n := qwen2ContractionLen(s); n > 0 {
+		if n := cliticLenCase(s, fam.cliticAnyCase); n > 0 {
 			return n
 		}
 	}
@@ -1451,13 +1465,24 @@ func digitRunLen(s string, fam preRule) int {
 	return i
 }
 
-// qwen2ContractionLen matches a clitic at the start of s.
-func qwen2ContractionLen(s string) int {
+// qwen2ContractionLen matches a clitic at the start of s, folding case.
+func qwen2ContractionLen(s string) int { return cliticLenCase(s, true) }
+
+// cliticLenCase matches one of the contractions at the start of s.
+//
+// anyCase decides whether the comparison folds case, which is the difference between llama3's
+// "(?i:'s|...)" and gpt2's "'s|..." in llama.cpp. The lower-case forms are what the expression
+// lists; a folded match also accepts the capitals.
+func cliticLenCase(s string, anyCase bool) int {
 	if len(s) < 2 || s[0] != '\'' {
 		return 0
 	}
 	for _, c := range qwen2Contractions {
-		if len(s) >= len(c) && strings.EqualFold(s[:len(c)], c) {
+		if len(s) < len(c) {
+			continue
+		}
+		got := s[:len(c)]
+		if got == c || (anyCase && strings.EqualFold(got, c)) {
 			return len(c)
 		}
 	}

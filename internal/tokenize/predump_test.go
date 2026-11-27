@@ -23,7 +23,9 @@ func TestDumpPreSplit(t *testing.T) {
 	// One entry per family the script has a published pattern for. Adding a family here means
 	// adding its pattern there; the script fails on a name it does not know rather than skipping
 	// it, so the two lists cannot drift apart silently.
-	families := map[string]preType{"gpt2": preGPT2, "llama3": preLlama3}
+	families := map[string]preType{
+		"gpt2": preGPT2, "llama3": preLlama3, "qwen2": preQwen2, "tekken": preTekken,
+	}
 	inputs := []string{
 		"hello world", "a.b", "it's 42", "  x  ", "", " ", "\n\n", "a\tb",
 		"Hello, World!", "12345", "3.14", "don't", "I'll", "we've",
@@ -36,6 +38,16 @@ func TestDumpPreSplit(t *testing.T) {
 		"abc123def", "123abc", "(a)", "-x", "'94", "a'b'c",
 		"x\u0301", "e\u0308", "   \n   ", "a\r\nb", "\r\n", "\r",
 		"x\r\ny", "!?", "?!", "...", "end.", ".start", "a.b.c", "12 34 56",
+		// Where the four families disagree with each other. Qwen2 takes one digit per chunk where
+		// GPT-2 takes the run and Llama 3 takes up to three, so a plain number separates them; the
+		// contraction list is spelled out rather than case-folded there, so mixed case does too.
+		"1234567", "abc123456def", "1", "0",
+		"It'S", "it'S", "DON'T",
+		// Tekken cuts a letter run at a lower-to-upper boundary, so a CamelCase word is several
+		// chunks where the other three families treat it as one; its punctuation tail also takes
+		// slashes, and an uppercase run followed by lowercase splits at the join.
+		"camelCaseWord", "HTTPServer", "x/y", "path/to/file", "a/b\n",
+		"A", "aA", "Aa", "ABCdef",
 	}
 	got := make(map[string]map[string][]string, len(families))
 	for name, pre := range families {

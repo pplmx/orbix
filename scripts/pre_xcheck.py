@@ -9,9 +9,15 @@ rather than from the Go implementation. That is the point: pre_reference_cases.g
 were transcribed from llama.cpp's expressions, so a mistake in reading either side would not show
 up against itself.
 
-Only preGPT2 is covered. The other families' patterns live in the same llama.cpp file, but each
-would need its own transcription and its own corpus, and the two done this way (this one and the
-reference table) already disagree whenever a rule drifts.
+Four families are covered: gpt2, llama3, qwen2 and tekken. The other families' patterns live in
+the same llama.cpp file, but each would need its own transcription and its own corpus, and the ones
+done this way already disagree whenever a rule drifts.
+
+Adding qwen2 and tekken was what found a real defect: this repository folded case on the clitic
+alternative for every family, while llama.cpp writes llama3's as "(?i:'s|'t|...)" and gpt2's and
+starcoder's without the flag. "DON'T" therefore split as ["DON", "'T"] for all four where gpt2 and
+starcoder want ["DON", "'", "T"]. A family-by-family comparison is what makes that visible; against
+one pattern it cannot be.
 """
 
 import json
@@ -35,6 +41,26 @@ PATTERNS = {
         r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
         r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*"
         r"|\s*[\r\n]+|\s+(?!\S)|\s+"
+    ),
+    # Qwen2's, from llama.cpp's llama-vocab.cpp under LLAMA_VOCAB_PRE_TYPE_QWEN2. The contraction
+    # branch is spelled out rather than written with (?i:) as Llama 3's is, and the digit branch is
+    # `\p{N}` -- one digit per chunk, where GPT-2 takes a run and Llama 3 takes up to three. Those
+    # two are the differences worth checking, so the corpus below puts digits and contractions side
+    # by side.
+    "qwen2": regex.compile(
+        r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
+        r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*"
+        r"|\s*[\r\n]+|\s+(?!\S)|\s+"
+    ),
+    # Tekken's, same file under LLAMA_VOCAB_PRE_TYPE_TEKKEN. The llama.cpp entry carries both the
+    # readable original from the model's tokenizer.json and a rewritten form with lookaheads; the
+    # original is transcribed here, since a comparison against the rewrite could only confirm the
+    # rewrite. Its letter alternatives cut at a lower-to-upper boundary, which is the property the
+    # corpus is built to exercise.
+    "tekken": regex.compile(
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+"
+        r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*"
+        r"|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"
     ),
 }
 

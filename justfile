@@ -57,7 +57,11 @@ test-race:
     @# That does not weaken the build: the ban exists so no shipping binary ever links C, and
     @# this recipe produces no binary -- it is a test instrument. Without the override the
     @# recipe could never have succeeded, because CGO_ENABLED=0 is exported to every recipe.
-    CGO_ENABLED=1 go test -count=1 -race {{PKG}}
+    @# -tags race makes the build detectable from a test. go doesn't define one for -race, and
+    @# timing assertions have to know: race instrumentation slows the binary by several times,
+    @# so a wall-clock budget that measures the algorithm would measure the instrumentation
+    @# instead.
+    CGO_ENABLED=1 go test -count=1 -race -tags race {{PKG}}
 
 # check the suite for order dependencies and state leaks
 isolate:

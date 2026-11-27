@@ -12,7 +12,7 @@
 | `internal/tokenize` | 4872      | 138            | 109      | 7124      | 1.46      |
 | `internal/llama`    | 4868      | 135            | 40       | 13312     | 2.73      |
 | `cmd/orbix`         | 3913      | 85             | 81       | 8629      | 2.21      |
-| `internal/chat`     | 3333      | 81             | 41       | 5300      | 1.59      |
+| `internal/chat`     | 3333      | 81             | 41       | 5332      | 1.60      |
 | `internal/engine`   | 2090      | 47             | 20       | 6124      | 2.93      |
 | `internal/gguf`     | 1499      | 51             | 14       | 3068      | 2.05      |
 | `internal/quant`    | 930       | 27             | 20       | 3835      | 4.12      |
@@ -38,7 +38,7 @@
 三个观察：
 
 1. **仓库的重心在 token 与提示词，不在算子。** `tokenize` + `chat` 合计 8170 行，是 `kernel`（705 行）的 11.6 倍；`llama` 里真正属于"数学生成"的部分（attention、feedForward、rope、logprob）约 900 行。这与 README 的自述一致——这是学习工程，难点被有意放在"文件格式与模型格式"上。
-2. **测试密度随"契约有多硬"上升，不随代码量上升。** `quant`（4.14）、`engine`（2.93）、`kernel`（2.86）最高，因为它们和外部参考逐值比对；`tokenize`（1.46）与 `chat`（1.59）最低，因为 `pre.go` 是 34 个预分词族的表驱动实现，单族覆盖成本高。`gguftest`（0.46）是测试夹具包，这个比值没有信息量。
+2. **测试密度随"契约有多硬"上升，不随代码量上升。** `quant`（4.14）、`engine`（2.93）、`kernel`（2.86）最高，因为它们和外部参考逐值比对；`tokenize`（1.46）与 `chat`（1.60）最低，因为 `pre.go` 是 34 个预分词族的表驱动实现，单族覆盖成本高。`gguftest`（0.46）是测试夹具包，这个比值没有信息量。
 3. **`cmd/orbix` 的 100 个顶层函数里只有 8 个是命令入口**，其余是渲染、校验与错误解释。CLI 不是薄壳，它持有真实的业务规则（见第五节）。
 
 复算命令：
@@ -341,7 +341,7 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 
    真正修掉这一点的是给新构造逐个补上语料条目，并各做一次注入。四种改动当时**全都不让门槛变红**：`<` 改成 `<=`、切片的负起点当成 0、`split` 按首字符切、`namespace` 写回当前帧。原因是旧语料里没有相等边界、负索引、多字符分隔符，也没有 loop 之外的字段赋值。补上这些用例后再注入，四种都被抓住。语料条目是对照的判别力所在，不是例数。
 
-覆盖率与 checkpoint 门禁：72 处 `t.Skip` 分布在 28 个测试文件里（2026-11-27 复算；上一版写 73 和 28，再上一版 74 和 29，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+覆盖率与 checkpoint 门禁：73 处 `t.Skip` 分布在 28 个测试文件里（2026-11-27 复算；上一版写 72 和 28，再上一版 74 和 29，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
 
 少掉的那一处是 `TestParseScalesLinearlyInTagCount` 里的计时器精度保护：判据从「两个规模的时间比」改成「20000 个标签的绝对预算」之后，零值分支落进比较本身，不再需要单独 `t.Skip`。那次改写的原因见那条测试的注释——比值形式的阈值在共享 runner 上把机器负载报成了回归，两次。
 

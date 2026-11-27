@@ -2515,3 +2515,99 @@ func TestVersionJSONReportsCgoConsistently(t *testing.T) {
 		t.Errorf("platform = %q, want os/arch", got.Platform)
 	}
 }
+
+// TestHelpMentionsNoFlagTheCommandDoesNotAccept closes the gap the two rounds before this one
+// found by hand, twice.
+//
+// TestHelpForACommandPrintsThatCommandsFlags checks that a command's help contains its own flags.
+// Nothing checked the other direction, so help text could name a flag the command rejects. That
+// happened: a shared string for --workers said a request "queued behind --max-active" waits the
+// same, and --max-active is registered on serve and bench but not on run or chat, so
+// `orbix run -h` documented a flag that `orbix run` refuses. A reader following the help gets a
+// "flag provided but not defined" error and no reason to suspect the help.
+//
+// The check is mechanical: every --word in the output of `help <command>` must be a flag that
+// command's FlagSet defines, or one of the few names the help legitimately refers to across
+// commands (--model, which every command shares, and the values the flag package itself prints).
+// It found the defect above when run against the tree that had it.
+func TestHelpMentionsNoFlagTheCommandDoesNotAccept(t *testing.T) {
+	// Flags one command's help names on purpose while describing another's. Kept short and
+	// justified: an entry here is a claim that the reference is accurate, not a silencer.
+	allowed := map[string]bool{
+		"--model": true, // --model is on every command; the text may name it from any of them
+	}
+
+	for _, command := range []string{"run", "bench", "chat", "serve", "healthcheck", "model"} {
+		t.Run(command, func(t *testing.T) {
+			out := captureStderr(t, func() {
+				if err := run([]string{"help", command}); err != nil && !errors.Is(err, flag.ErrHelp) {
+					t.Fatalf("help %s: %v", command, err)
+				}
+			})
+
+			// The flags this command actually defines, read from the same FlagSets the commands
+			// register, so the two cannot drift.
+			defined := commandFlagNames(t, command)
+
+			for _, name := range flagsNamedIn(out) {
+				if defined[name] || allowed[name] {
+					continue
+				}
+				t.Errorf("help for %s names %s, which the command does not define; a reader who "+
+					"follows that gets \"flag provided but not defined\" with nothing pointing "+
+					"at the help text", command, name)
+			}
+		})
+	}
+}
+
+// flagsNamedIn returns the --flag spellings in a help text, in order of first appearance.
+func flagsNamedIn(text string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, tok := range strings.Fields(text) {
+		// Strip trailing punctuation the prose adds: "--blocks," and "--max-active." are mentions.
+		tok = strings.TrimRight(tok, ".,;:)")
+		if !strings.HasPrefix(tok, "--") || len(tok) < 3 {
+			continue
+		}
+		if seen[tok] {
+			continue
+		}
+		seen[tok] = true
+		out = append(out, tok)
+	}
+	return out
+}
+
+// commandFlagNames collects the flag names a command registers by running its setup with a
+// FlagSet that records them.
+//
+// The commands parse into their own FlagSets inside runTo and friends, so this reads them the
+// same way the help does -- by invoking the command with -h, which stops before any work -- and
+// then asks the FlagSet it built. A command that gains a flag picks it up with no change here.
+func commandFlagNames(t *testing.T, command string) map[string]bool {
+	t.Helper()
+	names := map[string]bool{}
+	// The help output lists them one per line as "  -name value"; the flag package writes that
+	// from the FlagSet it registered on. Reading it back is what keeps this in step without a
+	// second registry to maintain.
+	out := captureStderr(t, func() {
+		if err := run([]string{command, "-h"}); err != nil && !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("%s -h: %v", command, err)
+		}
+	})
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		// The flag package prints one dash; the prose in the help strings uses two. Both spell
+		// the same flag, so the table is keyed by the doubled form the comparison uses.
+		name, _, _ := strings.Cut(trimmed, " ")
+		if len(name) > 1 {
+			names["--"+strings.TrimLeft(name, "-")] = true
+		}
+	}
+	return names
+}

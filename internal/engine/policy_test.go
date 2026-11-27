@@ -350,19 +350,34 @@ func TestSchedulingPolicyKeepsShortRequestResponsive(t *testing.T) {
 // when a request runs, never what it produces. Greedy decoding is deterministic, so two
 // policies must return the same tokens for the same prompt.
 func TestPolicyDoesNotChangeOutput(t *testing.T) {
+	// Different prompts, not one repeated. With a shared prompt every request computes the same
+	// distribution, so a scheduler that admitted the wrong one first, or advanced two of them a
+	// different number of times, could still produce identical rows for all four and pass. The
+	// sequences here differ in length as well, which is what makes PriorityShortest reorder them.
+	prompts := []string{"Once upon a time", "The capital of France is", "a", "Hello there"}
+
 	run := func(policy Priority) [][]int32 {
 		e, tok := loadEngine(t, Options{MaxActive: 2, Workers: 2, Policy: policy})
-		prompt := tok.Encode("Once upon a time", true)
-		const n = 4
+		n := len(prompts)
 		chans := make([]<-chan Event, n)
 		for i := range chans {
-			ch, err := e.Submit(Request{Prompt: prompt, MaxTokens: 6})
+			ch, err := e.Submit(Request{Prompt: tok.Encode(prompts[i], true), MaxTokens: 6})
 			if err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
 			chans[i] = ch
 		}
+		// The comparison is between schedules, so there has to be a schedule: with MaxActive 2 and
+		// four requests the other two wait, and a smaller MaxActive or a shorter prompt would make
+		// this one batch measured twice.
+		queued := false
 		for e.Pump() > 0 {
+			if e.Stats().Queued > 0 {
+				queued = true
+			}
+		}
+		if !queued {
+			t.Fatalf("%v: nothing ever queued, so this compares one schedule with itself", policy)
 		}
 		out := make([][]int32, n)
 		for i, ch := range chans {
@@ -383,11 +398,13 @@ func TestPolicyDoesNotChangeOutput(t *testing.T) {
 		got := run(policy)
 		for i := range fifo {
 			if len(got[i]) != len(fifo[i]) {
-				t.Fatalf("%v: request %d produced %d tokens, fifo produced %d", policy, i, len(got[i]), len(fifo[i]))
+				t.Fatalf("%v: request %d (%q) produced %d tokens, fifo produced %d",
+					policy, i, prompts[i], len(got[i]), len(fifo[i]))
 			}
 			for j := range fifo[i] {
 				if got[i][j] != fifo[i][j] {
-					t.Errorf("%v: request %d token %d = %d, fifo = %d", policy, i, j, got[i][j], fifo[i][j])
+					t.Errorf("%v: request %d (%q) token %d = %d, fifo = %d",
+						policy, i, prompts[i], j, got[i][j], fifo[i][j])
 				}
 			}
 		}

@@ -17,8 +17,10 @@ on:
       - "v*"
 
 permissions:
-  # The default is read; publishing assets needs write on the release itself.
+  # The default is read; publishing assets needs write on the release itself, and pushing the
+  # image needs write on packages.
   contents: write
+  packages: write
 
 env:
   # Matches the main workflow. The binary records this in its build info, and a release built
@@ -72,6 +74,11 @@ jobs:
 
       # Builds all five platforms into bin/. The script lives in the justfile rather than being
       # repeated here so the release artifacts and a local `just cross` come from one list.
+      # The published image is started against the same fixture the CI docker job uses, so the
+      # workflow needs it on disk.
+      - name: just fixture
+        run: just fixture
+
       - name: just cross
         run: just cross
 
@@ -95,6 +102,94 @@ jobs:
             sha256sum "$f" > "$f.sha256"
           done
           cat ./*.sha256
+
+      # The image is built from the same commit as the binaries, by the Dockerfile's own path.
+      # That path is a second way to produce the same metadata, so the image is checked against
+      # the tag the same way the linux binary is -- an image whose `version` disagrees with its
+      # tag is worse than no image, because pull-by-tag is the whole interface.
+      #
+      # QEMU is needed because arm64 is built on this amd64 runner. The Dockerfile cross-compiles
+      # (FROM --platform=$BUILDPLATFORM), so only the final `COPY` and `FROM scratch` layers are
+      # assembled per-platform -- the Go build itself runs natively.
+      - name: set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Two moving tags, and no `{{major}}` one on purpose: semver says a 0.y.z line may change
+      # incompatibly, so an image tagged `0` would promise more than the version does. `latest`
+      # still appears because metadata-action adds it for semver tags, and that is honest here
+      # -- this workflow only runs on tags, so `latest` means the newest release and never a
+      # branch build.
+      - name: image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: build and push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # DATE is the tag's commit date, not the workflow's: the image should report when the
+          # code was released, and a re-run hours later must not produce a different answer for
+          # the same tag. `github.event.repository.updated_at` would move with any push.
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp }}
+
+      # Pull the manifest back and require both architectures in it. A push that silently
+      # produced one platform would leave `docker pull` on the other one failing to find a
+      # manifest, which is a confusing error to meet from the outside.
+      - name: the published manifest has both architectures
+        run: |
+          # --raw gives the OCI manifest list itself. The templated form of this command
+          # prints a human-readable summary, so parsing it would mean matching text.
+          want="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v}"
+          have=$(docker buildx imagetools inspect --raw "$want" \
+            | python3 -c 'import json,sys; m=json.load(sys.stdin); print(" ".join(sorted(e["platform"]["architecture"] for e in m["manifests"])))')
+          echo "manifest architectures: $have"
+          if [ "$have" != "amd64 arm64" ]; then
+            echo "::error::manifest lists '$have', want 'amd64 arm64'"
+            exit 1
+          fi
+
+      # The published image is pulled back and started, not just inspected. Two things can only
+      # be wrong in the artifact rather than in the build: the tag it reports, and whether a
+      # `scratch` image with no shell can actually reach the point of answering /healthz -- the
+      # whole reason `orbix healthcheck` exists.
+      #
+      # amd64 is enough for this: the arm64 manifest entry is checked above, and running it here
+      # would need full emulation of a binary that CI already builds natively in another job.
+      - name: the published image starts and turns healthy
+        run: |
+          ref="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v}"
+          got=$(docker run --rm --platform linux/amd64 "$ref" version | head -1 | awk '{print $2}')
+          echo "image reports $got"
+          if [ "$got" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::image reports $got, tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          # The wait lives in one script because the CI job does the same thing against the
+          # locally built image, and the timing bound has to agree in both.
+          scripts/wait_healthy.sh "$ref" .cache/stress.gguf linux/amd64
 
       - name: publish
         uses: softprops/action-gh-release@v3

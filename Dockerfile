@@ -14,7 +14,17 @@
 #     orbix --model /models/your-model.gguf
 
 # ---------------------------------------------------------------- build
-FROM golang:1.27 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
+
+# The target platform, so one Dockerfile builds a correct image for each architecture a
+# manifest lists. Without it the build stage cross-compiles with the builder's GOARCH -- on an
+# amd64 runner every arm64 image would carry an amd64 binary, and the failure would only appear
+# when someone ran it.
+#
+# --platform=$BUILDPLATFORM on FROM is the other half: build on the runner's own architecture
+# and cross-compile, rather than running the whole Go toolchain under emulation.
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -33,7 +43,10 @@ ARG DATE=
 # "error obtaining VCS status: exit status 128" and the build stops. Verified by building from
 # the exact filtered context. The version metadata that -buildvcs would have derived comes from
 # the --build-arg values below instead.
-RUN CGO_ENABLED=0 GOOS=linux go build \
+# TARGETARCH is empty under a plain `docker build` -- only buildx sets it -- and the go command
+# treats `GOARCH=` as unset, so such a build uses the builder's own architecture, which is what
+# a single-arch image should be. The two cases need no separate branch.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
         -buildvcs=false \
         -trimpath \
         -ldflags "-s -w \

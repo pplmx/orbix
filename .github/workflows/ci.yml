@@ -274,39 +274,11 @@ jobs:
       # success for it.
       - name: the container turns healthy
         run: |
-          export HEALTH_FMT='{{.State.Health.Status}}'
-          cid=$(docker run -d -p 8080:8080 \
-            -v "$PWD/.cache:/models:ro" \
-            orbix:ci serve --model /models/stress.gguf --addr :8080)
-          echo "container $cid"
-          # 90 attempts of 2s, which is 180s against a start-period of 120s plus one 30s
-          # interval. The three numbers are not free choices: waiting less than the
-          # start-period would call a container unhealthy while the image says that much time
-          # is allowed, and waiting less than one interval would report a timeout before the
-          # first verdict exists.
-          for i in $(seq 1 90); do
-            # Through a variable so the Go template syntax is not interleaved with the shell's
-            # own quoting: nested single quotes inside a -f '...' argument are a reading hazard
-            # even where they parse.
-            state=$(docker inspect -f "$HEALTH_FMT" "$cid" 2>/dev/null || echo none)
-            echo "attempt $i: $state"
-            if [ "$state" = "healthy" ]; then
-              docker logs "$cid" | tail -5
-              docker rm -f "$cid" >/dev/null
-              exit 0
-            fi
-            if [ "$state" = "unhealthy" ]; then
-              docker logs "$cid"
-              docker rm -f "$cid" >/dev/null
-              echo "::error::the container never turned healthy"
-              exit 1
-            fi
-            sleep 2
-          done
-          docker logs "$cid"
-          docker rm -f "$cid" >/dev/null
-          echo "::error::the container did not become healthy within 180s"
-          exit 1
+          # One script for both workflows: this job checks the locally built image and the
+          # release job checks the one it pushed, and a second copy of the wait would be a
+          # second place to get the timing bound wrong.
+          scripts/wait_healthy.sh orbix:ci .cache/stress.gguf linux/amd64
+
 
   # The hooks in .pre-commit-config.yaml check things `just check` does not: trailing
   # whitespace and final newlines in non-Go files, YAML/TOML/JSON syntax, and merge-conflict

@@ -52,6 +52,27 @@ PATTERNS = {
         r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*"
         r"|\s*[\r\n]+|\s+(?!\S)|\s+"
     ),
+    # BailingMoE's, same file under LLAMA_VOCAB_PRE_TYPE_BAILINGMOE. Llama 3's shape with a bare
+    # `\p{N}` instead of `\p{N}{1,3}`, and the newline alternative without Llama 3's `+` -- which
+    # changes nothing, since both consume the whole run. The contraction alternative spells every
+    # letter both ways rather than using (?i:), so its accepted set equals Llama 3's.
+    "bailingmoe": regex.compile(
+        r"'(?:[sSdDmMtT]|[lL][lL]|[vV][eE]|[rR][eE])"
+        r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*"
+        r"|\s*[\r\n]|\s+(?!\S)|\s+"
+    ),
+    # Jais2's, same file under LLAMA_VOCAB_PRE_TYPE_JAIS2. Llama 3's expression with the whitespace
+    # tail replaced by power-of-two tiers tried largest first, so a run of spaces is cut into
+    # 512, 256, ... and the final space leads whatever follows. Writing out the tiers is what makes
+    # this worth having: the interaction between "\s{4}(?!\S)", "\s{1,2}(?!\S)" and "\s{1}" decides
+    # where a run breaks, and reading that off by hand is exactly the kind of mistake this file
+    # exists to catch.
+    "jais2": regex.compile(
+        r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
+        r"|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*"
+        r"|\s*[\r\n]+|\s{512}(?!\S)|\s{256}(?!\S)|\s{128}(?!\S)|\s{64}(?!\S)"
+        r"|\s{32}(?!\S)|\s{16}(?!\S)|\s{8}(?!\S)|\s{4}(?!\S)|\s{1,2}(?!\S)|\s{1}"
+    ),
     # Tekken's, same file under LLAMA_VOCAB_PRE_TYPE_TEKKEN. The llama.cpp entry carries both the
     # readable original from the model's tokenizer.json and a rewritten form with lookaheads; the
     # original is transcribed here, since a comparison against the rewrite could only confirm the

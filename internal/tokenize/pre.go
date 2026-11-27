@@ -1137,7 +1137,7 @@ func preFamilyOf(p preType) (preRule, bool) {
 		// consume the whole run, so nothing separates the families there.
 		return preRule{
 			digits: 1, lead: leadAnyNonLetter,
-			newlinesAfterPunct: true, newlineChunk: true,
+			newlinesAfterPunct: true, newlineChunk: true, cliticAnyCase: true,
 		}, true
 	case preLaguna:
 		// "[^\n]+|[\n]+" then bailingmoe's expression. The pass separates newlines from any

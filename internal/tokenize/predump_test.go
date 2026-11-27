@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,7 @@ func TestDumpPreSplit(t *testing.T) {
 	// it, so the two lists cannot drift apart silently.
 	families := map[string]preType{
 		"gpt2": preGPT2, "llama3": preLlama3, "qwen2": preQwen2, "tekken": preTekken,
+		"jais2": preJais2, "bailingmoe": preBailingMoE,
 	}
 	inputs := []string{
 		"hello world", "a.b", "it's 42", "  x  ", "", " ", "\n\n", "a\tb",
@@ -48,6 +50,15 @@ func TestDumpPreSplit(t *testing.T) {
 		// slashes, and an uppercase run followed by lowercase splits at the join.
 		"camelCaseWord", "HTTPServer", "x/y", "path/to/file", "a/b\n",
 		"A", "aA", "Aa", "ABCdef",
+		// jais2's whitespace tiers are tried largest first, so a run is cut into power-of-two
+		// pieces and the last space leads what follows. These lengths straddle every tier
+		// boundary the expression names, including the two that are adjacent in value.
+		"   x", "    x", "        x", "    y", "     y",
+		strings.Repeat(" ", 16) + "z", strings.Repeat(" ", 17) + "z",
+		strings.Repeat(" ", 100) + "z", strings.Repeat(" ", 513) + "z",
+		// BailingMoE is llama3's shape with a bare \p{N}, so a plain number separates them and a
+		// mixed-case contraction checks that its spelled-out alternatives fold.
+		"DON'T", "I'LL", "we'VE",
 	}
 	got := make(map[string]map[string][]string, len(families))
 	for name, pre := range families {

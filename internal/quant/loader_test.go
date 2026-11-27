@@ -1230,3 +1230,46 @@ func TestTensorRefusesAnUndecodableTypeBeforeReading(t *testing.T) {
 		t.Errorf("TensorReader refused a type it does not need to decode: %v", err)
 	}
 }
+
+// TestPreloadStops covers what a caller can see when one tensor in a batch cannot be decoded: the
+// whole set is refused rather than a partial map returned.
+//
+// The partial map would be worse than useless -- a model missing one projection loads and then
+// produces nonsense, and the caller has no way to tell that from a model that is merely bad -- so
+// Preload returns nil whenever any name failed. That is also why the early cancellation inside it
+// has no test of its own: from outside, stopping at the first error and finishing the set produce
+// the same result. See the note on the implementation for the counts that show it stops.
+func TestPreloadStops(t *testing.T) {
+	n := uint64(4096)
+	var tis []gguf.TensorInfo
+	for i := range 4 {
+		tis = append(tis, gguf.TensorInfo{
+			Name: fmt.Sprintf("ok%d", i), Dims: []uint64{n}, Type: gguf.F32,
+			Offset: uint64(i) * n * 4,
+		})
+	}
+	tis = append(tis, gguf.TensorInfo{
+		Name: "bad", Dims: []uint64{n}, Type: gguf.Q8_1, Offset: 4 * n * 4,
+	})
+	path := writeModel(t, tis, make([]byte, 5*int(n)*4))
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+	defer closeLoader(t, l)
+
+	names := []string{"ok0", "ok1", "ok2", "ok3", "bad"}
+	for _, workers := range []int{1, 4} {
+		out, err := l.Preload(names, workers)
+		if err == nil {
+			t.Fatalf("workers=%d: Preload accepted a batch holding an undecodable tensor", workers)
+		}
+		if out != nil {
+			t.Errorf("workers=%d: Preload returned a map of %d tensors alongside the error; a "+
+				"partial model loads and then produces nonsense", workers, len(out))
+		}
+		if !strings.Contains(err.Error(), "bad") {
+			t.Errorf("workers=%d: error %q does not name the tensor that failed", workers, err)
+		}
+	}
+}

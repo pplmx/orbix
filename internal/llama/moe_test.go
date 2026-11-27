@@ -709,3 +709,80 @@ func TestSelectExpertsLeadingNaNAreNotSkipped(t *testing.T) {
 		}
 	})
 }
+
+// TestMoEPrefillWithOneExpertMatchesDense is TestMoEWithOneExpertMatchesDense through the batched
+// path, which is a different function.
+//
+// Forward runs feedForward in forward.go; a prefill runs feedForwardMoERows in batch.go, and that
+// one adds the experts' scatter buffer back to the residual with its own AddInPlace. Dropping that
+// line changes every MoE prefill and left the whole package green -- measured -- because
+// TestMoEDecodeMatchesPrefill compares two calls that both go through it, so both lose the same
+// term and still agree with each other. A comparison test is blind to a mistake both sides share.
+//
+// The dense model is the reference the MoE path has to match: one expert with weight 1 is the same
+// arithmetic, laid out differently.
+func TestMoEPrefillWithOneExpertMatchesDense(t *testing.T) {
+	dense := defaultTiny()
+	densePath := buildTinyWeights(t, dense)
+
+	moe := defaultTiny()
+	moe.experts = 1
+	moe.used = 1
+
+	dir := moe.tensors()
+	var data []byte
+	offset := 0
+	for i, ti := range dir {
+		dir[i] = ti
+		dir[i].Offset = uint64(offset)
+		dir[i].Type = gguf.F32
+		n := int64(1)
+		for _, d := range ti.Dims {
+			n *= int64(d)
+		}
+		vals := make([]float32, n)
+		if ti.Name == "blk.0.ffn_gate_inp.weight" || ti.Name == "blk.1.ffn_gate_inp.weight" {
+			vals[0] = 1
+		} else {
+			for j := range vals {
+				vals[j] = float32((j%17)-8) / 64
+			}
+		}
+		data = appendFloat32s(data, vals)
+		offset += int(n) * 4
+	}
+	moePath := t.TempDir() + "/moe-prefill.gguf"
+	if err := os.WriteFile(moePath, buildFile(moe.kvs(), dir, data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prefill, not Forward: the batched FFN is the path under test.
+	run := func(path string) []float32 {
+		m, err := New(path)
+		if err != nil {
+			t.Fatalf("New(%s): %v", path, err)
+		}
+		cfg := m.Config()
+		cache, err := NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		logits, err := m.Prefill(cache, []int32{3, 4}, 0)
+		if err != nil {
+			t.Fatalf("Prefill: %v", err)
+		}
+		return append([]float32(nil), logits...)
+	}
+
+	denseLogits := run(densePath)
+	moeLogits := run(moePath)
+	if len(denseLogits) != len(moeLogits) {
+		t.Fatalf("logit counts differ: %d vs %d", len(denseLogits), len(moeLogits))
+	}
+	for i := range denseLogits {
+		if math.Abs(float64(denseLogits[i]-moeLogits[i])) > 1e-5 {
+			t.Fatalf("logit[%d] = %v for MoE prefill, %v for dense; one expert with weight 1 "+
+				"must match", i, moeLogits[i], denseLogits[i])
+		}
+	}
+}

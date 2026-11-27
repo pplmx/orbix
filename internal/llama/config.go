@@ -244,6 +244,17 @@ type archSpec struct {
 	// before the rotation, which is what Qwen3 adds to Qwen2's layout. The weights are one
 	// vector of head-dim length per layer, shared by every head of that layer.
 	qkNorm bool
+	// defaultWindow is the sliding window an architecture is defined to have when the file does
+	// not name one, or 0 when an absent key means "no window".
+	//
+	// It is a per-architecture number rather than a global default because the two cases it
+	// separates are both real and they disagree. Gemma 2 is windowed by construction: llama.cpp's
+	// src/models/gemma2.cpp sets `swa_type = LLAMA_SWA_TYPE_STANDARD` and `n_swa = 4096` before it
+	// reads the key, so a file that omits the window still gets one -- and Hugging Face's
+	// Gemma2Config defaults sliding_window to 4096 for the same reason. Mistral is the other way
+	// round: published fine-tunes that trained with full attention set the key to 0 or leave it
+	// out, and both mean unbounded.
+	defaultWindow int
 	// swaRopeBase is the frequency a windowed layer rotates at when the file does not name one,
 	// or 0 when the architecture has a single rotation.
 	//
@@ -297,6 +308,7 @@ var archSpecs = map[string]archSpec{
 		rope: RopeNeox, attnBias: false,
 		embedScale: true, ffn: ffnGELU,
 		postNorms: true, slidingPattern: true,
+		defaultWindow: 4096,
 	},
 	// Gemma 3 keeps Gemma 2's block shape -- sandwich norms, GeGLU, scaled embeddings -- and
 	// changes three things. It normalises each head's query and key, which is Qwen3's step. It drops
@@ -578,6 +590,11 @@ func (p configParser) window(cfg *Config) error {
 	// normally.
 	if v, ok := f.Get[int](arch + ".attention.sliding_window"); ok && v > 0 {
 		cfg.WindowLen = v
+	} else if p.spec.defaultWindow > 0 {
+		// No window key: the architecture's own window, which for Gemma 2 is 4096 and is part of
+		// what the architecture is rather than an optional refinement. Its absence in a file is a
+		// converter that predates the key, not a checkpoint trained without a window.
+		cfg.WindowLen = p.spec.defaultWindow
 	}
 
 	// The two caps are per-file numbers, so they are read by key rather than taken from the

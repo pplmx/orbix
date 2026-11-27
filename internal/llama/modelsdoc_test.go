@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 )
 
 // TestModelsDocListsEverySupportedArchitecture keeps the table and the table disagreeing from
@@ -150,5 +153,68 @@ func TestModelsDocStatesWhichCandidatesTheLogitOffsetRulesOut(t *testing.T) {
 	if !strings.Contains(strings.ReplaceAll(doc, "\n", " "), "not worth closing") {
 		t.Error("docs/models.md no longer states whether the offset is worth closing; the" +
 			" paragraph is meant to end in a decision, not in an open question")
+	}
+}
+
+// TestGemma2HasAWindowWhenTheFileOmitsTheKey covers the one architecture whose window is part of
+// what it is rather than an optional refinement.
+//
+// llama.cpp's src/models/gemma2.cpp sets `swa_type = LLAMA_SWA_TYPE_STANDARD` and
+// `n_swa = 4096` *before* it reads `attention.sliding_window`, so the read is an override and not
+// the only source. Hugging Face's Gemma2Config carries the same 4096 as the field default. A file
+// that omits the key is therefore a converter predating it, not a checkpoint trained without a
+// window -- and treating the absence as "unbounded" made every layer attend over the whole context
+// instead of every second one.
+//
+// The default has to stay per-architecture: Mistral is the opposite case, where an absent key or a
+// zero means full attention, which is why the other architectures must not pick this up.
+func TestGemma2HasAWindowWhenTheFileOmitsTheKey(t *testing.T) {
+	load := func(arch string, extra ...gguftest.Model) Config {
+		t.Helper()
+		m := gguftest.Model{Arch: arch, Layers: 4, Hidden: 32, Heads: 4, FFN: 64,
+			QKNorm: arch == "gemma3", PostNorms: arch != "llama"}
+		if len(extra) > 0 {
+			m = extra[0]
+			m.Arch = arch
+		}
+		path := m.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		cfg, err := LoadConfig(f)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		return cfg
+	}
+
+	// gemma2 with no window key gets 4096, and every second layer is the one that is bounded.
+	cfg := load("gemma2")
+	if cfg.WindowLen != 4096 {
+		t.Errorf("gemma2 with no sliding_window key: WindowLen = %d, want llama.cpp's 4096 "+
+			"default", cfg.WindowLen)
+	}
+	for l, want := range []int{4097, 0, 4097, 0} {
+		if got := windowFor(cfg, l); got != want {
+			t.Errorf("gemma2 layer %d window = %d, want %d", l, got, want)
+		}
+	}
+
+	// The file still wins when it says something else: 2048 in the file is 2048 here.
+	cfg = load("gemma2", gguftest.Model{Layers: 4, Hidden: 32, Heads: 4, FFN: 64,
+		PostNorms: true, WindowLen: 2048})
+	if cfg.WindowLen != 2048 {
+		t.Errorf("gemma2 with sliding_window 2048: WindowLen = %d, want the file's 2048",
+			cfg.WindowLen)
+	}
+
+	// And no other architecture inherits it. llama and gemma3 both leave an absent key alone.
+	for _, arch := range []string{"llama", "gemma3"} {
+		if got := load(arch).WindowLen; got != 0 {
+			t.Errorf("%s with no sliding_window key: WindowLen = %d, want 0 -- the default is "+
+				"gemma2's and applying it to any windowed architecture would bound a model that "+
+				"trained with full attention", arch, got)
+		}
 	}
 }

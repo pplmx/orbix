@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -393,6 +394,84 @@ func TestFinalSoftcapBoundsTheLogits(t *testing.T) {
 	}
 }
 
+// TestGemma2WindowChangesWhatTheModelAnswers is the real-weight counterpart of the fixture test
+// above.
+//
+// The fixture cannot show this: a constructed model's weights make every position look alike, so
+// bounding attention changes the logits by 1e-6 and a window that was silently dropped looks
+// identical to one that was applied. On gemma-2-2b-it the difference is 10.93 logits and a
+// different argmax, which is what makes the window worth getting right and what makes the
+// architecture default in TestGemma2HasAWindowWhenTheFileOmitsTheKey worth having.
+//
+// Set GEMMA2_MODEL to a Gemma 2 GGUF. The window is set to 32 rather than left at the file's 4096
+// so the prompt can be short: 32 binds at position 32, and a 122-token prompt crosses it five
+// times over.
+func TestGemma2WindowChangesWhatTheModelAnswers(t *testing.T) {
+	path := os.Getenv("GEMMA2_MODEL")
+	if path == "" {
+		t.Skip("set GEMMA2_MODEL to a Gemma 2 GGUF file")
+	}
+	f, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, err := tokenize.New(f)
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	w, err := LoadWeights(path)
+	if err != nil {
+		t.Fatalf("LoadWeights: %v", err)
+	}
+	ids := tok.Encode(strings.Repeat("The quick brown fox jumps over the lazy dog. ", 12), true)
+	if len(ids) > 128 {
+		ids = ids[:128]
+	}
+	if len(ids) < 64 {
+		t.Fatalf("the prompt is only %d tokens; a window of 32 would bind too few times", len(ids))
+	}
+
+	// bounded runs the prompt with one window, returning the logits of the last position.
+	bounded := func(window int) []float32 {
+		w.Config.WindowLen = window
+		m := modelFromWeights(t, w)
+		cache, err := NewKVCache(w.Config, len(ids)+8)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		var logits []float32
+		for pos, id := range ids {
+			if logits, err = m.Forward(cache, int(id), pos); err != nil {
+				t.Fatalf("Forward at %d: %v", pos, err)
+			}
+		}
+		return append([]float32(nil), logits...)
+	}
+	with, without := bounded(32), bounded(0)
+
+	worst, argW, argO := 0.0, 0, 0
+	for i := range with {
+		if d := math.Abs(float64(with[i] - without[i])); d > worst {
+			worst = d
+		}
+		if with[i] > with[argW] {
+			argW = i
+		}
+		if without[i] > without[argO] {
+			argO = i
+		}
+	}
+	if worst < 1 {
+		t.Errorf("a 32-position window moved the logits by only %.4f on real weights; the fixture "+
+			"cannot see this either, so a value this small would mean the window is not reaching "+
+			"attention at all", worst)
+	}
+	if argW == argO {
+		t.Logf("the window moved the logits by %.2f without changing the argmax, which is expected "+
+			"on a repetitive prompt", worst)
+	}
+}
+
 // TestGemma3MatchesReferenceLogprobs checks the Gemma 3 architecture against llama.cpp.
 //
 // Gemma 3 keeps Gemma 2's block -- sandwich norms, GeGLU, scaled embeddings -- and changes three
@@ -655,7 +734,11 @@ func modelFromWeights(t *testing.T, w *Weights) *Model {
 		t.Fatalf("newLocalRope: %v", err)
 	}
 	return &Model{
-		W: w, rope: r, ropeLocal: local, run: kernel.NewRunner(1),
+		// Workers rather than 1: the partitionable kernels are documented as bit-identical across
+		// the split (kernel/pool.go), so a test that compares two configs gets the same answer
+		// either way -- and a real checkpoint on one core is minutes per prompt instead of
+		// seconds.
+		W: w, rope: r, ropeLocal: local, run: kernel.NewRunner(runtime.GOMAXPROCS(0)),
 		x: make([]float32, cfg.Hidden), xn: make([]float32, cfg.Hidden),
 		q: make([]float32, cfg.Heads*cfg.HeadDim), k: make([]float32, cfg.kvDim()),
 		v: make([]float32, cfg.kvDim()), attn: make([]float32, cfg.Heads*cfg.HeadDim),

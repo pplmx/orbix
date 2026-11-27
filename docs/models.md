@@ -231,6 +231,13 @@ of 0.29 nats; skipping the normalisation puts the same token 21 nats away.
   dropping both norms puts the top-8 log probabilities 130 nats away.
 - Only every second block is bounded by the sliding window; the blocks between read the whole
   context. Applying the window to every layer is what the metadata key alone would do.
+- The window is 4096 positions when the file does not say. That is llama.cpp's default, set in
+  `src/models/gemma2.cpp` *before* it reads `attention.sliding_window`, so the key overrides a
+  value rather than supplying the only one; Hugging Face's `Gemma2Config` defaults the field to
+  4096 as well, and the converter writes it unconditionally, so a file that omits it is a
+  converter that predates the key. Treating the absence as "unbounded" made all 26 layers of
+  Gemma 2 2B attend over the whole context where 13 of them should have been bounded. The default
+  is `gemma2`'s alone: Mistral is the opposite case, where an absent key means full attention.
 - The attention projections are not square. Gemma 2 2B has 2304 hidden and 8 heads but 256-wide
   queries and keys, so the per-head width comes from `attention.key_length` rather than from
   `hidden/heads`, which would give 288.

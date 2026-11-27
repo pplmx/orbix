@@ -15,13 +15,13 @@
 | `internal/chat`     | 3658      | 88             | 48       | 5598      | 1.53      |
 | `internal/engine`   | 2090      | 47             | 20       | 6199      | 2.97      |
 | `internal/gguf`     | 1499      | 51             | 14       | 3068      | 2.05      |
-| `internal/quant`    | 930       | 27             | 20       | 3860      | 4.15      |
+| `internal/quant`    | 962       | 28             | 21       | 3904      | 4.06      |
 | `internal/gguftest` | 838       | 22             | 14       | 388       | 0.46      |
 | `internal/otel`     | 794       | 35             | 14       | 1787      | 2.25      |
 | `internal/kernel`   | 711       | 28             | 20       | 2182      | 3.07      |
 | `internal/f16`      | 154       | 4              | 4        | 399       | 2.59      |
 | `internal/arch`     | 14        | 0              | 0        | 1646      | 117.57    |
-| **合计**            | **29644** | **774**        | **438**  | **67839** | **2.29**  |
+| **合计**            | **29676** | **775**        | **439**  | **67883** | **2.29**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -503,7 +503,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
 **22 个函数在 100 行以上**（2026-11-26 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；774 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；775 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
@@ -518,7 +518,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**现存 22 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，774 个函数）：`chat.evalExpr`
+**现存 22 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，775 个函数）：`chat.evalExpr`
 316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
 205、`server.generate` 208、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
 141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`

@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 
 	"github.com/pplmx/orbix/internal/f16"
 	"github.com/pplmx/orbix/internal/gguf"
@@ -530,4 +532,20 @@ func decodeQ5_K(dst []float32, src []byte) {
 			u2 <<= 2
 		}
 	}
+}
+
+// supportedList names the quantization formats Decode handles, for an error that has to say what
+// it would have accepted.
+//
+// A reader who hits an undecodable tensor needs to know two things: which type the file used, and
+// which ones this build knows. The first is in the message already; without the second the only
+// recourse is the source. Sorted so the line is stable between runs and comparable between
+// versions.
+func supportedList() string {
+	names := make([]string, 0, len(codecs))
+	for t := range codecs {
+		names = append(names, t.String())
+	}
+	slices.Sort(names)
+	return strings.Join(names, ", ")
 }

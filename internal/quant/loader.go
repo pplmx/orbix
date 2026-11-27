@@ -126,6 +126,20 @@ func (l *Loader) Tensor(name string) ([]float32, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Decodability is checked here rather than in tensorBytes, because two of that function's
+	// three callers do not decode: TensorReader hands back the raw bytes for a type this build
+	// has no decoder for, and that is a supported use -- I8 and F64 tensors are readable even
+	// though nothing here turns them into float32.
+	//
+	// It goes before the read. gguf knows the encoded length of 34 quantization formats and this
+	// package decodes 14, so without the check a tensor in one of the other 20 had its whole
+	// length allocated and read off disk -- measured at 5 MB for a 4M-element Q8_1, and a real
+	// projection is hundreds of times that -- only to fail in Decode with "cannot decode Q8_1",
+	// which names neither the tensor nor what this build does support.
+	if !Supported(ti.Type) {
+		return nil, fmt.Errorf("quant: tensor %q has unsupported type %s: this build cannot "+
+			"decode it; it decodes %s", name, ti.Type, supportedList())
+	}
 	start, rerr := l.dataStart(ti, nbytes)
 	if rerr != nil {
 		return nil, fmt.Errorf("quant: tensor %q %w", name, rerr)

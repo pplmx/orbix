@@ -1186,3 +1186,47 @@ func TestTensorIntoRejectsWhatTensorRejects(t *testing.T) {
 			intoErr, tensorErr)
 	}
 }
+
+// TestTensorRefusesAnUndecodableTypeBeforeReading covers where in the load the refusal happens.
+//
+// gguf knows the encoded length of 34 quantization formats and this package decodes 14. A tensor
+// in one of the other 20 used to be sized, have its whole length allocated, and be read off disk
+// before Decode reported "cannot decode Q8_1" -- a message naming neither the tensor nor what this
+// build supports. Measured on a 4M-element Q8_1: 5 MB read and discarded; a real projection would be
+// hundreds of times that.
+//
+// The check cannot live in tensorBytes, which is what this test also pins: TensorReader hands back
+// raw bytes for types nothing here decodes, so a check there would refuse a supported use. That is
+// why the file has to be small enough to read and why the assertion is on the message rather than on
+// an allocation count -- what changed is the order, and the message is what shows it.
+func TestTensorRefusesAnUndecodableTypeBeforeReading(t *testing.T) {
+	// Q8_1 has a published block layout, so gguf sizes it, but this package has no decoder for it.
+	const n = 4096
+	path := writeModel(t, []gguf.TensorInfo{
+		{Name: "unsupported.weight", Dims: []uint64{n}, Type: gguf.Q8_1, Offset: 0},
+	}, make([]byte, 40))
+
+	l, err := OpenLoader(path)
+	if err != nil {
+		t.Fatalf("OpenLoader: %v", err)
+	}
+	defer closeLoader(t, l)
+
+	_, err = l.Tensor("unsupported.weight")
+	if err == nil {
+		t.Fatal("Tensor decoded a Q8_1 tensor")
+	}
+	msg := err.Error()
+	for _, want := range []string{"unsupported.weight", "Q8_1", "cannot decode", "Q4_0"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q; it has to name the tensor, the type, and what "+
+				"this build does support", msg, want)
+		}
+	}
+
+	// The same tensor as raw bytes is a supported read: the check belongs to the decode path.
+	if _, err := l.TensorReader("unsupported.weight"); err != nil &&
+		strings.Contains(err.Error(), "cannot decode") {
+		t.Errorf("TensorReader refused a type it does not need to decode: %v", err)
+	}
+}

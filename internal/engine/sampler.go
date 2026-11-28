@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/pplmx/orbix/internal/llama"
+import (
+	"math/rand/v2"
+
+	"github.com/pplmx/orbix/internal/llama"
+)
 
 // This file declares the sampling types callers of this package use.
 //
@@ -112,4 +116,21 @@ func TokenLogprob(logits []float32, chosen int32, temp float32, top int) (float3
 		out[i] = Alternative{ID: a.ID, Logprob: a.Logprob}
 	}
 	return lp, out
+}
+
+// NewSamplerRand returns the pseudo-random generator a seed stands for.
+//
+// One seed has to mean one stream, and that only holds if every entry point builds the generator
+// the same way. It did not: the server used PCG while `orbix run` used math/rand's older
+// NewSource, so `--seed 42` and `seed: 42` over HTTP produced different replies for the same
+// prompt -- a seed that is reproducible only within the tool that was told about it. Measured
+// before the fix: the same three seeds disagreed through the CLI and through a running server,
+// and after it all three agreed.
+//
+// The generator is PCG rather than NewSource because math/rand/v2 is the current package and
+// NewSource is retained for compatibility with the sequences it already produced. The second
+// word is derived from the seed rather than fixed so that consecutive seeds -- the server passes
+// seed+i to choice i -- do not start streams that are adjacent in the generator's state space.
+func NewSamplerRand(seed int64) *rand.Rand {
+	return rand.New(rand.NewPCG(uint64(seed), uint64(seed>>1)))
 }

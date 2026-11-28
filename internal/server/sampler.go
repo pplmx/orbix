@@ -42,5 +42,5 @@ func (t temperatureSampler) Next(logits []float32) int32 {
 // to run before it. The engine advances sequences one round at a time, so a shared
 // generator's draw order would depend on scheduling.
 func newRand(seed int64) *rand.Rand {
-	return rand.New(rand.NewPCG(uint64(seed), uint64(seed>>1)))
+	return engine.NewSamplerRand(seed)
 }

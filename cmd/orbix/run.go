@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
 	"github.com/pplmx/orbix/internal/llama"
 	"github.com/pplmx/orbix/internal/tokenize"
@@ -146,10 +146,18 @@ func runTo(dst io.Writer, args []string) error {
 
 	var sampler llama.Sampler = llama.Greedy{}
 	if *temp > 0 {
-		s := rand.New(rand.NewSource(*seed))
+		// engine.NewSamplerRand, not a generator built here: one seed has to mean one stream across
+		// entry points, and this used to build its own with math/rand's older NewSource while the
+		// server used PCG. Measured then, `--seed 42` and `seed: 42` over HTTP returned different
+		// replies for the same prompt; with both going through that constructor all three seeds
+		// tried agree.
+		//
+		// The clock case uses the same constructor: what it needs is a seed the caller did not
+		// choose, not a different generator.
 		if *seed == 0 {
-			s = rand.New(rand.NewSource(time.Now().UnixNano()))
+			*seed = time.Now().UnixNano()
 		}
+		s := engine.NewSamplerRand(*seed)
 		sampler = llama.Temperature{
 			Temp:      float32(*temp),
 			TopK:      *topK,

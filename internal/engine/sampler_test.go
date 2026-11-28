@@ -2,6 +2,8 @@ package engine
 
 import (
 	"math"
+	"math/rand"
+	"slices"
 	"testing"
 )
 
@@ -134,5 +136,54 @@ func TestTokenLogprobLowerTopReturnsFewer(t *testing.T) {
 	_, none := TokenLogprob([]float32{0, 5, 1, 2}, 1, 1, 0)
 	if len(none) != 0 {
 		t.Errorf("asked for no alternatives, got %d", len(none))
+	}
+}
+
+// TestNewSamplerRandIsTheSameStreamForOneSeed pins the contract that makes a seed portable.
+//
+// The value of a seed is that it names a stream, and that only holds if every caller builds the
+// generator the same way. It did not: the server seeded PCG while `orbix run` seeded math/rand's
+// older NewSource, so `--seed 42` and `seed: 42` over HTTP produced different replies for the same
+// prompt. Both now come through this constructor, and the test asserts the two properties the
+// constructor promises -- the same seed gives the same draws, and consecutive seeds do not.
+//
+// The draws are compared as a sequence rather than by a single value because a generator that
+// ignored its second word would still produce a plausible first number while handing choice 0 and
+// choice 1 the same stream, which is what the server does with seed+i.
+func TestNewSamplerRandIsTheSameStreamForOneSeed(t *testing.T) {
+	draws := func(seed int64, n int) []float64 {
+		r := NewSamplerRand(seed)
+		out := make([]float64, n)
+		for i := range out {
+			out[i] = r.Float64()
+		}
+		return out
+	}
+
+	a, b := draws(42, 8), draws(42, 8)
+	if !slices.Equal(a, b) {
+		t.Errorf("the same seed produced two streams:\n%v\n%v", a, b)
+	}
+
+	// Consecutive seeds are what the server derives for choices of one request, so they must not
+	// be the same stream. This is the property a caller depends on; how the constructor spends its
+	// second word is not observable through it -- replacing that word with a constant still passes,
+	// measured, because PCG already separates two seeds through the first word alone. The test says
+	// what it can see rather than asserting a stronger claim it cannot detect.
+	c := draws(43, 8)
+	if slices.Equal(a, c) {
+		t.Errorf("seeds 42 and 43 produced the same stream: %v", a)
+	}
+
+	// And the stream is not the older generator's, which is the regression this pins: the reason
+	// for a single constructor is that a reply is reproducible across entry points, and the entry
+	// point that disagreed was the one still using NewSource.
+	legacy := rand.New(rand.NewSource(42))
+	legacyPrefix := make([]float64, 8)
+	for i := range legacyPrefix {
+		legacyPrefix[i] = legacy.Float64()
+	}
+	if slices.Equal(a, legacyPrefix) {
+		t.Error("the generator is math/rand's NewSource stream, the one the CLI used to disagree on")
 	}
 }

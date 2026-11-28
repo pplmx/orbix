@@ -1313,3 +1313,83 @@ func TestStreamedToolCallsAgreeWithTheBlockingBody(t *testing.T) {
 		})
 	}
 }
+
+// TestLogprobsDescribeTheTextTheResponseShows pins the rule the logprob lists exist to follow: an
+// entry may only describe bytes the caller receives.
+//
+// The rule was already written down -- keptTokens says a stop string's removed text gets no entries
+// because "a logprob for them would describe something the caller cannot see" -- but only the stop
+// cut honoured it. Parsing a tool call cuts a hole out of the *middle* of a reply, and the lists were
+// built from the length of the message's content, which a hole makes meaningless. Measured on
+// "Hi. <tool_call>{...}</tool_call> Done.": message.content was "Hi.  Done." and logprobs.content
+// held 45 entries joining to the whole reply including the call's own bytes, while the streamed
+// response carried the 9 entries that matched. A caller reading the logprob list to score the answer
+// was scoring a JSON blob that was never in the answer.
+//
+// The shapes below are the ones that differ in where the prose is: beside a call, between two
+// calls, nowhere, and the whole reply unparsed.
+func TestLogprobsDescribeTheTextTheResponseShows(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+	}{
+		{"prose around one call", `Hi. <tool_call>{"name": "f"}</tool_call> Done.`},
+		{"the whole reply is a call", `<tool_call>{"name": "f"}</tool_call>`},
+		{"prose only, no call", `plain prose`},
+		{"two calls with prose around and between", `x <tool_call>{"name": "f"}</tool_call> y ` +
+			`<tool_call>{"name": "g"}</tool_call> z`},
+		{"a call cut off mid-argument", `Let me check. <tool_call>{"name": "f", "argum`},
+		{"a call on its own lines", "\n<tool_call>{\"name\": \"f\"}</tool_call>\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(c.reply, false)
+			samples := make([]sampledToken, len(ids))
+			for i, id := range ids {
+				samples[i] = sampledToken{id: id, logprob: -1}
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-logprobs", logprobs: true,
+				tools: []engine.ToolSpec{{Name: "f"}}}
+			obj := srv.choiceObject(&choiceResult{out: ids, samples: samples, reason: "stop"}, 0, p)
+			msg, ok := obj["message"].(map[string]any)
+			if !ok {
+				t.Fatalf("no message object: %v", obj["message"])
+			}
+			content, _ := msg["content"].(string)
+
+			// The entries, in order, as a caller reading them would concatenate them.
+			var joined strings.Builder
+			entries := decodedLogprobEntries(t, obj["logprobs"])
+			for _, e := range entries {
+				joined.WriteString(e)
+			}
+			if got := joined.String(); got != content {
+				t.Errorf("the logprob entries join to %q but message.content is %q; an entry may "+
+					"only describe text the caller receives", got, content)
+			}
+		})
+	}
+}
+
+// decodedLogprobEntries renders a chat logprobs object's per-token texts, in order.
+func decodedLogprobEntries(t *testing.T, lp any) []string {
+	t.Helper()
+	raw, err := json.Marshal(lp)
+	if err != nil {
+		t.Fatalf("marshal logprobs: %v", err)
+	}
+	var obj struct {
+		Content []struct {
+			Token string `json:"token"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("logprobs is not the chat shape (%s): %v", raw, err)
+	}
+	out := make([]string, len(obj.Content))
+	for i, e := range obj.Content {
+		out[i] = e.Token
+	}
+	return out
+}

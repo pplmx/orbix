@@ -2131,9 +2131,9 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				described := s.describeStreamedToken(ev.Token, text, ev.Logprob, ev.Top, tokenOffset == 0)
 				advance = len(described[0].text)
 				if p.chat {
-					chunkLogprobs = chatLogprobs(described, 1)
+					chunkLogprobs = chatLogprobs(described)
 				} else {
-					chunkLogprobs = completionLogprobs(described, 1, tokenOffset)
+					chunkLogprobs = completionLogprobs(described, tokenOffset)
 				}
 			}
 			tokenOffset += advance
@@ -3227,10 +3227,27 @@ func (s *Server) choiceObject(c *choiceResult, out int, p generateParams) map[st
 		text = cut
 		reason = "stop"
 	}
-	// The logprob lists are cut to the text the response shows, which is the stop-cut
-	// text and not the echoed one: the prompt was not generated, so it has no logprob
-	// here. With echo the offsets move past it, because they index into the text the
-	// caller receives.
+	// A chat reply is parsed here rather than at the end, because the parse decides what the
+	// response shows and the logprobs describe that. It runs only when the request declared
+	// tools: a model that writes <tool_call> unasked -- a conversation pasted in from
+	// elsewhere, or a base model imitating the marker -- would otherwise have its text cut out
+	// of a reply nobody asked to be a call.
+	var (
+		calls []toolCall
+		// spans is the byte ranges of text the response shows once calls are cut out, and nil
+		// when no call was found -- at which point the whole of text is what is shown and a
+		// length budget over it is the right cut.
+		spans []proseSpan
+	)
+	if p.chat && len(p.tools) > 0 {
+		if _, parsed, ranges := parseToolCallsSpans(text); len(parsed) > 0 {
+			calls, spans = parsed, ranges
+		}
+	}
+	// The logprob lists are cut to the text the response shows, which is the stop-cut text, or
+	// the prose once a call has been parsed out of it. The echoed prompt is not part of either:
+	// it was not generated, so it has no logprob here, and with echo the offsets move past it
+	// because they index into the text the caller receives.
 	//
 	// A token whose text straddles the cut is dropped rather than half-reported: half of
 	// its text survived, and neither keeping it nor truncating it would describe the
@@ -3238,15 +3255,15 @@ func (s *Server) choiceObject(c *choiceResult, out int, p generateParams) map[st
 	var logprobs any
 	if p.logprobs {
 		described := s.describeTokens(c.samples)
-		keep, _ := keptTokens(described, len(text))
+		described = shownLogprobTokens(described, text, calls, spans)
 		if p.chat {
-			logprobs = chatLogprobs(described, keep)
+			logprobs = chatLogprobs(described)
 		} else {
 			offset := 0
 			if p.echo {
 				offset = len(p.prompt)
 			}
-			logprobs = completionLogprobs(described, keep, offset)
+			logprobs = completionLogprobs(described, offset)
 		}
 	}
 
@@ -3268,22 +3285,16 @@ func (s *Server) choiceObject(c *choiceResult, out int, p generateParams) map[st
 	// reads choices[0] as the best one, and leaving a discarded candidate's number there would
 	// name an index that no longer exists.
 	if p.chat {
-		// The reply is parsed for tool calls only when the request declared tools. A model
-		// that writes <tool_call> unasked -- a conversation pasted in from elsewhere, or a
-		// base model imitating the marker -- would otherwise have its text cut out of a reply
-		// nobody asked to be a call.
 		message := map[string]any{"role": "assistant", "content": text}
-		if len(p.tools) > 0 {
-			prose, calls := parseToolCalls(text)
-			if len(calls) > 0 {
-				calls = assignToolCallIDs(p.responseID, calls)
-				message["content"] = prose
-				message["tool_calls"] = toolCallsJSON(calls)
-				// finish_reason is tool_calls, which is what the schema reserves for a turn
-				// that asks the caller to run something. "stop" would tell a client the
-				// assistant finished speaking and nothing is expected of it.
-				reason = "tool_calls"
-			}
+		if calls != nil {
+			prose, _ := parseToolCalls(text)
+			calls = assignToolCallIDs(p.responseID, calls)
+			message["content"] = prose
+			message["tool_calls"] = toolCallsJSON(calls)
+			// finish_reason is tool_calls, which is what the schema reserves for a turn
+			// that asks the caller to run something. "stop" would tell a client the
+			// assistant finished speaking and nothing is expected of it.
+			reason = "tool_calls"
 		}
 		return map[string]any{
 			"index":         out,

@@ -124,7 +124,18 @@ carrying `token`, `bytes`, `logprob` and `top_logprobs`. The count of alternativ
 endpoint because OpenAI documents different maxima -- `logprobs` at most 5 on completions,
 `top_logprobs` at most 20 on chat -- and a count past either is refused with `invalid_value`
 naming the bound rather than clamped. Streaming carries a logprobs object on each delta chunk,
-and the streamed and non-streaming lists are equal for the same request, offsets included.
+and the streamed and non-streaming lists are equal for the same request, offsets included, with
+one exception: a request that declares `tools` omits the streamed entry for a token whose text the
+tool gate swallows. The non-streaming list keeps that entry even when its text is empty (the first
+token of a reply often is), because the blocking path counts every sampled token. Measured on a
+fixture reply of "Hi. there.": both transports report 6 entries without `tools`, and with `tools`
+the stream reports 5 and the blocking body 6. Everything after that entry agrees, and neither list
+describes a call's own bytes -- that is a defect this server had, not a shape to rely on.
+
+A parsed tool call also decides what the lists may describe, on both transports. The entries cover
+the message's `content` and stop where a call was cut out: `"Hi. <tool_call>{...}</tool_call>
+Done."` reports entries joining to `"Hi.  Done."`, not to the whole generated text. Before that
+was fixed the blocking path kept the call's own bytes in the list while the stream did not.
 
 One consequence of those shapes is worth knowing before reading `top_logprobs` on completions. Its
 alternatives are a JSON object keyed by token text, so two alternatives that render to the same

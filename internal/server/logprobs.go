@@ -154,6 +154,45 @@ func keptTokens(described []logprobText, retained int) (keep, used int) {
 	return keep, used
 }
 
+// keptTokensInSpans keeps the described entries whose text falls inside one of the given byte
+// ranges of the reply.
+//
+// This is what a parsed tool call needs and what keptTokens cannot express: removing a call cuts
+// a hole in the middle of the reply, and a length budget can only keep a prefix. Measured before
+// this existed: "Hi. <tool_call>...</tool_call> Done." reported eleven logprob entries joining to
+// "Hi. <tool_" while the message's content was "Hi.  Done." -- the list described the call's own
+// bytes, which is exactly what keptTokens' comment says must not happen.
+//
+// An entry that straddles a boundary is dropped for the reason keptTokens gives: half its text
+// survived, and neither including it nor including half describes the token the caller can see.
+func keptTokensInSpans(described []logprobText, spans []proseSpan) []logprobText {
+	var out []logprobText
+	if len(spans) == 0 {
+		// Nothing of the reply is prose -- an all-call reply -- so no token describes anything
+		// the caller sees.
+		return nil
+	}
+	at := 0
+	next := 0
+	for _, d := range described {
+		start := at
+		at += len(d.text)
+		// Skip spans that end before this token starts; they cannot hold any of it.
+		for next < len(spans) && spans[next].end <= start {
+			next++
+		}
+		if next == len(spans) {
+			break
+		}
+		// The token has to sit wholly inside one span: a token that only partly overlaps was
+		// partly removed by the parse.
+		if start >= spans[next].start && at <= spans[next].end {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // completionLogprobs builds the completions endpoint's logprobs object for one choice.
 //
 // The schema is a set of parallel arrays rather than a list of objects -- tokens, their log
@@ -175,7 +214,8 @@ func keptTokens(described []logprobText, retained int) (keep, used int) {
 // on the key, or a bytes field beside it -- and a client parsing OpenAI's schema would then have
 // to special-case this server. chat's shape needs neither: its alternatives are a list of
 // objects, each carrying `bytes`, so nothing collapses there.
-func completionLogprobs(described []logprobText, count int, offset int) map[string]any {
+func completionLogprobs(described []logprobText, offset int) map[string]any {
+	count := len(described)
 	tokens := make([]string, count)
 	logprobs := make([]float32, count)
 	offsets := make([]int, count)
@@ -214,7 +254,8 @@ func completionLogprobs(described []logprobText, count int, offset int) map[stri
 // carrying its own text, bytes and alternatives. refusal is always null, because this server
 // has no separate refusal channel -- a reply is either generated normally or reported as an
 // error.
-func chatLogprobs(described []logprobText, count int) map[string]any {
+func chatLogprobs(described []logprobText) map[string]any {
+	count := len(described)
 	content := make([]map[string]any, count)
 	for i := range count {
 		d := described[i]
@@ -297,4 +338,26 @@ func alternatives(tops []logprobText) orderedLogprobs {
 		out[i] = logprobEntry{text: a.text, logprob: a.logprob}
 	}
 	return out
+}
+
+// shownLogprobTokens cuts the described tokens down to the ones that produced text the response
+// shows.
+//
+// Two cuts are possible and they are not the same shape. A stop string removes the end of the
+// reply, so a prefix is what survives and keptTokens' length budget is right. A parsed tool call
+// removes a hole in the middle, so the surviving tokens are not contiguous and only the spans the
+// parser reported can say which ones they are -- a length budget keeps the reply's first N bytes,
+// which for "Hi. <call> Done." is mostly the call.
+//
+// calls decides which cut applies: when the parser found none, the whole of text is what the
+// response shows, and when it found one, spans is what is left of it -- possibly nothing, which is
+// why this is keyed on calls rather than on spans being non-empty.
+func shownLogprobTokens(described []logprobText, text string, calls []toolCall, spans []proseSpan) []logprobText {
+	if calls != nil {
+		return keptTokensInSpans(described, spans)
+	}
+	if keep, _ := keptTokens(described, len(text)); keep < len(described) {
+		return described[:keep]
+	}
+	return described
 }

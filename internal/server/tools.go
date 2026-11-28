@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/pplmx/orbix/internal/engine"
 )
@@ -271,6 +272,23 @@ func checkToolMessages(msgs []chatMessage) ([]engine.Turn, error) {
 	return turns, nil
 }
 
+// proseSpan is one piece of a reply the parser returned as prose, as a byte range into the text it
+// was given.
+//
+// The ranges exist because a caller that reports per-token log probabilities has to describe the
+// same text the response shows, and the parser is what decides which parts of the reply those are.
+// Recomputing them by searching for the markers again would be a second implementation of the same
+// rule, and the two would drift the first time either changes.
+//
+// Concatenating them yields exactly the prose string parseToolCalls returns -- trimming included.
+// That is the property the logprob list depends on, and it is why the ranges are computed by the
+// same code that computes the string rather than alongside it: a span that disagrees with the text
+// reports the probability of bytes the caller cannot see.
+type proseSpan struct {
+	// start and end are byte offsets into the text parseToolCallsSpans was given.
+	start, end int
+}
+
 // parseToolCalls extracts the calls in a generated assistant turn.
 //
 // The marker set is the two the published templates ask for, and the text outside them is the
@@ -285,24 +303,45 @@ func checkToolMessages(msgs []chatMessage) ([]engine.Turn, error) {
 //     says arguments is a JSON object, and passing a caller something else would fail in their
 //     code far from this response.
 //
-// The returned text is what remains once the calls are removed, trimmed of the newlines the
+// The returned text is what remains once the calls are removed, trimmed of the whitespace the
 // template's own layout leaves around them. A model that wrote no calls returns its text
 // unchanged, so this cannot alter an ordinary reply.
 func parseToolCalls(text string) (string, []toolCall) {
+	prose, calls, _ := parseToolCallsSpans(text)
+	return prose, calls
+}
+
+// parseToolCallsSpans is parseToolCalls plus the byte ranges the prose came from.
+//
+// The spans are the untrimmed pieces, in reply order, and concatenating them gives the text with
+// the calls cut out -- before the empty-prose and no-call special cases below, which is what a
+// caller mapping tokens to what the response shows needs. Those special cases are about the prose
+// *string*: an empty one is what an all-call reply trims to, and a reply with no calls keeps its
+// text exactly, but the mapping is the same in both.
+func parseToolCallsSpans(text string) (string, []toolCall, []proseSpan) {
 	const open, closeTag = "<tool_call>", "</tool_call>"
 	if !strings.Contains(text, open) {
-		return text, nil
+		return text, nil, []proseSpan{{0, len(text)}}
 	}
 	var calls []toolCall
+	var spans []proseSpan
 	var prose strings.Builder
 	rest := text
+	// base is where rest starts in text, so the spans can be expressed in text's offsets.
+	base := 0
 	for {
 		start := strings.Index(rest, open)
 		if start < 0 {
 			prose.WriteString(rest)
+			if len(rest) > 0 {
+				spans = append(spans, proseSpan{base, len(text)})
+			}
 			break
 		}
 		prose.WriteString(rest[:start])
+		if start > 0 {
+			spans = append(spans, proseSpan{base, base + start})
+		}
 		body := rest[start+len(open):]
 		end := strings.Index(body, closeTag)
 		if end < 0 {
@@ -318,17 +357,65 @@ func parseToolCalls(text string) (string, []toolCall) {
 		if !ok {
 			// Text that merely looks like a call stays text. The alternative is dropping what
 			// the model wrote because it mentioned the marker.
-			prose.WriteString(rest[start : start+len(open)+end+len(closeTag)])
+			whole := rest[start : start+len(open)+end+len(closeTag)]
+			prose.WriteString(whole)
+			spans = append(spans, proseSpan{base + start, base + start + len(whole)})
+			base += start + len(whole)
 			rest = body[end+len(closeTag):]
 			continue
 		}
 		calls = append(calls, c)
+		base += start + len(open) + end + len(closeTag)
 		rest = body[end+len(closeTag):]
 	}
 	if len(calls) == 0 {
-		return text, nil
+		return text, nil, []proseSpan{{0, len(text)}}
 	}
-	return strings.TrimSpace(prose.String()), calls
+	trimmed, ranges := trimSpans(prose.String(), spans)
+	return trimmed, calls, ranges
+}
+
+// trimSpans trims the given spans the way strings.TrimSpace trims their concatenation, and returns
+// the result together with the trimmed ranges.
+//
+// The spans are recorded as the reply is walked, before the parse knows whether the whitespace
+// around the calls is part of the answer. It is not: the templates wrap a call in newlines of their
+// own, so the parser drops them, and the logprob list has to drop the tokens that produced them
+// too. Keeping the two in one place is what stops the ranges from drifting from the string.
+func trimSpans(prose string, spans []proseSpan) (string, []proseSpan) {
+	trimmed := strings.TrimSpace(prose)
+	if trimmed == "" {
+		return "", nil
+	}
+	// The counts are byte counts, and strings.TrimSpace trims a rune at a time; counting the
+	// difference in lengths gives the byte count of the whitespace actually removed, which is
+	// what the span walk below needs.
+	left := len(prose) - len(strings.TrimLeftFunc(prose, unicode.IsSpace))
+	right := len(prose) - len(strings.TrimRightFunc(prose, unicode.IsSpace))
+
+	// Walk the spans in order, dropping the first `left` bytes and then the last `right` of what
+	// remains.
+	out := make([]proseSpan, 0, len(spans))
+	for _, sp := range spans {
+		start, end := sp.start, sp.end
+		if left > 0 {
+			drop := min(left, end-start)
+			start += drop
+			left -= drop
+		}
+		if start < end {
+			out = append(out, proseSpan{start, end})
+		}
+	}
+	for i := len(out) - 1; i >= 0 && right > 0; i-- {
+		drop := min(right, out[i].end-out[i].start)
+		out[i].end -= drop
+		right -= drop
+		if out[i].end == out[i].start {
+			out = out[:i]
+		}
+	}
+	return trimmed, out
 }
 
 // toolCall is one call parsed out of a reply.

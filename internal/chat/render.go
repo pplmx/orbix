@@ -166,14 +166,14 @@ func (t *Template) Render(msgs []Message, in Inputs) (string, error) {
 		}
 		v, err := variableValue(in.Variables[name])
 		if err != nil {
-			return "", fmt.Errorf("chat: variable %q: %w", name, err)
+			return "", fmt.Errorf("variable %q: %w", name, err)
 		}
 		vars[name] = v
 	}
 	sc := newScope(vars)
 	var r renderer
 	if err := r.renderNodes(t.nodes, sc); err != nil {
-		return "", fmt.Errorf("chat: render: %w", err)
+		return "", fmt.Errorf("render: %w", err)
 	}
 	return r.buf.String(), nil
 }

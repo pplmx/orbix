@@ -545,17 +545,17 @@ func argumentsText(raw json.RawMessage) (string, error) {
 // A held region that turns out not to be a call is released on flush, so text that merely mentions
 // the marker still reaches the client.
 //
-// text is the only source of truth: sent and inCall decide when bytes go out, never what the reply
-// contains. parseToolCalls runs over the whole of text at the end regardless of how much was
-// released, which is why two shapes that look like data loss are not. A call that arrives complete
-// in a single push leaves inCall true and makes flush return nothing -- the push that found the
-// opening marker returned before it could look for the closing one -- and the call is still parsed
-// from text. A later push that carries the closing marker clears inCall and the prose after it is
-// parsed as content. Both measured; neither loses a byte.
+// text is the only source of truth: sent decides how far the client's copy goes and never what the
+// reply contains. parseToolCalls runs over the whole of text at the end regardless of how much was
+// released, which is why withholding a call's bytes loses nothing -- the call is reported from
+// text. push carries no decision from one push to the next beyond "a call is open": a single push
+// may hold the end of one call, prose, and the whole of the next, and each region is handled in the
+// order it appears, so what a client reads does not depend on where the token boundaries fell.
 type toolCallGate struct {
 	// text is everything pushed so far.
 	text string
-	// sent is how many bytes of text the client has.
+	// sent is how much of text the client's copy covers: everything before it was either
+	// released as prose or withheld for good as part of a call.
 	sent int
 	// inCall is true once an opening marker has matched and its closing marker has not.
 	inCall bool
@@ -567,44 +567,64 @@ const (
 )
 
 // push adds generated text and returns what may now be sent.
+//
+// One push may hold several regions -- the tail of a call, the prose between two calls, the whole
+// of the next call -- so the work is a loop over them rather than one decision. Every exit leaves
+// sent at the first byte whose release is still undecided, which is what makes the output depend on
+// the text and not on where the caller split it: the same reply pushed whole and pushed a byte at a
+// time must release the same bytes in the same order.
 func (g *toolCallGate) push(gen string) string {
 	g.text += gen
-	if g.inCall {
-		// Inside a call nothing is released; the close marker ends it, and the call itself is
-		// reported through the response's tool_calls rather than as content.
-		if strings.Contains(g.text[g.sent:], toolCallClose) {
-			// The call's own bytes are dropped, which is the point: what the client sees is the
-			// parsed call. sent jumps past the marker so the prose after it streams normally.
+	var out strings.Builder
+	for {
+		if g.inCall {
+			// Inside a call nothing is released; the close marker ends it, and the call itself
+			// is reported through the response's tool_calls rather than as content.
+			j := strings.Index(g.text[g.sent:], toolCallClose)
+			if j < 0 {
+				// Unterminated so far. flush and parseToolCalls decide once, from the whole
+				// text, whether this was a call; nothing inside the marker goes out as prose
+				// either way.
+				break
+			}
+			// The call's own bytes are dropped, which is the point: what the client sees is
+			// the parsed call. sent moves just past the marker, not to the end of the text --
+			// anything after it in this same push is prose, or the next call, and dropping it
+			// would lose output the client never gets another chance to see.
 			g.inCall = false
-			g.sent = len(g.text)
-			return ""
+			g.sent += j + len(toolCallClose)
+			continue
 		}
-		return ""
-	}
-	// Where the first opening marker starts, if the text seen so far contains one.
-	if i := strings.Index(g.text[g.sent:], toolCallOpen); i >= 0 {
-		start := g.sent + i
-		out := g.text[g.sent:start]
-		g.inCall = true
-		g.sent = start
-		return out
-	}
-	// No complete marker yet. Release everything except a tail that is a prefix of it -- that is
-	// the only way a marker can still be forming across a chunk boundary.
-	hold := 0
-	for n := min(len(toolCallOpen)-1, len(g.text)-g.sent); n > 0; n-- {
-		if strings.HasPrefix(toolCallOpen, g.text[len(g.text)-n:]) {
-			hold = n
+		i := strings.Index(g.text[g.sent:], toolCallOpen)
+		if i < 0 {
+			// No complete marker yet. Release everything except a tail that is a prefix of the
+			// opening marker -- that is the only way a marker can still be forming across a
+			// chunk boundary.
+			safe := g.safeEnd()
+			if safe > g.sent {
+				out.WriteString(g.text[g.sent:safe])
+				g.sent = safe
+			}
 			break
 		}
+		// Everything before the marker is prose and goes out; the marker itself opens a region
+		// whose release is decided by the pass above, which may find its close in this same push.
+		out.WriteString(g.text[g.sent : g.sent+i])
+		g.sent += i
+		g.inCall = true
 	}
-	safe := len(g.text) - hold
-	if safe <= g.sent {
-		return ""
+	return out.String()
+}
+
+// safeEnd is the offset just past the last byte of text that can be released as prose: a tail that
+// is a prefix of the opening marker is held, because the next push may complete it.
+func (g *toolCallGate) safeEnd() int {
+	for n := min(len(toolCallOpen)-1, len(g.text)-g.sent); n > 0; n-- {
+		if strings.HasPrefix(toolCallOpen, g.text[len(g.text)-n:]) {
+			return len(g.text) - n
+		}
 	}
-	out := g.text[g.sent:safe]
-	g.sent = safe
-	return out
+	return len(g.text)
 }
 
 // flush returns whatever is still held once generation has ended.

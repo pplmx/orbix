@@ -1037,3 +1037,102 @@ func TestChatWithholdsToolsForChoiceNoneThroughTheHandler(t *testing.T) {
 			"withheld from the prompt", none, auto)
 	}
 }
+
+// TestToolCallGateIsIndependentOfChunking pins the property a streaming gate has to have: the
+// prose it releases must not depend on how the reply happened to be split into tokens.
+//
+// The gate decides when bytes go out, so a difference here is a difference in what a client
+// reads. Every split point is tried, not just "all at once" against "a byte at a time": the two
+// shapes that broke it before the fix were a push carrying a call plus the prose after it, and a
+// push carrying two calls, and neither is a split a caller can avoid -- the chunking comes from the
+// tokenizer, which may emit a whole `<tool_call>{...}</tool_call>` as one token.
+//
+// The expected value is written out rather than taken from the gate's own answer, so a gate that
+// consistently dropped or duplicated a region cannot pass by agreeing with itself.
+func TestToolCallGateIsIndependentOfChunking(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "prose, a call, then prose",
+			in:   `Hello there. <tool_call>{"name":"get","arguments":{"x":1}}</tool_call> Done.`,
+			want: "Hello there.  Done.",
+		},
+		{
+			name: "the whole reply is one call",
+			in:   `<tool_call>{"name":"f","arguments":{}}</tool_call>`,
+			want: "",
+		},
+		{
+			name: "no marker at all",
+			in:   `plain prose with no call`,
+			want: `plain prose with no call`,
+		},
+		{
+			name: "angle brackets that are not a marker",
+			in:   `a < b and c > d`,
+			want: `a < b and c > d`,
+		},
+		{
+			name: "two calls with prose around and between them",
+			in:   `x <tool_call>{"a":1}</tool_call> y <tool_call>{"b":2}</tool_call> z`,
+			want: "x  y  z",
+		},
+		{
+			name: "two calls back to back",
+			in:   `<tool_call>{"a":1}</tool_call><tool_call>{"b":2}</tool_call>`,
+			want: "",
+		},
+		{
+			name: "a marker that never completes",
+			in:   `trailing <tool_ca`,
+			want: `trailing <tool_ca`,
+		},
+		{
+			name: "a call that never closes",
+			in:   `before <tool_call>{"a":1`,
+			want: "before ",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := streamed(t, c.in, []int{0, len(c.in)}); got != c.want {
+				t.Errorf("one push released %q, want %q", got, c.want)
+			}
+			// Every way of cutting the reply into two pushes has to agree with that.
+			for k := 0; k <= len(c.in); k++ {
+				if got := streamed(t, c.in, []int{0, k, len(c.in)}); got != c.want {
+					t.Errorf("split after byte %d released %q, want %q", k, got, c.want)
+				}
+			}
+			// And so does one byte at a time, which is the worst case a tokenizer can produce.
+			cuts := make([]int, 0, len(c.in)+2)
+			for k := 0; k <= len(c.in); k++ {
+				cuts = append(cuts, k)
+			}
+			if got := streamed(t, c.in, cuts); got != c.want {
+				t.Errorf("one byte at a time released %q, want %q", got, c.want)
+			}
+			// No path may leak a call's own bytes as prose; that is the whole point of the gate.
+			if strings.Contains(c.want, toolCallOpen) || strings.Contains(c.want, toolCallClose) {
+				t.Fatalf("the expected text %q carries a call marker; the case is miswritten",
+					c.want)
+			}
+		})
+	}
+}
+
+// streamed pushes in up to the given byte offsets and returns everything released, including the
+// flush. Offsets are ascending and end at len(src).
+func streamed(t *testing.T, src string, cuts []int) string {
+	t.Helper()
+	var g toolCallGate
+	var got strings.Builder
+	for i := 0; i+1 < len(cuts); i++ {
+		got.WriteString(g.push(src[cuts[i]:cuts[i+1]]))
+	}
+	got.WriteString(g.flush())
+	return got.String()
+}

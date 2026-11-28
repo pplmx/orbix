@@ -128,7 +128,7 @@ func TestCommandsParseTheMetadataOnce(t *testing.T) {
 			err := chatSession(strings.NewReader("/exit\n"), &out, chatOptions{
 				model:     path,
 				maxTokens: 2,
-				topK:      40,
+				sampling:  samplingFlags{topK: 40},
 			})
 			if err != nil {
 				t.Fatalf("chatSession: %v", err)

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -103,6 +104,52 @@ func workersFlag(fs *flag.FlagSet) *int {
 			"helping: a pass can only be split as far as its smallest dimension allows, so a "+
 			"small model does not use a large number, and a request that is waiting for a slot "+
 			"does not run faster for it either")
+}
+
+// samplingFlags holds the three knobs that decide how a token is drawn.
+type samplingFlags struct {
+	temp float64
+	topK int
+	topP float64
+}
+
+// registerSamplingFlags registers --temp, --top-k and --top-p.
+//
+// run and chat each registered these three by hand, with wording that had to stay identical and a
+// validation block that had to stay equivalent. They were identical when this was written, which
+// is the state that makes the duplication invisible: nothing fails until one of them is edited.
+// The validation was the part worth sharing, because it is not a range check -- NaN and Inf pass
+// every comparison, and a NaN temperature reached the sampler, made the sum NaN, failed every
+// "r < acc" and returned the last candidate, the least likely token in the set.
+func registerSamplingFlags(fs *flag.FlagSet, s *samplingFlags) {
+	// *Var rather than the returning form, so the fields stay plain values: validate's tests build
+	// a struct literal, and a caller reading the result after Parse needs no dereference.
+	fs.Float64Var(&s.temp, "temp", 0, "sampling temperature; 0 means greedy")
+	fs.IntVar(&s.topK, "top-k", 40, "top-k sampling cutoff, 0 disables it. Only applies with --temp > 0")
+	fs.Float64Var(&s.topP, "top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it. Only applies with --temp > 0")
+}
+
+// validate refuses sampling values with no reading, naming the command that received them.
+//
+// The command name is the only thing that differs between callers, so it is a parameter rather
+// than a reason to restate the four checks.
+func (s samplingFlags) validate(cmd string) error {
+	// Sampling is switched on by "temp > 0" and top-k applies at "topK > 0", so a negative value
+	// is the same as zero: the run goes greedy without saying so.
+	if math.IsNaN(s.temp) || math.IsInf(s.temp, 0) || s.temp < 0 {
+		return fmt.Errorf("%s: --temp must be a finite, non-negative number (0 means greedy)", cmd)
+	}
+	if s.topK < 0 {
+		return fmt.Errorf("%s: --top-k must not be negative (0 disables it)", cmd)
+	}
+	// A probability outside [0, 1] is refused rather than clamped. Zero and one both mean "no
+	// limit" to the sampler and the flag documents 0 as the value that disables the cutoff, so
+	// what is refused is a value with no reading at all: clamping -0.1 up to 0 would silently
+	// turn a typo into "off", and lowering 1.5 would apply a cutoff nobody asked for.
+	if math.IsNaN(s.topP) || s.topP < 0 || s.topP > 1 {
+		return fmt.Errorf("%s: --top-p must be between 0 and 1 (0 disables it)", cmd)
+	}
+	return nil
 }
 
 // registerCacheFlags registers the paged-cache flags, and the worker flag when asked.

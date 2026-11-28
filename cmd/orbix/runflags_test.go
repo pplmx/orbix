@@ -17,10 +17,10 @@ func TestValidateRunFlagsRefusesNonFinite(t *testing.T) {
 		v     runFlags
 		wants string
 	}{
-		{"NaN temperature", runFlags{temp: math.NaN()}, "--temp"},
-		{"infinite temperature", runFlags{temp: math.Inf(1)}, "--temp"},
-		{"NaN top-p", runFlags{topP: math.NaN()}, "--top-p"},
-		{"infinite top-p", runFlags{topP: math.Inf(-1)}, "--top-p"},
+		{"NaN temperature", runFlags{sampling: samplingFlags{temp: math.NaN()}}, "--temp"},
+		{"infinite temperature", runFlags{sampling: samplingFlags{temp: math.Inf(1)}}, "--temp"},
+		{"NaN top-p", runFlags{sampling: samplingFlags{topP: math.NaN()}}, "--top-p"},
+		{"infinite top-p", runFlags{sampling: samplingFlags{topP: math.Inf(-1)}}, "--top-p"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -47,9 +47,9 @@ func TestValidateRunFlagsRefusesNegativeValues(t *testing.T) {
 		v     runFlags
 		wants string
 	}{
-		{"negative temperature", runFlags{temp: -0.5}, "--temp"},
-		{"negative top-k", runFlags{topK: -1}, "--top-k"},
-		{"negative top-p", runFlags{topP: -0.1}, "--top-p"},
+		{"negative temperature", runFlags{sampling: samplingFlags{temp: -0.5}}, "--temp"},
+		{"negative top-k", runFlags{sampling: samplingFlags{topK: -1}}, "--top-k"},
+		{"negative top-p", runFlags{sampling: samplingFlags{topP: -0.1}}, "--top-p"},
 		{"negative workers", runFlags{workers: -2}, "--workers"},
 		{"negative max-tokens", runFlags{maxTokens: -5}, "--max-tokens"},
 		{"negative ctx", runFlags{contextLen: -100}, "--ctx"},
@@ -74,7 +74,7 @@ func TestValidateRunFlagsRefusesNegativeValues(t *testing.T) {
 // disables the cutoff, so both are accepted. Above one is not a wider cutoff but a typo, and
 // clamping it would apply a cutoff the caller did not ask for.
 func TestValidateRunFlagsRefusesATopPAboveOne(t *testing.T) {
-	err := validateRunFlags(runFlags{topP: 1.5})
+	err := validateRunFlags(runFlags{sampling: samplingFlags{topP: 1.5}})
 	if err == nil {
 		t.Fatal("--top-p 1.5 was accepted")
 	}
@@ -92,8 +92,8 @@ func TestValidateRunFlagsAcceptsTheOrdinaryValues(t *testing.T) {
 		v    runFlags
 	}{
 		{"greedy, no limits", runFlags{}},
-		{"sampling on", runFlags{temp: 0.8, topK: 40, topP: 0.95}},
-		{"top-p at both ends", runFlags{topP: 1}},
+		{"sampling on", runFlags{sampling: samplingFlags{temp: 0.8, topK: 40, topP: 0.95}}},
+		{"top-p at both ends", runFlags{sampling: samplingFlags{topP: 1}}},
 		{"workers set", runFlags{workers: 4}},
 	}
 	for _, c := range cases {

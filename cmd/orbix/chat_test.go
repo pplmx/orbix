@@ -58,7 +58,7 @@ func TestChatDoesNotInventARenderFailure(t *testing.T) {
 	out := runChat(t, chatOptions{
 		model:     chatModel(t),
 		maxTokens: 4,
-		topK:      40,
+		sampling:  samplingFlags{topK: 40},
 	}, "Once upon a time\n/exit\n")
 
 	// The banner must still say which format is in use -- that is the honest statement.
@@ -88,7 +88,7 @@ func TestChatReportsARealRenderTimeFallback(t *testing.T) {
 	out := runChat(t, chatOptions{
 		model:     path,
 		maxTokens: 4,
-		topK:      40,
+		sampling:  samplingFlags{topK: 40},
 	}, "Once upon a time\n/exit\n")
 
 	if !strings.Contains(out, "could not render this conversation") {
@@ -100,7 +100,7 @@ func TestChatRepliesAndExits(t *testing.T) {
 	out := runChat(t, chatOptions{
 		model:     chatModel(t),
 		maxTokens: 4,
-		topK:      40,
+		sampling:  samplingFlags{topK: 40},
 	}, "Once upon a time\n/exit\n")
 
 	for _, want := range []string{"orbix chat:", "Type a message", "> "} {
@@ -125,7 +125,7 @@ func TestChatRepliesAndExits(t *testing.T) {
 func TestChatEOFEndsSession(t *testing.T) {
 	// A piped session ends at EOF without needing /exit, which is what makes
 	// "printf 'hi' | orbix chat" usable.
-	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40}, "hello\n")
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, sampling: samplingFlags{topK: 40}}, "hello\n")
 	if !strings.Contains(out, "orbix chat:") {
 		t.Errorf("no banner:\n%s", out)
 	}
@@ -135,7 +135,7 @@ func TestChatClearAndHistory(t *testing.T) {
 	out := runChat(t, chatOptions{
 		model:     chatModel(t),
 		maxTokens: 3,
-		topK:      40,
+		sampling:  samplingFlags{topK: 40},
 	}, "Once upon a time\n/history\n/clear\n/history\n/exit\n")
 
 	if !strings.Contains(out, "user: Once upon a time") {
@@ -168,7 +168,7 @@ func TestChatClearAndHistory(t *testing.T) {
 }
 
 func TestChatHelpAndUnknownCommand(t *testing.T) {
-	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40},
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, sampling: samplingFlags{topK: 40}},
 		"/help\n/nope\n/exit\n")
 	// The descriptions are what /help adds over the banner, which lists the same names on one line.
 	// Asserting a name only proves the banner appeared: with the /help case removed, the command falls
@@ -195,7 +195,7 @@ func TestChatHelpAndUnknownCommand(t *testing.T) {
 // asserted one sample rather than the set. This one derives the set from chatHelp and requires
 // the banner to name every member of it.
 func TestChatBannerNamesEveryCommand(t *testing.T) {
-	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40}, "/exit\n")
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, sampling: samplingFlags{topK: 40}}, "/exit\n")
 
 	// Every name chatHelp lists, in its first column, must appear in chatCommands.
 	//
@@ -257,7 +257,7 @@ func TestChatBannerNamesEveryCommand(t *testing.T) {
 func TestChatBlankLinesIgnored(t *testing.T) {
 	// A blank line must not become a turn: it would otherwise be encoded as a prompt
 	// with no user text and answered.
-	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40},
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, sampling: samplingFlags{topK: 40}},
 		"\n\n   \n/exit\n")
 	if strings.Count(out, "> ") > 4 {
 		t.Errorf("blank lines produced extra prompts:\n%s", out)
@@ -271,7 +271,7 @@ func TestChatHistoryOnlyGrowsOnSuccess(t *testing.T) {
 	out := runChat(t, chatOptions{
 		model:     chatModel(t),
 		maxTokens: 3,
-		topK:      40,
+		sampling:  samplingFlags{topK: 40},
 	}, "Once upon a time\nTell me more\n/history\n/exit\n")
 
 	if got := strings.Count(out, "user: "); got != 2 {
@@ -308,7 +308,7 @@ func TestRenderChatPrompt(t *testing.T) {
 
 func TestChatPromptTooLongAsksForClear(t *testing.T) {
 	path := chatModel(t)
-	opts := chatOptions{model: path, maxTokens: 2, topK: 40}
+	opts := chatOptions{model: path, maxTokens: 2, sampling: samplingFlags{topK: 40}}
 
 	// Build a conversation that overflows the model's context before the first turn by
 	// asking with a prompt longer than the window.
@@ -366,7 +366,7 @@ func TestChatRefusesABudgetThatGeneratesNothing(t *testing.T) {
 	t.Run("one still starts a session", func(t *testing.T) {
 		// A real model, because the point is that 1 passes validation all the way into a
 		// session. The session is fed an immediate /exit so nothing is generated.
-		opts := chatOptions{model: chatModel(t), maxTokens: 1, topK: 40}
+		opts := chatOptions{model: chatModel(t), maxTokens: 1, sampling: samplingFlags{topK: 40}}
 		out := runChat(t, opts, "/exit\n")
 		if !strings.Contains(out, "orbix chat:") {
 			t.Errorf("--max-tokens 1 did not start a session:\n%s", out)
@@ -386,7 +386,7 @@ func TestChatAliasesEndTheSession(t *testing.T) {
 			// A second line follows the command. If the alias did not end the session, that
 			// line would be sent to the model and answered, which the absence of a second
 			// prompt shows.
-			out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40},
+			out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, sampling: samplingFlags{topK: 40}},
 				"Once upon a time\n"+cmd+"\n/help\n")
 			// "end the session" appears only in /help's own listing: the startup banner
 			// also starts with the word Commands, so that would match either way.
@@ -403,7 +403,7 @@ func TestChatAliasesEndTheSession(t *testing.T) {
 // TestChatAliasesAreNotSentToTheModel is the other half: a command must not also become a
 // user message. Both would end the session here, so the check is on the transcript.
 func TestChatAliasesAreNotSentToTheModel(t *testing.T) {
-	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, topK: 40},
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 2, sampling: samplingFlags{topK: 40}},
 		"/quit\n")
 	if strings.Contains(out, "user: /quit") || strings.Contains(out, "user: /q") {
 		t.Errorf("a command was recorded as a user message:\n%s", out)
@@ -467,7 +467,7 @@ func TestClearDoesNotAlwaysEndPoolExhaustion(t *testing.T) {
 	// A pool far smaller than one message: 2 blocks of 16 positions cannot hold ~60 words.
 	long := strings.Repeat("word ", 60)
 	out := runChat(t, chatOptions{
-		model: path, maxTokens: 2, topK: 40, blocks: 2, blockSize: 16,
+		model: path, maxTokens: 2, sampling: samplingFlags{topK: 40}, blocks: 2, blockSize: 16,
 	}, long+"\n/clear\n"+long+"\n/exit\n")
 	if n := strings.Count(out, "block pool exhausted"); n != 2 {
 		t.Errorf("saw %d pool-exhaustion errors, want 2 (one before /clear and one after):\n%s", n, out)
@@ -529,7 +529,7 @@ func TestChatRefusesABlockBiggerThanTheContext(t *testing.T) {
 		blockSize:   1000,
 		prefixCache: true,
 		maxTokens:   4,
-		topK:        40,
+		sampling:    samplingFlags{topK: 40},
 	})
 	if err == nil {
 		t.Fatal("chat accepted a block larger than the context")
@@ -1374,7 +1374,7 @@ func TestChatClearKeepsThePrefixCache(t *testing.T) {
 		"/clear\n/stats\n" +
 		msg + "\n/stats\n/exit\n"
 	out := runChat(t, chatOptions{
-		model: path, maxTokens: 4, topK: 40, topP: 0.9, prefixCache: true,
+		model: path, maxTokens: 4, sampling: samplingFlags{topK: 40, topP: 0.9}, prefixCache: true,
 	}, input)
 
 	// Collect the reuse figure after each turn, in order.
@@ -1437,7 +1437,7 @@ func TestChatTreatsEachLineAsATurn(t *testing.T) {
 	in.WriteString("What did it say?\n/exit\n")
 
 	out := runChat(t, chatOptions{
-		model: path, maxTokens: 4, topK: 40, prefixCache: true,
+		model: path, maxTokens: 4, sampling: samplingFlags{topK: 40}, prefixCache: true,
 	}, in.String())
 
 	// Every line started a turn, which is the property being pinned.
@@ -1475,7 +1475,7 @@ func TestChatSystemPromptReachesTheModel(t *testing.T) {
 		in.WriteString(msg + "\n/stats\n" + msg + "\n/stats\n/exit\n")
 		var out strings.Builder
 		if err := chatSession(strings.NewReader(in.String()), &out, chatOptions{
-			model: path, maxTokens: 4, topK: 40, prefixCache: true, system: system,
+			model: path, maxTokens: 4, sampling: samplingFlags{topK: 40}, prefixCache: true, system: system,
 		}); err != nil {
 			t.Fatalf("chatSession: %v", err)
 		}
@@ -1524,7 +1524,7 @@ func TestChatBannerIsRightBeforeTheFirstTurn(t *testing.T) {
 	path := gguftest.Model{
 		NoEOS: true, ContextLen: 512, ChatTemplate: `{{ messages[99].content }}`,
 	}.Write(t, t.TempDir())
-	out := runChat(t, chatOptions{model: path, maxTokens: 2, topK: 40}, "Once upon a time\n/exit\n")
+	out := runChat(t, chatOptions{model: path, maxTokens: 2, sampling: samplingFlags{topK: 40}}, "Once upon a time\n/exit\n")
 
 	// The first line is the banner. Everything after it may legitimately mention the
 	// fallback; the point is that the banner does not claim the template works.
@@ -1560,7 +1560,7 @@ func TestChatExplainsAnOverflowOnce(t *testing.T) {
 	}
 	in.WriteString("/exit\n")
 
-	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 4, topK: 40}, in.String())
+	out := runChat(t, chatOptions{model: chatModel(t), maxTokens: 4, sampling: samplingFlags{topK: 40}}, in.String())
 
 	if got := strings.Count(out, "no longer fits the model's window"); got != 2 {
 		t.Errorf("the full explanation appeared %d times, want 2 (one per conversation, since "+
@@ -1589,7 +1589,7 @@ func TestChatExplainsAPoolExhaustionOnce(t *testing.T) {
 	in.WriteString("/exit\n")
 
 	out := runChat(t, chatOptions{
-		model: chatModel(t), maxTokens: 4, topK: 40, blocks: 4, blockSize: 16, prefixCache: true,
+		model: chatModel(t), maxTokens: 4, sampling: samplingFlags{topK: 40}, blocks: 4, blockSize: 16, prefixCache: true,
 	}, in.String())
 
 	if got := strings.Count(out, "outgrew the pool"); got != 1 {
@@ -1612,7 +1612,7 @@ func TestChatExplainsAPoolExhaustionOnce(t *testing.T) {
 func TestChatSaysWhenClearCannotHelp(t *testing.T) {
 	sys := strings.TrimSpace(strings.Repeat("padding words here ", 40))
 	out := runChat(t, chatOptions{
-		model: chatModel(t), maxTokens: 4, topK: 40, system: sys,
+		model: chatModel(t), maxTokens: 4, sampling: samplingFlags{topK: 40}, system: sys,
 	}, "hi\n/clear\nhi again\n/exit\n")
 
 	if got := strings.Count(out, "no longer fits the model's window"); got < 1 {

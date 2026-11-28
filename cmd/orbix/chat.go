@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"strings"
 	"time"
@@ -30,9 +29,8 @@ func cmdChat(args []string) error {
 	model := modelFlag(fs)
 	system := fs.String("system", "", "system prompt prepended to the conversation")
 	maxTokens := maxTokensFlag(fs, 128)
-	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
-	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it. Only applies with --temp > 0")
-	topP := fs.Float64("top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it. Only applies with --temp > 0")
+	var sampling samplingFlags
+	registerSamplingFlags(fs, &sampling)
 	cache := registerCacheFlags(fs, true)
 	noPrefix := fs.Bool("no-prefix-cache", false, "disable prefix reuse between turns")
 	if err := fs.Parse(args); err != nil {
@@ -44,19 +42,8 @@ func cmdChat(args []string) error {
 	if err := cache.validate("chat", true); err != nil {
 		return err
 	}
-	// Sampling is switched on by "temp > 0" and top-k applies at "topK > 0", so a negative
-	// value is the same as zero: the session goes greedy without saying so.
-	// NaN and Inf pass every comparison below, so each is named rather than left to a range
-	// check: a NaN temperature reached the sampler, made sum NaN, failed every `r < acc`
-	// and returned the last candidate -- the least likely token in the set.
-	if math.IsNaN(*temp) || math.IsInf(*temp, 0) || *temp < 0 {
-		return fmt.Errorf("chat: --temp must be a finite, non-negative number (0 means greedy)")
-	}
-	if *topK < 0 {
-		return fmt.Errorf("chat: --top-k must not be negative (0 disables it)")
-	}
-	if math.IsNaN(*topP) || *topP < 0 || *topP > 1 {
-		return fmt.Errorf("chat: --top-p must be between 0 and 1 (0 disables it)")
+	if err := sampling.validate("chat"); err != nil {
+		return err
 	}
 	// The engine refuses a negative budget too, but only when a turn is submitted -- so the
 	// user typed a question, waited for the model to load, and then read an error about the
@@ -78,9 +65,7 @@ func cmdChat(args []string) error {
 		model:       *model,
 		system:      *system,
 		maxTokens:   *maxTokens,
-		temp:        *temp,
-		topK:        *topK,
-		topP:        *topP,
+		sampling:    sampling,
 		workers:     *cache.workers,
 		blockSize:   *cache.blockSize,
 		blocks:      *cache.blocks,
@@ -93,9 +78,7 @@ type chatOptions struct {
 	model       string
 	system      string
 	maxTokens   int
-	temp        float64
-	topK        int
-	topP        float64
+	sampling    samplingFlags
 	workers     int
 	blockSize   int
 	blocks      int
@@ -384,7 +367,7 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 	}
 
 	sampler := llama.Sampler(llama.Greedy{})
-	if opts.temp > 0 {
+	if opts.sampling.temp > 0 {
 		// engine.NewSamplerRand, the same constructor `run` and the server seed with, rather than
 		// a third one built here. The generator is not crypto/rand because sampling quality does
 		// not depend on unpredictability; the reason to share it is that one seed should mean one
@@ -398,7 +381,7 @@ func chatTurnOnce(out io.Writer, eng *engine.Engine, tok *tokenize.Tokenizer, sy
 		// there the prompt is fixed and the seed is the only variable.
 		r := engine.NewSamplerRand(time.Now().UnixNano())
 		sampler = llama.Temperature{
-			Temp: float32(opts.temp), TopK: opts.topK, TopP: float32(opts.topP),
+			Temp: float32(opts.sampling.temp), TopK: opts.sampling.topK, TopP: float32(opts.sampling.topP),
 			NextFloat: r.Float64,
 		}
 	}

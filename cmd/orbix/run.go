@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"slices"
 	"strings"
@@ -32,9 +31,8 @@ func runTo(dst io.Writer, args []string) error {
 	fs.SetOutput(os.Stderr)
 	model := modelFlag(fs)
 	maxTokens := maxTokensFlag(fs, 128)
-	temp := fs.Float64("temp", 0, "sampling temperature; 0 means greedy")
-	topK := fs.Int("top-k", 40, "top-k sampling cutoff, 0 disables it. Only applies with --temp > 0")
-	topP := fs.Float64("top-p", 0, "nucleus sampling cutoff in (0,1], 0 disables it. Only applies with --temp > 0")
+	var sampling samplingFlags
+	registerSamplingFlags(fs, &sampling)
 	seed := fs.Int64("seed", 0, "sampling seed; 0 uses the current time. Has no effect without --temp, because greedy decoding is already deterministic")
 	contextLen := fs.Int("ctx", 0, "context length; 0 uses the model's trained amount")
 	echo := fs.Bool("echo", false, "print the prompt before the generated text")
@@ -59,9 +57,7 @@ func runTo(dst io.Writer, args []string) error {
 		return err
 	}
 	if err := validateRunFlags(runFlags{
-		temp:       *temp,
-		topK:       *topK,
-		topP:       *topP,
+		sampling:   sampling,
 		workers:    *workers,
 		maxTokens:  *maxTokens,
 		contextLen: *contextLen,
@@ -145,7 +141,7 @@ func runTo(dst io.Writer, args []string) error {
 	}
 
 	var sampler llama.Sampler = llama.Greedy{}
-	if *temp > 0 {
+	if sampling.temp > 0 {
 		// engine.NewSamplerRand, not a generator built here: one seed has to mean one stream across
 		// entry points, and this used to build its own with math/rand's older NewSource while the
 		// server used PCG. Measured then, `--seed 42` and `seed: 42` over HTTP returned different
@@ -159,9 +155,9 @@ func runTo(dst io.Writer, args []string) error {
 		}
 		s := engine.NewSamplerRand(*seed)
 		sampler = llama.Temperature{
-			Temp:      float32(*temp),
-			TopK:      *topK,
-			TopP:      float32(*topP),
+			Temp:      float32(sampling.temp),
+			TopK:      sampling.topK,
+			TopP:      float32(sampling.topP),
 			NextFloat: s.Float64,
 		}
 	}
@@ -344,9 +340,7 @@ func promptFromArgs(fs *flag.FlagSet, args []string) (string, error) {
 
 // runFlags is what cmdRun read from its flags, before validation.
 type runFlags struct {
-	temp       float64
-	topK       int
-	topP       float64
+	sampling   samplingFlags
 	workers    int
 	maxTokens  int
 	contextLen int
@@ -370,23 +364,11 @@ func validateRunFlags(v runFlags) error {
 	// NaN and Inf pass every comparison below, so each is named rather than left to a range
 	// check: a NaN temperature reached the sampler, made sum NaN, failed every `r < acc`
 	// and returned the last candidate -- the least likely token in the set.
-	if math.IsNaN(v.temp) || math.IsInf(v.temp, 0) || v.temp < 0 {
-		return fmt.Errorf("run: --temp must be a finite, non-negative number (0 means greedy)")
+	if err := v.sampling.validate("run"); err != nil {
+		return err
 	}
 	if v.workers < 0 {
 		return fmt.Errorf("run: --workers must not be negative")
-	}
-	if v.topK < 0 {
-		return fmt.Errorf("run: --top-k must not be negative (0 disables it)")
-	}
-	// A probability outside [0, 1] is refused rather than clamped, for the same reason as
-	// --top-k. Zero and one both mean "no limit" to the sampler, and the flag documents 0 as
-	// the value that disables the cutoff, so accepting them is the point rather than a
-	// guess. What is refused is a value with no reading at all: clamping -0.1 up to 0 would
-	// silently turn a typo into "off", and lowering 1.5 would apply a cutoff the caller did
-	// not ask for.
-	if math.IsNaN(v.topP) || v.topP < 0 || v.topP > 1 {
-		return fmt.Errorf("run: --top-p must be between 0 and 1 (0 disables it)")
 	}
 	// The library rejects this too, but only once the model is loaded and Generate is
 	// reached. Reporting it here means a typo costs nothing and does not depend on which

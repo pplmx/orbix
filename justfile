@@ -493,6 +493,36 @@ skips:
         exit "$status"
     fi
 
+# Coverage measured the only way it answers "is this dead code": every package instrumented, every
+# package's tests running.
+#
+# The plain form, `go test -cover ./pkg`, instruments only `pkg`, so a function called from a test
+# in another package reads 0%. AGENTS.md records that as a trap -- `Float32s` shown at 0% while
+# tokenize's tests call it constantly -- but nothing produced the other number, so each case had to
+# be chased by hand. Measured with -coverpkg=./... no package of the engine has a function at 0%; what remains is
+# three `main` functions and scripts/count.go, which has no test file. Six others that read 0% per package (gguf's Float32s and Int32s,
+# tokenize's FIMMarkerNames and PreName, llama's DefaultBlockSize before it got a test) are all at
+# 100% here.
+#
+# Two of the six remaining are `main` in cmd/orbix and scripts/genfixture -- nothing can call those.
+# The other four are scripts/count.go's own helpers, and that package has no test file at all: it is
+# a development tool, not a layer of the engine. Both groups are why this recipe prints the list
+# rather than asserting it is empty.
+#
+# Slow, because instrumentation applies to every package on every run: about 50s against the plain
+# form's 35s. That is why it is not in `check`.
+coverage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(mktemp)
+    trap 'rm -f "$out"' EXIT
+    go test -coverpkg=./... -coverprofile="$out" ./... >/dev/null
+    # -func prints one line per function; the total row is dropped so it does not look like a
+    # function nobody calls.
+    go tool cover -func="$out" | grep -v '^total:'
+    echo
+    echo "functions at 0%:"
+    go tool cover -func="$out" | awk '$3=="0.0%" {print "  " $0}'
 
 # Prints the version cz would bump to and the changelog section it would write, then stops. The
 # real bump is a person's decision: it writes a tag, and a tag is what `git describe` turns into

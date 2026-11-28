@@ -29,7 +29,7 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外十三个是辅助配方，不进门槛，但会用得上：
+上面是门槛和发布入口。另外十五个是辅助配方，不进门槛，但会用得上（`just --list` 里的第 29 条是 `default`，即不带配方时等价于 `just check`）：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题
@@ -72,6 +72,12 @@ just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打�
              # 它与 architecture-review.md 的「74 处 t.Skip」不是一回事：那是代码里的跳过点，
              # 这里是运行时真正跳过的。后者少于前者，因为有的跳过点在子测试里、有的在同一轮
              # 被别的路径覆盖。suite 失败时这条配方会先打印计数再以非零退出。
+just coverage # 按函数看覆盖率，每个包都被 instrumented——这是回答「这段代码没人用吗」的那条。
+             # `go test -cover ./pkg` 只 instrument 自己，被别的包的测试调用的函数会显示 0%，
+             # 本节「覆盖率按包看」那段讲的就是这个坑；这条配方给出另一个数。实测引擎各包
+             # 已无 0% 函数；剩下的六个是三个 `main`（测试调不到）和 scripts/count.go 的四个
+             # 辅助函数（那个包没有测试文件，它是开发工具不是引擎的一层）。
+             # 比裸的 -cover 慢（约 50s vs 35s），所以不进 check。
 just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）
 just         # 不带配方等价于 just check
 ```

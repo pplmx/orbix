@@ -34,6 +34,9 @@ just xcheck-fixture # parse gguftest's fixture with the Python gguf package and 
 just stress    # race binary under mixed load: plain, SSE, and clients that hang up; needs MODEL=
 just fixture   # write a synthetic checkpoint big enough for just stress to interrupt
 just skips     # count the tests that skip for want of a checkpoint, which CI reports too
+just coverage  # per-function coverage with every package instrumented, which is what answers
+               # "is this dead": `go test -cover ./pkg` reports 0% for a function another
+               # package calls
 just isolate   # run the suite twice with shuffling, to catch order dependence
 just fmt       # gofmt -w, to fix whatever just check reported
 just vet       # go vet on one package: just PKG=./internal/gguf vet

@@ -3943,3 +3943,87 @@ func TestLengthOfAMappingCountsKeys(t *testing.T) {
 		t.Errorf("rendered %q, want %q", got, want)
 	}
 }
+
+// TestSelectAttrTestsAreNotTheOnesTheIsOperatorTakes pins the set selectattr evaluates, and the
+// fact that it is not the set `is` takes.
+//
+// The code comment used to claim the two were the same and to point at an evalTest function that
+// does not exist. They overlap on defined and none and nothing else: `is` handles the seven type
+// and presence tests, selectattr handles presence and equality. A reader who trusted the comment
+// would expect `selectattr("role", "string")` to work, and measured it reports "unsupported test"
+// while `role is string` renders.
+//
+// Each case is one branch of applyNamedTest, including the argument-count refusals, which are the
+// reason the function is a switch rather than a table: a test that takes no argument has to say so
+// instead of ignoring the extra one.
+func TestSelectAttrTestsAreNotTheOnesTheIsOperatorTakes(t *testing.T) {
+	cases := []struct {
+		name    string
+		src     string
+		want    string
+		wantErr string
+	}{
+		{
+			name: "defined keeps every item that has the field",
+			src:  `{{ messages|selectattr("role", "defined")|list|length }}`,
+			want: "2",
+		},
+		{
+			name: "none keeps nothing, because a role is a string",
+			src:  `{{ messages|selectattr("role", "none")|list|length }}`,
+			want: "0",
+		},
+		{
+			name: "eq is an alias for equalto",
+			src:  `{{ messages|selectattr("role", "eq", "user")|list|length }}`,
+			want: "1",
+		},
+		{
+			name: "sameas is an alias for equalto",
+			src:  `{{ messages|selectattr("role", "sameas", "assistant")|list|length }}`,
+			want: "1",
+		},
+		{
+			// A type test `is` accepts and selectattr does not. The message names the test so a
+			// template author can tell this from a syntax error.
+			name:    "a type test the is operator takes is refused here",
+			src:     `{{ messages|selectattr("role", "string")|list|length }}`,
+			wantErr: `unsupported test "string"`,
+		},
+		{
+			name:    "a test that takes no argument refuses one",
+			src:     `{{ messages|selectattr("role", "defined", "extra")|list|length }}`,
+			wantErr: "the defined test takes no argument",
+		},
+		{
+			name:    "equalto needs its argument",
+			src:     `{{ messages|selectattr("role", "equalto")|list|length }}`,
+			wantErr: "the equalto test takes one argument",
+		},
+	}
+	msgs := []Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmpl, err := Parse(c.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := tmpl.Render(msgs, Inputs{})
+			if c.wantErr != "" {
+				if err == nil {
+					t.Fatalf("rendered %q, want an error containing %q", out, c.wantErr)
+				}
+				if !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("error %q does not contain %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if out != c.want {
+				t.Errorf("rendered %q, want %q", out, c.want)
+			}
+		})
+	}
+}

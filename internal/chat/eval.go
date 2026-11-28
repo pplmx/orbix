@@ -918,8 +918,16 @@ func selectAttrField(item value, field string) (value, bool) {
 
 // applyNamedTest runs one Jinja2 test by name, with the arguments selectattr passes after it.
 //
-// The set is the same one the `is` operator accepts; see evalTest. Comparing is done here rather
-// than by re-entering the parser because selectattr's arguments are values, not source text.
+// The set is not the same one the `is` operator accepts, and the two overlap only on defined and
+// none. `is` takes the seven type and presence tests a template inspects a value with (defined,
+// none, mapping, iterable, string, true, false); selectattr filters a sequence by one field, where
+// the interesting questions are "is this field present" and "does it equal that", so it takes
+// defined, none, boolean and equalto/eq/sameas instead. This comment used to say the sets were the
+// same and to name an evalTest function that does not exist; measured, `selectattr("role",
+// "string")` reported "unsupported test" while `role is string` rendered.
+//
+// Comparing is done here rather than by re-entering the parser because selectattr's arguments are
+// values, not source text.
 func applyNamedTest(name string, subject value, rest []value) (bool, error) {
 	switch name {
 	case "boolean":

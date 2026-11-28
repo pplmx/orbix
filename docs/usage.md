@@ -154,6 +154,18 @@ three-byte U+FFFD, and the highest `offset + len(token)` is 9 -- six bytes past 
 overshoots by twelve. A client that indexes `choices[0].text` with `text_offset` therefore reads
 outside it, and one that joins `tokens` to recover the text gets `"���"` where the content is `"中"`.
 
+How far this reaches in practice was measured on 2026-11-28 against a real checkpoint, not the
+fixture: Qwen2.5-0.5B-Instruct answered 北京，位于华北平原的中心，是全国的政治、 with the tokens
+joining to the text exactly and the highest `offset + len(token)` landing at 60, the text's own
+byte count. Three more replies -- an emoji prompt, a bare `é`, and a mixed 中文English one -- all
+came out with zero overshoot. Every token in that vocabulary is a complete UTF-8 sequence, so the
+sum of the rendered lengths is the text's length and the defect does not arise.
+
+So the overshoot needs a vocabulary whose pieces are bytes rather than characters, which is what
+`internal/gguftest`'s synthetic one is. That is a real input -- llama.cpp's `tokenizer.ggml.model`
+allows it and the fixture exists to exercise it -- but it is not what a Qwen2 or a Llama file does,
+and the four prompts above are the evidence for saying so rather than an assumption.
+
 This paragraph used to end by saying the question was cosmetic "because the bytes are
 authoritative". The bytes are right and that is still true; the offsets are a separate field, and
 they are wrong. The fix is not obvious and has not been made. Writing this out is worth it because

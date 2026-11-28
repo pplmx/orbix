@@ -436,12 +436,12 @@ Measured 2026-11:
 
 | Gates set                                                                                                         | Skipped |
 | ----------------------------------------------------------------------------------------------------------------- | ------- |
-| none                                                                                                              | 33      |
+| none                                                                                                              | 32      |
 | the six that were on hand (`MODEL`, `QWEN2_MODEL`, `QWEN3_MODEL`, `GEMMA2_MODEL`, `GEMMA3_MODEL`, `MODEL_KQUANT`) | 10      |
 | all fourteen                                                                                                      | 0       |
 
 The "none" figure was re-measured 2026-11-28 with `go test -v ./...` -- it moves every time a gated
-test is added or un-gated, and 2026-11-28 un-gated one; the "all fourteen" figure was last measured
+test is added or un-gated, and two were un-gated that day; the "all fourteen" figure was last measured
 2026-11 with the same command, on a machine holding every checkpoint, and the middle row the same
 way on 2026-11-25 with six of them downloaded from ModelScope and set. The ten it leaves are
 worth naming because they show what the remaining gates buy: three are the `ORBIX_*` dump switches
@@ -483,7 +483,7 @@ because nothing at a call site reads them.
 
 The four quantization ones are easy to miss when auditing this list: they are not `os.Getenv("...")`
 at the call site but rows in a table that `TestRealWeightMatrixStats` walks, so a search for
-`Getenv("` finds ten gates and the four rows are invisible. Measured both ways -- 33 skipped with no
+`Getenv("` finds ten gates and the four rows are invisible. Measured both ways -- 32 skipped with no
 variables, 0 with all fourteen.
 
 That search is worth trusting only after measuring, because the two answers look equally plausible.

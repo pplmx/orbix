@@ -50,11 +50,12 @@ just docker  # 本地构建容器镜像并打印里面的版本号；发布镜�
 just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打印的就是这个数。
              # 它先打一行 `gates set: N of 14`，再打 `skipped: M`：一个数字单独看没有意义，
              # 只有配上当时设了几个检查点才知道它说的是什么。实测两档（2026-11-28）：
-             # 0 个 → 33；4 个（gemma2 Q3_K_L 充当 MODEL/GEMMA2_MODEL/MODEL_KQUANT、
+             # 0 个 → 32；4 个（gemma2 Q3_K_L 充当 MODEL/GEMMA2_MODEL/MODEL_KQUANT、
              # gemma3 270M 充当 GEMMA3_MODEL）→ 20。
-             # **33 是「没有任何真实权重」的数，不是仓库的常数**：它随 gated 测试增删而变。
-             # 本会话加了两条（gemma3 的窗口后困惑度、gemma2 的窗口影响）涨到 34，随后又有
-             # 一条不再需要门禁（`TestTCPResetStopsGeneration` 改用 fixture 兜底）掉回 33。
+             # **32 是「没有任何真实权重」的数，不是仓库的常数**：它随 gated 测试增删而变。
+             # 本会话加了两条（gemma3 的窗口后困惑度、gemma2 的窗口影响）涨到 34，随后两条
+             # 改用 fixture 兜底（`TestTCPResetStopsGeneration`、`TestTensorDecodesTheSameTwice`）
+             # 掉回 32。
              # 5 个和 6 个那两档这一轮没能复算——手头只有 gemma2 与 gemma3 两个文件，用它们
              # 冒充 MODEL/QWEN2_MODEL 等会让 suite 失败，而 `just skips` 在失败时不报数字
              # （这是它该有的行为）。要更新那两档得先凑齐六个真文件。2026-11-26 的读数是
@@ -66,7 +67,7 @@ just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打�
              # reference fixture 每次带门禁都报红，`just skips` 就只肯说「这轮是坏的」；
              # 把那两个 fixture 标成记录已被取代的读数之后才拿到数字——一份「已知失效但仍红」
              # 的测试会让整条配方失去读数，代价不止是噪声。
-             # 它与 architecture-review.md 的「76 处 t.Skip」不是一回事：那是代码里的跳过点，
+             # 它与 architecture-review.md 的「75 处 t.Skip」不是一回事：那是代码里的跳过点，
              # 这里是运行时真正跳过的。后者少于前者，因为有的跳过点在子测试里、有的在同一轮
              # 被别的路径覆盖。suite 失败时这条配方会先打印计数再以非零退出。
 just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）

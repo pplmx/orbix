@@ -39,7 +39,10 @@ func TestDocsCiteRealFiles(t *testing.T) {
 	// mention (rope.go, tools.go) do not become noise here.
 	for _, pattern := range []string{
 		filepath.Join(root, "internal", "*", "doc.go"),
-		filepath.Join(root, "cmd", "*", "doc.go"),
+		// No cmd/*/doc.go here: the main packages keep their package comment in main.go,
+		// where `go doc` still finds it, and the cmd/*/*.go pattern below reads them anyway.
+		// A pattern that matches nothing is indistinguishable from one written wrong, so the
+		// list holds only patterns that match something.
 		// And the rest of the source, for the same reason one step further out: comments in
 		// ordinary Go files cite paths too. Measured before adding them, ten such citations
 		// existed -- internal/llama/config.go, internal/chat/eval.go, cmd/orbix/run.go,
@@ -60,6 +63,15 @@ func TestDocsCiteRealFiles(t *testing.T) {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		// A pattern that matches nothing stops checking anything, and it looks exactly like
+		// a pattern that is simply narrow. The scripts gap fixed above was this shape: the
+		// list read as covering scripts/ because scripts/*.go was in it and matched a file.
+		// Failing here means a directory was renamed or a package moved, and the list needs
+		// to follow rather than quietly reading less of the tree.
+		if len(matches) == 0 {
+			t.Fatalf("pattern %s matches no files: either the tree moved or the pattern is wrong",
+				pattern)
 		}
 		docs = append(docs, matches...)
 	}

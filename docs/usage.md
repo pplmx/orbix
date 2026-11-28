@@ -138,14 +138,14 @@ and attaching them unconditionally reported the call's own bytes instead.
 
 **One exception, and it is a known defect rather than a rule.** A byte-level vocabulary spells a
 character as several single-byte tokens, and each entry then describes its own byte rather than the
-character those bytes form: `"中文"` reports six replacement characters, one per byte, against a
-two-character reply. The streamed list is affected too and reports each byte twice, so the two
-transports disagree with each other as well as with the content. The cause is that an entry is
-built from its token's bytes in isolation, while the content is the decoder's rendering of the run.
-ASCII replies are unaffected, which is why every logprob test in this repository passes: none of
-them uses a non-ASCII reply. Fixing it means deciding what an entry means when a character spans
-tokens -- the blocking path would keep the byte run and the streamed path would keep the decoder's
-render, and the two have to be reconciled before either can claim the property above.
+character those bytes form: `"中文"` reports replacement characters against a two-character reply.
+Every generated token still gets its entry, and the byte count is right -- what is wrong is what
+each entry says. The cause is that an entry is built from its token's bytes in isolation, while the
+content is the decoder's rendering of the run. ASCII replies are unaffected, which is why every
+logprob test in this repository passed until one used a non-ASCII reply. Fixing what the entries
+*say* means deciding what an entry means when a character spans tokens: the blocking path would
+keep the byte run and the streamed path the decoder's render, and reconciling the two is a separate
+change from the count, which now has a test of its own.
 
 One consequence of those shapes is worth knowing before reading `top_logprobs` on completions. Its
 alternatives are a JSON object keyed by token text, so two alternatives that render to the same

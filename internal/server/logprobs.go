@@ -377,7 +377,12 @@ func shownLogprobTokens(described []logprobText, text string, calls []toolCall, 
 	if calls != nil {
 		return keptTokensInSpans(described, spans)
 	}
-	if keep, _ := keptTokens(described, len(text)); keep < len(described) {
+	// The budget is the content's length, but keptTokens counts the entries' rendered text, and for
+	// a byte-level vocabulary those are different units: three tokens contribute one character, and
+	// each token's bytes render on their own as a replacement character. Passing the content length
+	// through cut the list short -- measured on "\u4e2d\u6587", 3 of 7 entries survived a reply that
+	// was never truncated.
+	if keep, _ := keptTokens(described, renderedCovering(described, len(text))); keep < len(described) {
 		return described[:keep]
 	}
 	return described

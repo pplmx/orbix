@@ -9260,8 +9260,11 @@ func TestShownTokensAppliesTheStopCut(t *testing.T) {
 	c := &choiceResult{
 		out: []int32{1, 2, 3, 4, 5, 6},
 	}
-	for range c.out {
-		c.samples = append(c.samples, sampledToken{logprob: -1})
+	// One sample per token, carrying the token id as well as a log probability: an entry's bytes
+	// come from the id, and a zero id is outside the vocabulary, so the described entries would
+	// have no bytes and the count would be zero for a reason that has nothing to do with the cut.
+	for _, id := range c.out {
+		c.samples = append(c.samples, sampledToken{id: id, logprob: -1})
 	}
 	full := srv.tok.DecodeCompletion(c.out)
 	if len(full) < 3 {

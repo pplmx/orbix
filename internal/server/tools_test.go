@@ -1871,3 +1871,60 @@ func TestStreamedLogprobsSurviveACharacterThatSpansTwoTokens(t *testing.T) {
 		})
 	}
 }
+
+// TestEveryGeneratedTokenKeepsItsEntryWhenACharacterSpansSeveral covers the count, separately from
+// what the entries say.
+//
+// Two facts about a byte-level vocabulary pull the count in opposite directions from the text. Its
+// pieces concatenate to the content, so one entry per token is what a caller asked for; but each
+// token's bytes render on their own as a replacement character when the token holds only part of a
+// character, so the rendered texts run longer than the content. The cut that decides how much of
+// the list to keep compared the content's length against those rendered lengths and concluded the
+// reply had been truncated: measured on "中文", 3 of 7 entries survived a reply that was not cut at
+// all.
+//
+// This asserts the count, not the text, because the text is a separate question -- an entry whose
+// bytes are one fragment of a character cannot say the character, and what it should say instead
+// is not decided here. The count has an unambiguous answer: a caller that asked for log
+// probabilities gets one per generated token.
+func TestEveryGeneratedTokenKeepsItsEntryWhenACharacterSpansSeveral(t *testing.T) {
+	cases := []string{
+		"ascii only",
+		"中文",
+		"é",
+		"🎉",
+		"mixed 中 A",
+		"  two leading",
+	}
+	for _, reply := range cases {
+		t.Run(reply, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(reply, false)
+			if len(ids) == 0 {
+				t.Fatal("the fixture encodes the reply to nothing")
+			}
+			samples := make([]sampledToken, len(ids))
+			for i, id := range ids {
+				samples[i] = sampledToken{id: id, logprob: -1}
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-count", logprobs: true}
+			obj := srv.choiceObject(&choiceResult{out: ids, samples: samples, reason: "length"}, 0, p)
+			var lp struct {
+				Content []struct {
+					Token string `json:"token"`
+				} `json:"content"`
+			}
+			raw, err := json.Marshal(obj["logprobs"])
+			if err != nil {
+				t.Fatalf("marshal logprobs: %v", err)
+			}
+			if err := json.Unmarshal(raw, &lp); err != nil {
+				t.Fatalf("unmarshal logprobs: %v", err)
+			}
+			if got, want := len(lp.Content), len(ids); got != want {
+				t.Errorf("got %d logprob entries for %d generated tokens; the reply was not "+
+					"truncated, so every token should have one", got, want)
+			}
+		})
+	}
+}

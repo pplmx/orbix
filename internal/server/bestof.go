@@ -86,6 +86,34 @@ func (s *Server) shownTokens(c *choiceResult, p generateParams) int {
 		text = cut
 	}
 	described := s.describeTokens(c.samples)
-	keep, _ := keptTokens(described, len(text))
+	// The budget is expressed in the content's bytes, but the cut counts the entries' rendered
+	// text, and the two are not the same scale for a byte-level vocabulary: three tokens contribute
+	// one character, each token's bytes render on their own as a replacement character, so six
+	// bytes of content can come from entries whose texts total eighteen. Passing the content length
+	// straight through cut the list short -- measured on "\u4e2d\u6587", 3 of 7 entries survived a
+	// reply that was not truncated at all.
+	//
+	// So the budget is converted: walk the entries until their raw bytes reach the retained length,
+	// and hand keptTokens how many rendered bytes those entries cover. A reply that was not cut
+	// converts to the whole sum, and one that was converts to the entries that survived the cut.
+	keep, _ := keptTokens(described, renderedCovering(described, len(text)))
 	return keep
+}
+
+// renderedCovering reports how many bytes of rendered text the entries covering the first n raw
+// bytes account for.
+//
+// It is the conversion keptTokens needs when the budget and the entries are counted in different
+// units: an entry's raw bytes sum to the content (that is what Decode concatenates), while its
+// text can be longer -- an invalid byte run renders as U+FFFD, three bytes for one.
+func renderedCovering(described []logprobText, n int) int {
+	raw, rendered := 0, 0
+	for _, d := range described {
+		if raw >= n {
+			return rendered
+		}
+		raw += len(d.raw)
+		rendered += len(d.text)
+	}
+	return rendered
 }

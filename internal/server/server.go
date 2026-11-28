@@ -2073,6 +2073,10 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// variable because reason cannot carry it: the engine reports "stop" for an ordinary
 	// completion, and the two would be indistinguishable.
 	stopMatched := false
+	// notStarted is true until the first decoded piece has been seen. It is what tells the stop
+	// gate's input whether the reply has started yet, which decides if a leading space belongs to
+	// the text the caller sees.
+	notStarted := true
 	gate := &stopGate{stop: p.stop}
 	// tcg is non-nil only when the request declared tools on the chat endpoint, which is the one
 	// combination whose output has to be withheld until a call can be recognised. With no tools
@@ -2162,6 +2166,16 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 			// two agree for one request.
 			generated++
 			text := dec.Token(ev.Token)
+			// The stop gate matches against the text a caller sees, which is DecodeCompletion's:
+			// the reply's first space is not part of it. Dropping the space here rather than
+			// inside the gate keeps the description in step, because describeStreamedToken is
+			// told what the chunk actually carries. Measured on " Hi y<" with stop=[" "]: feeding
+			// the raw stream made the stop string match at position zero and the stream returned
+			// "" where the blocking body cut at the space and returned "Hi".
+			if notStarted && text != "" {
+				notStarted = false
+				text = strings.TrimPrefix(text, " ")
+			}
 			// The token's byte offset in this choice's text, counted before it is written:
 			// a stop list can hold text back, and the offset describes where the text lands
 			// rather than when it was released.

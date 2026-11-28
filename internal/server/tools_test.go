@@ -1730,3 +1730,90 @@ func TestStreamedLogprobsAreNotDuplicatedWhenAReleaseIncludesItsOwnToken(t *test
 		})
 	}
 }
+
+// TestStreamedToolCallsAgreeWithTheBlockingBodyOverGeneratedReplies is the sweep the earlier
+// agreement tests were distilled from.
+//
+// The hand-written cases there came from shapes that were seen to break, which makes them good
+// regressions and poor discovery: six of the defects this file's tests now pin were found by this
+// generator and not by reading the code. It assembles replies from the pieces a tool-calling
+// response is built from -- both markers, their prefixes, the JSON punctuation, prose with a
+// stray '<' -- and pairs them with stop lists that do and do not collide with those pieces.
+//
+// The invariants are equalities, which is what makes the generator useful: the entries a client
+// accumulates must join to the text it accumulates, and that text must match the blocking body
+// apart from the surrounding whitespace the two transports trim differently. A seed is fixed so a
+// failure is reproducible, and the failing reply is printed so it can be added to the table.
+func TestStreamedToolCallsAgreeWithTheBlockingBodyOverGeneratedReplies(t *testing.T) {
+	pieces := []string{toolCallOpen, toolCallClose, `{"name":"f"}`, `{"name":"g"}`, `{`, `}`,
+		`"`, "a", " ", "\n", "<", ">", "/", "x", "y", "tool_call", `{"a":1}`, "Hi", "there"}
+	// The stop lists are the interesting half: two of them are prefixes of a marker, so the stop
+	// gate and the tool gate withhold the same bytes for different reasons.
+	stops := [][]string{nil, {"zzz"}, {"a"}, {"<tool"}, {"</tool"}, {" "}}
+
+	srv, tok := newTestServer(t)
+	rng := rand.New(rand.NewSource(20261204))
+	for iter := range 240 {
+		var body strings.Builder
+		for range rng.Intn(9) + 1 {
+			body.WriteString(pieces[rng.Intn(len(pieces))])
+		}
+		reply := body.String()
+		stop := stops[rng.Intn(len(stops))]
+		t.Run(fmt.Sprintf("%03d", iter), func(t *testing.T) {
+			ids := tok.Encode(reply, false)
+			if len(ids) == 0 {
+				t.Skip("the fixture encodes this reply to nothing")
+			}
+			samples := make([]sampledToken, len(ids))
+			p := generateParams{chat: true, responseID: "chatcmpl-sweep", logprobs: true,
+				tools: []engine.ToolSpec{{Name: "f"}, {Name: "g"}}, stop: stop}
+			ch := make(chan engine.Event, len(ids)+1)
+			for i, id := range ids {
+				samples[i] = sampledToken{id: id, logprob: float32(-0.5 - float64(i)/100)}
+				ch <- engine.Event{Token: id, HasToken: true, HasLogprob: true,
+					Logprob: samples[i].logprob}
+			}
+			ch <- engine.Event{Done: true, FinishReason: "length"}
+			close(ch)
+
+			var content, entries strings.Builder
+			var streamedCalls int
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				content.WriteString(it.delta)
+				for _, e := range decodedLogprobEntries(t, it.logprobs) {
+					entries.WriteString(e)
+				}
+				streamedCalls += len(it.calls)
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+
+			if got, want := entries.String(), content.String(); got != want {
+				t.Errorf("reply %q with stop %v: the entries join to %q but the client received %q",
+					reply, stop, got, want)
+			}
+
+			obj := srv.choiceObject(&choiceResult{out: ids, samples: samples, reason: "length"}, 0, p)
+			msg, ok := obj["message"].(map[string]any)
+			if !ok {
+				t.Fatalf("no message object for %q", reply)
+			}
+			blocked, _ := msg["content"].(string)
+			blockedCalls := 0
+			if raw, ok := msg["tool_calls"].([]map[string]any); ok {
+				blockedCalls = len(raw)
+			}
+			// Surrounding whitespace is the one difference the transports cannot close; see
+			// TestStreamedToolCallsAgreeWithTheBlockingBody for why.
+			if got, want := strings.TrimSpace(content.String()), strings.TrimSpace(blocked); got != want {
+				t.Errorf("reply %q with stop %v: streamed %q, blocking %q", reply, stop, got, want)
+			}
+			if streamedCalls != blockedCalls {
+				t.Errorf("reply %q with stop %v: the stream carried %d calls, the blocking body %d",
+					reply, stop, streamedCalls, blockedCalls)
+			}
+		})
+	}
+}

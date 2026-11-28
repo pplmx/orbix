@@ -161,6 +161,14 @@ byte count. Three more replies -- an emoji prompt, a bare `é`, and a mixed 中�
 came out with zero overshoot. Every token in that vocabulary is a complete UTF-8 sequence, so the
 sum of the rendered lengths is the text's length and the defect does not arise.
 
+Two more checkpoints say the same thing, and they matter because they are different tokenizer
+implementations rather than more of the same one: Gemma 3 270M and Gemma 2 2B, both SentencePiece
+against Qwen2's byte-level BPE. Twelve prompts across the three -- Chinese, Japanese, an emoji, a
+bare accented letter, mixed scripts -- all came out at zero overshoot with the tokens joining to
+the text. Four concurrent requests and one streamed reply did too, which covers the paths the
+blocking measurement alone would not: the streamed delta text and its per-chunk logprobs joined to
+the same string the client received.
+
 So the overshoot needs a vocabulary whose pieces are bytes rather than characters, which is what
 `internal/gguftest`'s synthetic one is. That is a real input -- llama.cpp's `tokenizer.ggml.model`
 allows it and the fixture exists to exercise it -- but it is not what a Qwen2 or a Llama file does,

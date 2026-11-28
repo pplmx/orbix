@@ -353,10 +353,30 @@ func (o orderedLogprobs) MarshalJSON() ([]byte, error) {
 }
 
 // alternatives converts the rendered alternatives to the pair a position needs.
+//
+// Two alternatives whose bytes render to the same string cannot both appear as keys of one JSON
+// object, so one of them has to go. Keeping the first is the correct choice rather than an
+// arbitrary one, because the input is in descending probability: the first occurrence of a text
+// is the most likely token that renders as it.
+//
+// The alternative is to emit both and let the client's parser decide, which is what this did and
+// is why it was wrong. A JSON parser keeps the last occurrence of a duplicate key, so the value a
+// client read back was the *least* likely of the clashing tokens -- measured: `{"�":-0.1,
+// "�":-2.5,"ok":-3}` parses to `-2.5`. The list is short by one entry either way; dropping the
+// losers here at least leaves the survivor describing the best candidate, and it stops the
+// response from containing two things a client would have to reconcile itself.
+//
+// The documented consequence stands: a request for 5 alternatives can come back with 4 keys.
+// What changes is which 4.
 func alternatives(tops []logprobText) orderedLogprobs {
-	out := make(orderedLogprobs, len(tops))
-	for i, a := range tops {
-		out[i] = logprobEntry{text: a.text, logprob: a.logprob}
+	out := make(orderedLogprobs, 0, len(tops))
+	seen := make(map[string]struct{}, len(tops))
+	for _, a := range tops {
+		if _, dup := seen[a.text]; dup {
+			continue
+		}
+		seen[a.text] = struct{}{}
+		out = append(out, logprobEntry{text: a.text, logprob: a.logprob})
 	}
 	return out
 }

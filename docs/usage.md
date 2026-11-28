@@ -154,9 +154,18 @@ string become one entry -- and the count that comes back can be shorter than the
 asked for. It is not a rare vocabulary defect: a token whose bytes are not valid UTF-8 on its own
 renders as U+FFFD, and a byte-level vocabulary has one per continuation byte. Measured,
 Qwen3-0.6B has 1138 token ids that render as a single U+FFFD and stories15M has 129. Measured on a
-small fixture with 128 such ids: a request asking for 5 alternatives came back with 4 keys, and two
-of the values were out of descending order because the survivor carried the later position's number.
-The chosen token's own probability is reported separately in `token_logprobs` and is unaffected.
+small fixture with 128 such ids: a request asking for 5 alternatives came back with 4 keys. The
+chosen token's own probability is reported separately in `token_logprobs` and is unaffected.
+
+**Which entry survives the collapse is the one that was most likely.** The alternatives arrive in
+descending probability, so the first occurrence of a text wins and the later ones are dropped before
+encoding. That is not what the first version did: it wrote every alternative into the object and let
+the client's JSON parser pick, and a parser keeps the *last* duplicate key -- so the value a client
+read back was the least likely of the clashing tokens. Measured: `{"\uFFFD":-0.1,"\uFFFD":-2.5,
+"ok":-3}` parsed to `-2.5`, reporting a candidate 2.4 nats less likely than the one it displaced,
+with two of the values out of descending order as a result. Dropping the losers server-side fixes
+both symptoms and leaves a response with no repeated key to reconcile. The count is still short by
+the number of clashes; what changed is which entry is missing.
 
 Chat's shape does not share this: its alternatives are a list of objects each carrying `bytes`, so
 nothing collapses and the requested count always comes back. A caller that needs the full list on a

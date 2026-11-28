@@ -2992,10 +2992,36 @@ func promptParam(chat bool) string {
 func writeErrorParam(w http.ResponseWriter, status int, msg, param, code string) {
 	var body errorBody
 	body.Error.Message = msg
-	body.Error.Type = "invalid_request_error"
+	body.Error.Type = errorTypeFor(status)
 	body.Error.Param = param
 	body.Error.Code = code
 	writeJSON(w, status, body)
+}
+
+// errorTypeFor picks the OpenAI error `type` for a status code.
+//
+// It is one function because two writers need the same answer and disagreed when they did not:
+// writeError chose service_unavailable_error for 503 and server_error for other 5xx, while
+// writeErrorParam hard-coded invalid_request_error for every status. Measured with a paramError
+// at 503, the pair produced {"type":"invalid_request_error"} next to what a plain error at the
+// same status produced, {"type":"service_unavailable_error"} -- the same failure reported two
+// ways depending on whether the error happened to name a field.
+//
+// No request path does this today: every writeRequestError call site passes 400, and the only
+// variable status is set from a switch over 400, 415 and 413. That is why this is a fix rather
+// than a bug report -- the invariant held by inspection, and the two writers still disagreed
+// about it.
+func errorTypeFor(status int) string {
+	switch {
+	case status == http.StatusServiceUnavailable:
+		// OpenAI gives 503 its own type. A client that branches on `type` -- which the
+		// official SDKs do, mapping it to a retryable error rather than a failure -- would
+		// otherwise read "the server broke" where this engine means "come back shortly".
+		return "service_unavailable_error"
+	case status >= 500:
+		return "server_error"
+	}
+	return "invalid_request_error"
 }
 
 // paramError is a request-validation failure that knows which field it is about.
@@ -3043,16 +3069,7 @@ func writeRequestError(w http.ResponseWriter, status int, err error) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	var body errorBody
 	body.Error.Message = msg
-	body.Error.Type = "invalid_request_error"
-	switch {
-	case status == http.StatusServiceUnavailable:
-		// OpenAI gives 503 its own type. A client that branches on `type` -- which the
-		// official SDKs do, mapping it to a retryable error rather than a failure -- would
-		// otherwise read "the server broke" where this engine means "come back shortly".
-		body.Error.Type = "service_unavailable_error"
-	case status >= 500:
-		body.Error.Type = "server_error"
-	}
+	body.Error.Type = errorTypeFor(status)
 	writeJSON(w, status, body)
 }
 

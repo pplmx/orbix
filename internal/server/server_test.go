@@ -10062,3 +10062,63 @@ func TestConcurrentRequestsMatchTheirSerialResults(t *testing.T) {
 		}
 	}
 }
+
+// TestErrorTypeDependsOnStatusNotOnErrorKind pins that the two error writers agree.
+//
+// There are two of them: writeError takes a message, writeErrorParam also names the field at
+// fault, and writeRequestError picks between them by whether the error is a *paramError. Before
+// they shared errorTypeFor, writeError chose service_unavailable_error for 503 and server_error
+// for other 5xx while writeErrorParam hard-coded invalid_request_error for everything. Measured
+// at 503: the same failure came back as {"type":"invalid_request_error"} when it named a field
+// and {"type":"service_unavailable_error"} when it did not.
+//
+// No request path sends a 5xx through writeErrorParam today -- every writeRequestError call site
+// passes 400, and the one variable status comes from a switch over 400, 415 and 413 -- so this
+// is a contract test rather than a bug fix. The value is that the two writers cannot drift again
+// without a caller having to hit the case first.
+func TestErrorTypeDependsOnStatusNotOnErrorKind(t *testing.T) {
+	plain := errors.New("boom")
+	for _, status := range []int{
+		http.StatusBadRequest,
+		http.StatusUnsupportedMediaType,
+		http.StatusRequestEntityTooLarge,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	} {
+		kindOf := func(err error) string {
+			w := httptest.NewRecorder()
+			writeRequestError(w, status, err)
+			var b errorBody
+			if err := json.Unmarshal(w.Body.Bytes(), &b); err != nil {
+				t.Fatalf("status %d: decode: %v", status, err)
+			}
+			return b.Error.Type
+		}
+		fromPlain := kindOf(plain)
+		fromParam := kindOf(newParamError("prompt", "bad", "boom"))
+		if fromPlain != fromParam {
+			t.Errorf("status %d: a plain error gives type %q but a paramError gives %q; "+
+				"the type is a property of the status, not of which writer ran",
+				status, fromPlain, fromParam)
+		}
+	}
+
+	// And the values themselves, so a change to errorTypeFor is a deliberate one.
+	for status, want := range map[int]string{
+		http.StatusBadRequest:            "invalid_request_error",
+		http.StatusUnsupportedMediaType:  "invalid_request_error",
+		http.StatusRequestEntityTooLarge: "invalid_request_error",
+		http.StatusInternalServerError:   "server_error",
+		http.StatusServiceUnavailable:    "service_unavailable_error",
+	} {
+		w := httptest.NewRecorder()
+		writeError(w, status, "boom")
+		var b errorBody
+		if err := json.Unmarshal(w.Body.Bytes(), &b); err != nil {
+			t.Fatalf("status %d: decode: %v", status, err)
+		}
+		if b.Error.Type != want {
+			t.Errorf("status %d gives type %q, want %q", status, b.Error.Type, want)
+		}
+	}
+}

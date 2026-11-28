@@ -337,8 +337,14 @@ func decodeBody[T any](t *testing.T, resp *http.Response) T {
 	t.Helper()
 	defer func() { _ = resp.Body.Close() }()
 	var out T
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&out); err != nil {
 		t.Fatalf("decode response: %v", err)
+	}
+	// A second value after the first is a handler that wrote twice, which no assertion on the
+	// decoded struct can see. Rejecting it here covers every caller at once.
+	if dec.More() {
+		t.Fatalf("the response carries more than one JSON value")
 	}
 	return out
 }

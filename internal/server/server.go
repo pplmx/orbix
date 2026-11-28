@@ -2069,6 +2069,10 @@ const streamFanInBuffer = 64
 func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generateParams, emit func(streamItem) bool) (generated int, cancelled, ok bool) {
 	dec := s.tok.Seq()
 	reason := "stop"
+	// stopMatched is true only when a stop string was found in the text. It is a separate
+	// variable because reason cannot carry it: the engine reports "stop" for an ordinary
+	// completion, and the two would be indistinguishable.
+	stopMatched := false
 	gate := &stopGate{stop: p.stop}
 	// tcg is non-nil only when the request declared tools on the chat endpoint, which is the one
 	// combination whose output has to be withheld until a call can be recognised. With no tools
@@ -2204,6 +2208,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 					// unread, which is what the engine does for a client that stopped
 					// reading. What changes here is only what this response reports.
 					reason = "stop"
+					stopMatched = true
 					// The engine keeps producing after this point, and completion_tokens has
 					// to include that output: OpenAI defines it as every token the model
 					// generated, not the text that reached the caller, and the blocking body
@@ -2274,7 +2279,14 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// Text held back in case it began a stop string is the client's after all: no match was
 	// found, so the tail was ordinary output. Sending it is what makes a stop list that never
 	// matches cost nothing but a later chunk.
-	if reason != "stop" {
+	// stopMatched, not reason, is the condition: reason is the engine's own finish reason, and
+	// an ordinary completion ends with "stop" too. Gating on it meant a reply that finished
+	// normally lost whatever the gate was holding -- measured, `x y z` with stop=["zzz"]
+	// streamed "x y " while the blocking body returned all of it, because the trailing "z"
+	// could still have begun the stop string. The two ideas share a word and nothing else: one
+	// says the model stopped because it had nothing more to write, the other says this server
+	// cut the reply because it found a stop string.
+	if !stopMatched {
 		if rest := gate.flush(); rest != "" {
 			if !write(rest, nil, 0) {
 				return generated, cancelled, false

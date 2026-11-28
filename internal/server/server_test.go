@@ -403,6 +403,58 @@ func TestCompletionMatchesRun(t *testing.T) {
 	}
 }
 
+// TestStopListThatNeverMatchesCostsNothing pins the promise the stop gate's documentation makes:
+// a stop list that never matches must cost a later chunk and nothing else.
+//
+// The gate holds back the longest tail that could still begin a stop string, and releases it when
+// generation ends. Whether it released was decided by the finish reason being something other than
+// "stop" -- and "stop" is also what the engine reports for an ordinary completion, so the two were
+// indistinguishable and the tail was dropped for every reply that ended normally. Measured on
+// `x y z` with stop=["zzz"]: the streamed text was "x y " and the blocking body returned "x y z".
+// The trailing "z" was withheld because it could have begun "zzz", and then never released.
+//
+// Both endings are exercised: a "length" cut released correctly all along, which is what made the
+// defect look like it only affected some replies.
+func TestStopListThatNeverMatchesCostsNothing(t *testing.T) {
+	srv, tok := newTestServer(t)
+	const reply = `x y z`
+	ids := tok.Encode(reply, false)
+	if len(ids) == 0 {
+		t.Fatal("the fixture encodes the reply to nothing")
+	}
+	for _, finish := range []string{"stop", "length"} {
+		t.Run(finish, func(t *testing.T) {
+			p := generateParams{chat: false, responseID: "cmpl-never-matches",
+				stop: []string{"zzz"}}
+			ch := make(chan engine.Event, len(ids)+1)
+			for _, id := range ids {
+				ch <- engine.Event{Token: id, HasToken: true}
+			}
+			ch <- engine.Event{Done: true, FinishReason: finish}
+			close(ch)
+
+			var streamed strings.Builder
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				streamed.WriteString(it.delta)
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+
+			// And the blocking body on the same tokens, which is what the stream has to agree
+			// with rather than with a written-out literal: the gate's job is to match the other
+			// transport, and the literal would have to be re-derived whenever the fixture's
+			// vocabulary changes.
+			obj := srv.choiceObject(&choiceResult{out: ids, reason: finish}, 0, p)
+			blocked, _ := obj["text"].(string)
+			if streamed.String() != blocked {
+				t.Errorf("the stream reassembled to %q and the blocking body returned %q; a stop "+
+					"list that never matches must only delay the tail", streamed.String(), blocked)
+			}
+		})
+	}
+}
+
 func TestStreamingReassemblesToSameText(t *testing.T) {
 	// The contract that makes streaming safe: concatenating the deltas must equal
 	// the non-streaming text for the same request. This is where a per-token Decode

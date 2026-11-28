@@ -331,8 +331,14 @@ fuzz:
     set -euo pipefail
     for pkg in $(go list ./...); do
         dir=$(go list -f '{{'{{'}}.Dir{{'}}'}}' "$pkg")
-        targets=$(grep -ho 'func Fuzz[A-Za-z0-9_]*' "$dir"/*_test.go 2>/dev/null \
-            | sed 's/func //' | sort -u || true)
+        # Anchored to the line start and to a full declaration: an unanchored
+        # "func Fuzz[A-Za-z0-9_]*" also matches prose that mentions the phrase, and
+        # gatesdoc_test.go does discuss `func Fuzz` in a comment. That produced a target
+        # named "Fuzz", whose -fuzz "^Fuzz$" matched nothing, and `set -e` then stopped the
+        # loop -- so five packages after quant were never fuzzed at all. A recipe that
+        # scrapes source text has to say what a declaration looks like, not what it starts with.
+        targets=$(grep -hoE '^func Fuzz[A-Za-z0-9_]*\(f \*testing\.F\)' "$dir"/*_test.go 2>/dev/null \
+            | sed -E 's/^func (Fuzz[A-Za-z0-9_]*)\(.*/\1/' | sort -u || true)
         for t in $targets; do
             echo "==> $pkg $t ({{FUZZTIME}})"
             # The `$` is written `\$`: a shebang recipe's body is handed to bash as written,

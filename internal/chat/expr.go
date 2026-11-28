@@ -222,7 +222,7 @@ func (p *exprParser) parseCall(name string) (expr, error) {
 			return c, nil
 		}
 		if next.text != "," {
-			return nil, fmt.Errorf("chat: expected \",\" or \")\" in call to %q, got %q", name, next.text)
+			return nil, fmt.Errorf("chat: expected \",\" or \")\" in call to %q, got %q (%s)", name, next.text, p.where())
 		}
 	}
 }
@@ -257,7 +257,7 @@ func parseExpr(src string) (expr, error) {
 		return nil, err
 	}
 	if p.pos != len(p.toks) {
-		return nil, fmt.Errorf("chat: unexpected %q after expression %q", p.toks[p.pos].text, src)
+		return nil, fmt.Errorf("chat: unexpected %q after expression %q (%s)", p.toks[p.pos].text, src, p.where())
 	}
 	return e, nil
 }
@@ -582,9 +582,9 @@ func (p *exprParser) parseCompare() (expr, error) {
 				// template wrote `is true` is told it is unsupported. It said "is defined,
 				// is not defined, is none, is mapping, is iterable and is string" -- six names,
 				// missing two the parser takes and three the message's own neighbour mentions.
-				return nil, fmt.Errorf("chat: unsupported test after 'is'. Supported: defined, " +
-					"is not defined, none, is not none, mapping, iterable, string, true, is not " +
-					"true, false, is not false")
+				return nil, fmt.Errorf("chat: unsupported test after 'is'. Supported: defined, "+
+					"is not defined, none, is not none, mapping, iterable, string, true, is not "+
+					"true, false, is not false (%s)", p.where())
 			}
 			// "x is defined" and "x.y is defined" are both used: the first asks
 			// whether a name is bound, the second whether a mapping has a key.
@@ -778,7 +778,7 @@ func (p *exprParser) parsePostfix() (expr, error) {
 		case p.accept("."):
 			name := p.peek()
 			if !isIdentifier(name) {
-				return nil, fmt.Errorf("chat: expected a field name after '.'")
+				return nil, fmt.Errorf("chat: expected a field name after '.' (%s)", p.where())
 			}
 			p.pos++
 			e = attrExpr{base: e, name: name}
@@ -807,7 +807,7 @@ func (p *exprParser) parsePostfix() (expr, error) {
 			}
 			p.pos++
 			if !supportedFilters[name] {
-				return nil, fmt.Errorf("chat: unsupported template filter %q", name)
+				return nil, fmt.Errorf("chat: unsupported template filter %q (%s)", name, p.where())
 			}
 			fe := filterExpr{operand: e, name: name}
 			// A filter may take one parenthesised argument: trim has none, tojson
@@ -925,7 +925,7 @@ func (p *exprParser) parsePrimary() (expr, error) {
 		return litExpr{val: strconv.Itoa(n), isNumber: true}, nil
 	}
 	if !isIdentifier(tok) {
-		return nil, fmt.Errorf("chat: unexpected %q in expression", tok)
+		return nil, fmt.Errorf("chat: unexpected %q in expression (%s)", tok, p.where())
 	}
 	// name(...) is a call. Only strftime_now exists in Jinja's own function set, and this
 	// package implements none of them, so a call parses but cannot be evaluated. Parsing it

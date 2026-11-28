@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -38,6 +39,14 @@ func cmdHealthcheck(args []string) error {
 	}
 
 	url := trimTrailingSlash(*addr) + "/healthz"
+	// A base URL needs a scheme, and the flag is named --addr like serve's, whose value is a bare
+	// host:port. Passing that form here reaches client.Get as "127.0.0.1:8080/healthz" and fails
+	// with `parse "127.0.0.1:8080/healthz": first path segment in URL cannot contain colon`, which
+	// says what the parser saw and not what to type. The check below turns it into the fix.
+	if !strings.Contains(*addr, "://") {
+		return fmt.Errorf("healthcheck: --addr is a base URL such as http://127.0.0.1:8080, got %q; "+
+			"the bare host:port that serve accepts is not a URL", *addr)
+	}
 	client := &http.Client{Timeout: *timeout}
 
 	resp, err := client.Get(url)

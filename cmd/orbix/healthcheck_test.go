@@ -163,4 +163,18 @@ func TestHealthcheckRefusesBadArguments(t *testing.T) {
 			t.Error("a stray positional argument was accepted")
 		}
 	})
+	// The flag is named --addr, which serve takes as a bare host:port. Copying that value here
+	// used to reach http.Get and fail with `parse "127.0.0.1:8080/healthz": first path segment
+	// in URL cannot contain colon` -- true, and no help at all. The refusal now names the fix.
+	_ = captureStdout(t, func() {
+		err := cmdHealthcheck([]string{"--addr", "127.0.0.1:8080"})
+		if err == nil {
+			t.Fatal("a bare host:port was accepted as a base URL")
+		}
+		for _, want := range []string{"http://", "base URL", "127.0.0.1:8080"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
 }

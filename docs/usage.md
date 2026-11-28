@@ -64,6 +64,15 @@ missing `code` as "this answer is about capacity, not about your fields", and br
 for the retryable case. Treating the absence as a malformed response would make a correctly
 shaped 503 look like a proxy error.
 
+A request that cannot fit the pool at all is a 400 instead, and the difference is the whole
+retry story. Measured on one server, `--blocks 4 --block-size 16`: a request needing 32 blocks
+answered 400 with "the pool holds 4 (64 positions), so no other request finishing can make room
+for it", while three requests that would have fitted an idle pool answered 503 once a fourth was
+holding the blocks. The 400 is arithmetic -- shorten the prompt or raise `--blocks` -- and retrying
+it unchanged never succeeds. The 503 is a race and retrying it does. Only the 503 is counted in
+`orbix_requests_refused_pool_total`, which is the right shape for an alert: a gauge that moved on
+every impossible request would fire for a caller sending one bad prompt forever.
+
 Unsupported fields split by what a client does with the answer, and the split is not the one this
 section originally drew. `logit_bias`, `presence_penalty` and `frequency_penalty` were listed as
 ignorable sampling knobs and are now honoured: a caller who bans a token or asks for less repetition

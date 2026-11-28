@@ -136,16 +136,17 @@ none. That is a property with a test (`TestStreamedLogprobsCoverExactlyTheStream
 intention: emitting entries with the token as it arrives reported 8 for 9 tokens on `a < b tail`,
 and attaching them unconditionally reported the call's own bytes instead.
 
-**One exception, and it is a known defect rather than a rule.** A byte-level vocabulary spells a
-character as several single-byte tokens, and each entry then describes its own byte rather than the
-character those bytes form: `"中文"` reports replacement characters against a two-character reply.
-Every generated token still gets its entry, and the byte count is right -- what is wrong is what
-each entry says. The cause is that an entry is built from its token's bytes in isolation, while the
-content is the decoder's rendering of the run. ASCII replies are unaffected, which is why every
-logprob test in this repository passed until one used a non-ASCII reply. Fixing what the entries
-*say* means deciding what an entry means when a character spans tokens: the blocking path would
-keep the byte run and the streamed path the decoder's render, and reconciling the two is a separate
-change from the count, which now has a test of its own.
+**Read `bytes`, not `token`, on a vocabulary that splits characters.** A byte-level vocabulary
+spells one character as several single-byte tokens, and an entry is built from its own token's
+bytes: each of `"中文"`'s six bytes is a token, and each entry's `token` is one replacement
+character rather than the character those bytes form. Every generated token still gets its entry,
+and every entry's `bytes` is exactly right -- concatenating them reproduces the content. That split
+is deliberate: the schema has a `bytes` field because a token's text is not always valid UTF-8 on
+its own, and `token` is the best effort beside it. ASCII replies never hit it, which is why every
+logprob test in this repository passed until one used a non-ASCII reply. What an entry's `token`
+should say for a fragment of a character is still open -- the content is the decoder's rendering of
+the whole run, and no per-token text reproduces it -- but that question does not affect anything a
+reader can act on today, because the bytes are authoritative.
 
 One consequence of those shapes is worth knowing before reading `top_logprobs` on completions. Its
 alternatives are a JSON object keyed by token text, so two alternatives that render to the same

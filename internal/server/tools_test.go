@@ -1928,3 +1928,57 @@ func TestEveryGeneratedTokenKeepsItsEntryWhenACharacterSpansSeveral(t *testing.T
 		})
 	}
 }
+
+// TestTheBytesOfTheEntriesConcatenateToTheContent is the invariant a caller on a character-splitting
+// vocabulary has to rely on.
+//
+// An entry's `token` cannot say a character that spans several tokens: a byte-level vocabulary
+// spells "中" as three, and each entry's own bytes render on their own as a replacement character.
+// What can be relied on is `bytes`, and the schema has that field for this reason. Concatenating
+// every entry's bytes gives exactly the content, which makes a caller able to reconstruct the
+// reply's bytes from the logprob list alone -- and that is a claim worth checking rather than
+// asserting in prose.
+//
+// The replies include one with no characters at all, one whose leading space is trimmed, and three
+// whose characters split differently (three bytes, two bytes, four), because the trim and the split
+// are the two places the concatenation could stop matching.
+func TestTheBytesOfTheEntriesConcatenateToTheContent(t *testing.T) {
+	cases := []string{"", "ascii only", "中文", "é", "🎉", "mixed 中 A", " Hi", "  two leading"}
+	for _, reply := range cases {
+		t.Run(reply, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(reply, false)
+			samples := make([]sampledToken, len(ids))
+			for i, id := range ids {
+				samples[i] = sampledToken{id: id, logprob: -1}
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-bytes", logprobs: true}
+			obj := srv.choiceObject(&choiceResult{out: ids, samples: samples, reason: "length"}, 0, p)
+			msg, ok := obj["message"].(map[string]any)
+			if !ok {
+				t.Fatalf("no message object")
+			}
+			content, _ := msg["content"].(string)
+
+			raw, err := json.Marshal(obj["logprobs"])
+			if err != nil {
+				t.Fatalf("marshal logprobs: %v", err)
+			}
+			var lp struct {
+				Content []struct {
+					Bytes []byte `json:"bytes"`
+				} `json:"content"`
+			}
+			if err := json.Unmarshal(raw, &lp); err != nil {
+				t.Fatalf("unmarshal logprobs: %v", err)
+			}
+			var joined []byte
+			for _, e := range lp.Content {
+				joined = append(joined, e.Bytes...)
+			}
+			if string(joined) != content {
+				t.Errorf("the entries' bytes join to %q but the content is %q", joined, content)
+			}
+		})
+	}
+}

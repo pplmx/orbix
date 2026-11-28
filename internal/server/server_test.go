@@ -1246,6 +1246,27 @@ func TestTypeMismatchIsNotMalformedJSON(t *testing.T) {
 			body: `{"messages":"hi"}`, param: "messages", want: "must be an array",
 		},
 		{
+			// An overflowing number is not a type mismatch even though the decoder reports it as
+			// one, and the value it reports is the type it was typing all along: the message read
+			// "temperature must be a number, but it is number", which names no problem at all.
+			name: "temperature too large to represent", path: "/v1/completions",
+			body:  `{"prompt":"hi","max_tokens":1,"temperature":1e999}`,
+			param: "temperature", want: "out of range",
+		},
+		{
+			// The integer case is the one where the old message was not merely odd but vacuous:
+			// every integer is a number, so "must be an integer, but it is number" holds for any
+			// value and tells the caller nothing about why the request failed.
+			name: "max_tokens too large to represent", path: "/v1/completions",
+			body:  `{"prompt":"hi","max_tokens":1e999}`,
+			param: "max_tokens", want: "out of range",
+		},
+		{
+			name: "logprobs too large to represent", path: "/v1/completions",
+			body:  `{"prompt":"hi","max_tokens":1,"logprobs":1e999}`,
+			param: "logprobs", want: "out of range",
+		},
+		{
 			name: "role as a number", path: "/v1/chat/completions",
 			body: `{"messages":[{"role":5,"content":"hi"}]}`, param: "messages.0.role",
 			want: "must be a string, but it is number",

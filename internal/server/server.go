@@ -2792,6 +2792,16 @@ type typeMismatchError struct {
 // number", which is true and unhelpful. Telling the two apart means parsing the raw token again
 // to see whether it is a number at all; the caller still gets a 400 naming the field, and a
 // request with a 10^20 token budget is not one with a plausible intended answer.
+// isNumberType reports whether a JSON type name describes a number, with or without the article
+// the want strings carry ("a number", "an integer").
+func isNumberType(name string) bool {
+	switch strings.TrimPrefix(strings.TrimPrefix(name, "a "), "an ") {
+	case "number", "integer":
+		return true
+	}
+	return false
+}
+
 func (e *typeMismatchError) Error() string {
 	if e.param() == "" {
 		return fmt.Sprintf("the request body must be a JSON object, but it is %s",
@@ -2801,8 +2811,20 @@ func (e *typeMismatchError) Error() string {
 	if want == "" {
 		want = goTypeName(e.typeErr.Type)
 	}
-	return fmt.Sprintf("%s must be %s, but it is %s", e.param(),
-		want, jsonTypeName(e.typeErr.Value))
+	got := jsonTypeName(e.typeErr.Value)
+	// A number too large for its field reports "number" as the value it saw, so both halves of this
+	// sentence name the same type and it reads as nonsense: measured, temperature 1e999 answered
+	// "temperature must be a number, but it is number", and max_tokens 1e999 said "must be an
+	// integer, but it is number" -- which is true of every integer and so says nothing. The type
+	// was right in both cases; the magnitude was not, and that is what the caller needs to hear.
+	if isNumberType(got) && isNumberType(strings.TrimPrefix(want, "an ")) {
+		return fmt.Sprintf("%s is out of range: the value is too large or too small to represent",
+			e.param())
+	}
+	if got == want {
+		return fmt.Sprintf("%s is out of range for %s", e.param(), want)
+	}
+	return fmt.Sprintf("%s must be %s, but it is %s", e.param(), want, got)
 }
 
 // param is the request field at fault, as the path the caller can find in their body.

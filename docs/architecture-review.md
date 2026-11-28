@@ -1043,3 +1043,23 @@ grep -rn "eng.Pump()" --include=*.go internal cmd | grep -v _test
 # 零调用导出
 grep -rn "\.Key(\|\.BlocksHeld(\|\.RefCount(\|\.Positions(\|\.Logits(" --include=*.go . | grep -v _test
 ```
+
+### CI 十三个 job 的逐个核对（2026-11-28）
+
+`.cache/`、`bin/`、编译产物这些东西在开发机上早已存在，所以「本机能跑」证明不了 CI 能跑。2026-11 给 `just stress` 加了 CI job，本地验证通过；但那台机器的 `.cache/` 从会话开始前就在，而全新 clone 里没有它，`go build -o .cache/orbix-race` 会直接失败。
+
+查法很短：
+
+```bash
+git clone . /tmp/ci && cd /tmp/ci && <the recipe>
+```
+
+`build` 和 `fixture` 本来就有 `mkdir -p`，`stress` 漏了——不是因为谁知道要做，而是因为写它的时候目录恰好存在。**同一个仓库里同类配方要一起看**：只检查自己正在改的那个，会漏掉它和邻居的差别。
+
+2026-11-28 把 ci.yml 的十三个 job 逐个核对了一遍，十一个通过、两个这台机器验不了。
+在全新 `git clone` 里跑的是九个：`check`、`cross`、`isolate`、`docs`、`race`（`just test-race`）、`stress`、`xcheck`、`jinja-diff`、`xcheck-parts`（后者的四个配方 `xcheck-pre`/`-quant`/`-rope`/`-fixture` 各跑一次）。
+其中 `stress` 用的是 `just fixture` 造出的 `.cache/stress.gguf`，输出 `no races, no 5xx, active returned to 0, 3 cancelled`——取消计数非零，所以它确实测到了取消路径，不是「什么都没测到就说 ok」；`xcheck` 比对了 39 个张量。
+另两个在主仓跑：`prek`（`just hooks`，未改写任何文件）与 `commits`（`just commits`）。
+验不了的两个是 `docker`（这台机器没装 docker）和 `test-darwin`（需要 macOS）。
+
+这条记录的用途是「上一次真跑过是什么时候、当时绿不绿」，不是「它们永远不会坏」——没有守卫，换机器就要重跑。写之前算错过一次：先写了「十二个全部通过」，而 13 减去两个验不了是 11，多出来的那个是我把 `prek` 和 `commits` 也算进了「在干净 clone 里跑」的那一组。

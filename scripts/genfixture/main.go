@@ -5,7 +5,7 @@
 // hangs up mid-generation has nothing to hang up on. `just stress` needs the opposite: a request
 // that keeps the engine busy long enough for a queued client to leave. This writes one.
 //
-//	go run ./scripts/genfixture.go -out /tmp/stress.gguf
+//	go run ./scripts/genfixture -out /tmp/stress.gguf
 //
 // The weights are random, so the text it generates is meaningless. That is fine: the script under
 // stress measures whether a disconnect is handled, not what the model said.

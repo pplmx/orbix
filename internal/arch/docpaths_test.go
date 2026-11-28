@@ -49,6 +49,13 @@ func TestDocsCiteRealFiles(t *testing.T) {
 		filepath.Join(root, "internal", "*", "*.go"),
 		filepath.Join(root, "cmd", "*", "*.go"),
 		filepath.Join(root, "scripts", "*.go"),
+		// And one level down, because a command that becomes its own package moves there.
+		// scripts/genfixture is the case: its package comment documented a `go run` of the
+		// file itself with a .go suffix, which is not how a package directory is run, and
+		// the pattern above matched only scripts/count.go -- so the broken command sat in
+		// the tree unread by anything. Measured before adding this: rewriting that comment
+		// to name a path that does not exist left this test green.
+		filepath.Join(root, "scripts", "*", "*.go"),
 	} {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {

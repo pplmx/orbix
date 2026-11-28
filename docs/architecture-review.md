@@ -8,7 +8,7 @@
 
 | 包                  | 代码行    | 函数（含方法） | 顶层函数 | 测试行    | 测试/代码 |
 | ------------------- | --------- | -------------- | -------- | --------- | --------- |
-| `internal/server`   | 5582      | 119            | 60       | 14100     | 2.53      |
+| `internal/server`   | 5588      | 119            | 60       | 14100     | 2.52      |
 | `internal/tokenize` | 4897      | 139            | 110      | 7270      | 1.48      |
 | `internal/llama`    | 5105      | 139            | 42       | 14766     | 2.89      |
 | `cmd/orbix`         | 4037      | 88             | 83       | 8981      | 2.22      |
@@ -21,7 +21,7 @@
 | `internal/kernel`   | 711       | 28             | 20       | 2182      | 3.07      |
 | `internal/f16`      | 154       | 4              | 4        | 446       | 2.90      |
 | `internal/arch`     | 14        | 0              | 0        | 2188      | 156.29    |
-| **合计**            | **30461** | **791**        | **448**  | **71507** | **2.32**  |
+| **合计**            | **30467** | **791**        | **448**  | **71507** | **2.32**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -545,7 +545,7 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 | `cli.cmdBench`            | 279  | 246  | `validateBenchFlags`（59 行，9 条错误串逐字一致）           |
 | `cli.cmdServe`            | 311  | 275  | `validateServeFlags`（94 行，9 条错误串逐字一致）           |
 | `server.blockingResponse` | 201  | 141  | `choiceObject`（68 行，两种 schema / echo / stop 截断）     |
-| `server.streamResponse`   | 162  | 90   | `eventWriter`（帧头、对象名、usage 标记、编码、flush）      |
+| `server.streamResponse`   | 168  | 96   | `eventWriter`（帧头、对象名、usage 标记、编码、flush）      |
 
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。

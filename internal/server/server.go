@@ -1909,6 +1909,12 @@ func (s *Server) streamResponse(w http.ResponseWriter, r *http.Request, chans []
 			// requests against an exhausted pool left refused_pool_total at 0 against 4 for the
 			// same four sent blocking. The count is the only signal that survives the
 			// protocol's inability to say it in the response.
+			//
+			// Only the pool error is counted here, and that is not an oversight: ErrQueueFull
+			// comes back from Submit, which runs before this function does, so a streaming
+			// request that finds the queue full is refused by the blocking path and counted
+			// there. This one is the only error that can arrive on an event after the response
+			// has started.
 			if errors.Is(it.err, engine.ErrPoolExhausted) {
 				s.refusedPool.Add(1)
 			}

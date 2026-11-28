@@ -2082,6 +2082,9 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// for. It is the offset a logprob entry reports, and it is tracked separately from sent
 	// because held-back text has an offset before it has been written.
 	tokenOffset := 0
+	// held collects the described tokens whose text the tool gate is still withholding. It is
+	// empty whenever the gate is not in use, and emptied as soon as the gate releases anything.
+	var held []heldToken
 	// write releases one piece of a choice's text to the client, routing it through the tool
 	// gate when the request declared tools. Every path below goes through it rather than
 	// straight to emit, because the tool gate is not an alternative to the other two
@@ -2090,19 +2093,54 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// `tools` and `stop` streamed the whole `<tool_call>{...}</tool_call>` to the client as
 	// content and reported no tool_calls at all, while the same request non-streamed returned
 	// the call. The stop branch simply continued before the gate was consulted.
-	write := func(part string, lp any) bool {
-		if tcg != nil {
-			if out := tcg.push(part); out != "" {
-				return emit(streamItem{index: index, delta: out, logprobs: lp})
+	// chunkFor renders one chunk's logprobs object in the shape the endpoint uses. A chat chunk
+	// carries a list of per-token objects and a completions chunk parallel arrays, so a held run
+	// released in one chunk is one object built from the whole run.
+	chunkFor := func(described []logprobText, offset int) any {
+		if described == nil {
+			return nil
+		}
+		if p.chat {
+			return chatLogprobs(described)
+		}
+		return completionLogprobs(described, offset)
+	}
+	write := func(part string, described []logprobText, offset int) bool {
+		if tcg == nil {
+			if part == "" && described == nil {
+				return true
 			}
-			// The gate swallowed this piece: it is part of a call, so neither its text nor a
-			// logprob describing bytes the client will never see goes out.
+			return emit(streamItem{index: index, delta: part, logprobs: chunkFor(described, offset)})
+		}
+		before := tcg.dropped
+		out := tcg.push(part)
+		if tcg.dropped > before {
+			// Some of these bytes turned out to be part of a call and will never reach the
+			// client. That settles every description the gate was still holding as well: they
+			// were waiting on exactly this decision, and it went against them.
+			held = nil
+			return emit(streamItem{index: index, delta: out})
+		}
+		if out == "" {
+			// The gate is holding this piece: it may still turn out to be a call, and a call's
+			// bytes must not reach the client as content. The description is held with it
+			// rather than dropped, because whether the bytes are prose is decided later -- a
+			// '<' in prose is released by this same gate on a later push. Measured before the
+			// description was held: "a < b tail" streamed 8 logprob entries for 9 tokens, the
+			// missing one being the '<' the client did receive.
+			if described != nil {
+				held = append(held, heldToken{described, offset})
+			}
 			return true
 		}
-		if part == "" && lp == nil {
-			return true
+		// Whatever was held comes out with the first piece the gate releases, which is the same
+		// chunk the text itself arrives in. The entries are contiguous in the reply, so the
+		// first one's offset is where the run starts.
+		if len(held) > 0 {
+			described, offset = appendHeld(held, described, offset)
+			held = nil
 		}
-		return emit(streamItem{index: index, delta: part, logprobs: lp})
+		return emit(streamItem{index: index, delta: out, logprobs: chunkFor(described, offset)})
 	}
 	for ev := range ch {
 		if ev.Err != nil {
@@ -2119,7 +2157,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 			// The token's byte offset in this choice's text, counted before it is written:
 			// a stop list can hold text back, and the offset describes where the text lands
 			// rather than when it was released.
-			var chunkLogprobs any
+			var describedToken []logprobText
 			// advance is how much of the choice's text this token accounts for. Without
 			// logprobs it is the text the stream decoder released; with them it is the length
 			// of the token's own rendering, because that is what the blocking path counts and
@@ -2130,17 +2168,14 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				// first says whether this is the token the leading-space rule applies to.
 				described := s.describeStreamedToken(ev.Token, text, ev.Logprob, ev.Top, tokenOffset == 0)
 				advance = len(described[0].text)
-				if p.chat {
-					chunkLogprobs = chatLogprobs(described)
-				} else {
-					chunkLogprobs = completionLogprobs(described, tokenOffset)
-				}
+				describedToken = described
 			}
+			tokenStart := tokenOffset
 			tokenOffset += advance
 			// A token that decodes to nothing still has a log probability, and a caller who
 			// asked for them expects one entry per generated token. Without this the streamed
 			// list would be shorter than the blocking one for the same request.
-			if text == "" && chunkLogprobs == nil {
+			if text == "" && describedToken == nil {
 				continue
 			}
 			// A stop string has to be applied to the stream as well as to the whole body.
@@ -2161,7 +2196,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 					// Dropping the straddling token is what the blocking path does, so the two
 					// transports report the same list for the same request.
 					if release != "" {
-						if !write(release, nil) {
+						if !write(release, nil, 0) {
 							return generated, cancelled, false
 						}
 					}
@@ -2196,19 +2231,19 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				// everything before it. Without this, stop=["北京"] streamed "北" where the
 				// non-streaming body returned nothing.
 				if release != "" {
-					if !write(release, chunkLogprobs) {
+					if !write(release, describedToken, tokenStart) {
 						return generated, cancelled, false
 					}
-				} else if chunkLogprobs != nil {
+				} else if describedToken != nil {
 					// Everything visible is already out and this token's text is being held,
 					// so the entry travels alone. The text follows when the tail is released.
-					if !emit(streamItem{index: index, logprobs: chunkLogprobs}) {
+					if !emit(streamItem{index: index, logprobs: chunkFor(describedToken, tokenStart)}) {
 						return generated, cancelled, false
 					}
 				}
 				continue
 			}
-			if !write(text, chunkLogprobs) {
+			if !write(text, describedToken, tokenStart) {
 				// The client went away. Its context is cancelled, so the engine
 				// stops the sequence; draining is the caller's job and this loop
 				// is already past that point.
@@ -2232,7 +2267,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// the same sequence produces without streaming, which breaks the contract
 	// TestStreamingReassemblesToSameText states.
 	if tail := dec.Flush(); tail != "" {
-		if !write(tail, nil) {
+		if !write(tail, nil, 0) {
 			return generated, cancelled, false
 		}
 	}
@@ -2241,7 +2276,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// matches cost nothing but a later chunk.
 	if reason != "stop" {
 		if rest := gate.flush(); rest != "" {
-			if !write(rest, nil) {
+			if !write(rest, nil, 0) {
 				return generated, cancelled, false
 			}
 		}
@@ -2250,7 +2285,21 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// only ever prose goes out, and a complete call is left to the final chunk's tool_calls.
 	var calls []toolCall
 	if tcg != nil {
-		if rest := tcg.flush(); rest != "" {
+		// Whatever the gate was still holding, and the descriptions that went with it, is
+		// decided now: flush releases it when no complete call was in the reply, so the text is
+		// prose and its log probabilities belong to the chunk that carries it.
+		rest := tcg.flush()
+		// flush releases the held region only when the whole reply held no complete call, and
+		// in that case the region is prose: its log probabilities belong to the chunk carrying
+		// it. When it stays empty the region was a call, and held == nil has just said so.
+		if run, offset := appendHeld(held, nil, 0); rest != "" && run != nil {
+			if !emit(streamItem{index: index, delta: rest, logprobs: chunkFor(run, offset)}) {
+				return generated, cancelled, false
+			}
+			held, rest = nil, ""
+		}
+		held = nil
+		if rest != "" {
 			if !emit(streamItem{index: index, delta: rest}) {
 				return generated, cancelled, false
 			}

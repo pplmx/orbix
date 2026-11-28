@@ -1393,3 +1393,79 @@ func decodedLogprobEntries(t *testing.T, lp any) []string {
 	}
 	return out
 }
+
+// TestStreamedLogprobsCoverExactlyTheStreamedText pins the property that makes a streamed logprob
+// list usable: the entries a client accumulates have to describe the text it accumulates, token for
+// token and in order.
+//
+// The tool gate makes this non-trivial, because it withholds text that it has not yet decided
+// about. A '<' may begin a call or may be prose, and the decision comes on a later push. The gate's
+// text was released correctly either way; what went wrong was the log probability, which was
+// attached to the chunk at the moment the token was pushed -- so a token whose text was held and
+// then released as prose lost its entry. Measured on "a < b tail" with tools declared: the client
+// received all 11 bytes and 8 logprob entries for 9 tokens, the missing one being the '<'.
+//
+// Both outcomes are covered, because a fix that only ever attaches entries would keep describing
+// bytes that turned out to be a call: the reply with a real call must report entries for the prose
+// alone, and one whose '<' never became a call must report its entry.
+func TestStreamedLogprobsCoverExactlyTheStreamedText(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+	}{
+		{"a '<' that turns out to be prose", `a < b tail`},
+		{"a reply with no angle bracket at all", `Hi. there.`},
+		{"prose, a call, and prose", `x <tool_call>{"name": "f"}</tool_call> y`},
+		{"the whole reply is a call", `<tool_call>{"name": "f"}</tool_call>`},
+		{"a marker that never completes", `trailing <tool_ca`},
+		{"a call that never closes", `prose <tool_call>{"name": "f"}`},
+		{"two calls with prose around and between",
+			`a <tool_call>{"name": "f"}</tool_call> b <tool_call>{"name": "g"}</tool_call> c`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(c.reply, false)
+			ch := make(chan engine.Event, len(ids)+1)
+			for i, id := range ids {
+				ch <- engine.Event{Token: id, HasToken: true, HasLogprob: true,
+					Logprob: float32(-0.5 - float64(i)/100)}
+			}
+			ch <- engine.Event{Done: true, FinishReason: "stop"}
+			close(ch)
+			p := generateParams{chat: true, responseID: "chatcmpl-logprobs", logprobs: true,
+				tools: []engine.ToolSpec{{Name: "f"}}}
+
+			var streamed strings.Builder
+			var entries strings.Builder
+			count := 0
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				streamed.WriteString(it.delta)
+				for _, e := range decodedLogprobEntries(t, it.logprobs) {
+					entries.WriteString(e)
+					count++
+				}
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+
+			if got, want := entries.String(), streamed.String(); got != want {
+				t.Errorf("the logprob entries join to %q but the client received %q; an entry may "+
+					"only describe text that reaches the client", got, want)
+			}
+			// The call's own bytes must be in neither stream. A reply that holds no complete
+			// call is prose by the parser's rule, so its markers are legitimately content.
+			if _, parsed := parseToolCalls(c.reply); len(parsed) > 0 {
+				if strings.Contains(streamed.String(), toolCallOpen) ||
+					strings.Contains(entries.String(), toolCallOpen) {
+					t.Errorf("a call marker reached the client: text %q entries %q",
+						streamed.String(), entries.String())
+				}
+			}
+			if count == 0 && streamed.Len() > 0 {
+				t.Error("the stream carried text but no logprob entries at all")
+			}
+		})
+	}
+}

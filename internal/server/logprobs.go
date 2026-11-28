@@ -361,3 +361,39 @@ func shownLogprobTokens(described []logprobText, text string, calls []toolCall, 
 	}
 	return described
 }
+
+// heldToken is one described token waiting for the streaming tool gate to decide whether its bytes
+// are prose a client will see.
+//
+// The description is kept rather than the rendered chunk because the chunk's shape depends on the
+// offset at which the run is finally released, and that is not known until the gate lets go.
+type heldToken struct {
+	described []logprobText
+	offset    int
+}
+
+// appendHeld prepends the token descriptions the gate was holding to the one it just released.
+//
+// The runs are contiguous in the reply, so the first held description's offset is where the
+// combined run starts. A held run is empty for a token that carried no log probability, which is
+// why the offsets are stored per run rather than assumed.
+func appendHeld(held []heldToken, released []logprobText, offset int) ([]logprobText, int) {
+	var all []logprobText
+	for _, h := range held {
+		if h.described == nil {
+			continue
+		}
+		if all == nil {
+			offset = h.offset
+		}
+		all = append(all, h.described...)
+	}
+	if released != nil {
+		if all == nil {
+			// Nothing was held: the released description starts the run.
+			return released, offset
+		}
+		all = append(all, released...)
+	}
+	return all, offset
+}

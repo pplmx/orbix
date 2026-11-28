@@ -646,6 +646,13 @@ type toolCallGate struct {
 	sent int
 	// inCall is true once an opening marker has matched and its closing marker has not.
 	inCall bool
+	// dropped counts the bytes withheld for good as part of a call. It exists for the stream
+	// reader: a described token may only carry a log probability when its text reaches the
+	// client, and this is how the reader tells "held for now" from "gone". sent cannot say it,
+	// because it advances over both -- what the client's copy covers is the same whether the
+	// bytes went out or were dropped. Measured before it existed: with tools declared,
+	// `x <tool_call>{...}</tool_call> y` reported logprob entries for the call's own bytes.
+	dropped int
 }
 
 const (
@@ -679,7 +686,9 @@ func (g *toolCallGate) push(gen string) string {
 			// anything after it in this same push is prose, or the next call, and dropping it
 			// would lose output the client never gets another chance to see.
 			g.inCall = false
-			g.sent += j + len(toolCallClose)
+			skip := j + len(toolCallClose)
+			g.sent += skip
+			g.dropped += skip
 			continue
 		}
 		i := strings.Index(g.text[g.sent:], toolCallOpen)

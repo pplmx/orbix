@@ -113,7 +113,9 @@ func (p *parser) parseBody() (nodes []node, t term, err error) {
 		case pieceStmt:
 			keyword, rest, err := splitStatement(pc.text)
 			if err != nil {
-				return nil, term{}, err
+				// splitStatement sees only the piece's text, so the position comes from the
+				// piece it was cut from.
+				return nil, term{}, fmt.Errorf("%w, at offset %d", err, pc.offset)
 			}
 			switch keyword {
 			case "if":
@@ -294,7 +296,8 @@ func (p *parser) parseFor(header string, start int) (node, error) {
 	}
 	iterSrc, filterSrc, err := splitForIf(strings.TrimSpace(rest))
 	if err != nil {
-		return nil, err
+		// splitForIf sees only the header text, so the tag's own position is attached here.
+		return nil, fmt.Errorf("%w, at offset %d", err, start)
 	}
 	iter, err := parseExpr(strings.TrimSpace(iterSrc))
 	if err != nil {

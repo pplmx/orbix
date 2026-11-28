@@ -258,6 +258,24 @@ func TestBlockPoolSizes(t *testing.T) {
 	if got := def.BlockSize(); got != defaultBlockSize {
 		t.Errorf("default BlockSize = %d, want %d", got, defaultBlockSize)
 	}
+
+	// DefaultBlockSize is the exported form of that number, and the two have to stay equal: a
+	// caller sizing a pool from it and the pool deciding how big a block is must start from one
+	// value. The assertion above compares the pool against the unexported constant, which cannot
+	// see the exported function drifting away from it -- and it did: the function had no caller in
+	// this package at all, so `go test -cover ./internal/llama` reported it at 0% while only
+	// cmd/orbix exercised it, which is the cross-package coverage illusion AGENTS.md names.
+	//
+	// Written as a literal rather than as `DefaultBlockSize() == defaultBlockSize`, because that
+	// form is the same trap one level down: changing the constant would move both sides.
+	if got := DefaultBlockSize(); got != 16 {
+		t.Errorf("DefaultBlockSize() = %d, want 16; a caller that sizes a pool from this value "+
+			"and the pool that fills in its own default would disagree", got)
+	}
+	if got := def.BlockSize(); got != DefaultBlockSize() {
+		t.Errorf("a pool built with no block size uses %d, but DefaultBlockSize() says %d",
+			got, DefaultBlockSize())
+	}
 }
 
 // The prefix index holds blocks speculatively -- some future request might match them --

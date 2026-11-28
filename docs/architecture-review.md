@@ -10,7 +10,7 @@
 | ------------------- | --------- | -------------- | -------- | --------- | --------- |
 | `internal/server`   | 5553      | 118            | 59       | 13913     | 2.51      |
 | `internal/tokenize` | 4897      | 139            | 110      | 7270      | 1.48      |
-| `internal/llama`    | 5070      | 139            | 42       | 14660     | 2.89      |
+| `internal/llama`    | 5070      | 139            | 42       | 14678     | 2.90      |
 | `cmd/orbix`         | 3957      | 85             | 81       | 8839      | 2.23      |
 | `internal/chat`     | 3681      | 88             | 48       | 5715      | 1.55      |
 | `internal/engine`   | 2119      | 48             | 21       | 6279      | 2.96      |
@@ -21,7 +21,7 @@
 | `internal/kernel`   | 711       | 28             | 20       | 2182      | 3.07      |
 | `internal/f16`      | 154       | 4              | 4        | 446       | 2.90      |
 | `internal/arch`     | 14        | 0              | 0        | 1771      | 126.50    |
-| **合计**            | **30277** | **785**        | **448**  | **70544** | **2.32**  |
+| **合计**            | **30277** | **785**        | **448**  | **70562** | **2.32**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -285,11 +285,15 @@ as the next block's parent"，而实际实现是包内未导出的 `chainRoot`�
 谁的断言失去依据"，而不是"有多少个 `x.Name`"。这条和 AGENTS.md 里"判定不可达之前先看函数的参数"
 是同一个道理：静态计数看到的是引用图，不是用途。
 
-覆盖率快照（`go test -cover ./...`，2026-11-26 下午复测）：kernel 99.5%、f16 100.0%、quant 99.0%、tokenize 96.9%、server 96.6%、engine 96.5%、chat 94.3%、gguf 96.0%、otel 95.3%、llama 90.8%、gguftest 89.1%、cmd/orbix 88.0%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`
+覆盖率快照（`go test -cover ./...`，2026-11-28 复测）：kernel 99.5%、f16 100.0%、quant 98.4%、tokenize 96.9%、server 97.5%、engine 96.5%、chat 94.0%、gguf 96.0%、otel 95.3%、llama 91.0%、gguftest 88.2%、cmd/orbix 88.2%。`internal/arch` 没有可测代码——它只有测试。`llama` 与 `cmd` 的低点集中在 `cmdServe`
 （39.4%，模型加载后的编排难以在测试里跑完整）。
 
 `llama` 已无 0% 的函数，最低是 `feedForwardRows` 的 64.7%，其次 `forward.go` 里
-`Model.feedForward` 的 66.7%。同名的还有 `batch.go` 的 `decodeBatch.feedForward`，
+`Model.feedForward` 的 66.7%。**这句话曾经不成立，而它是被自己的测量方式掩盖的：**
+`DefaultBlockSize` 在 `go test -cover ./internal/llama` 下报 0%，唯一的调用方在
+`cmd/orbix`，所以它既没有本包测试也不在这个数字里。补一条断言之后它到 100%，`llama` 从
+90.9% 升到 91.0%——正是 AGENTS.md 说的「跨包覆盖率假象」：0% 不等于没人调用，也可能等于
+调用方在另一个包里。同名的还有 `batch.go` 的 `decodeBatch.feedForward`，
 那个是 100%，因为它只是把行交给 `feedForwardRows`——不写清楚是哪一个，读的人会在两个
 66.7% 之间找不着北。
 

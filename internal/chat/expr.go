@@ -148,6 +148,11 @@ type arithExpr struct {
 type token struct {
 	text     string
 	isString bool
+	// pos is the byte offset in the expression source where this token starts. It exists so a
+	// parse failure can say where it happened: the parser used to report "expression ends
+	// early" with no position at all, which for a template with several expressions names
+	// neither the expression nor the place in it.
+	pos int
 }
 
 // supportedFilters is the filter set this package implements.
@@ -274,12 +279,12 @@ func lexExpr(src string) ([]token, error) {
 			if err != nil {
 				return nil, err
 			}
-			toks = append(toks, token{text: s, isString: true})
+			toks = append(toks, token{text: s, isString: true, pos: i})
 			i += n
 		case c == '=' || c == '!' || c == '<' || c == '>':
 			// Two-character comparisons first, so "==" is not read as two '='.
 			if i+1 < len(src) && src[i+1] == '=' {
-				toks = append(toks, token{text: src[i : i+2]})
+				toks = append(toks, token{text: src[i : i+2], pos: i})
 				i += 2
 				continue
 			}
@@ -287,15 +292,15 @@ func lexExpr(src string) ([]token, error) {
 			// consumes it; emitting it as a token lets that happen, and parseOr still
 			// rejects it anywhere else.
 			if c == '=' {
-				toks = append(toks, token{text: "="})
+				toks = append(toks, token{text: "=", pos: i})
 				i++
 				continue
 			}
-			toks = append(toks, token{text: string(c)})
+			toks = append(toks, token{text: string(c), pos: i})
 			i++
 		case c == '|' || c == '(' || c == ')' || c == '[' || c == ']' ||
 			c == '+' || c == '-' || c == '%' || c == '.' || c == ',' || c == ':':
-			toks = append(toks, token{text: string(c)})
+			toks = append(toks, token{text: string(c), pos: i})
 			i++
 		default:
 			start := i
@@ -303,9 +308,9 @@ func lexExpr(src string) ([]token, error) {
 				i++
 			}
 			if start == i {
-				return nil, fmt.Errorf("chat: unexpected %q in expression %q", string(c), src)
+				return nil, fmt.Errorf("chat: unexpected %q in expression %q at offset %d", string(c), src, i)
 			}
-			toks = append(toks, token{text: src[start:i]})
+			toks = append(toks, token{text: src[start:i], pos: start})
 		}
 	}
 	if len(toks) == 0 {
@@ -358,6 +363,22 @@ func lexString(src string) (string, int, error) {
 		}
 	}
 	return "", 0, fmt.Errorf("chat: unterminated string literal")
+}
+
+// where describes the parser's position for an error message.
+//
+// Past the last token there is no token to point at, so it points just past the final one --
+// which is where the missing operand would have gone -- and an expression with no tokens at
+// all says so instead of reporting offset 0.
+func (p *exprParser) where() string {
+	if p.pos < len(p.toks) {
+		return fmt.Sprintf("in the expression at offset %d, near %q", p.toks[p.pos].pos, p.toks[p.pos].text)
+	}
+	if n := len(p.toks); n > 0 {
+		last := p.toks[n-1]
+		return fmt.Sprintf("in the expression at offset %d, after %q", last.pos+len(last.text), last.text)
+	}
+	return "in an empty expression"
 }
 
 // peek returns the current token, or "" at end of input.
@@ -782,7 +803,7 @@ func (p *exprParser) parsePostfix() (expr, error) {
 		case p.accept("|"):
 			name := p.peek()
 			if !isIdentifier(name) {
-				return nil, fmt.Errorf("chat: expected a filter name after '|'")
+				return nil, fmt.Errorf("chat: expected a filter name after '|' (%s)", p.where())
 			}
 			p.pos++
 			if !supportedFilters[name] {
@@ -852,7 +873,7 @@ func (p *exprParser) parsePrimary() (expr, error) {
 	// which is a real value templates use -- {% set system_message = "" %} among them. The
 	// position decides.
 	if p.pos >= len(p.toks) {
-		return nil, fmt.Errorf("chat: expression ends early")
+		return nil, fmt.Errorf("chat: expression ends early (%s)", p.where())
 	}
 	tok := p.peek()
 	if p.toks[p.pos].isString {

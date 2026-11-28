@@ -388,6 +388,14 @@ One limit remains on `n`, and it is reported rather than silent: it must be at m
 each choice holds its own KV blocks and they are all in flight at once. The refusal names the
 bound, so a caller learns what would have been accepted.
 
+`temperature` has a floor but no ceiling: a negative value is refused with `invalid_value`, while
+`3`, `5` and `100` are all accepted. OpenAI documents 0-2, so a request above 2 that works here
+would be refused there. The asymmetry is deliberate and matches the CLI, whose `--temp` has the
+same floor and the same absence of a ceiling -- refusing 2.5 would make the two disagree about a
+request that the sampler handles fine. Measured at the extremes rather than assumed: the fixture
+answered `seed: 7, max_tokens: 6` with four different texts at temperatures 0, 2, 5 and 100, so a
+large value flattens the distribution without producing a NaN or an error.
+
 `stream: true` works with `n > 1` too. The chunks are interleaved as the choices advance, and
 every chunk's `index` says which choice its delta belongs to, so a client accumulates per index
 and gets `n` texts. Each choice gets its own finish chunk carrying its `finish_reason`, because

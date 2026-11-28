@@ -186,7 +186,8 @@ func (p *parser) parseIf(condSrc string, start int) (node, error) {
 				return nil, err
 			}
 			if next.keyword != "endif" {
-				return nil, fmt.Errorf("chat: {%% else %%} must be followed by {%% endif %%}")
+				return nil, fmt.Errorf("chat: {%% else %%} must be followed by {%% endif %%}, got {%% %s %%} at offset %d",
+					next.keyword, next.offset)
 			}
 			p.pos++ // consume {% endif %}
 			out.elseBody, out.hasElse = b, true

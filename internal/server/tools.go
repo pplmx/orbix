@@ -681,11 +681,26 @@ func (g *toolCallGate) push(gen string) string {
 				// either way.
 				break
 			}
+			g.inCall = false
+			body := g.text[g.sent+len(toolCallOpen) : g.sent+j]
+			end := g.sent + j + len(toolCallClose)
+			if _, ok := decodeToolCall(body); !ok {
+				// A marker pair that does not hold a call is text, by the same rule the parser
+				// uses: text that merely mentions the marker stays text, because dropping what
+				// the model wrote is worse than showing a marker. Measured before this check:
+				// `<tool_call></</tool_call>Hi` streamed "Hi" where the blocking body returned
+				// the whole string, since the parser found no call and returned its input.
+				//
+				// The bytes between the markers are released here as prose, which is what the
+				// already-released text before them leads into.
+				out.WriteString(g.text[g.sent:end])
+				g.sent = end
+				continue
+			}
 			// The call's own bytes are dropped, which is the point: what the client sees is
 			// the parsed call. sent moves just past the marker, not to the end of the text --
 			// anything after it in this same push is prose, or the next call, and dropping it
 			// would lose output the client never gets another chance to see.
-			g.inCall = false
 			skip := j + len(toolCallClose)
 			g.sent += skip
 			g.dropped += skip

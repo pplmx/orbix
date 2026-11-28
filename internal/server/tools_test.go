@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -1096,13 +1098,15 @@ func TestToolCallGateIsIndependentOfChunking(t *testing.T) {
 		},
 		{
 			name: "two calls with prose around and between them",
-			in:   `x <tool_call>{"a":1}</tool_call> y <tool_call>{"b":2}</tool_call> z`,
+			in:   `x <tool_call>{"name":"a"}</tool_call> y <tool_call>{"name":"b"}</tool_call> z`,
 			want: "x  y  z",
 		},
 		{
-			name: "two calls back to back",
+			// Neither body names a tool, so the parser returns the whole text and the gate has
+			// to agree: a marker pair that does not hold a call is prose, not a call to hide.
+			name: "two marker pairs that hold no calls",
 			in:   `<tool_call>{"a":1}</tool_call><tool_call>{"b":2}</tool_call>`,
-			want: "",
+			want: `<tool_call>{"a":1}</tool_call><tool_call>{"b":2}</tool_call>`,
 		},
 		{
 			name: "a marker that never completes",
@@ -1465,6 +1469,84 @@ func TestStreamedLogprobsCoverExactlyTheStreamedText(t *testing.T) {
 			}
 			if count == 0 && streamed.Len() > 0 {
 				t.Error("the stream carried text but no logprob entries at all")
+			}
+		})
+	}
+}
+
+// TestStreamedToolCallsSurviveRandomChunkings is the same invariant as the agreement tests above,
+// checked over generated replies rather than hand-listed ones.
+//
+// The hand-written cases came from shapes that were observed to break, which makes them good
+// regressions and weak discovery: the next defect will be at a boundary nobody thought to write
+// down. The pieces below are the ones a tool-calling reply is built from -- both markers, their
+// halves, the JSON punctuation, and prose that contains a stray '<' -- and the generator assembles
+// them into replies whose marker placement is arbitrary. A fixed seed keeps a failure reproducible;
+// the reply is printed with it, so a case that goes wrong can be added to the table above.
+func TestStreamedToolCallsSurviveRandomChunkings(t *testing.T) {
+	pieces := []string{"Hi", " ", "<", "tool_call", ">", "</", "{", `"name"`, ":", `"f"`,
+		"}", "x", "y", "\n", "a < b", toolCallOpen, toolCallClose}
+	rng := rand.New(rand.NewSource(20261128))
+	for iter := range 60 {
+		var reply strings.Builder
+		for range rng.Intn(8) + 1 {
+			reply.WriteString(pieces[rng.Intn(len(pieces))])
+		}
+		src := reply.String()
+		t.Run(fmt.Sprintf("%02d", iter), func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(src, false)
+			if len(ids) == 0 {
+				t.Skip("the fixture vocabulary encodes this reply to nothing")
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-random", logprobs: true,
+				tools: []engine.ToolSpec{{Name: "f"}}}
+
+			// The streamed path: what a client accumulates from the deltas, and from the entries.
+			ch := make(chan engine.Event, len(ids)+1)
+			for i, id := range ids {
+				ch <- engine.Event{Token: id, HasToken: true, HasLogprob: true,
+					Logprob: float32(-0.5 - float64(i)/100)}
+			}
+			ch <- engine.Event{Done: true, FinishReason: "stop"}
+			close(ch)
+			var content, entries strings.Builder
+			var streamedCalls []toolCall
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				content.WriteString(it.delta)
+				for _, e := range decodedLogprobEntries(t, it.logprobs) {
+					entries.WriteString(e)
+				}
+				streamedCalls = append(streamedCalls, it.calls...)
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+
+			// The blocking path on the same tokens, for the same reasons as the table test.
+			obj := srv.choiceObject(&choiceResult{out: ids, reason: "stop"}, 0, p)
+			msg, ok := obj["message"].(map[string]any)
+			if !ok {
+				t.Fatalf("no message object for %q", src)
+			}
+			blocked, _ := msg["content"].(string)
+			var blockedCalls int
+			if raw, ok := msg["tool_calls"].([]map[string]any); ok {
+				blockedCalls = len(raw)
+			}
+
+			if got, want := entries.String(), content.String(); got != want {
+				t.Errorf("reply %q: the logprob entries join to %q but the client received %q",
+					src, got, want)
+			}
+			// Surrounding whitespace is the one difference the transports cannot close; see
+			// TestStreamedToolCallsAgreeWithTheBlockingBody for why.
+			if got, want := strings.TrimSpace(content.String()), strings.TrimSpace(blocked); got != want {
+				t.Errorf("reply %q: streamed %q, blocking %q", src, got, want)
+			}
+			if len(streamedCalls) != blockedCalls {
+				t.Errorf("reply %q: the stream carried %d calls, the blocking body %d",
+					src, len(streamedCalls), blockedCalls)
 			}
 		})
 	}

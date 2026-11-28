@@ -251,3 +251,36 @@ func TestReadsIsFalseForANilTemplate(t *testing.T) {
 		t.Error("a nil Template reported reading a name")
 	}
 }
+
+// TestReadsSeesFilterArguments covers the gap that made a caller refuse a variable the template
+// needed.
+//
+// filterExpr carries its positional arguments twice: arg holds the first, for the filters that take
+// one, and args holds all of them. collectReads walked arg only, so a name in the second or third
+// position of selectattr was invisible -- `items | selectattr("a", "equalto", target)` rendered with
+// target's value and still reported Reads("target") false. A caller using Reads to refuse a
+// variable that would do nothing therefore refused a variable that did something, and the prompt
+// lost it with nothing in the output saying why.
+//
+// All three selectattr positions are checked, because the first one happened to work through arg
+// and only the later ones were broken: a test written from the working case would have passed.
+func TestReadsSeesFilterArguments(t *testing.T) {
+	tmpl, err := Parse(`{{ items | selectattr(attrname, "equalto", target) }}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, want := range []string{"items", "attrname", "target"} {
+		if !tmpl.Reads(want) {
+			t.Errorf("Reads(%q) is false; the template reads it: one as the operand, one as "+
+				"selectattr's first argument and one as its third", want)
+		}
+	}
+
+	// The literal arguments are not names, so nothing else should be reported.
+	for _, absent := range []string{"equalto", "a"} {
+		if tmpl.Reads(absent) {
+			t.Errorf("Reads(%q) is true, but that is a string literal in the template, not a "+
+				"variable a caller supplies", absent)
+		}
+	}
+}

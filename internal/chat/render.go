@@ -585,8 +585,14 @@ func collectReads(nodes []node, into map[string]bool) {
 			}
 		case filterExpr:
 			walkExpr(x.operand)
-			if x.arg != nil {
-				walkExpr(x.arg)
+			// args, not only arg: arg is the first positional argument kept for the filters that
+			// take one, and a filter that takes more reads args. Walking the wrong one made
+			// `items | selectattr("a", "equalto", target)` report Reads("target") false while the
+			// renderer looked target up -- so a caller that refuses variables a template ignores
+			// refused a variable this template needs, and the prompt lost its value with nothing
+			// saying why.
+			for _, a := range x.args {
+				walkExpr(a)
 			}
 			for _, kw := range x.kwargs {
 				walkExpr(kw)

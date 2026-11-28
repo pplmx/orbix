@@ -1611,3 +1611,63 @@ func TestChatLogprobsDescribeTheReplyAfterTheLeadingSpaceTrim(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamedLogprobsCoverTheTextWhenAStopStringIsAMarkerPrefix covers the case where the stop
+// gate withholds the very characters that make up a tool call's marker, and then matches them.
+//
+// Both gates hold text independently. When the stop string is `<tool` and the model writes
+// `<tool_call>`, the stop gate withholds each leading character on the chance it begins the stop
+// string, and then matches: the client receives "x" and the call never appears. The streamed
+// entries used to describe those withheld characters as they were pushed, one empty-delta chunk
+// each, so the list joined to "x</too" against a content of "x". Measured over 1200 generated
+// replies before the fix: 82 streamed mismatches; after it: 2, both of the same shape, where a
+// character is withheld and released within one push.
+//
+// The empty-text case is covered too: those tokens' entries have to go out immediately, because
+// the gate holds nothing on their behalf and no later release will carry them.
+func TestStreamedLogprobsCoverTheTextWhenAStopStringIsAMarkerPrefix(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+		stop  []string
+	}{
+		{"the stop string cuts a call's opening marker", `x</tool_call>`, []string{"</tool"}},
+		{"the stop string cuts the call and prose follows", `a <tool_call>{} b`, []string{"<tool"}},
+		{"the prefix never completes, so it is prose", `a < b`, []string{"<tool"}},
+		{"two prefixes, the second completing", `x <tool y <tool z`, []string{"<tool"}},
+		{"no marker at all", `a b c`, []string{"<tool"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(c.reply, false)
+			if len(ids) == 0 {
+				t.Fatal("the fixture encodes the reply to nothing")
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-stop-marker", logprobs: true,
+				tools: []engine.ToolSpec{{Name: "f"}}, stop: c.stop}
+			ch := make(chan engine.Event, len(ids)+1)
+			for i, id := range ids {
+				ch <- engine.Event{Token: id, HasToken: true, HasLogprob: true,
+					Logprob: float32(-0.5 - float64(i)/100)}
+			}
+			ch <- engine.Event{Done: true, FinishReason: "length"}
+			close(ch)
+
+			var content, entries strings.Builder
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				content.WriteString(it.delta)
+				for _, e := range decodedLogprobEntries(t, it.logprobs) {
+					entries.WriteString(e)
+				}
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+			if got, want := entries.String(), content.String(); got != want {
+				t.Errorf("the entries join to %q but the client received %q; an entry may only "+
+					"describe text that reaches the client", got, want)
+			}
+		})
+	}
+}

@@ -2089,6 +2089,10 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// held collects the described tokens whose text the tool gate is still withholding. It is
 	// empty whenever the gate is not in use, and emptied as soon as the gate releases anything.
 	var held []heldToken
+	// stopHeld holds the entries for text the stop gate is withholding. It is separate from held,
+	// which belongs to the tool gate: the two hold for different reasons, release on different
+	// events, and one book for both mixes two different lifetimes.
+	var stopHeld []heldToken
 	// write releases one piece of a choice's text to the client, routing it through the tool
 	// gate when the request declared tools. Every path below goes through it rather than
 	// straight to emit, because the tool gate is not an alternative to the other two
@@ -2199,11 +2203,12 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 					// part of it survives and neither "include" nor "truncate" is right.
 					// Dropping the straddling token is what the blocking path does, so the two
 					// transports report the same list for the same request.
-					if release != "" {
-						if !write(release, nil, 0) {
-							return generated, cancelled, false
-						}
+					if !write(release, nil, 0) {
+						return generated, cancelled, false
 					}
+					// What the gate still held is the stop string and after it, which the caller
+					// never receives, so those entries are dropped rather than described.
+					stopHeld = nil
 					// The sequence is still running; its context drives it to completion
 					// unread, which is what the engine does for a client that stopped
 					// reading. What changes here is only what this response reports.
@@ -2236,14 +2241,30 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				// everything before it. Without this, stop=["北京"] streamed "北" where the
 				// non-streaming body returned nothing.
 				if release != "" {
-					if !write(release, describedToken, tokenStart) {
+					// The release carries text from the tokens the gate had been holding, plus
+					// this token's when part of its text is in the release. Their entries travel
+					// with it; leave them behind and the list stops covering the text.
+					run, offset := appendHeld(stopHeld, describedToken, tokenStart)
+					stopHeld = nil
+					if !write(release, run, offset) {
 						return generated, cancelled, false
 					}
 				} else if describedToken != nil {
-					// Everything visible is already out and this token's text is being held,
-					// so the entry travels alone. The text follows when the tail is released.
-					if !emit(streamItem{index: index, logprobs: chunkFor(describedToken, tokenStart)}) {
-						return generated, cancelled, false
+					// The token's text is withheld on the chance that it begins a stop string, so
+					// its entry waits with it. Sending the entry alone was wrong whenever the text
+					// turned out to be the stop string itself: the caller never receives those
+					// bytes and the list described them anyway. Measured on `x</tool_call>` with
+					// stop=["</tool"]: the content was "x" and the entries joined to "x</too",
+					// with each withheld character sent as its own empty-delta chunk.
+					//
+					// A token whose text renders empty is the exception: the gate holds nothing on
+					// its behalf, and there is no later release to carry the entry, so it goes now.
+					if text == "" {
+						if !emit(streamItem{index: index, logprobs: chunkFor(describedToken, tokenStart)}) {
+							return generated, cancelled, false
+						}
+					} else {
+						stopHeld = append(stopHeld, heldToken{describedToken, tokenStart})
 					}
 				}
 				continue
@@ -2288,7 +2309,10 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// cut the reply because it found a stop string.
 	if !stopMatched {
 		if rest := gate.flush(); rest != "" {
-			if !write(rest, nil, 0) {
+			// The withheld tail is the client's after all, so the entries held with it go out now
+			// in the same chunk.
+			run, offset := appendHeld(stopHeld, nil, 0)
+			if !write(rest, run, offset) {
 				return generated, cancelled, false
 			}
 		}

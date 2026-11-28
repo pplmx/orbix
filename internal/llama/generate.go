@@ -73,6 +73,14 @@ type Temperature struct {
 	TopP float32
 	// NextFloat returns a value in [0, 1). It is a field rather than a call to
 	// math/rand so a seed and a test can control it without global state.
+	//
+	// A nil NextFloat makes Next greedy, which is the same answer Temp <= 0 gives. That is
+	// the safe reading of a struct someone forgot to finish filling in -- random sampling
+	// without a source of randomness is not something to approximate -- but it is also
+	// silent, so nothing may leave it nil. Production reaches this struct through one
+	// constructor, engine.NewTemperature, which takes nextFloat as a parameter; the caller
+	// that matters is the server, which builds a generator per request rather than sharing
+	// one (internal/server/sampler.go explains why).
 	NextFloat func() float64
 }
 

@@ -524,6 +524,67 @@ coverage:
     echo "functions at 0%:"
     go tool cover -func="$out" | awk '$3=="0.0%" {print "  " $0}'
 
+# Flips one boolean return at a time in a source file and reports which flips the suite notices.
+#
+# `just coverage` says a line never ran; this says whether the tests can tell when it changes.
+# They are different questions, and the second is the one that found a handler writing two JSON
+# documents while every test decoded the first: checkModel's `return false` was reachable and
+# covered, and flipping it to true still left the suite green.
+#
+# Every candidate is mutated, rebuilt and rerun on its own, so a file with twenty sites takes
+# twenty passes. Only `return true` and `return false` on a line by themselves are candidates --
+# the narrow shape whose flip cannot change the syntax around it. A flip that fails to build is
+# reported as such rather than counted as caught, because a site the compiler rejects proves
+# nothing about the tests.
+#
+# What a survivor means depends on reading the site: a rejection path whose response was already
+# written before the value is read is mutation-equivalent, and a branch whose comment says it
+# cannot be reached is documented rather than untested. The recipe finds them; it cannot judge
+# them.
+#
+# PKG and FILE pick the target. PKG is the import path used for the test run and FILE the source
+# file, which are not derivable from each other for the top-level cmd package.
+mutate file pkg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src="{{file}}"
+    test_pkg="{{pkg}}"
+    [ -f "$src" ] || { echo "no such file: $src" >&2; exit 1; }
+    sites=$(grep -nE '^\s*return (true|false)$' "$src" | cut -d: -f1 || true)
+    if [ -z "$sites" ]; then
+        echo "no boolean returns in $src"
+        exit 0
+    fi
+    backup=$(mktemp)
+    cp "$src" "$backup"
+    trap 'cp "$backup" "$src"; rm -f "$backup"' EXIT
+    total=$(printf '%s\n' "$sites" | wc -l)
+    printf '%s: %d candidate site(s)\n' "$src" "$total"
+    survived=0
+    for line in $sites; do
+        cp "$backup" "$src"
+        # awk rather than a nested heredoc: just parses the recipe body for its own syntax, and a
+        # second << inside a shebang recipe is parsed as justfile text.
+        awk -v n="$line" 'NR == n { if ($0 ~ /true/) sub(/true/, "false"); else sub(/false/, "true") } { print }' \
+            "$backup" > "$src"
+        if ! go build "./$test_pkg" 2>/dev/null; then
+            printf '  line %s: build failed after the flip\n' "$line"
+            continue
+        fi
+        if go test "./$test_pkg" -count=1 >/dev/null 2>&1; then
+            printf '  line %s: SURVIVED -- no test notices this flip\n' "$line"
+            survived=$((survived + 1))
+        else
+            printf '  line %s: caught\n' "$line"
+        fi
+    done
+    cp "$backup" "$src"
+    # Exits 0 even when something survived. A survivor is a question, not a failure: the caller
+    # has to read the site to decide whether it is mutation-equivalent, a documented unreachable
+    # arm, or a gap. Exiting non-zero would make the recipe unusable in a script that scans a
+    # whole package, where most survivors are expected and only the reading tells them apart.
+    printf '%d of %d survived -- read each site before treating it as a gap\n' "$survived" "$total"
+
 # Prints the version cz would bump to and the changelog section it would write, then stops. The
 # real bump is a person's decision: it writes a tag, and a tag is what `git describe` turns into
 # the version a binary reports.

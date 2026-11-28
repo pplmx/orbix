@@ -37,6 +37,8 @@ just skips     # count the tests that skip for want of a checkpoint, which CI re
 just coverage  # per-function coverage with every package instrumented, which is what answers
                # "is this dead": `go test -cover ./pkg` reports 0% for a function another
                # package calls
+just mutate FILE PKG # flip each boolean return in FILE and report which flips the suite misses,
+                     # which answers "can the tests tell": the complement of coverage
 just isolate   # run the suite twice with shuffling, to catch order dependence
 just fmt       # gofmt -w, to fix whatever just check reported
 just vet       # go vet on one package: just PKG=./internal/gguf vet

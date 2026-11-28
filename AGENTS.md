@@ -29,7 +29,7 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外十五个是辅助配方，不进门槛，但会用得上（`just --list` 里的第 29 条是 `default`，即不带配方时等价于 `just check`）：
+上面是门槛和发布入口。另外十六个是辅助配方，不进门槛，但会用得上（`just --list` 里的第 29 条是 `default`，即不带配方时等价于 `just check`）：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题
@@ -78,6 +78,13 @@ just coverage # 按函数看覆盖率，每个包都被 instrumented——这是
              # 已无 0% 函数；剩下的六个是三个 `main`（测试调不到）和 scripts/count.go 的四个
              # 辅助函数（那个包没有测试文件，它是开发工具不是引擎的一层）。
              # 比裸的 -cover 慢（约 50s vs 35s），所以不进 check。
+just mutate file pkg # 把一个文件里的 `return true`/`return false` 逐个翻过来、重编、重跑，
+             # 报出哪些翻转测试察觉不到。与 `just coverage` 回答的是两个问题：那条只说明某行
+             # 没跑到，这条说明跑到的时候测试能不能分辨对错。本会话用它找到过一个真缺陷——
+             # checkModel 的 `return false` 有覆盖，翻成 true 之后套件仍全绿，而响应体变成了
+             # 错误信封后接一个完整 model 对象。存活不等于缺陷：拒绝路径的返回值常在写出响应
+             # 之后才被读（变异等价），注释里写明不可达的分支是已记录的取舍。每个位点各跑一遍
+             # 全套，二十个位点的文件就是二十遍，目标选小一点。
 just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）
 just         # 不带配方等价于 just check
 ```

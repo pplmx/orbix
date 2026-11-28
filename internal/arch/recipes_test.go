@@ -298,3 +298,56 @@ func dispatchCases(t *testing.T, src string) []string {
 	}
 	return names
 }
+
+// TestAgentDocQuantCrossCheckCountMatchesTheCorpus checks the value count in AGENTS.md's
+// xcheck-quant recipe line.
+//
+// That figure is quoted in prose and nothing computed it, so it drifted: the line said 17770 while
+// `just xcheck-quant` reports 14750. The corpus is built by qdump_test.go as two arithmetic blocks
+// plus eight random ones per format, so the total is a function of the format table and the block
+// count -- both in that file -- and can be recomputed here from the same numbers rather than by
+// running the whole cross-check.
+//
+// It reads the format table's block sizes out of qdump_test.go instead of restating them, so
+// adding a format or changing a block size fails here rather than leaving the prose behind. What it
+// cannot see is the Python side: if scripts/quant_xcheck.py stopped comparing every value, this
+// would still pass. The script now prints the total, which is the check for that half.
+func TestAgentDocQuantCrossCheckCountMatchesTheCorpus(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "AGENTS.md")))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	m := quantCrossCheckCount.FindStringSubmatch(string(doc))
+	if m == nil {
+		t.Fatalf("AGENTS.md no longer states the xcheck-quant corpus as \"14 种格式、N 个值\"; " +
+			"restore that phrasing or update this pattern")
+	}
+
+	src, err := os.ReadFile(filepath.Clean(filepath.Join("..", "quant", "qdump_test.go")))
+	if err != nil {
+		t.Fatalf("read qdump_test.go: %v", err)
+	}
+	// Each row is {"NAME", gguf.TYPE, blockSize, bytesPerBlock}; the value count contributed is
+	// blockSize per block, and every format gets the same number of blocks.
+	rows := quantFormatRow.FindAllStringSubmatch(string(src), -1)
+	if len(rows) < 14 {
+		t.Fatalf("parsed %d format rows from qdump_test.go, too few; the table moved or its "+
+			"shape changed", len(rows))
+	}
+	const blocksPerFormat = 2 + 8 // the arithmetic run plus the eight seeded blocks
+	total := 0
+	for _, r := range rows {
+		total += archAtoi(t, r[1]) * blocksPerFormat
+	}
+	if got := archAtoi(t, m[1]); got != total {
+		t.Errorf("AGENTS.md says the quant cross-check compares %d values; %d formats x %d "+
+			"blocks gives %d -- run `just xcheck-quant` and use the total it prints",
+			got, len(rows), blocksPerFormat, total)
+	}
+}
+
+// quantCrossCheckCount captures the value count from the xcheck-quant recipe line.
+var quantCrossCheckCount = regexp.MustCompile(`14 种格式、(\d+) 个值`)
+
+// quantFormatRow captures one format's block size from qdump_test.go's table.
+var quantFormatRow = regexp.MustCompile(`\{"[A-Z0-9_]+", gguf\.[A-Z0-9_]+, (\d+), \d+\}`)

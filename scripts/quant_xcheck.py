@@ -344,6 +344,7 @@ def main() -> int:
         go = json.load(f)
 
     differ = 0
+    total = 0
     for name, case in go.items():
         decode = DECODERS.get(name)
         if decode is None:
@@ -382,7 +383,12 @@ def main() -> int:
                   f"go 0x{w:08x} ({len(bad)} of {len(want)} differ)")
         else:
             print(f"{name}: {len(want)} values agree")
-    print(f"{len(go)} formats, {len(go) - differ} agree, {differ} differ")
+        total += len(want)
+    # The total is printed rather than left to a reader to add up, because the number is quoted
+    # in AGENTS.md and was wrong there for want of exactly this: the corpus is built from ten
+    # blocks per format, so the sum depends on the format list and the block count, and a change
+    # to either left the quoted figure describing a corpus that no longer existed.
+    print(f"{len(go)} formats, {len(go) - differ} agree, {differ} differ, {total} values")
     return 1 if differ else 0
 
 

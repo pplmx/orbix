@@ -41,7 +41,7 @@ just xcheck  # 用 Python 的 gguf 包独立解析同一文件，逐张量比对
              # MODEL 不必是真实 checkpoint：just fixture 造的合成文件同样能跑（39 个张量全对）
 just jinja-diff # 用真实 Jinja2 渲染 chat 模板与本包的输出逐字比对；不需要 checkpoint，语料在脚本里
 just xcheck-pre # 预分词器与 GPT-2 / Llama 3 的上游正则对照；不需要 checkpoint
-just xcheck-quant # 反量化与 ggml quantize.c 的块布局对照，14 种格式、17770 个值
+just xcheck-quant # 反量化与 ggml quantize.c 的块布局对照，14 种格式、14750 个值（脚本末尾会打印总数）
 just xcheck-rope # RoPE 与 numpy 按 RoFormer 定义算出的旋转对照，6 组参数
 just xcheck-fixture # 用 Python gguf 包解析 gguftest 的合成 fixture，比对元数据与张量目录
 just docker  # 本地构建容器镜像并打印里面的版本号；发布镜像是 build-push-action 走 buildx 出的双架构

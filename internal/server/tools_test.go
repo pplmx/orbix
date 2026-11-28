@@ -1671,3 +1671,62 @@ func TestStreamedLogprobsCoverTheTextWhenAStopStringIsAMarkerPrefix(t *testing.T
 		})
 	}
 }
+
+// TestStreamedLogprobsAreNotDuplicatedWhenAReleaseIncludesItsOwnToken covers the boundary where
+// the stop gate releases text and withholds this same token in one push.
+//
+// The gate's push reports both: it can release text from earlier pushes while withholding the
+// token that just arrived. This token's description was added to the chunk and also kept for the
+// later release, so the character was described twice -- measured on `<<tool_call>` with
+// stop=["<tool"], where the one released character came with two entries and the list joined to
+// "<<" against a content of "<".
+//
+// The offset decides it: release ends at the gate's sent count, so this token's text is inside
+// the chunk exactly when that count has reached the end of the token. Both halves are pinned
+// here because the two wrong answers are opposite -- always adding the description duplicates it,
+// never adding it drops ordinary tokens entirely (961 mismatches over 1200 generated replies).
+func TestStreamedLogprobsAreNotDuplicatedWhenAReleaseIncludesItsOwnToken(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+		stop  []string
+	}{
+		{"one character withheld then released with its own token", `<<tool_call>`, []string{"<tool"}},
+		{"a marker prefix preceded by other text", `x<tool_call>`, []string{"<tool"}},
+		{"several prefixes ending in a match", `x <tool y <tool_call>`, []string{"<tool"}},
+		{"a release that does not include this token", `a < b`, []string{"<tool"}},
+		{"no stop string at all", `a <tool_call>{"name": "f"}</tool_call> b`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(c.reply, false)
+			if len(ids) == 0 {
+				t.Fatal("the fixture encodes the reply to nothing")
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-dup", logprobs: true,
+				tools: []engine.ToolSpec{{Name: "f"}}, stop: c.stop}
+			ch := make(chan engine.Event, len(ids)+1)
+			for i, id := range ids {
+				ch <- engine.Event{Token: id, HasToken: true, HasLogprob: true,
+					Logprob: float32(-0.5 - float64(i)/100)}
+			}
+			ch <- engine.Event{Done: true, FinishReason: "length"}
+			close(ch)
+
+			var content, entries strings.Builder
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				content.WriteString(it.delta)
+				for _, e := range decodedLogprobEntries(t, it.logprobs) {
+					entries.WriteString(e)
+				}
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+			if got, want := entries.String(), content.String(); got != want {
+				t.Errorf("the entries join to %q but the client received %q", got, want)
+			}
+		})
+	}
+}

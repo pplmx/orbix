@@ -2241,11 +2241,27 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				// everything before it. Without this, stop=["北京"] streamed "北" where the
 				// non-streaming body returned nothing.
 				if release != "" {
-					// The release carries text from the tokens the gate had been holding, plus
-					// this token's when part of its text is in the release. Their entries travel
-					// with it; leave them behind and the list stops covering the text.
-					run, offset := appendHeld(stopHeld, describedToken, tokenStart)
-					stopHeld = nil
+					// release is the text between what the client already has and the point the
+					// gate can prove safe. It can start before this token and end before it, in
+					// which case this token is still withheld and its description belongs in
+					// stopHeld rather than in this chunk.
+					//
+					// The two lists are combined rather than one being assumed: stopHeld holds
+					// what earlier pushes withheld, and describedToken is this token's own -- but
+					// only when this token's text is inside the release. Measured twice: always
+					// adding it described the same character twice on `<<tool_call>` with
+					// stop=["<tool"], and never adding it dropped ordinary tokens entirely.
+					endsAt := gate.sent
+					covers := endsAt >= tokenStart+len(text)
+					run, offset := appendHeld(stopHeld, nil, tokenStart)
+					if covers {
+						run, offset = appendHeld(stopHeld, describedToken, tokenStart)
+					}
+					if !covers && describedToken != nil {
+						stopHeld = []heldToken{{describedToken, tokenStart}}
+					} else {
+						stopHeld = nil
+					}
 					if !write(release, run, offset) {
 						return generated, cancelled, false
 					}

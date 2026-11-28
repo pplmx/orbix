@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -110,4 +112,69 @@ func TestChatContentRoundTripsItsAcceptedForms(t *testing.T) {
 	if _, ok := err.(*typeMismatchError); !ok {
 		t.Errorf("the refusal is %T, want *typeMismatchError", err)
 	}
+}
+
+// FuzzDecodeJSON checks that no request body can take the decode path down or leave it returning
+// a blank answer.
+//
+// The existing target covers chatContent, which is one field of one request. This covers the
+// envelope: decodeJSON is what every POST on both endpoints goes through before anything else
+// looks at the body, so its inputs are whatever bytes a client sends -- including the ones the
+// decoder has to give up on. Three properties, each matching something the layer below can
+// violate in a way the caller would trip over:
+//
+//   - it returns, so a malformed body cannot take the serving goroutine down;
+//   - an error always carries a message, because writeDecodeError surfaces it to the caller and
+//     an empty one produces an envelope with nothing in it;
+//   - a nil error leaves the destination usable, since the handlers read it immediately.
+//
+// The destination is a chatRequest rather than `any` so the fuzzer reaches the fields that have
+// their own unmarshalers -- messages, tool_choice, the numeric limits -- instead of stopping at
+// "this is valid JSON".
+func FuzzDecodeJSON(f *testing.F) {
+	seeds := []string{
+		`{}`,
+		`{"messages":[{"role":"user","content":"hi"}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`,
+		`{"messages":[],"max_tokens":8,"temperature":0.5,"top_p":0.9,"n":2}`,
+		`{"model":"m","stream":true,"stream_options":{"include_usage":true}}`,
+		`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function",` +
+			`"function":{"name":"f","parameters":{"type":"object"}}}]}`,
+		`{"messages":[{"role":"user","content":"hi"}],"tool_choice":"required"}`,
+		`{"prompt":"hi","suffix":null,"echo":true,"best_of":2}`,
+		// Wrong shapes and truncations: each should be refused rather than crash.
+		`{"messages":"x"}`,
+		`{"messages":[1]}`,
+		`{"messages":[{"role":1}]}`,
+		`{"max_tokens":"8"}`,
+		`{"max_tokens":-1}`,
+		`{"temperature":true}`,
+		`{"messages":[{"role":"user","content":`,
+		`null`,
+		`[]`,
+		``,
+	}
+	for _, s := range seeds {
+		f.Add([]byte(s))
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var req chatRequest
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(data))
+		err := decodeJSON(w, r, &req, 1<<20)
+		if err != nil {
+			if err.Error() == "" {
+				t.Fatal("decodeJSON returned an error with no message")
+			}
+			return
+		}
+		// Accepted, so the handlers read the destination. Touching the fields that have their own
+		// unmarshalers is what would surface a receiver left half-built.
+		_ = len(req.Messages)
+		for _, m := range req.Messages {
+			_ = string(m.Content)
+		}
+		_ = req.MaxTokens
+	})
 }

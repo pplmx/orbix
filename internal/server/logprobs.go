@@ -418,3 +418,25 @@ func appendHeld(held []heldToken, released []logprobText, offset int) ([]logprob
 	}
 	return all, offset
 }
+
+// stopsHeldWith reports whether the text the stop gate released ends with this token's own text,
+// which is the condition for the token's entry to belong in the chunk rather than in the withheld
+// list.
+//
+// A release can be longer than the token -- it usually carries text withheld from earlier pushes --
+// and it can be exactly the token, which is the case where the token was withheld before and its
+// entry is already in held. Any other shape means the release stopped before this token and the
+// entry waits.
+func stopsHeldWith(text, release string, described []logprobText, held []heldToken) bool {
+	if text == "" || described == nil {
+		return false
+	}
+	if !strings.HasSuffix(release, text) {
+		return false
+	}
+	// The release is this token and nothing else: its entry is already withheld.
+	if len(release) == len(text) && len(held) > 0 {
+		return false
+	}
+	return true
+}

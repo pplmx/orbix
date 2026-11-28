@@ -2265,8 +2265,19 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 					// only when this token's text is inside the release. Measured twice: always
 					// adding it described the same character twice on `<<tool_call>` with
 					// stop=["<tool"], and never adding it dropped ordinary tokens entirely.
-					endsAt := gate.sent
-					covers := endsAt >= tokenStart+len(text)
+					// covers says whether this token's own text is inside the release. It is
+					// decided from the text rather than from tokenStart, which counts the bytes
+					// the entries describe and diverges from the gate's count when a character
+					// spans several tokens: the decoder renders a lone 0xef as nothing and then
+					// that byte plus "A" as one character, so the entries total three bytes while
+					// the gate's total is four. Comparing those two numbers made covers false for
+					// the token that completed the character and dropped its entry -- measured on
+					// "\xefA" with any stop list declared, entries joined to "�" against a content
+					// of "�A".
+					//
+					// The whole-release case is excluded because stopHeld already holds this
+					// token's entry there; adding it again described one character twice.
+					covers := stopsHeldWith(text, release, describedToken, stopHeld)
 					run, offset := appendHeld(stopHeld, nil, tokenStart)
 					if covers {
 						run, offset = appendHeld(stopHeld, describedToken, tokenStart)

@@ -1817,3 +1817,57 @@ func TestStreamedToolCallsAgreeWithTheBlockingBodyOverGeneratedReplies(t *testin
 		})
 	}
 }
+
+// TestStreamedLogprobsSurviveACharacterThatSpansTwoTokens covers the byte-token case the offset
+// comparison got wrong.
+//
+// A byte-level vocabulary can emit the leader byte of a multi-byte character as one token and the
+// rest as another. The stream decoder holds the leader -- nothing can be rendered from it yet --
+// and then renders the leader plus the next byte as one character. So the bytes the description
+// counts and the bytes the stop gate was fed diverge: "\xef" plus "A" is two tokens describing
+// three rendered bytes ("<replacement>" then "A") while the gate's own count is two. The release
+// decision compared those two numbers, decided the token was not covered, and dropped its entry.
+//
+// Measured before the fix: over a 10-reply by 7-stop matrix, 6 disagreements, every one of them
+// this reply; over 2000 generated ASCII replies the same matrix reported none, which is why the
+// existing tests did not see it. The decision is now made from the text, and the whole-release
+// case stays excluded because there the entry is already withheld.
+//
+// Every stop list is covered, including one that cannot match, because the defect needed only a
+// non-empty list: the gate runs whenever there is one.
+func TestStreamedLogprobsSurviveACharacterThatSpansTwoTokens(t *testing.T) {
+	const reply = "\xefA"
+	for _, stop := range [][]string{nil, {"zzz"}, {"0"}, {" "}, {"A"}} {
+		t.Run(strings.Join(stop, "|"), func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(reply, false)
+			if len(ids) < 2 {
+				t.Fatalf("the fixture encodes %q to %d tokens; the case needs the byte split",
+					reply, len(ids))
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-byte-split", logprobs: true,
+				stop: stop}
+			ch := make(chan engine.Event, len(ids)+1)
+			for i, id := range ids {
+				ch <- engine.Event{Token: id, HasToken: true, HasLogprob: true,
+					Logprob: float32(-0.5 - float64(i)/100)}
+			}
+			ch <- engine.Event{Done: true, FinishReason: "length"}
+			close(ch)
+
+			var content, entries strings.Builder
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				content.WriteString(it.delta)
+				for _, e := range decodedLogprobEntries(t, it.logprobs) {
+					entries.WriteString(e)
+				}
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+			if got, want := entries.String(), content.String(); got != want {
+				t.Errorf("the entries join to %q but the client received %q", got, want)
+			}
+		})
+	}
+}

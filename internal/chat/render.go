@@ -528,6 +528,15 @@ func (t *Template) Reads(name string) bool {
 // defined`, and isNoneExpr's variable operand -- and everything else reaches one of them through
 // a base expression. A name only written by {% set %} is not collected: it is the template's own
 // variable, and reporting it would let a caller think a value it never set reached the prompt.
+//
+// The two switches below have no default, unlike evalExpr's and evalNodes', which refuse an
+// unknown type by name. That asymmetry is deliberate and its cost is bounded: a new expr or node
+// type that reaches the renderer fails there first, with the type in the message, so a missing arm
+// here is found by the template that uses the new form rather than only by a wrong Reads answer.
+// The one way to get this wrong silently is a new *field* on an existing type -- filterExpr.args
+// was added for selectattr and the walk below kept looking at arg alone -- which no default would
+// have caught either. If that class of mistake recurs, the fix is a test that enumerates the
+// types, not a default here.
 func collectReads(nodes []node, into map[string]bool) {
 	// bound holds the names the template binds for itself: a for loop's variable and anything
 	// {% set %} assigns. They are removed at the end, because a caller cannot set them -- the

@@ -75,8 +75,9 @@ type Stats struct {
 }
 
 // FinishReason identifies why a sequence ended. The values are the ones finish is called
-// with; anything else is a bug, and ReasonIndex keeps it out of the array rather than
-// letting it panic.
+// with; anything else is a bug, and reasonIndex keeps it out of the array rather than
+// letting it panic -- it maps the reason strings that reach finish to their slot, and
+// reports false for a string it does not know.
 type FinishReason int
 
 // The reasons a request can end, in the order they are array-indexed.

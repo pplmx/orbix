@@ -285,7 +285,7 @@ func (p *parser) parseFor(header string, start int) (node, error) {
 	// The header is "names in expression", optionally followed by "if condition".
 	spec, rest, ok := strings.Cut(header, " in ")
 	if !ok {
-		return nil, fmt.Errorf("chat: {%% for %s %%} has no 'in' clause", header)
+		return nil, fmt.Errorf("chat: {%% for %s %%} has no 'in' clause, at offset %d", header, start)
 	}
 	names, err := forNames(strings.TrimSpace(spec))
 	if err != nil {

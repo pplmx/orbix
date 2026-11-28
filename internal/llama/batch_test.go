@@ -1756,3 +1756,48 @@ func TestDecodeStepReturnsTheBatchThatRan(t *testing.T) {
 			"the tail is the previous batch's logits, not this one's", len(out), want)
 	}
 }
+
+// TestForwardReusesOneLogitsRow pins the lifetime Forward's doc comment promises.
+//
+// m.logits is a single VocabSize row that every forward pass rewrites, which is what lets the
+// model run without allocating per token. The consequence is that a caller cannot hold the
+// result across another call: the slice it was given is the same memory. Every internal caller
+// uses it immediately, so nothing observable depends on the sharing today -- which is why it is
+// worth a test now rather than after someone stores one.
+func TestForwardReusesOneLogitsRow(t *testing.T) {
+	m := loadReal(t)
+	cfg := m.Config()
+	c1, err := NewKVCache(cfg, 32)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	c2, err := NewKVCache(cfg, 32)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+
+	first, err := m.Forward(c1, 100, 0)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	saved := append([]float32(nil), first...)
+
+	second, err := m.Forward(c2, 200, 0)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if &first[0] != &second[0] {
+		t.Fatalf("two calls returned different backing arrays; the doc says one row is reused, " +
+			"and if that changed the comment needs updating")
+	}
+	differing := 0
+	for i := range first {
+		if first[i] != saved[i] {
+			differing++
+		}
+	}
+	if differing == 0 {
+		t.Errorf("the earlier slice still holds its values after a second call; " +
+			"either the buffer is no longer shared or the two tokens produced identical logits")
+	}
+}

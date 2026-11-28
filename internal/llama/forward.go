@@ -180,6 +180,12 @@ func (m *Model) Logits() []float32 { return m.logits }
 //	    x += attention(rmsnorm(x))
 //	    x += ffn(rmsnorm(x))
 //	logits = output(rmsnorm(x))
+//
+// The returned slice is m.logits, one VocabSize row that every forward pass rewrites: it stays
+// readable until the next Forward, Prefill or DecodeStep on the same model, and a caller that
+// needs it longer has to copy. The internal callers all use it immediately -- Generate samples
+// from it and moves on -- so the sharing is deliberate rather than an oversight, but nothing in
+// the signature says so and a test in this package records the behaviour only in passing.
 func (m *Model) Forward(cache Cache, token int, pos int) ([]float32, error) {
 	cfg := m.W.Config
 	if token < 0 || token >= cfg.VocabSize {

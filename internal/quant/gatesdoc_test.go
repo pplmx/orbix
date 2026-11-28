@@ -556,3 +556,63 @@ func countFuzzTargets(t *testing.T) (targets, packages int) {
 	}
 	return targets, packages
 }
+
+// TestArchitectureReviewStatesTheMarkdownFileCount checks the rumdl row's figure.
+//
+// "12 个文件" is how many Markdown files the docs gate reads, which is a stable fact about the
+// tree: adding a document changes it and nothing else does. It went stale in the same round as the
+// fuzz count beside it -- the row said 11 while the tree had 12.
+//
+// The walk matches what `rumdl check .` reads: every .md under the repository root, which is the
+// current directory the recipe runs in. Hidden directories are skipped because rumdl skips them,
+// and .cache is skipped because a downloaded checkpoint's README is not part of the repository.
+func TestArchitectureReviewStatesTheMarkdownFileCount(t *testing.T) {
+	review, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "docs", "architecture-review.md")))
+	if err != nil {
+		t.Fatalf("read architecture-review.md: %v", err)
+	}
+	files := countMarkdownFiles(t)
+	if files < 5 {
+		t.Fatalf("found %d Markdown files, too few to be real -- the walk probably stopped early",
+			files)
+	}
+
+	claim := regexp.MustCompile(`通过，(\d+) 个文件（含本文）`)
+	m := claim.FindStringSubmatch(string(review))
+	if m == nil {
+		t.Fatalf("architecture-review.md no longer states the docs result as " +
+			`"通过，N 个文件（含本文）"; restore that phrasing or update this pattern`)
+	}
+	if got := m[1]; got != strconv.Itoa(files) {
+		t.Errorf("architecture-review.md says the docs gate reads %s files; the tree has %d",
+			got, files)
+	}
+}
+
+// countMarkdownFiles counts the files `rumdl check .` reads from the repository root.
+func countMarkdownFiles(t *testing.T) int {
+	t.Helper()
+	n := 0
+	root := filepath.Join("..", "..")
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// rumdl skips hidden directories and the checkpoint cache is not the repository.
+			if name := d.Name(); path != root &&
+				(strings.HasPrefix(name, ".") || name == "node_modules") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(strings.ToLower(path), ".md") {
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	return n
+}

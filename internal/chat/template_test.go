@@ -4027,3 +4027,39 @@ func TestSelectAttrTestsAreNotTheOnesTheIsOperatorTakes(t *testing.T) {
 		})
 	}
 }
+
+// TestElseMismatchNamesTheTagAndOffset pins what a broken if/else actually says back.
+//
+// The message used to stop at "must be followed by {% endif %}", which is true and useless: the
+// template author still has to find which else block they are inside and what they wrote after
+// it. The tag that ended the block and its offset are both available at that point -- the parser
+// holds the term it just read -- so the message names them.
+//
+// Worth a test rather than only a comment because the two things it names are the two things a
+// reader acts on. It also keeps the parse-time and render-time error paths agreeing: the other
+// statement errors name an offset too, and this one read differently until it did.
+func TestElseMismatchNamesTheTagAndOffset(t *testing.T) {
+	cases := []struct {
+		src      string
+		wantTag  string
+		wantOffs string
+	}{
+		{"{% if a %}x{% else %}y{% elif b %}z{% endif %}", "elif", "at offset 22"},
+		{"{% if a %}x{% else %}y{% else %}z{% endif %}", "else", "at offset 22"},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.src)
+		if err == nil {
+			t.Errorf("Parse(%q) accepted a second branch after else", c.src)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "{% "+c.wantTag+" %}") {
+			t.Errorf("Parse(%q) error %q does not name the tag %q that ended the block",
+				c.src, msg, c.wantTag)
+		}
+		if !strings.Contains(msg, c.wantOffs) {
+			t.Errorf("Parse(%q) error %q does not say where: want %q", c.src, msg, c.wantOffs)
+		}
+	}
+}

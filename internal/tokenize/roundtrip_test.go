@@ -174,28 +174,74 @@ func TestRoundTripEveryRune(t *testing.T) {
 // character can still be wrong in sequence: chunk boundaries, merges, and the space
 // conventions all only exist between characters.
 //
-// Gated on MODEL, and the same family gap applies as to the sweep above: with the byte
-// table's 0xC3 and 0xC4 entries swapped this passes on a SentencePiece checkpoint and
-// reports "naïve round-trips to naįve" on a byte-level one. TestRoundTripTextByteLevel
-// covers the other family.
+// The fixture runs first. That needs justifying against this file's opening comment, which warns
+// that a fixture "can round-trip by construction and still miss a convention the real file uses".
+// The warning is about assuming a pass means something, so this was checked rather than assumed:
+// tightening bpeKeep's 0xA1..0xAC range to 0xAB, which is a real change to the mapping, makes the
+// byte-level fixture report `"中文" round-trips to "�文"` on the corpus below. The fixture reaches
+// the table, so the corpus is not vacuous there.
+//
+// MODEL stays as a second subtest: the corpus is the same, but a trained vocabulary spells these
+// strings differently, and a convention the fixture does not have is exactly what this file exists
+// to find.
 func TestRoundTripText(t *testing.T) {
-	roundTripText(t, realTokenizer(t))
+	t.Run("fixture", func(t *testing.T) {
+		path := gguftest.Default().Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open(%s): %v", path, err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		roundTripText(t, tok)
+	})
+
+	if os.Getenv("MODEL") == "" {
+		return
+	}
+	t.Run("MODEL", func(t *testing.T) { roundTripText(t, realTokenizer(t)) })
 }
 
 // TestRoundTripTextByteLevel is TestRoundTripText against a byte-level vocabulary.
 //
 // It shares the inputs rather than restating them, so the two families cannot drift into
-// being tested on different strings.
+// being tested on different strings. The fixture runs first for the same reason as above, and
+// the mutation recorded there was measured on this family -- the byte table is the one a
+// SentencePiece vocabulary never reads.
 func TestRoundTripTextByteLevel(t *testing.T) {
+	t.Run("fixture", func(t *testing.T) {
+		path := gguftest.Model{TokenizerModel: "gpt2"}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open(%s): %v", path, err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if !tok.byteLevel {
+			t.Fatal("the fixture is not byte-level, so this subtest checks nothing; gguftest's " +
+				"gpt2 mode is what makes it one")
+		}
+		roundTripText(t, tok)
+	})
+
 	path := os.Getenv("QWEN2_MODEL")
-	tok := realTokenizerAt(t, path)
-	if !tok.byteLevel {
-		t.Skipf("%s is not a byte-level vocabulary", path)
+	if path == "" {
+		return
 	}
-	if path == os.Getenv("MODEL") {
-		t.Skip("MODEL and QWEN2_MODEL are the same file; TestRoundTripText covers it")
-	}
-	roundTripText(t, tok)
+	t.Run("QWEN2_MODEL", func(t *testing.T) {
+		tok := realTokenizerAt(t, path)
+		if !tok.byteLevel {
+			t.Skipf("%s is not a byte-level vocabulary", path)
+		}
+		if path == os.Getenv("MODEL") {
+			t.Skip("MODEL and QWEN2_MODEL are the same file; TestRoundTripText covers it")
+		}
+		roundTripText(t, tok)
+	})
 }
 
 // roundTripText is the string corpus both vocabulary families round-trip.

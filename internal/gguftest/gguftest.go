@@ -249,6 +249,12 @@ func (m Model) headDim() int {
 // kvDim is the width of the combined key or value projection.
 func (m Model) kvDim() int { return m.KVHeads * m.headDim() }
 
+// queryDim is the width of the combined query projection.
+//
+// Separate from kvDim because a model can have fewer key heads than query heads, and separate
+// from Hidden because a non-square head makes the two differ.
+func (m Model) queryDim() int { return m.Heads * m.headDim() }
+
 // kv is one metadata entry. GGUF has no exported writer, and this package is the reason
 // it does not need one: a writer exists only here, for fixtures.
 type kv struct {
@@ -279,10 +285,15 @@ func (m Model) tensors() []tensorSpec {
 		p := "blk." + itoa(i) + "."
 		out = append(out,
 			tensorSpec{p + "attn_norm.weight", []uint64{h}},
-			tensorSpec{p + "attn_q.weight", []uint64{h, h}},
+			// q and output are rows of queries, not rows of hidden states: with a non-square head
+			// the query width is Heads*headDim, which equals Hidden only when headDim is the
+			// derived ratio. Hardcoding h here made a fixture with HeadDim set state a
+			// key_length of 16 next to a [64 64] query matrix, and the loader refused it with
+			// "attn_q.weight has shape [64 64], want [64 128]" -- the file contradicted itself.
+			tensorSpec{p + "attn_q.weight", []uint64{h, uint64(m.queryDim())}},
 			tensorSpec{p + "attn_k.weight", []uint64{h, uint64(m.kvDim())}},
 			tensorSpec{p + "attn_v.weight", []uint64{h, uint64(m.kvDim())}},
-			tensorSpec{p + "attn_output.weight", []uint64{h, h}},
+			tensorSpec{p + "attn_output.weight", []uint64{uint64(m.queryDim()), h}},
 			tensorSpec{p + "ffn_norm.weight", []uint64{h}},
 		)
 		// The per-head query and key norms a Qwen3 block carries instead of attention bias.

@@ -186,6 +186,50 @@ func TestModelShapeOptions(t *testing.T) {
 			t.Errorf("ContextLen = %d, want 128", cfg.ContextLen)
 		}
 	})
+	// Non-square attention, which is what HeadDim exists for. Hidden 64 over 8 heads derives 8
+	// and the override says 16, so a reader that trusts the ratio and a reader that trusts the
+	// key give different answers -- and the model has to build and run either way, which is what
+	// distinguishes "the key was read" from "the key was present in the file".
+	//
+	// This field had no test: nothing in the tree set it, so both the metadata writer and the
+	// loader's override were unexercised. Measured before writing this: `grep -c 'gguftest.Model{'
+	// ... HeadDim` found no use.
+	t.Run("explicit head dim", func(t *testing.T) {
+		const hidden, heads, headDim = 64, 8, 16
+		path := Model{Hidden: hidden, Heads: heads, HeadDim: headDim}.Write(t, t.TempDir())
+
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		for _, key := range []string{"llama.attention.key_length", "llama.attention.value_length"} {
+			got, ok := f.Get[int](key)
+			if !ok {
+				t.Errorf("the fixture does not carry %s", key)
+				continue
+			}
+			if got != headDim {
+				t.Errorf("%s = %d, want %d", key, got, headDim)
+			}
+		}
+
+		m, err := llama.New(path)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		cfg := m.Config()
+		if want := headDim; cfg.HeadDim != want {
+			t.Errorf("HeadDim = %d, want %d from attention.key_length, not %d from Hidden/Heads",
+				cfg.HeadDim, want, hidden/heads)
+		}
+		cache, err := llama.NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		if _, err := m.Forward(cache, 4, 0); err != nil {
+			t.Fatalf("Forward with a non-square head: %v", err)
+		}
+	})
 }
 
 // TestModelRejectsBadShapes keeps a misconfigured fixture from producing a file that

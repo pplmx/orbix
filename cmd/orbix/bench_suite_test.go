@@ -587,6 +587,10 @@ func TestRowNoteExplainsTheRow(t *testing.T) {
 			"baseline; 96 prompt positions reused"},
 		{"all three", result{extra: "paged 8x16", earlyStops: 1, prefixReused: 32},
 			"baseline; paged 8x16; 1 request(s) stopped early on EOS; 32 prompt positions reused"},
+		// The spread leads, because it decides whether comparing this row to its neighbour means
+		// anything. Appended at the end it would sit past a multi-clause note and be missed.
+		{"spread leads", result{spread: "median of 3 runs, spread 6%", extra: "paged 8x16"},
+			"median of 3 runs, spread 6%; baseline; paged 8x16"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1380,5 +1384,66 @@ func TestScenarioFailureDoesNotStopTheSuite(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("the table does not contain %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestRepeatScenarioKeepsTheMedian covers the aggregation a --repeat run relies on. The scenario
+// here returns a different elapsed time on each call, so the median is a value that could only
+// have come from the sorted middle -- not the first sample, not the last, and not the mean.
+func TestRepeatScenarioKeepsTheMedian(t *testing.T) {
+	times := []time.Duration{500 * time.Millisecond, 100 * time.Millisecond, 900 * time.Millisecond}
+	var calls int
+	sc := scenario{
+		name: "synthetic",
+		note: "three samples",
+		run: func(suiteOptions) (result, error) {
+			d := times[calls]
+			calls++
+			return result{elapsed: d}, nil
+		},
+	}
+
+	first, err := sc.run(suiteOptions{})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	got := repeatScenario(sc, suiteOptions{}, 3, first)
+
+	if want := 500 * time.Millisecond; got.elapsed != want {
+		t.Errorf("elapsed = %v, want %v (the middle of 100/500/900)", got.elapsed, want)
+	}
+	if calls != 3 {
+		t.Errorf("scenario ran %d times, want 3 (the first sample counts as one)", calls)
+	}
+	// The spread is stated as a range so a reader can see how far the samples went, not just
+	// that they varied. 900/100 is the widest the three could be.
+	for _, want := range []string{"median of 3 runs", "800%", "0.10s", "0.90s"} {
+		if !strings.Contains(got.spread, want) {
+			t.Errorf("spread %q does not mention %q", got.spread, want)
+		}
+	}
+}
+
+// TestRepeatScenarioKeepsTheFirstSampleWhenALaterRunFails checks the failure path. Averaging over
+// a shortfall would report a row as if it had more samples than it does, so the first result is
+// returned unchanged and the row's number stays one the reader can trace.
+func TestRepeatScenarioKeepsTheFirstSampleWhenALaterRunFails(t *testing.T) {
+	var calls int
+	sc := scenario{
+		run: func(suiteOptions) (result, error) {
+			calls++
+			if calls > 1 {
+				return result{}, errors.New("second run failed")
+			}
+			return result{elapsed: 2 * time.Second, tokens: 7}, nil
+		},
+	}
+	first, _ := sc.run(suiteOptions{})
+	got := repeatScenario(sc, suiteOptions{}, 3, first)
+	if got.elapsed != 2*time.Second || got.tokens != 7 {
+		t.Errorf("result = %+v, want the first sample unchanged", got)
+	}
+	if got.spread != "" {
+		t.Errorf("spread = %q, want empty: the median of one sample is not a median", got.spread)
 	}
 }

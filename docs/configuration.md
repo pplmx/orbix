@@ -63,6 +63,7 @@ Paged cache, on `serve`, `chat` and `bench`:
 | `--requests`               | Requests per measurement                                            |
 | `--prompt`                 | Prompt text for the measurement                                     |
 | `--suite`                  | Run every scenario as one table; fixes the flags it would ignore    |
+| `--repeat`                 | With `--suite`, samples per row: median plus the spread it saw      |
 
 Every one of these is registered once in `cmd/orbix/flags.go` when several commands share it, so
 the wording is the same wherever it appears. `orbix <command> -h` prints the same list with the

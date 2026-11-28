@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -22,9 +23,14 @@ import (
 // per engine (cache shape, admission policy, worker count), so sharing one would mean
 // measuring the previous scenario's leftovers.
 type suiteOptions struct {
-	model   string
-	prompt  []int32
-	maxTok  int
+	model  string
+	prompt []int32
+	maxTok int
+	// repeat is how many times each scenario runs. One is the default because the suite is
+	// meant to be cheap, but one sample cannot tell a 9% difference from the 15% the same
+	// configuration showed across runs on an idle 128-core machine -- measured five times,
+	// prefix reuse beat the reuse-off row every time, by between 3.5% and 20.7%.
+	repeat  int
 	workers int
 }
 
@@ -55,6 +61,9 @@ type result struct {
 	// forward pass, so a row can say whether its cache setting had anything to reuse
 	// instead of leaving the reader to infer it from throughput.
 	prefixReused uint64
+	// spread records how much elapsed varied across the runs a --repeat asked for, so a table
+	// that reports one number also says whether the number is stable.
+	spread string
 	// firstRound is the engine round in which the measured request first produced a
 	// token, for the scenarios whose property is ordering rather than speed.
 	//
@@ -164,6 +173,11 @@ func scenarioList() []scenario {
 // then anything the run discovered about itself, then the two counters.
 func rowNote(sc scenario, res result) string {
 	note := sc.note
+	// The spread leads when --repeat asked for it, because it decides whether any comparison
+	// between this row and its neighbour is readable at all.
+	if res.spread != "" {
+		note = res.spread + "; " + note
+	}
 	if res.extra != "" {
 		note += "; " + res.extra
 	}
@@ -211,6 +225,38 @@ type suiteRow struct {
 // Split out so the write-failure path is reachable from a test: the suite writes to os.Stdout, and
 // nothing in a test can make that fail. The first error wins and later writes are skipped, because a
 // table that has already lost a row should not keep appending to a broken stream.
+// repeatScenario runs a scenario n times and keeps the median, annotating the note with the
+// spread it saw.
+//
+// The spread is the point. A single number invites comparison with the row above it, and the
+// comparison is meaningless when the same configuration varies by more than the difference being
+// read -- which is what happened with prefix reuse: one sample said 3.5%, the next said 20.7%.
+// Reporting min and max costs one clause and makes that visible instead of implied.
+//
+// The median deliberately keeps the first sample's other fields: tokens, firstToken and
+// prefixReused describe what the scenario did, not how fast, so only elapsed (and the TOK/S derived
+// from it) is the measurement to aggregate.
+func repeatScenario(sc scenario, o suiteOptions, n int, first result) result {
+	elapsed := make([]time.Duration, 0, n)
+	elapsed = append(elapsed, first.elapsed)
+	for range n - 1 {
+		res, err := sc.run(o)
+		if err != nil {
+			// A later failure is worth reporting rather than averaging over: it means the row's
+			// number came from fewer samples than it claims.
+			return first
+		}
+		elapsed = append(elapsed, res.elapsed)
+	}
+	slices.Sort(elapsed)
+	out := first
+	out.elapsed = elapsed[len(elapsed)/2]
+	out.spread = fmt.Sprintf("median of %d runs, spread %.0f%% (%.2fs..%.2fs)",
+		n, float64(elapsed[len(elapsed)-1]-elapsed[0])/float64(elapsed[0])*100,
+		elapsed[0].Seconds(), elapsed[len(elapsed)-1].Seconds())
+	return out
+}
+
 func writeTable(w io.Writer, rows []suiteRow) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	var werr error
@@ -253,9 +299,13 @@ func runScenarios(o suiteOptions, scenarios []scenario) error {
 		runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), workers)
 	fmt.Printf("go:          %s\n\n", runtime.Version())
 
+	n := max(o.repeat, 1)
 	rows := make([]suiteRow, 0, len(scenarios))
 	for _, sc := range scenarios {
 		res, err := sc.run(o)
+		if err == nil && n > 1 {
+			res = repeatScenario(sc, o, n, res)
+		}
 		rows = append(rows, suiteRow{scenario: sc, res: res, err: err})
 	}
 

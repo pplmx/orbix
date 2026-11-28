@@ -11,7 +11,7 @@
 | `internal/server`   | 5565      | 118            | 59       | 13993     | 2.51      |
 | `internal/tokenize` | 4897      | 139            | 110      | 7270      | 1.48      |
 | `internal/llama`    | 5070      | 139            | 42       | 14678     | 2.90      |
-| `cmd/orbix`         | 3966      | 85             | 81       | 8853      | 2.23      |
+| `cmd/orbix`         | 4025      | 86             | 82       | 8918      | 2.22      |
 | `internal/chat`     | 3681      | 88             | 48       | 5715      | 1.55      |
 | `internal/engine`   | 2119      | 48             | 21       | 6279      | 2.96      |
 | `internal/gguf`     | 1499      | 51             | 14       | 3068      | 2.05      |
@@ -21,7 +21,7 @@
 | `internal/kernel`   | 711       | 28             | 20       | 2182      | 3.07      |
 | `internal/f16`      | 154       | 4              | 4        | 446       | 2.90      |
 | `internal/arch`     | 14        | 0              | 0        | 2113      | 150.93    |
-| **合计**            | **30337** | **787**        | **448**  | **71109** | **2.32**  |
+| **合计**            | **30396** | **788**        | **448**  | **71174** | **2.32**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -535,14 +535,14 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 第九节的三项是小时的清理，第三节到第七节是结构问题。这件事两者都不是，却是最影响阅读的：
 **23 个函数在 100 行以上**（2026-11-26 复算；本轮拆分前是 18，详见本节末尾的清单；
 用 AST 按 `FuncDecl` 的起止行数，不用括号计数——注释里的花括号会把
-统计骗成几千行；787 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
+统计骗成几千行；788 个函数）。本轮按当下代码逐个处理，每改一个都核对错误字符串
 与字段赋值是否逐字保留。
 
 | 函数                      | 之前 | 之后 | 拿出来的部分                                                |
 | ------------------------- | ---- | ---- | ----------------------------------------------------------- |
 | `llama.LoadConfig`        | 315  | 45   | 六个阶段方法 + `configParser`（`get` 一个必填正整数读取器） |
 | `server.generate`         | 282  | 208  | `resolvePrompt`（预算校验、按端点编码、窗口检查）           |
-| `cli.cmdBench`            | 279  | 240  | `validateBenchFlags`（59 行，9 条错误串逐字一致）           |
+| `cli.cmdBench`            | 279  | 246  | `validateBenchFlags`（59 行，9 条错误串逐字一致）           |
 | `cli.cmdServe`            | 311  | 275  | `validateServeFlags`（94 行，9 条错误串逐字一致）           |
 | `server.blockingResponse` | 201  | 141  | `choiceObject`（68 行，两种 schema / echo / stop 截断）     |
 | `server.streamResponse`   | 162  | 90   | `eventWriter`（帧头、对象名、usage 标记、编码、flush）      |
@@ -550,8 +550,8 @@ uv run --offline --with numpy python3 scripts/hf_to_gguf.py \
 `cmdServe` 与 `cmdBench` 仍在 200 行以上：剩下的部分是"装配 + 运行"，是一条连续流程，再切只会
 把一步拆成两半而不减少读者要在脑中持有的东西。
 
-**现存 23 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，787 个函数）：`chat.evalExpr`
-316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 240、`server.streamOneChoice`
+**现存 23 个 >=100 行函数**（`go run ./scripts/count.go -long` 实测，788 个函数）：`chat.evalExpr`
+316、`cli.cmdServe` 275、`tokenize.preFamilyOf` 271、`cli.cmdBench` 246、`server.streamOneChoice`
 205、`server.generate` 208、`cli.runTo` 177、`tokenize.loadPreTokenization` 157、`server.blockingResponse`
 141、`cli.chatSession` 135、`llama.attentionBatch` 126、`tokenize.splitKimiK2` 123、`engine.Submit`
 122、`server.handleChat` 122、`gguftest.kvs` 119、`server.resolvePrompt` 108、`gguf.Read` 107、

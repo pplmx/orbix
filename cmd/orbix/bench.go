@@ -36,6 +36,8 @@ func cmdBench(args []string) error {
 	requests := fs.Int("requests", 0, "total requests; 0 means one per concurrency slot")
 	prompt := fs.String("prompt", "Once upon a time", "prompt for each request")
 	suite := fs.Bool("suite", false, "run the fixed scenario suite instead of one measurement")
+	repeat := fs.Int("repeat", 1, "with --suite, run each scenario this many times and report the "+
+		"median and the spread; one sample cannot tell a real difference from run-to-run noise")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -69,10 +71,14 @@ func cmdBench(args []string) error {
 		if len(promptIDs) >= cfg.ContextLen {
 			return fmt.Errorf("bench: prompt is %d tokens, context is %d", len(promptIDs), cfg.ContextLen)
 		}
+		if *repeat < 1 {
+			return fmt.Errorf("bench: --repeat must be at least 1, got %d", *repeat)
+		}
 		return runSuite(suiteOptions{
 			model:   *model,
 			prompt:  promptIDs,
 			maxTok:  *maxTokens,
+			repeat:  *repeat,
 			workers: *cache.workers,
 		})
 	}
@@ -323,6 +329,9 @@ func validateBenchFlags(v benchFlags) error {
 		var ignored []string
 		usedBySuite := map[string]bool{
 			"model": true, "max-tokens": true, "prompt": true, "workers": true, "suite": true,
+			// --repeat is the one flag the suite does read: it decides how many samples each
+			// row's median comes from.
+			"repeat": true,
 		}
 		v.visit(func(f *flag.Flag) {
 			if !usedBySuite[f.Name] {

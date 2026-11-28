@@ -385,10 +385,16 @@ func TestPagedCacheMatchesContiguousBeyondTheWindow(t *testing.T) {
 		}
 	}
 
-	// This comparison cannot see a wrong window, and the note is here rather than the assertion
-	// because the fixture cannot support one: both caches run the same attentionBatch, so doubling
-	// the trim there changes both sides equally, and a windowless fixture produces the same logits
-	// for two different distant prefixes anyway -- measured, WindowLen 0 and 32 both give 0
-	// differing logits for the same pair. The trim's own coverage comes from the decode path, where
-	// injecting the error does turn the package red.
+	// This comparison cannot see a wrong window: both caches run the same attentionBatch, so
+	// doubling the trim there changes both sides equally -- measured, the package stays green.
+	//
+	// A second prompt with the same tail and a different distant history does not work either, and
+	// the reason is the fixture rather than the window: with WindowLen 2, twelve differing prefix
+	// positions still produce 0 differing logits of 363. This fixture's attention barely reaches a
+	// position twelve rows back, so it cannot tell a bounded model from an unbounded one by
+	// comparing histories. window_test.go gets its traction the other way, by holding the prompt
+	// fixed and shrinking the window from 0 to 2 until the trim removes rows the model does use.
+	//
+	// The trim's own coverage is real and comes from there: injecting the doubled window into
+	// attention.go turns the package red.
 }

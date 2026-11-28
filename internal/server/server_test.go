@@ -10122,3 +10122,50 @@ func TestErrorTypeDependsOnStatusNotOnErrorKind(t *testing.T) {
 		}
 	}
 }
+
+// TestAbandonedRequestIs503WithoutRetryAfter pins the one 503 that must not be retried.
+//
+// Two other paths answer 503 and both set Retry-After: a full queue and an exhausted block pool.
+// They are transient -- the same request succeeds later on the same server -- so the header tells
+// a client or proxy to wait rather than to give up. This one is not that: drainEvents reports it
+// when ctx is cancelled before the sequence finished, which is the client hanging up or the
+// server shutting down. Retrying either is meaningless, and a Retry-After would invite a client
+// to re-send a request to a connection that is gone.
+//
+// The distinction had no test. TestQueueFullReturns503 asserts the header on the queue path and
+// nothing covered the abandoned one, so the two could have converged without a failure either
+// way. The test is cheap and deterministic: cancelling the request context before the handler
+// runs makes drainEvents take its ctx.Done arm on the first event, no scheduling race involved.
+func TestAbandonedRequestIs503WithoutRetryAfter(t *testing.T) {
+	srv, _ := newTestServerModel(t, gguftest.Default())
+	// A pump that never advances anything, so the sequence cannot finish before the
+	// cancellation is seen.
+	pumpCtx, stopPump := context.WithCancel(context.Background())
+	t.Cleanup(stopPump)
+	srv.StartPump(pumpCtx)
+	stopPump()
+
+	body := `{"prompt": "Once upon a time", "max_tokens": 8}`
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	deadCtx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(deadCtx)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "" {
+		t.Errorf("Retry-After = %q on an abandoned request; the client is gone or the server "+
+			"is shutting down, so there is nothing to retry against", got)
+	}
+	var got errorBody
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(got.Error.Message, "abandoned") {
+		t.Errorf("message = %q, want it to say the request was abandoned", got.Error.Message)
+	}
+}

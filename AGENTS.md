@@ -366,6 +366,8 @@ HF 的 `models/` 路径会 302 到 `models-moved/` 再到 CDN，`dl` 的重定�
 
   或者起服务时把 pid 记下来（`nohup ... & echo $! > /tmp/orbix.pid`），清理时 `kill "$(cat /tmp/orbix.pid)"`。
 - 起 server 用 `nohup ... &` 加 `sleep` 加 `/healthz` 轮询，不要用固定长 sleep。端口用 `--addr 127.0.0.1:19xxx` 手工编号，`--blocks`/`--block-size` 按测试意图显式给。
+- **轮询循环必须有一条「等不到」的出路，否则它无条件报成功。** 2026-11-28 起了两个 server 想比 `--workers 1` 与 `128`，就绪判断写成 `for i in $(seq 1 120); do curl -sf A && curl -sf B && break; sleep 1; done; echo 就绪`。其中 B 的端口号是我拼错的（`193$w` 在 `w=128` 时成了 `193128`），那个 server 根本没起来，`curl` 一路失败，而循环跑满 120 次之后**照样打印「就绪」**——`break` 只在成功时执行，正常结束和超时结束走的是同一条路。于是我把一个只起了一个 server 的状态当成两个都好了，下一步的对比就会把一个不存在的对端算进去。真正发现它是因为读日志时看到 `orbix: serve: --addr "127.0.0.1:193128" is not a host:port to listen to: address 193128: invalid port`。判据：等待循环里要么在超时后 `exit 1`，要么记录是否真的 `break` 过（`ok=0; ... ok=1; break; ... done; [ $ok = 1 ] || exit 1`）。打印一句「就绪」不构成等待成功的证据。
+- **端口号不要用参数拼。** 同一个错误的另一半：`--addr 127.0.0.1:193$w` 在 `w` 是一位数时看着没问题，`w=128` 时拼出 193128。端口要么写字面量，要么用 `$((19000 + w))` 这样的算术。
 - 注入验证（改代码看测试是否失败）之后**立刻复原**，并在同一条命令里跑 `git status --short` 确认工作区干净。用 `cp file /tmp/file.bak` 保存原件，不要靠 `git stash`。
 
 ## 注入验证要确认打到了目标

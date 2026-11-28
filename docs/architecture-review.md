@@ -8,7 +8,7 @@
 
 | 包                  | 代码行    | 函数（含方法） | 顶层函数 | 测试行    | 测试/代码 |
 | ------------------- | --------- | -------------- | -------- | --------- | --------- |
-| `internal/server`   | 5533      | 118            | 59       | 13833     | 2.50      |
+| `internal/server`   | 5533      | 118            | 59       | 13845     | 2.50      |
 | `internal/tokenize` | 4897      | 139            | 110      | 7171      | 1.46      |
 | `internal/llama`    | 5070      | 139            | 42       | 14660     | 2.89      |
 | `cmd/orbix`         | 3957      | 85             | 81       | 8839      | 2.23      |
@@ -21,7 +21,7 @@
 | `internal/kernel`   | 711       | 28             | 20       | 2182      | 3.07      |
 | `internal/f16`      | 154       | 4              | 4        | 446       | 2.90      |
 | `internal/arch`     | 14        | 0              | 0        | 1646      | 117.57    |
-| **合计**            | **30257** | **785**        | **448**  | **70091** | **2.32**  |
+| **合计**            | **30257** | **785**        | **448**  | **70103** | **2.32**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -341,9 +341,11 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 
    真正修掉这一点的是给新构造逐个补上语料条目，并各做一次注入。四种改动当时**全都不让门槛变红**：`<` 改成 `<=`、切片的负起点当成 0、`split` 按首字符切、`namespace` 写回当前帧。原因是旧语料里没有相等边界、负索引、多字符分隔符，也没有 loop 之外的字段赋值。补上这些用例后再注入，四种都被抓住。语料条目是对照的判别力所在，不是例数。
 
-覆盖率与 checkpoint 门禁：77 处 `t.Skip` 分布在 29 个测试文件里（2026-11-28 复算；此前的读数依次是 76/29、75/28、74/28、73 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+覆盖率与 checkpoint 门禁：76 处 `t.Skip` 分布在 28 个测试文件里（2026-11-28 复算；此前的读数依次是 77/29、76/29、75/28、74/28、73 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
 
 少掉的那一处是 `TestParseScalesLinearlyInTagCount` 里的计时器精度保护：判据从「两个规模的时间比」改成「20000 个标签的绝对预算」之后，零值分支落进比较本身，不再需要单独 `t.Skip`。那次改写的原因见那条测试的注释——比值形式的阈值在共享 runner 上把机器负载报成了回归，两次。
+
+再少一处（76/28，2026-11-28 当轮）：`TestTCPResetStopsGeneration` 的 `MODEL` 门禁换成了 fixture 兜底。它原先的理由是「fixture 生成太快，reset 落不进流的中段」，实测是错的——fixture 上 reset 落在两个 SSE 块之后、40 个预算里还剩 38 个没生成，注入 `Cancel: nil` 后八次跑八次失败（31 到 35 个 token 越过 reset）。门禁只让这条性质在没 checkpoint 的机器上一次都没被检查过。连带把预算从 200 收到 40：fixture 的窗口是 64 个位置、prompt 占 20，200 预算下注入后只跑到 35 到 41 个，而判据是 `budget/4 = 50`，窗口永远够不到那个数，于是那条测试无论取消接得对不对都会绿。
 
 “本机没有 `.gguf`”是复算当时的环境，不是永久事实：后来本机装上了 checkpoint，本文后面那些与真实权重相关的结论就是在有文件的情况下重测的。
 
@@ -355,7 +357,9 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 四个都读不到 `os.Getenv("...")` 的字面量——它们是 `internal/quant/formats_real_test.go` 那张表的行，
 由 `os.Getenv(g.env)` 间接读取——所以只 grep `Getenv` 会漏掉，而 `docs/models.md` 的对照表一直是对的
 （它由 `TestModelsDocGateTableMatchesTheCode` 双向校验）。**同一份事实写在两份文件里，只有一份有守卫，
-另一份就烂了。** 这份文档里的数字没有守卫，这也是它第二次在该节上出错。
+另一份就烂了。** 这份文档里这两个数当时确实没有守卫，也是在那一节上第二次出错——后来补上了：
+`TestArchitectureReviewStatesTheSkipCounts` 按同一套口径（`_test.go` 里的 `t.Skip`/`t.Skipf`/`t.SkipNow`
+调用，注释先剥掉）重数一遍，读不出那句话时先报「这条测试读不出那个数了」而不是比数字。
 
 **后续（2026-11 同日）：上面「本机没有任何 `.gguf`」是那一轮的事实，不是当前状态。** 本机有
 Hugging Face checkpoint 目录，用仓库自己的转换器就能造出 GGUF，于是真实权重这条路不再依赖下载：

@@ -351,3 +351,94 @@ var quantCrossCheckCount = regexp.MustCompile(`14 种格式、(\d+) 个值`)
 
 // quantFormatRow captures one format's block size from qdump_test.go's table.
 var quantFormatRow = regexp.MustCompile(`\{"[A-Z0-9_]+", gguf\.[A-Z0-9_]+, (\d+), \d+\}`)
+
+// TestDocumentedRecipeArgumentsMatchTheRecipe checks the parameter names the documents show
+// against the ones `just --list` reports.
+//
+// TestEveryRecipeIsDocumented only asks whether a recipe is named somewhere, and justMention
+// captures the first word after `just` -- so `just mutate FILE PKG` counted as naming mutate
+// while the recipe takes positional `file pkg`. Measured: `just mutate FILE=x PKG=y` passes
+// "FILE=x" as the file name and fails with "no such file: FILE=x", so a reader following
+// CONTRIBUTING.md got an error that looks like a missing file rather than a wrong invocation.
+//
+// Only the argument names are compared, not their values: `just RANGE=base..HEAD commits` uses
+// the variable-assignment form just accepts for that recipe, and checking values would need
+// running the recipe.
+func TestDocumentedRecipeArgumentsMatchTheRecipe(t *testing.T) {
+	listed, err := exec.Command("just", "--list").Output()
+	if err != nil {
+		t.Fatalf("just is not available: %v", err)
+	}
+	params := parseRecipeParams(string(listed))
+	if len(params) == 0 {
+		t.Fatal("parsed no recipes with parameters from just --list; the output format changed")
+	}
+
+	for _, doc := range []string{"CONTRIBUTING.md", "AGENTS.md"} {
+		body, err := os.ReadFile(filepath.Join("..", "..", doc))
+		if err != nil {
+			t.Fatalf("read %s: %v", doc, err)
+		}
+		for _, m := range justArgsMention.FindAllStringSubmatch(string(body), -1) {
+			recipe, shown := m[1], strings.Fields(m[2])
+			want, ok := params[recipe]
+			if !ok {
+				// No parameters to compare, or a recipe this parser did not see; the other guard
+				// owns whether the recipe exists at all.
+				continue
+			}
+			for i, arg := range shown {
+				if i >= len(want) {
+					t.Errorf("%s shows `just %s` with %d argument(s); the recipe takes %d (%v)",
+						doc, recipe, len(shown), len(want), want)
+					break
+				}
+				// `NAME=value` is the variable form just accepts; a bare word has to match the
+				// parameter name exactly, because just takes parameters positionally.
+				if strings.Contains(arg, "=") {
+					continue
+				}
+				if arg != want[i] {
+					t.Errorf("%s shows `just %s %s`; parameter %d of that recipe is named %q, "+
+						"not %q, and just matches them by position",
+						doc, recipe, strings.Join(shown, " "), i+1, want[i], arg)
+				}
+			}
+		}
+	}
+}
+
+// justArgsMention captures a recipe name and the argument text after it, on the same line.
+var justArgsMention = regexp.MustCompile("`?just ([a-z][a-z-]*)( [^`#\n]*)")
+
+// parseRecipeParams reads the parameter names `just --list` prints after each recipe name.
+//
+// A variable is written as NAME='default' and a positional as name; only the NAME part is kept
+// because that is what a caller types.
+func parseRecipeParams(out string) map[string][]string {
+	found := map[string][]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "    ") {
+			continue
+		}
+		text, _, _ := strings.Cut(strings.TrimSpace(line), " #")
+		fields := strings.Fields(text)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[0]
+		if strings.ContainsAny(name, "#=") {
+			continue
+		}
+		var ps []string
+		for _, f := range fields[1:] {
+			if p, _, ok := strings.Cut(f, "="); ok {
+				ps = append(ps, p)
+			} else {
+				ps = append(ps, f)
+			}
+		}
+		found[name] = ps
+	}
+	return found
+}

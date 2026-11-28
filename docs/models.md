@@ -1,8 +1,10 @@
 # Supported models and quantization
 
-Orbix targets the GGUF ecosystem. The Status column names the release each family is planned to
-ship in; no release has been tagged yet, so `v0.1` is the first one and `done` means implemented
-and cross-checked against a real checkpoint rather than released.
+Orbix targets the GGUF ecosystem. The Status column names the release each family ships in. Three
+have been tagged -- `v0.1.0`, `v0.2.0` and `v0.3.0` -- so a marker at or below `v0.3` names a
+release that exists, and `v0.4` is the next one planned. The marker says when a family arrived
+rather than whether it works: `done` means implemented and cross-checked against a real checkpoint,
+which is a different claim from having shipped.
 
 | Family                  | Architectures        | Status        |
 | ----------------------- | -------------------- | ------------- |
@@ -436,7 +438,7 @@ Measured 2026-11:
 
 | Gates set                                                                                                         | Skipped |
 | ----------------------------------------------------------------------------------------------------------------- | ------- |
-| none                                                                                                              | 28      |
+| none                                                                                                              | 27      |
 | the six that were on hand (`MODEL`, `QWEN2_MODEL`, `QWEN3_MODEL`, `GEMMA2_MODEL`, `GEMMA3_MODEL`, `MODEL_KQUANT`) | 10      |
 | all fourteen                                                                                                      | 0       |
 
@@ -483,7 +485,7 @@ because nothing at a call site reads them.
 
 The four quantization ones are easy to miss when auditing this list: they are not `os.Getenv("...")`
 at the call site but rows in a table that `TestRealWeightMatrixStats` walks, so a search for
-`Getenv("` finds ten gates and the four rows are invisible. Measured both ways -- 28 skipped with no
+`Getenv("` finds ten gates and the four rows are invisible. Measured both ways -- 27 skipped with no
 variables, 0 with all fourteen.
 
 That search is worth trusting only after measuring, because the two answers look equally plausible.

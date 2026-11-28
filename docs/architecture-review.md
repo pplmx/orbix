@@ -20,8 +20,8 @@
 | `internal/otel`     | 794       | 35             | 14       | 1787      | 2.25      |
 | `internal/kernel`   | 711       | 28             | 20       | 2182      | 3.07      |
 | `internal/f16`      | 154       | 4              | 4        | 446       | 2.90      |
-| `internal/arch`     | 14        | 0              | 0        | 1646      | 117.57    |
-| **合计**            | **30277** | **785**        | **448**  | **70419** | **2.32**  |
+| `internal/arch`     | 14        | 0              | 0        | 1718      | 122.71    |
+| **合计**            | **30277** | **785**        | **448**  | **70491** | **2.32**  |
 
 **重构后的同一张表**（三项重构提交之后实测，是历史快照，不是当前值——上面的表才是）：
 
@@ -341,7 +341,7 @@ fuzz 的 seed 语料只有两个文件，都在 `internal/gguf/testdata/fuzz/Fuz
 
    真正修掉这一点的是给新构造逐个补上语料条目，并各做一次注入。四种改动当时**全都不让门槛变红**：`<` 改成 `<=`、切片的负起点当成 0、`split` 按首字符切、`namespace` 写回当前帧。原因是旧语料里没有相等边界、负索引、多字符分隔符，也没有 loop 之外的字段赋值。补上这些用例后再注入，四种都被抓住。语料条目是对照的判别力所在，不是例数。
 
-覆盖率与 checkpoint 门禁：75 处 `t.Skip` 分布在 27 个测试文件里（2026-11-28 复算；此前的读数依次是 76/28、77/29、76/29、75/28、74/28、73 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
+覆盖率与 checkpoint 门禁：74 处 `t.Skip` 分布在 26 个测试文件里（2026-11-28 复算；此前的读数依次是 75/27、76/28、77/29、76/29、75/28、74/28、73 和 28，写下时是 65 和 24），由 **14** 个环境变量控制——`MODEL`、`QWEN2_MODEL`、`QWEN3_MODEL`、`GEMMA_MODEL`、`GEMMA2_MODEL`、`GEMMA3_MODEL`、`MISTRAL_MODEL`、`MIXTRAL_MODEL`、`MODEL_KQUANT`、`MODEL_Q4_1`、`MODEL_Q5_0`、`MODEL_Q5_1`、`MODEL_IQ4_NL`、`CODER_MODEL`。复算当时本机没有任何 `.gguf`，所以那一轮**所有与真实权重相关的结论都没有被复测**；CI 的 skipped-tests 报告行存在的意义就是这个。
 
 少掉的那一处是 `TestParseScalesLinearlyInTagCount` 里的计时器精度保护：判据从「两个规模的时间比」改成「20000 个标签的绝对预算」之后，零值分支落进比较本身，不再需要单独 `t.Skip`。那次改写的原因见那条测试的注释——比值形式的阈值在共享 runner 上把机器负载报成了回归，两次。
 

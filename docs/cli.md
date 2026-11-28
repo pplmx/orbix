@@ -34,9 +34,9 @@ printed once rather than under every later turn, because the limit is a property
 conversation and every turn after the first cut runs into it. `run --stats` prints the same
 figures as a `note:` line, and `bench` reports them in its `NOTE` column.
 
-The Status column names the release each command is planned to ship in. No release has been
-tagged yet, so `v0.1` is the first one -- every command in the table works today, and the marker
-says when it arrived rather than whether it is usable.
+The Status column names the release each command ships in. Three have been tagged (`v0.1.0`,
+`v0.2.0`, `v0.3.0`), so every marker in the table below names a release that exists. Every command
+in it works today, and the marker says when it arrived rather than whether it is usable.
 
 | Command                      | Description                                                                                                  | Status |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ------ |

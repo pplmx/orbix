@@ -1,6 +1,9 @@
 package arch
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -441,4 +444,89 @@ func parseRecipeParams(out string) map[string][]string {
 		found[name] = ps
 	}
 	return found
+}
+
+// TestFuzzRecipeFindsEveryFuzzTarget guards the extraction `just fuzz` depends on.
+//
+// The recipe scrapes target names out of *_test.go with a regexp and passes each to
+// `go test -fuzz`. Its first version was `func Fuzz[A-Za-z0-9_]*` with no anchor, which also
+// matched the phrase inside a comment in gatesdoc_test.go, producing a target named "Fuzz".
+// `go test` then failed with "matched no fuzz target", `set -e` ended the loop, and six of the
+// ten targets never ran while the recipe reported failure. Nothing caught it for two rounds
+// because no local gate runs `just fuzz`.
+//
+// This test holds the two sides together: the pattern the recipe uses, and a parse of the same
+// files. A pattern that starts matching prose again makes these two numbers differ.
+func TestFuzzRecipeFindsEveryFuzzTarget(t *testing.T) {
+	root := repoRoot(t)
+
+	// The exact pattern from the recipe's `targets` assignment. Kept as a literal rather than
+	// read out of the justfile so that changing the recipe without changing this fails loudly.
+	recipePattern := regexp.MustCompile(`(?m)^func (Fuzz[A-Za-z0-9_]*)\(f \*testing\.F\)`)
+
+	fromRecipe := map[string]bool{}
+	for _, path := range fuzzTestFiles(t, root) {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		for _, m := range recipePattern.FindAllStringSubmatch(string(src), -1) {
+			fromRecipe[m[1]] = true
+		}
+	}
+
+	fromAST := map[string]bool{}
+	for _, path := range fuzzTestFiles(t, root) {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil {
+				continue
+			}
+			if name := fn.Name.Name; strings.HasPrefix(name, "Fuzz") {
+				fromAST[name] = true
+			}
+		}
+	}
+
+	if len(fromAST) < 5 {
+		t.Fatalf("found %d fuzz declarations, too few to be the real set -- the walk probably "+
+			"missed directories", len(fromAST))
+	}
+	for name := range fromAST {
+		if !fromRecipe[name] {
+			t.Errorf("the recipe's pattern misses %s, which the tree declares: that target "+
+				"would never be fuzzed", name)
+		}
+	}
+	for name := range fromRecipe {
+		if !fromAST[name] {
+			t.Errorf("the recipe's pattern invents %s, which no declaration defines: "+
+				"go test -fuzz would fail on it and set -e would stop the loop", name)
+		}
+	}
+}
+
+// fuzzTestFiles lists every _test.go file under internal/ and cmd/.
+func fuzzTestFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	for _, pattern := range []string{
+		filepath.Join(root, "internal", "*", "*_test.go"),
+		filepath.Join(root, "cmd", "*", "*_test.go"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("globbing %s: %v", pattern, err)
+		}
+		out = append(out, matches...)
+	}
+	if len(out) == 0 {
+		t.Fatal("found no test files")
+	}
+	return out
 }

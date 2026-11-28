@@ -176,7 +176,20 @@ func (t *Tracer) StartTrace(name string, kind int, attrs ...Attribute) (Span, bo
 }
 
 // StartChild begins a span inside an existing trace.
+//
+// A zero parent's TraceID is refused rather than inherited. NewTraceID loops until its id is
+// non-zero because OTLP reads an all-zero trace id as "invalid", and a child that copies the
+// zero would carry that invalidity past every check the root went through: the collector drops
+// the span or files it under a trace that does not exist, and nothing reports it. Measured
+// before this guard: StartChild(Span{}, ...) returned ok with TraceID 00000000000000000000000000000000.
+//
+// ParentID is left alone when the parent has no SpanID -- a root span is the normal parent and
+// it has one, but a caller assembling a span by hand may not.
 func (t *Tracer) StartChild(parent Span, name string, kind int, attrs ...Attribute) (Span, bool) {
+	if parent.TraceID == (TraceID{}) {
+		t.noteDropped()
+		return Span{}, false
+	}
 	spanID, err := NewSpanID()
 	if err != nil {
 		t.noteDropped()

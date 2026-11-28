@@ -693,6 +693,36 @@ func TestTracerProducesValidSpans(t *testing.T) {
 	}
 }
 
+// TestStartChildRefusesAZeroParent covers the one input that produces a span the collector
+// cannot place.
+//
+// NewTraceID loops until its id is non-zero, because OTLP reads an all-zero trace id as
+// "invalid". StartChild inherited the parent's id without that check, so a zero parent -- a
+// Span{} from a caller whose StartTrace failed, or one assembled by hand -- produced ok=true
+// with TraceID 00000000000000000000000000000000. Nothing reports that downstream: the collector
+// drops the span or files it under a trace that does not exist.
+func TestStartChildRefusesAZeroParent(t *testing.T) {
+	tr := NewTracer()
+	if child, ok := tr.StartChild(Span{}, "prefill", 1); ok {
+		t.Errorf("StartChild accepted a zero parent and returned trace id %s", child.TraceID.Hex())
+	}
+	if got := tr.Dropped(); got != 1 {
+		t.Errorf("Dropped() = %d after one refused child, want 1", got)
+	}
+
+	// The refusal is about the trace id alone. A parent with a trace id but no span id is a
+	// span a caller assembled rather than one StartTrace handed out, and the child is fine.
+	parent := Span{TraceID: TraceID{1}, SpanID: SpanID{}}
+	child, ok := tr.StartChild(parent, "prefill", 1)
+	if !ok {
+		t.Fatal("StartChild refused a parent that has a trace id")
+	}
+	if child.TraceID != parent.TraceID {
+		t.Errorf("child trace id = %s, want the parent's %s",
+			child.TraceID.Hex(), parent.TraceID.Hex())
+	}
+}
+
 // TestSpanFinishSetsStatus checks that Finish records both the outcome and its message,
 // which is what makes a failed request visible in a trace.
 func TestSpanFinishSetsStatus(t *testing.T) {

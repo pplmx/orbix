@@ -481,6 +481,14 @@ where an index of 0 would say nothing.
 Measured against a live collector on Llama 3.2 1B with a 7-token prompt and `max_tokens: 8`:
 `input_tokens` 7, `output_tokens` 8, `prefill_ms` 238, `decode_ms` 797.
 
+The three do not sum to the span's duration. Each is truncated to whole milliseconds
+independently, so the three truncations can lose up to 3 ms against the nanosecond timestamps on the
+span itself -- measured on four requests against a live collector, the losses were 0.86, 1.37, 1.48
+and 1.58 ms. Round rather than truncate does not fix it: three roundings lose up to 1.5 ms the other
+way, and a trace reader comparing two spans cares about the direction being consistent rather than
+about which one. Treat the parts as attribution -- which phase the time went to -- and the span's own
+start and end as the total.
+
 The three timing attributes are what make a slow answer attributable instead of a guess, and they
 have to be three: the span starts when the request is submitted, so a request that waits for a slot
 spends part of its span doing nothing, and measuring prefill from the span's start would make a

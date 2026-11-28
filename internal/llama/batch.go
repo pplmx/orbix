@@ -885,6 +885,20 @@ func distinctExperts(assigned []expertAssignment) []int {
 // Each buffer is ContextLen wide because one position can attend to the whole window, and it is
 // per slot rather than per position because two workers sharing one would interleave writes into
 // the same slice.
+//
+// What is left on the table, measured so that nobody has to work it out twice. The call is per
+// layer, and attentionBatch is called once per layer inside the forward loop, so a gemma-3-270m
+// forward allocates min(workers, n) x ContextLen x 4 bytes eighteen times over. At n=1 that is
+// 3.72 MB per token, 0.24% of everything the decode benchmark allocates, with GC taking about
+// 1.65% of its CPU. At n=64 it is 12.44% of the batched-prefill benchmark's allocation and GC
+// reaches 6.05% of its CPU, which is the largest share this function ever accounts for.
+//
+// Hoisting the buffers onto the model would divide both by the layer count, 18x. It is not done
+// because the two remaining cases are cheap and the change is not: the model already carries
+// scratch that only one round may touch at a time, which is why the engine keeps Pump on a single
+// goroutine, and widening that set for a couple of percent is the trade this file's history
+// records going wrong -- see the spans() note in paged.go, where reusing a slice under the
+// parallel path made six tests fail at once with "values cover 5 positions, want 6".
 func (m *Model) scoreBuffers(n int) [][]float32 {
 	slots := min(m.run.Workers(), n)
 	if slots < 1 {

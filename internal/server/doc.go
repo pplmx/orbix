@@ -216,4 +216,15 @@
 // here is only the encoding, and it is written by hand -- a three-line family in a
 // format whose whole grammar fits on a page does not justify a client library in a
 // repository whose point is to make each layer legible.
+//
+// One counter's name deserves a note because its old help text promised something the
+// number does not measure. orbix_tokens_generated_total counts tokens the engine
+// produced, not tokens a caller received: the increment happens when the event is
+// queued for the stream, which is before anything reads it. On a reply that finishes
+// the two are the same number. On one the client abandons they are not -- three
+// measured runs that disconnected at 250ms received 199, 203 and 196 chunks while the
+// counter advanced by 202, 206 and 199, the difference being events still sitting in
+// the channel. The help used to say "Tokens delivered to callers", which reads as a
+// number a client could reconcile against its own transcript, so it now says what it
+// counts.
 package server

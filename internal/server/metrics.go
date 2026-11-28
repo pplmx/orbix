@@ -50,7 +50,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.labeledSeries("requests_finished_by_reason_total",
 		"Requests that reached their end, split by why.",
 		"counter", "reason", reasons)
-	b.help("tokens_generated_total", "Tokens delivered to callers, in cumulative total.",
+	// "Generated", not "delivered" -- see doc.go on why a cancelled stream counts more.
+	b.help("tokens_generated_total", "Tokens the engine produced, in cumulative total.",
 		"counter", st.TokensGenerated)
 	b.help("rounds_total", "Scheduling rounds that advanced at least one sequence.",
 		"counter", st.Rounds)

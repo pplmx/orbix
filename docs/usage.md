@@ -145,8 +145,44 @@ is deliberate: the schema has a `bytes` field because a token's text is not alwa
 its own, and `token` is the best effort beside it. ASCII replies never hit it, which is why every
 logprob test in this repository passed until one used a non-ASCII reply. What an entry's `token`
 should say for a fragment of a character is still open -- the content is the decoder's rendering of
-the whole run, and no per-token text reproduces it -- but that question does not affect anything a
-reader can act on today, because the bytes are authoritative.
+the whole run, and no per-token text reproduces it from one token alone.
+
+**It does affect something a reader can act on: `text_offset` on completions.** The offsets are
+summed from the rendered `token` lengths, so on a byte-level vocabulary they walk past the end of
+the text the caller has. Measured: `"中"` is three bytes in three tokens, each rendering as a
+three-byte U+FFFD, and the highest `offset + len(token)` is 9 -- six bytes past the reply. `"中文"`
+overshoots by twelve. A client that indexes `choices[0].text` with `text_offset` therefore reads
+outside it, and one that joins `tokens` to recover the text gets `"���"` where the content is `"中"`.
+
+This paragraph used to end by saying the question was cosmetic "because the bytes are
+authoritative". The bytes are right and that is still true; the offsets are a separate field, and
+they are wrong. The fix is not obvious and has not been made. Writing this out is worth it because
+the obvious attempt fails, and the reasons are measurements rather than guesses:
+
+1. Rendering each entry from a `StreamDecoder` does make `tokens` join to the content exactly --
+   measured on `" Hi"`, `"Hi"`, `"  Hi"`, `"a中"`, `"a中b"` and `"é"` -- because the decoder holds
+   back the bytes of a character it has not finished and releases them on the token that completes
+   it.
+2. But it emits nothing at all for a character that never completes, and a `max_tokens` bound can
+   cut one. Measured: encoding `"中"` and keeping the first two of its three byte tokens gives
+   `Decode` `"�"` and `StreamDecoder` `""`, so the entries would describe an empty reply that the
+   body says is one replacement character.
+3. `text_offset` cannot simply switch to raw byte lengths either: the parallel array is read as
+   "where this token's text starts", and a reader lining the offsets up against the tokens beside
+   them expects them to advance by those tokens' lengths. Both units are self-consistent and they
+   disagree, so the field's unit has to be chosen before the code moves.
+
+An attempt that changed the text but trimmed both `raw` and `text` by one count broke
+`TestTheBytesOfTheEntriesConcatenateToTheContent` -- `bytes` concatenating to the content is a
+property that holds today and has a test, so it is the constraint, not something to trade away.
+Whoever picks this up should decide the unit first, then move the blocking and streamed paths
+together: the two are compared against each other for the same request, so changing one alone turns
+that comparison red.
+
+What a reader can rely on today: `bytes` concatenates to the content exactly, the offsets are
+monotonic and match the lengths of the tokens beside them, and on an ASCII reply all of these
+agree. On a reply containing characters that split across tokens, `token` and `text_offset` describe
+a longer string than the reply is.
 
 One consequence of those shapes is worth knowing before reading `top_logprobs` on completions. Its
 alternatives are a JSON object keyed by token text, so two alternatives that render to the same

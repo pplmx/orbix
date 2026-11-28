@@ -471,7 +471,13 @@ func (m *Model) DecodeStep(caches []Cache, tokens []int32) ([]float32, error) {
 	if err := b.finish(m); err != nil {
 		return nil, err
 	}
-	return b.logits, nil
+	// Sliced to the batch that ran, not to the buffer. m.dbuf is reused across calls and
+	// only grows, so after a four-sequence step a two-sequence step would otherwise hand back
+	// a 4*VocabSize slice whose last two rows are the previous call's logits -- measured,
+	// 1452 values returned for a batch that wanted 726. The engine slices by its own batch
+	// length and is unaffected, but a length-returned contract that silently means "whatever
+	// the largest batch so far was" is a trap for the next caller.
+	return b.logits[:n*cfg.VocabSize], nil
 }
 
 // decodeBatch holds the per-batch scratch for DecodeStep.

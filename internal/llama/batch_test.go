@@ -1713,3 +1713,46 @@ func TestNegativeWorkersFallsBackLikeZero(t *testing.T) {
 		t.Errorf("workers(3) = %d, want 3", got)
 	}
 }
+
+// TestDecodeStepReturnsTheBatchThatRan pins the length of the returned logits.
+//
+// The buffers behind DecodeStep live on the model and are reused across calls, growing but never
+// shrinking: a step after a larger one runs against a slice long enough for the earlier batch.
+// Returning that slice whole means the length says "the largest batch so far" rather than "the
+// batch that just ran", and a caller reading len(out) would pick up the previous call's logits in
+// the tail. Measured before slicing it: four sequences followed by two returned 1452 values for a
+// batch that wanted 726.
+//
+// The engine slices by its own batch length and was never affected, which is exactly why this
+// needed a test -- the bug was invisible from the one caller that exists.
+func TestDecodeStepReturnsTheBatchThatRan(t *testing.T) {
+	m := loadReal(t)
+	cfg := m.Config()
+	newCache := func() Cache {
+		c, err := NewKVCache(cfg, 64)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		return c
+	}
+
+	// Larger first, so the second call runs against the longer buffer.
+	larger := []Cache{newCache(), newCache(), newCache(), newCache()}
+	out, err := m.DecodeStep(larger, []int32{5, 6, 7, 8})
+	if err != nil {
+		t.Fatalf("DecodeStep(4): %v", err)
+	}
+	if want := 4 * cfg.VocabSize; len(out) != want {
+		t.Fatalf("first step returned %d values, want %d", len(out), want)
+	}
+
+	smaller := []Cache{newCache(), newCache()}
+	out, err = m.DecodeStep(smaller, []int32{9, 10})
+	if err != nil {
+		t.Fatalf("DecodeStep(2): %v", err)
+	}
+	if want := 2 * cfg.VocabSize; len(out) != want {
+		t.Errorf("step after a larger one returned %d values, want %d -- "+
+			"the tail is the previous batch's logits, not this one's", len(out), want)
+	}
+}

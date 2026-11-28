@@ -582,7 +582,7 @@ func (e *Engine) Pump() int {
 	// against a reference implementation.
 	sortByID(seqs)
 	// The round number is taken under the lock and stamped on the admitted sequences
-	// here, before any of them runs: PolicyFair compares it later, and reading it
+	// here, before any of them runs: PriorityFair compares it later, and reading it
 	// without the lock would race with Round().
 	e.mu.Lock()
 	e.round++

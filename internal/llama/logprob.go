@@ -13,7 +13,7 @@ type Alternative struct {
 	// ID is the token index.
 	ID int32
 	// Logprob is the natural logarithm of this token's probability under the same
-	// distribution ChosenLogprob reports for the sampled token.
+	// distribution TokenLogprobs reports for the sampled token.
 	Logprob float32
 }
 

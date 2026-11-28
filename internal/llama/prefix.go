@@ -84,7 +84,8 @@ type prefixEntry struct {
 // trade, and saying what it actually covers is what makes it checkable.
 const maxPrefixEntries = 1024
 
-// NewPrefixIndex returns an empty index over pool.
+// EnablePrefixCache turns prefix reuse on for the pool and returns its index, creating it
+// on the first call and returning the same one after that.
 //
 // Calling it more than once for one pool would give two indexes competing for the
 // same blocks, so the pool keeps the one it was given.

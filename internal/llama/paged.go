@@ -329,7 +329,7 @@ func (c *PagedKVCache) Len() int { return c.len }
 // It is the model's context length, not the pool's remaining space: the pool is
 // shared, so how many positions this sequence can actually still get depends on
 // what the other sequences are holding. Running out of blocks therefore surfaces
-// as an error from AppendKV, where the pool's state is known, rather than as a
+// as an error from ensureBlocks, where the pool's state is known, rather than as a
 // capacity the cache would have to guess at.
 func (c *PagedKVCache) Cap() int { return c.cfg.ContextLen }
 

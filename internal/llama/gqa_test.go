@@ -319,3 +319,76 @@ func TestDecodeStepAgreesUnderGrouping(t *testing.T) {
 		}
 	}
 }
+
+// TestPagedCacheMatchesContiguousBeyondTheWindow covers the two caches on a prompt far longer
+// than the window, which is a different question from the one the existing window tests ask.
+//
+// TestLogitsForCachedHonoursTheWindow uses a window of 4 against a prompt of 8, so it checks that
+// the trim happens at all. This one runs a window of 32 against 9x that many positions, so the
+// trim lands across many blocks and the span arithmetic -- which block holds row
+// total-keep, where a trimmed span starts -- has room to be wrong.
+//
+// Both caches are compared bit for bit. They are separate code paths over the same weights, and a
+// model served with --blocks and one served without produce the same answer only if those paths
+// agree.
+func TestPagedCacheMatchesContiguousBeyondTheWindow(t *testing.T) {
+	const (
+		window    = 32
+		blockSize = 16
+	)
+	path := gguftest.Model{
+		ContextLen: 512, WindowLen: window, NoEOS: true,
+	}.Write(t, t.TempDir())
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := m.Config()
+	if cfg.WindowLen != window {
+		t.Fatalf("WindowLen = %d, want %d: the fixture's window did not load", cfg.WindowLen, window)
+	}
+
+	// Nine times the window, so several blocks sit entirely outside it.
+	prompt := make([]int32, 9*window)
+	for i := range prompt {
+		prompt[i] = int32(1 + i%7)
+	}
+
+	contiguous, err := NewKVCache(cfg, cfg.ContextLen)
+	if err != nil {
+		t.Fatalf("NewKVCache: %v", err)
+	}
+	want, err := m.Prefill(contiguous, prompt, 0)
+	if err != nil {
+		t.Fatalf("Prefill contiguous: %v", err)
+	}
+
+	pool, err := NewBlockPool(cfg, BlockPoolOptions{BlockSize: blockSize, Blocks: 64})
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	paged := pool.New()
+	got, err := m.Prefill(paged, prompt, 0)
+	if err != nil {
+		t.Fatalf("Prefill paged: %v", err)
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("paged produced %d logits, contiguous produced %d", len(got), len(want))
+	}
+	for i := range want {
+		if math.Float32bits(want[i]) != math.Float32bits(got[i]) {
+			t.Fatalf("logit %d: contiguous %v (0x%08x), paged %v (0x%08x) -- a prompt of %d "+
+				"positions against a window of %d has to agree whichever cache holds it", i,
+				want[i], math.Float32bits(want[i]), got[i], math.Float32bits(got[i]),
+				len(prompt), window)
+		}
+	}
+
+	// This comparison cannot see a wrong window, and the note is here rather than the assertion
+	// because the fixture cannot support one: both caches run the same attentionBatch, so doubling
+	// the trim there changes both sides equally, and a windowless fixture produces the same logits
+	// for two different distant prefixes anyway -- measured, WindowLen 0 and 32 both give 0
+	// differing logits for the same pair. The trim's own coverage comes from the decode path, where
+	// injecting the error does turn the package red.
+}

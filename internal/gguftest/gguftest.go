@@ -100,6 +100,13 @@ type Model struct {
 	// and 8 heads, so the derived 288 is not the 256 its queries actually use. A fixture that
 	// states them is the only way to exercise a reader that trusts the key over the ratio.
 	HeadDim int
+	// RopeDim sets <arch>.rope.dimension_count, the number of dimensions the rotation applies to.
+	//
+	// Zero writes HeadDim, which is the common case and what the loader falls back to. A partial
+	// rotation is the reason the key exists separately: Gemma 2 rotates 128 of its 256 head
+	// dimensions, so a fixture that cannot state the two separately cannot reach that path in the
+	// loader at all. Every test of it so far built a Config by hand, which skips the file read.
+	RopeDim int
 
 	// AttnBias adds the q, k, and v bias tensors the Qwen2 family uses and Llama does
 	// not. The loader infers the flag from the tensors' presence, so writing them is the
@@ -248,6 +255,14 @@ func (m Model) headDim() int {
 
 // kvDim is the width of the combined key or value projection.
 func (m Model) kvDim() int { return m.KVHeads * m.headDim() }
+
+// ropeDim is the width the rotation applies to.
+func (m Model) ropeDim() int {
+	if m.RopeDim > 0 {
+		return m.RopeDim
+	}
+	return m.headDim()
+}
 
 // queryDim is the width of the combined query projection.
 //
@@ -483,7 +498,7 @@ func (m Model) kvs() []kv {
 		u32KV(a+".attention.head_count", m.Heads),
 		u32KV(a+".attention.head_count_kv", m.KVHeads),
 		u32KV(a+".feed_forward_length", m.FFN),
-		u32KV(a+".rope.dimension_count", m.headDim()),
+		u32KV(a+".rope.dimension_count", m.ropeDim()),
 		f32KV(a+".attention.layer_norm_rms_epsilon", 1e-5),
 	}
 	if !m.OmitContextLen {

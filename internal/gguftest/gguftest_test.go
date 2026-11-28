@@ -186,6 +186,43 @@ func TestModelShapeOptions(t *testing.T) {
 			t.Errorf("ContextLen = %d, want 128", cfg.ContextLen)
 		}
 	})
+	// A rotation narrower than the head, which is the shape Gemma 2 states: 128 rotated of 256.
+	// Every existing test of rope.dimension_count builds a llama.Config by hand, so the read from
+	// a file -- the fallback to HeadDim when the key is absent, and the override when it is present
+	// -- had no fixture that could express the second case.
+	t.Run("partial rope", func(t *testing.T) {
+		const hidden, heads, headDim, ropeDim = 64, 8, 16, 8
+		path := Model{Hidden: hidden, Heads: heads, HeadDim: headDim, RopeDim: ropeDim}.
+			Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		got, ok := f.Get[int]("llama.rope.dimension_count")
+		if !ok {
+			t.Fatal("the fixture does not carry rope.dimension_count")
+		}
+		if got != ropeDim {
+			t.Errorf("rope.dimension_count = %d, want %d", got, ropeDim)
+		}
+		m, err := llama.New(path)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		cfg := m.Config()
+		if cfg.RopeDim != ropeDim {
+			t.Errorf("RopeDim = %d, want %d from the file rather than %d from HeadDim",
+				cfg.RopeDim, ropeDim, headDim)
+		}
+		cache, err := llama.NewKVCache(cfg, cfg.ContextLen)
+		if err != nil {
+			t.Fatalf("NewKVCache: %v", err)
+		}
+		if _, err := m.Forward(cache, 4, 0); err != nil {
+			t.Fatalf("Forward with a partial rotation: %v", err)
+		}
+	})
+
 	// Non-square attention, which is what HeadDim exists for. Hidden 64 over 8 heads derives 8
 	// and the override says 16, so a reader that trusts the ratio and a reader that trusts the
 	// key give different answers -- and the model has to build and run either way, which is what

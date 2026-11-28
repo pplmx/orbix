@@ -2082,6 +2082,28 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// for. It is the offset a logprob entry reports, and it is tracked separately from sent
 	// because held-back text has an offset before it has been written.
 	tokenOffset := 0
+	// write releases one piece of a choice's text to the client, routing it through the tool
+	// gate when the request declared tools. Every path below goes through it rather than
+	// straight to emit, because the tool gate is not an alternative to the other two
+	// behaviours -- a stop list holds bytes back and a call has to be withheld -- but a third
+	// stage both of them feed. Measured before this was the only route: a request carrying both
+	// `tools` and `stop` streamed the whole `<tool_call>{...}</tool_call>` to the client as
+	// content and reported no tool_calls at all, while the same request non-streamed returned
+	// the call. The stop branch simply continued before the gate was consulted.
+	write := func(part string, lp any) bool {
+		if tcg != nil {
+			if out := tcg.push(part); out != "" {
+				return emit(streamItem{index: index, delta: out, logprobs: lp})
+			}
+			// The gate swallowed this piece: it is part of a call, so neither its text nor a
+			// logprob describing bytes the client will never see goes out.
+			return true
+		}
+		if part == "" && lp == nil {
+			return true
+		}
+		return emit(streamItem{index: index, delta: part, logprobs: lp})
+	}
 	for ev := range ch {
 		if ev.Err != nil {
 			emit(streamItem{index: index, err: ev.Err})
@@ -2139,7 +2161,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 					// Dropping the straddling token is what the blocking path does, so the two
 					// transports report the same list for the same request.
 					if release != "" {
-						if !emit(streamItem{index: index, delta: release}) {
+						if !write(release, nil) {
 							return generated, cancelled, false
 						}
 					}
@@ -2174,7 +2196,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				// everything before it. Without this, stop=["北京"] streamed "北" where the
 				// non-streaming body returned nothing.
 				if release != "" {
-					if !emit(streamItem{index: index, delta: release, logprobs: chunkLogprobs}) {
+					if !write(release, chunkLogprobs) {
 						return generated, cancelled, false
 					}
 				} else if chunkLogprobs != nil {
@@ -2186,21 +2208,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 				}
 				continue
 			}
-			if tcg != nil {
-				// Tools declared: a call's bytes must not reach the client as content. The gate
-				// holds exactly the part that could still be a call and releases the rest as it
-				// was released before. The logprobs entry travels with the first chunk the gate
-				// releases; a token the gate swallows contributes to the count but not the text,
-				// and its logprob describes bytes the client never sees, so it is dropped.
-				if out := tcg.push(text); out != "" {
-					if !emit(streamItem{index: index, delta: out, logprobs: chunkLogprobs}) {
-						return generated, cancelled, false
-					}
-					continue
-				}
-				continue
-			}
-			if !emit(streamItem{index: index, delta: text, logprobs: chunkLogprobs}) {
+			if !write(text, chunkLogprobs) {
 				// The client went away. Its context is cancelled, so the engine
 				// stops the sequence; draining is the caller's job and this loop
 				// is already past that point.
@@ -2224,13 +2232,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// the same sequence produces without streaming, which breaks the contract
 	// TestStreamingReassemblesToSameText states.
 	if tail := dec.Flush(); tail != "" {
-		if tcg != nil {
-			if out := tcg.push(tail); out != "" {
-				if !emit(streamItem{index: index, delta: out}) {
-					return generated, cancelled, false
-				}
-			}
-		} else if !emit(streamItem{index: index, delta: tail}) {
+		if !write(tail, nil) {
 			return generated, cancelled, false
 		}
 	}
@@ -2239,7 +2241,7 @@ func (s *Server) streamOneChoice(ch <-chan engine.Event, index int, p generatePa
 	// matches cost nothing but a later chunk.
 	if reason != "stop" {
 		if rest := gate.flush(); rest != "" {
-			if !emit(streamItem{index: index, delta: rest}) {
+			if !write(rest, nil) {
 				return generated, cancelled, false
 			}
 		}

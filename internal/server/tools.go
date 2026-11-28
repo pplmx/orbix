@@ -631,15 +631,20 @@ func (g *toolCallGate) safeEnd() int {
 //
 // A complete call is never released here: parseToolCalls is what turns it into tool_calls, and
 // duplicating its bytes as content would show the caller both the JSON and the parsed call. An
-// unterminated opening marker is ordinary text -- the model was cut off mid-marker, or wrote it in
-// prose -- and goes out as such.
+// unterminated opening marker is a different matter, and which way it goes depends on the rest of
+// the reply: parseToolCalls drops a cut-off fragment when the reply holds a complete call beside
+// it, and returns the whole text unchanged when it holds none -- so a reply that began a call and
+// stopped has produced no calls, and its prose is all there is to show. Releasing the held region
+// exactly when the parser will call it prose is what keeps the streamed and non-streamed answers
+// the same text; dropping it unconditionally lost "Let me check. <tool_call>{...}" off the end of
+// a streamed reply whose blocking answer kept it.
 func (g *toolCallGate) flush() string {
 	if g.inCall {
-		// Unterminated: the marker opened a region that never closed. Whether the enclosed text
-		// is a call is parseToolCalls' decision, and a fragment that is not one comes back as
-		// content from there, so nothing is lost by dropping it here -- releasing it would send
-		// the client a call's bytes as prose immediately before the same bytes as a call.
-		return ""
+		if _, calls := parseToolCalls(g.text); len(calls) > 0 {
+			// The parser will drop this fragment too, so releasing it would put a call's bytes
+			// in front of the caller as prose.
+			return ""
+		}
 	}
 	out := g.text[g.sent:]
 	g.sent = len(g.text)

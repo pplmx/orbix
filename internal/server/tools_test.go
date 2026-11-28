@@ -726,29 +726,48 @@ func TestResolveToolCallMessages(t *testing.T) {
 	})
 }
 
-// TestToolCallGateHoldsAnUnterminatedCall covers the flush path that was uncovered: a stream that
-// ends inside a call.
+// TestToolCallGateHoldsAnUnterminatedCall covers the flush path for a stream that ends inside a
+// call.
 //
-// The behaviour matters because it decides what a client sees when generation is cut off mid-call
-// -- a budget running out, a cancel, a stop string firing inside the JSON. Releasing the fragment
-// as content would send the call's own bytes as prose, immediately before parseToolCalls either
-// reports them as a call (when the fragment happens to parse) or returns them as content anyway
-// (when it does not). Dropping them here is safe for that reason and only for that reason: nothing
-// is lost, because the decision is made once, from the whole text.
+// Two shapes, and they differ, because what the parser does with a cut-off fragment depends on the
+// rest of the reply. Beside a complete call the fragment is dropped, and releasing it here would
+// put a call's bytes in front of the caller as prose immediately before the same bytes as a call.
+// With no complete call in the reply at all, the parser returns the whole text as prose -- so the
+// fragment is prose, and dropping it loses the tail of a streamed answer that the non-streamed body
+// keeps. The old comment here said "nothing is lost ... the decision is made once, from the whole
+// text", which is true of the parser and was false of the stream: the streaming path reads only
+// the calls from parseToolCalls and throws its prose away.
 func TestToolCallGateHoldsAnUnterminatedCall(t *testing.T) {
-	var g toolCallGate
-	g.push("before <tool_call>{\"name\": \"f\", \"argum")
-	if got := g.flush(); got != "" {
-		t.Errorf("flush released %q from an unterminated call; the bytes belong to the parser", got)
-	}
-	// And the parser agrees the fragment is not a call, so it comes back as text rather than
-	// disappearing: what the gate withheld is recoverable from the text it kept.
-	if _, calls := parseToolCalls(g.text); len(calls) != 0 {
-		t.Errorf("an unterminated call parsed as %+v", calls)
-	}
-	if !strings.Contains(g.text, "before ") {
-		t.Errorf("the gate dropped the prose before the marker: %q", g.text)
-	}
+	t.Run("with no complete call the fragment is prose", func(t *testing.T) {
+		var g toolCallGate
+		g.push("before <tool_call>{\"name\": \"f\", \"argum")
+		want := `before <tool_call>{"name": "f", "argum`
+		if got := g.flush(); got != `<tool_call>{"name": "f", "argum` {
+			t.Errorf("flush released %q, want the held fragment", got)
+		}
+		// And that is what the blocking path shows, which is the reason it is released: the
+		// parser agrees the whole text is prose.
+		prose, calls := parseToolCalls(g.text)
+		if len(calls) != 0 {
+			t.Fatalf("an unterminated call parsed as %+v", calls)
+		}
+		if prose != want {
+			t.Errorf("the parser returns %q, want %q", prose, want)
+		}
+	})
+
+	t.Run("beside a complete call the fragment is dropped", func(t *testing.T) {
+		var g toolCallGate
+		g.push(`<tool_call>{"name": "a", "arguments": {}}</tool_call> and then <tool_call>{"name": "b"`)
+		// Whatever preceded the second marker is prose and was released as it arrived.
+		if got := g.flush(); got != "" {
+			t.Errorf("flush released %q, want nothing: the parser drops this fragment too", got)
+		}
+		_, calls := parseToolCalls(g.text)
+		if len(calls) != 1 || calls[0].Name != "a" {
+			t.Fatalf("the parser found %+v, want the one complete call", calls)
+		}
+	})
 }
 
 // TestJSONKind covers the helper the argument checks are built on. Its empty-input answer (0) was
@@ -1091,9 +1110,11 @@ func TestToolCallGateIsIndependentOfChunking(t *testing.T) {
 			want: `trailing <tool_ca`,
 		},
 		{
+			// No complete call in the reply, so the parser calls the whole text prose and the
+			// gate has to agree: the fragment comes out at flush.
 			name: "a call that never closes",
 			in:   `before <tool_call>{"a":1`,
-			want: "before ",
+			want: `before <tool_call>{"a":1`,
 		},
 	}
 	for _, c := range cases {
@@ -1115,11 +1136,16 @@ func TestToolCallGateIsIndependentOfChunking(t *testing.T) {
 			if got := streamed(t, c.in, cuts); got != c.want {
 				t.Errorf("one byte at a time released %q, want %q", got, c.want)
 			}
-			// No path may leak a call's own bytes as prose; that is the whole point of the gate.
-			if strings.Contains(c.want, toolCallOpen) || strings.Contains(c.want, toolCallClose) {
+			// No path may leak a *parsed* call's bytes as prose; that is the whole point of the
+			// gate. A fragment the parser refused is prose by the parser's rule, so the check is
+			// scoped to the shapes that contain a complete call.
+			_, calls := parseToolCalls(c.in)
+			leaks := strings.Contains(c.want, toolCallOpen) || strings.Contains(c.want, toolCallClose)
+			if len(calls) > 0 && leaks {
 				t.Fatalf("the expected text %q carries a call marker; the case is miswritten",
 					c.want)
 			}
+
 		})
 	}
 }
@@ -1135,4 +1161,155 @@ func streamed(t *testing.T, src string, cuts []int) string {
 	}
 	got.WriteString(g.flush())
 	return got.String()
+}
+
+// TestStreamedToolCallsAgreeWithTheBlockingBody pins the one property the two transports owe a
+// caller: for the same generated tokens, the content a client accumulates and the calls it
+// receives must be the ones the non-streamed body would have returned.
+//
+// This is not a unit test of either half -- it drives streamOneChoice and choiceObject, which are
+// the two paths a request actually takes. It has to compare rather than assert fixed strings
+// because the shapes must agree with each other, and pinning one side would let the other drift to
+// a defensible-looking answer that differs from it.
+//
+// Every name below is a shape that used to disagree, measured on the code before the fix:
+//   - a stop list plus tools: the stop branch continued before the tool gate was consulted, so a
+//     request carrying both streamed the whole `<tool_call>{...}</tool_call>` as content and
+//     reported no tool_calls, while the non-streamed body returned the call. The two branches
+//     were never alternatives -- a stop list holds bytes back and a call has to be withheld --
+//     and treating them as such is what this now prevents.
+//   - a call that was cut off: the gate dropped the fragment and the parser returns the whole
+//     text when no complete call is in it, so the non-streamed body kept "Let me check.
+//     <tool_call>{"name": "f", "argum" while the stream released only "Let me check. ".
+//   - prose around a call that sits on its own lines: the stream released the newlines and the
+//     parser trims them.
+func TestStreamedToolCallsAgreeWithTheBlockingBody(t *testing.T) {
+	type shape struct {
+		name  string
+		reply string
+		// stop and tools are what the two branches keyed on; every combination that a caller
+		// can send is run, because the defect was in the combination.
+		stop  []string
+		tools bool
+	}
+	shapes := []shape{
+		{
+			name:  "prose, a call, then prose, with a stop list in force",
+			reply: `Hello there. <tool_call>{"name": "f"}</tool_call> Done.`,
+			stop:  []string{"NEVERMATCH"},
+			tools: true,
+		},
+		{
+			name:  "a reply that is only a call, with a stop list in force",
+			reply: `<tool_call>{"name": "f"}</tool_call>`,
+			stop:  []string{"NEVERMATCH"},
+			tools: true,
+		},
+		{
+			name:  "a call cut off mid-argument",
+			reply: `Let me check. <tool_call>{"name": "f", "argum`,
+			tools: true,
+		},
+		{
+			name:  "a call on its own lines",
+			reply: "\n<tool_call>{\"name\": \"f\"}</tool_call>\n",
+			tools: true,
+		},
+		{
+			name:  "prose with no call at all",
+			reply: `plain prose, no call`,
+			stop:  []string{"NEVERMATCH"},
+			tools: true,
+		},
+		{
+			name:  "no tools declared, so a marker is ordinary text",
+			reply: `he wrote <tool_call>{"name": "f"}</tool_call> by hand`,
+			stop:  []string{"NEVERMATCH"},
+		},
+	}
+	for _, c := range shapes {
+		t.Run(c.name, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(c.reply, false)
+			var specs []engine.ToolSpec
+			if c.tools {
+				specs = []engine.ToolSpec{{Name: "f"}}
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-agree", tools: specs, stop: c.stop}
+
+			// The streaming path, through the function the handler calls.
+			ch := make(chan engine.Event, len(ids)+1)
+			for _, id := range ids {
+				ch <- engine.Event{Token: id, HasToken: true}
+			}
+			ch <- engine.Event{Done: true, FinishReason: "stop"}
+			close(ch)
+			var content, reason string
+			var streamedCalls []toolCall
+			if _, _, ok := srv.streamOneChoice(ch, 0, p, func(it streamItem) bool {
+				content += it.delta
+				if it.reason != "" {
+					reason = it.reason
+				}
+				streamedCalls = append(streamedCalls, it.calls...)
+				return true
+			}); !ok {
+				t.Fatal("streamOneChoice reported a failed write")
+			}
+
+			// The blocking path, on the same tokens.
+			obj := srv.choiceObject(&choiceResult{out: ids, reason: "stop"}, 0, p)
+			msg, ok := obj["message"].(map[string]any)
+			if !ok {
+				t.Fatalf("the blocking choice has no message object: %v", obj["message"])
+			}
+			blocked, _ := msg["content"].(string)
+			blockedReason, _ := obj["finish_reason"].(string)
+			var blockedCalls []toolCall
+			if raw, ok := msg["tool_calls"].([]map[string]any); ok {
+				for _, m := range raw {
+					fn, _ := m["function"].(map[string]string)
+					blockedCalls = append(blockedCalls, toolCall{
+						ID: m["id"].(string), Name: fn["name"], Arguments: fn["arguments"]})
+				}
+			}
+
+			// Surrounding whitespace is compared trimmed, and that is the one difference that
+			// cannot be closed. parseToolCalls trims the prose around the calls it removes, and
+			// the decision is made over the whole reply: whitespace before a call survives when
+			// prose follows it, so nothing can be released the moment the marker appears. A
+			// stream that has already sent a reply's opening newline cannot take it back once a
+			// call turns up later. Every other byte has to match, which trimming the ends still
+			// proves -- two strings that agree after TrimSpace differ only in those runs.
+			if got, want := strings.TrimSpace(content), strings.TrimSpace(blocked); got != want {
+				t.Errorf("the stream reassembled to %q and the blocking body returned %q; a client "+
+					"that switches transports must not see different text", got, want)
+			}
+			if reason != blockedReason {
+				t.Errorf("the stream reported finish_reason %q and the blocking body %q",
+					reason, blockedReason)
+			}
+			if len(streamedCalls) != len(blockedCalls) {
+				t.Fatalf("the stream carried %d calls and the blocking body %d",
+					len(streamedCalls), len(blockedCalls))
+			}
+			for i := range streamedCalls {
+				// The ids are assigned per response and so differ; everything else is the
+				// call the model wrote, and has to be identical.
+				if streamedCalls[i].Name != blockedCalls[i].Name ||
+					streamedCalls[i].Arguments != blockedCalls[i].Arguments {
+					t.Errorf("call %d streamed as %+v and blocked as %+v",
+						i, streamedCalls[i], blockedCalls[i])
+				}
+			}
+			// A *parsed* call's bytes must never reach the client as content on either
+			// transport. The markers of a fragment the parser refused are content, by the
+			// parser's own rule, so the check is scoped to replies that hold a complete call.
+			if _, parsed := parseToolCalls(c.reply); len(parsed) > 0 && c.tools {
+				if strings.Contains(content, toolCallOpen) || strings.Contains(content, toolCallClose) {
+					t.Errorf("the client received a call marker as content: %q", content)
+				}
+			}
+		})
+	}
 }

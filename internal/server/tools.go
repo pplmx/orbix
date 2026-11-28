@@ -544,6 +544,14 @@ func argumentsText(raw json.RawMessage) (string, error) {
 //
 // A held region that turns out not to be a call is released on flush, so text that merely mentions
 // the marker still reaches the client.
+//
+// text is the only source of truth: sent and inCall decide when bytes go out, never what the reply
+// contains. parseToolCalls runs over the whole of text at the end regardless of how much was
+// released, which is why two shapes that look like data loss are not. A call that arrives complete
+// in a single push leaves inCall true and makes flush return nothing -- the push that found the
+// opening marker returned before it could look for the closing one -- and the call is still parsed
+// from text. A later push that carries the closing marker clears inCall and the prose after it is
+// parsed as content. Both measured; neither loses a byte.
 type toolCallGate struct {
 	// text is everything pushed so far.
 	text string

@@ -585,6 +585,53 @@ mutate file pkg:
     # whole package, where most survivors are expected and only the reading tells them apart.
     printf '%d of %d survived -- read each site before treating it as a gap\n' "$survived" "$total"
 
+# Breaks a document claim and reports whether its guard notices.
+#
+# This is the document-side counterpart of `just mutate`: that one asks whether a test can tell
+# when the code changes, this one asks whether a guard can tell when the document it protects is
+# wrong. Both are needed because a guard can be present, be green, and no longer be looking.
+#
+# The recipe exists because that failure was found six times in one session, and each time by hand:
+# deliberately corrupting the claim and watching the test. Doing it by hand is why only three of
+# the twenty-odd document guards had ever been checked this way.
+#
+# The dangerous part of automating it is the silent no-op. A search string that no longer appears
+# makes the edit a no-op, the guard stays green, and the report says the guard has no teeth when in
+# fact nothing was tested. Measured once already: a run that substituted "14 个门禁" reported GREEN
+# because the document actually says "由 **14** 个环境变量控制". So the recipe refuses to continue
+# when the pattern misses, and it reports the byte delta instead of "passed".
+#
+# DOC is the file, PATTERN the text to replace, WITH what to replace it with, and GUARD the test to
+# run. A pattern that matches more than once is replaced only at its first occurrence, which is
+# what a reader changing one claim does too.
+check-guard doc pattern with guard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    doc="{{doc}}"
+    [ -f "$doc" ] || { echo "no such file: $doc" >&2; exit 1; }
+    before=$(grep -cF -- "{{pattern}}" "$doc" || true)
+    if [ "$before" -eq 0 ]; then
+        printf '%s does not contain %s\n' "$doc" "{{pattern}}" >&2
+        echo "the substitution would be a no-op, so a green result would prove nothing" >&2
+        exit 2
+    fi
+    backup=$(mktemp)
+    cp "$doc" "$backup"
+    trap 'cp "$backup" "$doc"; rm -f "$backup"' EXIT
+    # -c rather than a nested heredoc: just parses the recipe body for its own syntax, and a
+    # second << inside a shebang recipe is parsed as justfile text. Same reason `mutate` uses awk.
+    python3 -c 'import sys; p=sys.argv[1]; t=open(p).read(); open(p,"w").write(t.replace(sys.argv[2], sys.argv[3], 1))' \
+        "$doc" "{{pattern}}" "{{with}}"
+    if cmp -s "$doc" "$backup"; then
+        echo "the edit changed nothing; the pattern matched bytes the file does not have" >&2
+        exit 2
+    fi
+    if go test ./internal/arch ./internal/quant -run "^{{guard}}$" -count=1 >/dev/null 2>&1; then
+        printf 'GREEN after breaking it -- %s has no teeth\n' "{{guard}}"
+        exit 1
+    fi
+    printf 'RED after breaking it -- %s notices\n' "{{guard}}"
+
 # Prints the version cz would bump to and the changelog section it would write, then stops. The
 # real bump is a person's decision: it writes a tag, and a tag is what `git describe` turns into
 # the version a binary reports.

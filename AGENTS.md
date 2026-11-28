@@ -29,7 +29,7 @@ just release-preview # 看下一次 release 会是什么版本、changelog 写�
 just release # 升版本、写 CHANGELOG.md、打 tag（tag 推到远端后由 release.yml 发布产物）
 ```
 
-上面是门槛和发布入口。另外十六个是辅助配方，不进门槛，但会用得上（`just --list` 里的第 29 条是 `default`，即不带配方时等价于 `just check`）：
+上面是门槛和发布入口。另外十七个是辅助配方，不进门槛，但会用得上（`just --list` 里的第 29 条是 `default`，即不带配方时等价于 `just check`）：
 
 ```bash
 just fmt     # gofmt -w，修 check 报出来的格式问题
@@ -85,6 +85,14 @@ just mutate file pkg # 把一个文件里的 `return true`/`return false` 逐个
              # 错误信封后接一个完整 model 对象。存活不等于缺陷：拒绝路径的返回值常在写出响应
              # 之后才被读（变异等价），注释里写明不可达的分支是已记录的取舍。每个位点各跑一遍
              # 全套，二十个位点的文件就是二十遍，目标选小一点。
+just check-guard doc pattern with guard # 把文档里的一处说法改错，报出守护它的测试红不红。
+             # 与 `just mutate` 是一对：那条问测试能不能分辨代码改动，这条问守卫能不能分辨
+             # 文档写错。两者都需要，因为守卫可以还在、还绿、却已经不看原来那件事了——本会话
+             # 出现六次，而每次都是手工改坏文档再看，所以二十多条文档守卫里只有三条被这样验过。
+             # **最危险的是静默空操作**：pattern 匹配不到时改动等于没做，守卫当然还是绿，报告
+             # 就会说「这条守卫没牙」而实际什么都没测。实测踩过：替换「14 个门禁」报 GREEN，
+             # 因为文档里写的是「由 **14** 个环境变量控制」。所以 pattern 落空时配方以退出码 2
+             # 拒绝继续，不改完就看结果。
 just fixture # 生成一个够大的合成 checkpoint，让 `just stress` 有东西可打断（默认落 .cache/）
 just         # 不带配方等价于 just check
 ```

@@ -39,6 +39,8 @@ just coverage  # per-function coverage with every package instrumented, which is
                # package calls
 just mutate file pkg # flip each boolean return in file and report which flips the suite misses,
                      # which answers "can the tests tell": the complement of coverage
+just check-guard doc pattern with guard # break a documented claim and report whether its guard
+                     # notices; refuses to continue when pattern no longer appears
 just isolate   # run the suite twice with shuffling, to catch order dependence
 just fmt       # gofmt -w, to fix whatever just check reported
 just vet       # go vet on one package: just PKG=./internal/gguf vet

@@ -51,19 +51,40 @@ type logprobText struct {
 // concatenation exact, and the text is that byte run made JSON-safe, which is the best effort
 // the schema's separate "bytes" field exists to supplement.
 //
-// One leading space is dropped, from the first token that has one, because DecodeCompletion
-// trims exactly that from a completion. Doing it here rather than on the chunk's text keeps
-// the offsets indexing the string the caller receives.
+// Leading spaces are dropped so that the entries describe exactly the text DecodeCompletion
+// returns. Doing it here rather than on the chunk's text keeps the offsets indexing the string the
+// caller receives.
+//
+// How many is not a constant. A vocabulary that spells a space as its own token makes the encoder
+// emit a leading space token whether or not the caller wrote one, and the decoder drops that token's
+// space again -- so the pieces can run one space longer than the decoded text, or two, depending on
+// what was encoded. Measured on this fixture: Encode(" Hi") is [space space H i], whose pieces join
+// to "  Hi" while Decode returns " Hi"; the rule "drop the leading space of the first token with
+// bytes" left both tokens' spaces in place once the first was a bare space, so the entries joined
+// to " Hi" against a content of "Hi" -- every entry shifted by one byte.
+//
+// The count is therefore taken from the tokenizer rather than assumed: pieces minus decoded is
+// exactly the run of leading spaces to remove.
 func (s *Server) describeTokens(tokens []sampledToken) []logprobText {
 	out := make([]logprobText, len(tokens))
-	trimmed := false
+	ids := make([]int32, len(tokens))
+	for i, t := range tokens {
+		ids[i] = t.id
+	}
+	// dropLeft is how many leading bytes the decoder removed: the pieces' own length minus what
+	// DecodeCompletion renders. Counting is safe because every dropped byte is a space, which is
+	// one byte in UTF-8 and renders as itself.
+	pieces := 0
+	for _, t := range tokens {
+		pieces += len(s.tok.PieceBytes(t.id))
+	}
+	dropLeft := max(0, pieces-len(s.tok.DecodeCompletion(ids)))
 	for i, t := range tokens {
 		raw := s.tok.PieceBytes(t.id)
-		if !trimmed && len(raw) > 0 {
-			trimmed = true
-			if raw[0] == ' ' {
-				raw = raw[1:]
-			}
+		if dropLeft > 0 && len(raw) > 0 {
+			drop := min(dropLeft, len(raw))
+			dropLeft -= drop
+			raw = raw[drop:]
 		}
 		out[i] = logprobText{
 			text:    strings.ToValidUTF8(string(raw), "\uFFFD"),

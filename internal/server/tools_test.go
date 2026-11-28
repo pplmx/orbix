@@ -1551,3 +1551,63 @@ func TestStreamedToolCallsSurviveRandomChunkings(t *testing.T) {
 		})
 	}
 }
+
+// TestChatLogprobsDescribeTheReplyAfterTheLeadingSpaceTrim pins the rule the blocking path has to
+// follow to keep its entries aligned with the text: the entries have to describe exactly what
+// DecodeCompletion renders, no more and no less.
+//
+// A vocabulary that spells a space as its own token makes the encoder emit one whether or not the
+// caller wrote one, and the decoder drops that token's space again. So the pieces a reply is built
+// from can run one space longer than the decoded text, or two, depending on what was encoded --
+// measured on this fixture, Encode(" Hi") is [space space H i], whose pieces join to "  Hi" while
+// Decode returns " Hi" and DecodeCompletion "Hi". The old rule dropped the leading space of the
+// first token that had any bytes, which for that shape emptied the first bare-space token and left
+// the second space standing: every entry then described text one byte longer than the content, and
+// the whole list read as the reply shifted right by one character.
+//
+// The count is taken from the tokenizer rather than guessed, so the cases below cover zero, one,
+// two and three leading spaces -- the shapes where a constant would be wrong for some of them.
+func TestChatLogprobsDescribeTheReplyAfterTheLeadingSpaceTrim(t *testing.T) {
+	cases := []string{
+		"no leading space",
+		" one leading space",
+		"  two leading spaces",
+		"   three leading spaces",
+		` "quoted with a space`,
+	}
+	for _, reply := range cases {
+		t.Run(reply, func(t *testing.T) {
+			srv, tok := newTestServer(t)
+			ids := tok.Encode(reply, false)
+			if len(ids) == 0 {
+				t.Fatal("the fixture encodes the reply to nothing")
+			}
+			samples := make([]sampledToken, len(ids))
+			for i, id := range ids {
+				samples[i] = sampledToken{id: id, logprob: -1}
+			}
+			p := generateParams{chat: true, responseID: "chatcmpl-trim", logprobs: true}
+			obj := srv.choiceObject(&choiceResult{out: ids, samples: samples, reason: "length"}, 0, p)
+			msg, ok := obj["message"].(map[string]any)
+			if !ok {
+				t.Fatalf("no message object: %v", obj["message"])
+			}
+			content, _ := msg["content"].(string)
+
+			var joined strings.Builder
+			for _, e := range decodedLogprobEntries(t, obj["logprobs"]) {
+				joined.WriteString(e)
+			}
+			if got := joined.String(); got != content {
+				t.Errorf("the entries join to %q but the content is %q; every entry describes the "+
+					"reply shifted by the untrimmed space", got, content)
+			}
+			// The entries may not be longer than the content either: a trailing space the
+			// tokenizer kept is part of the reply, and describing it is correct.
+			if len(joined.String()) < len(content) {
+				t.Errorf("the entries are shorter than the content: %q against %q",
+					joined.String(), content)
+			}
+		})
+	}
+}

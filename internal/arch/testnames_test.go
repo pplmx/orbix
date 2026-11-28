@@ -90,6 +90,19 @@ func docFiles(t *testing.T, root string) []string {
 		t.Fatalf("globbing internal doc.go: %v", err)
 	}
 	out = append(out, internalDocs...)
+	// AGENTS.md cites tests by name too -- fourteen of them at the time this was added -- and it
+	// was not in this list. Every one of those citations happened to be correct, which is why
+	// nothing failed; the guard cannot tell a lucky document from a checked one, and the next
+	// rename would leave a reference to a test that no longer exists. A reader who pastes such a
+	// name into `go test -run` gets exit 0 having run nothing.
+	//
+	// CONTRIBUTING.md is not included: it names recipes rather than tests, and a test name in it
+	// would be prose about the suite rather than a command to run.
+	agents := filepath.Join(root, "AGENTS.md")
+	if _, err := os.Stat(agents); err != nil {
+		t.Fatalf("AGENTS.md is not readable: %v", err)
+	}
+	out = append(out, agents)
 	if len(out) < 10 {
 		t.Fatalf("found %d documents, want at least 10", len(out))
 	}

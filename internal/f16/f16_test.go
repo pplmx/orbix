@@ -247,6 +247,53 @@ func TestToFloat32Exhaustive(t *testing.T) {
 	}
 }
 
+// TestToFloat32QuietsEveryNaN covers the one thing the exhaustive test cannot see.
+//
+// That test asks only whether the result IsNaN, so every NaN in the half's range passes no
+// matter which NaN it is: verified by dropping the quiet bit from the implementation, after
+// which the whole package still passed. What the code deliberately does is wider than
+// "produces a NaN" -- it keeps the payload and sets the quiet bit, so arithmetic on the
+// result does not raise a signalling-NaN trap, and a NaN produced from one half is not
+// silently interchangeable with one produced from another.
+//
+// Cross-checked against numpy before writing this: of the 2046 NaN halves, the conversion
+// agrees with numpy.float16 on every value except the quiet bit, which numpy leaves clear
+// and this sets on purpose. The other 63490 halves agree bit for bit.
+func TestToFloat32QuietsEveryNaN(t *testing.T) {
+	nanCount := 0
+	for h := range 0x10000 {
+		v := uint16(h)
+		exp := (v >> 10) & 0x1f
+		mant := v & 0x3ff
+		if exp != 0x1f || mant == 0 {
+			continue // finite or +/-Inf
+		}
+		nanCount++
+		got := math.Float32bits(ToFloat32(v))
+		if got&0x00400000 == 0 {
+			t.Errorf("ToFloat32(%#04x) = %#08x, which is a signalling NaN: the quiet bit "+
+				"has to be set", v, got)
+		}
+		// The payload survives, shifted into the float32 mantissa. A NaN carrying a payload
+		// is how a vocabulary records where it came from, so dropping it loses information
+		// that costs nothing to keep.
+		if wantPayload := uint32(mant) << 13; got&0x007fffff != 0x00400000|wantPayload {
+			t.Errorf("ToFloat32(%#04x) mantissa = %#07x, want %#07x",
+				v, got&0x007fffff, 0x00400000|wantPayload)
+		}
+		// The sign of the NaN is preserved, as it is for every other value.
+		if sign := v&0x8000 != 0; sign != (got&0x80000000 != 0) {
+			t.Errorf("ToFloat32(%#04x) = %#08x: sign bit %v, want %v",
+				v, got, got&0x80000000 != 0, sign)
+		}
+	}
+	// 2 * (1024 - 1): both signs, every mantissa except zero, which is infinity.
+	if want := 2 * 1023; nanCount != want {
+		t.Fatalf("walked %d NaN halves, want %d -- the filter is wrong, not the code",
+			nanCount, want)
+	}
+}
+
 // TestFromFloat32OverflowBoundary pins where a value stops rounding to the largest finite
 // half and starts rounding to infinity.
 //

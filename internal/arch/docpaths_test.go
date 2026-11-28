@@ -40,6 +40,15 @@ func TestDocsCiteRealFiles(t *testing.T) {
 	for _, pattern := range []string{
 		filepath.Join(root, "internal", "*", "doc.go"),
 		filepath.Join(root, "cmd", "*", "doc.go"),
+		// And the rest of the source, for the same reason one step further out: comments in
+		// ordinary Go files cite paths too. Measured before adding them, ten such citations
+		// existed -- internal/llama/config.go, internal/chat/eval.go, cmd/orbix/run.go,
+		// scripts/count.go and six more -- and every one of them was correct by luck. A comment
+		// naming a file that moved is the same broken pointer whether it sits in doc.go or in a
+		// function, and the second kind is far more common.
+		filepath.Join(root, "internal", "*", "*.go"),
+		filepath.Join(root, "cmd", "*", "*.go"),
+		filepath.Join(root, "scripts", "*.go"),
 	} {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
@@ -71,7 +80,7 @@ func TestDocsCiteRealFiles(t *testing.T) {
 
 // repoPath matches a path under one of the directories this repository owns. The trailing
 // extension is required so a directory reference does not match a file that does not exist yet.
-var repoPath = regexp.MustCompile(`\b(?:internal|cmd|scripts)/[a-zA-Z0-9_/.]+\.(?:go|py|sh)\b`)
+var repoPath = regexp.MustCompile(`\b(?:internal|cmd|scripts|docs)/[a-zA-Z0-9_/.]+\.(?:go|py|sh|md)\b`)
 
 // TestDocLinksResolve checks that a relative Markdown link points at a file.
 //

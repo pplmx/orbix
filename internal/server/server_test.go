@@ -2172,6 +2172,59 @@ func TestSeedMakesSamplingReproducible(t *testing.T) {
 	}
 }
 
+// TestSeedStaysReproducibleAtTheEdgesOfInt64 covers the arithmetic samplers does on the seed.
+//
+// Choice i is seeded with base+i, which wraps at the ends of int64: MaxInt64 with n=2 gives
+// MaxInt64 and MinInt64. Wrapping is the right answer rather than a defect -- the result is
+// still an integer, still distinct from its sibling, and still deterministic -- but nothing
+// said so, and "the seed plus the choice index" reads like it cannot overflow. Measured
+// against a live server: both MaxInt64 and MinInt64 with n=2 answered 200, and repeating
+// either request gave the same two completions in the same order.
+//
+// The distinctness assertion is what a wrap could plausibly break: if the offset arithmetic
+// collapsed two choices onto one seed, the response would carry n copies of one completion
+// and still be perfectly reproducible, so reproducibility alone would not catch it.
+func TestSeedStaysReproducibleAtTheEdgesOfInt64(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	gen := func(seed string) []string {
+		t.Helper()
+		reqBody := fmt.Sprintf(
+			`{"model": %q, "prompt": "Once upon a time", "max_tokens": 8,`+
+				` "temperature": 1.5, "seed": %s, "n": 3}`,
+			srv.cfg.ModelName, seed)
+		resp := post(t, h, "/v1/completions", reqBody)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("seed %s: status = %d", seed, resp.StatusCode)
+		}
+		out := decodeBody[completionResponse](t, resp)
+		if len(out.Choices) != 3 {
+			t.Fatalf("seed %s: %d choices, want 3", seed, len(out.Choices))
+		}
+		texts := make([]string, len(out.Choices))
+		for i, c := range out.Choices {
+			texts[i] = c.Text
+		}
+		return texts
+	}
+
+	for _, seed := range []string{"9223372036854775807", "-9223372036854775808"} {
+		t.Run(seed, func(t *testing.T) {
+			first := gen(seed)
+			second := gen(seed)
+			if slices.Compare(first, second) != 0 {
+				t.Errorf("the same edge seed produced different text:\n  %q\n  %q",
+					first, second)
+			}
+			if len(slices.Compact(slices.Clone(first))) == 1 {
+				t.Errorf("all 3 choices are identical (%q), so the seed offset collapsed",
+					first[0])
+			}
+		})
+	}
+}
+
 // TestGreedyIgnoresSeed covers the interaction between seed and temperature.
 //
 // Greedy is already deterministic, so a seed cannot change its output and must not appear to:

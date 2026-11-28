@@ -112,3 +112,42 @@ func TestCompletionAlternativesKeepTheMostLikelyOfATiedText(t *testing.T) {
 		t.Errorf("the encoded object mentions the clashing text %d times: %s", n, raw)
 	}
 }
+
+// TestStopsHeldWithRejectsAReleaseThatDoesNotEndWithTheToken covers the case the streaming loop
+// reaches when the gate's release stops before this token's own text: the token is still withheld,
+// so its entry must wait in the held list rather than go out with the chunk.
+//
+// Measured before adding this: changing that branch's false to true left the whole server suite
+// green, and `just coverage` put the line at 0% -- the function had no direct test, and every
+// existing streaming test happens to construct the two shapes where the release does end with the
+// token. The caller's comment cites this shape as reachable ("the release stopped before this
+// token and the entry waits"), so the branch is real code and not a defensive arm.
+func TestStopsHeldWithRejectsAReleaseThatDoesNotEndWithTheToken(t *testing.T) {
+	entry := []logprobText{{text: "北", raw: []byte("北"), logprob: -0.5}}
+	held := []heldToken{{described: entry, offset: 0}}
+
+	// The release stops before the token: the token is withheld, so its entry belongs in held.
+	if got := stopsHeldWith("北京", "北", entry, held); got {
+		t.Error("stopsHeldWith(\"北京\", \"北\") = true; the release does not end with the " +
+			"token's text, so the entry has to wait rather than be described in this chunk")
+	}
+
+	// A release that ends with the token does include it, which is the shape the streaming tests
+	// already exercise -- asserted here so the two cases are read together. HasSuffix is asked of
+	// the release, so the token is the suffix: "北京" ends with "京", not with "北".
+	if got := stopsHeldWith("京", "北京", entry, held); !got {
+		t.Error("stopsHeldWith(\"京\", \"北京\") = false; the release ends with the token's text")
+	}
+
+	// The whole-release shape is excluded from held even though the suffix matches, because the
+	// same entry is already in held and describing it twice was the defect the comment names.
+	if got := stopsHeldWith("京", "京", entry, held); got {
+		t.Error("stopsHeldWith(\"京\", \"京\") = true with held non-empty; stopHeld already " +
+			"holds this token's entry, so adding it again describes one character twice")
+	}
+
+	// No described entries means nothing to place, whatever the text says.
+	if got := stopsHeldWith("北", "北京", nil, held); got {
+		t.Error("stopsHeldWith with a nil described entry returned true")
+	}
+}

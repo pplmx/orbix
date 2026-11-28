@@ -272,6 +272,54 @@ func TestArchitectureReviewSizeTableMatchesTheCode(t *testing.T) {
 	}
 }
 
+// TestArchitectureReviewSizeTableTotalsAreSummed checks the table's total row against its own rows.
+//
+// The guard above compares each row to the code, which cannot see the total: that line names no
+// package, so sizeTableRows skips it and a stale figure there survives every edit to the rows above
+// it. It did -- the row for internal/server was corrected from 13913 to 13952 test lines while the
+// total went on saying 70562, which is the pre-edit sum. Measured: 70601.
+//
+// Two of the four totals are recomputed here. Code lines and function counts come from count.go and
+// are already compared per row, so their sums carry the same information; the test lines do not,
+// because count.go does not measure them and the per-row check is the only place they are read.
+func TestArchitectureReviewSizeTableTotalsAreSummed(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "docs", "architecture-review.md"))
+	if err != nil {
+		t.Fatalf("reading architecture-review.md: %v", err)
+	}
+	doc := string(raw)
+
+	rows := sizeTableRows(t, doc)
+	m := sizeTotalPattern.FindStringSubmatch(doc)
+	if m == nil {
+		t.Fatalf("architecture-review.md no longer states the totals as a bolded 合计 row; " +
+			"restore that or update this pattern")
+	}
+
+	testSum := 0
+	for _, r := range rows {
+		testSum += r.testLines
+	}
+	if got := archAtoi(t, m[2]); got != testSum {
+		t.Errorf("the document's total row says %d test lines; its own %d rows add up to "+
+			"%d -- recompute the total when a row changes", got, len(rows), testSum)
+	}
+
+	linesSum := 0
+	for _, r := range rows {
+		linesSum += r.lines
+	}
+	if got := archAtoi(t, m[1]); got != linesSum {
+		t.Errorf("the document's total row says %d code lines; its own rows add up to %d",
+			got, linesSum)
+	}
+}
+
+// sizeTotalPattern captures the code-line and test-line cells of the bolded total row.
+var sizeTotalPattern = regexp.MustCompile(
+	`\|\s*\*\*合计\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|[^|]*\|[^|]*\|\s*\*\*(\d+)\*\*\s*\|`)
+
 // sizeRow is one line of the document's table.
 type sizeRow struct {
 	pkg       string

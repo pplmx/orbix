@@ -974,22 +974,27 @@ API 面也复核了：`engine` 的导出签名里只出现 `Sampler`（`Greedy()
 
 ## 复算清单
 
+行尾的数字是**快照**，不是门槛：它们随语料、格式数与 fixture 规模增长，每条命令自己打印当前值，
+所以没有守卫，改语料时按输出更新这里。2026-11-28 一次复算把三处过期的改了过来——jinja 的 967
+实际 1016、预分词器的「2 families, 104 inputs」实际 10 families 1200 inputs、RoPE 的 6 cases
+实际 8——三处都是「没人跑那条命令」，不是跑错了，和第六节说的同一类过期。
+
 ```bash
 go test -count=1 ./...                                    # 24s
 go test -cover ./...
 golangci-lint run                                         # 需 v2
 just docs && just cross
-uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # 967 cases, 954 agree, 3 diverge by design, exit 0
+uv run --offline --with jinja2 python3 scripts/jinja_diff.py   # 1016 cases, 1003 agree, 4 diverge by design, 9 refused, exit 0
 
 # 跨实现对照：三个脚本各自从上游写期望值，不复述 Go 的读法
 ORBIX_PREDUMP=/tmp/pre.json go test ./internal/tokenize/ -run TestDumpPreSplit
-uv run --offline --with regex python3 scripts/pre_xcheck.py /tmp/pre.json   # 2 families, 104 inputs
+uv run --offline --with regex python3 scripts/pre_xcheck.py /tmp/pre.json   # 10 families, 1200 inputs
 
 ORBIX_QUANTDUMP=/tmp/q.json go test ./internal/quant/ -run TestDumpDequant
 uv run --offline python3 scripts/quant_xcheck.py /tmp/q.json               # 14 formats
 
 ORBIX_ROPEDUMP=/tmp/rope.json go test ./internal/llama/ -run TestDumpRope
-uv run --offline --with numpy python3 scripts/rope_xcheck.py /tmp/rope.json # 6 cases, 2048 values
+uv run --offline --with numpy python3 scripts/rope_xcheck.py /tmp/rope.json # 8 cases, 2048 values
 
 uv run --offline --with gguf python3 scripts/fixture_xcheck.py   # 18 keys, 21 tensors
 ```

@@ -195,6 +195,27 @@ Three attempts during the investigation, all reverted, mark the edges of the pro
 Whoever picks this up should decide the unit for both fields first, then move the blocking and
 streamed paths together, and expect the stop-straddle case to be the last one standing.
 
+Two attempts after this was written went into the two obstacles above and came back out, and
+between them they pinned down the recipe the blocking path needs, which was the part still vague:
+
+- `Seq` / `Token` per id, then one `Flush` at the end, concatenates to `DecodeCompletion` exactly.
+  Measured over four sequences on the fixture: a clean ASCII run, a three-token `"中"` that
+  releases everything on its last entry, a tail cut after two of its bytes, and a lone leader byte.
+  All four matched. This is the "remembered rather than a blocker" item from point 2 above,
+  confirmed on the blocking path rather than assumed.
+- One leading space comes off the first entry **that has text**, not entry zero. The decoder
+  buffers, so the token that starts a reply can render to `""` while its space arrives with the
+  next one. Trimming by a byte count measured over `raw` instead of removing one `" "` prefix took
+  the opening quote off a reply of `"quoted with a space`; `strings.TrimLeft` took the space out of
+  the middle of the same reply.
+- With that, the blocking path alone passes every test except `TestStreamingLogprobsMatchBlocking`,
+  which is the obstacle 2 case and needs the streamed path moved in the same commit.
+
+The streamed path is the harder half and the reason this is still open: changing `advance` there
+from the described entry's length to the decoder's length makes `stop: ["A"]` against `"\xefA"`
+report entries joining to `""` where the client received `"�"`. That is obstacle 3 arriving from the
+other side, and it is where the next attempt should start.
+
 What a reader can rely on today: `bytes` concatenates to the content exactly, the offsets are
 monotonic and match the lengths of the tokens beside them, and on an ASCII reply all of these
 agree. On a reply containing characters that split across tokens, `token` and `text_offset` describe

@@ -13,6 +13,7 @@ import (
 
 	"github.com/pplmx/orbix/internal/engine"
 	"github.com/pplmx/orbix/internal/gguf"
+	"github.com/pplmx/orbix/internal/gguftest"
 	"github.com/pplmx/orbix/internal/tokenize"
 )
 
@@ -25,17 +26,28 @@ import (
 // ResponseWriter whose Write fails, with a hand-built channel standing in for the engine -- which
 // says the handler returns and says nothing about whether the model stops.
 //
-// This runs the real thing over a real socket, because the property is about TCP: a graceful FIN
-// leaves the connection usable and generation runs to its full budget, so the test sets SO_LINGER
-// to zero to send RST instead. That difference is the reason an earlier attempt over http.Post
-// measured nothing.
+// This runs the real thing over a real socket, because the property is about TCP: SetLinger(0)
+// makes Close send RST rather than FIN, which is what distinguishes "the client is gone" from "the
+// client has stopped writing but is still reading". An earlier attempt over http.Post measured
+// nothing because a plain close left generation running to its full budget.
 //
-// Gated on MODEL because it needs a checkpoint; the fixture is too fast for a reset to land in the
-// middle of a stream.
+// It used to be gated on MODEL, with the fixture described as too fast for a reset to land
+// mid-stream. That was wrong. Measured on the fixture, the reset lands after two SSE chunks with 38
+// of a 40-token budget still to generate, and the run stops 1 or 2 tokens later; removing the
+// cancellation wiring -- Cancel: nil instead of r.Context().Done() -- makes eight runs out of eight
+// fail, at 31 to 35 tokens past the reset. The gate only kept the property from being checked at
+// all on a machine without a checkpoint.
+//
+// The budget has to fit the fixture's window (64 positions, 20-token prompt) or the run is cut
+// short by the context rather than by the reset, which passes for the wrong reason. At 200 the
+// budget leaves the window only 44 positions, so the injected run stops at 35 to 41 tokens, and the
+// bound below is 200/4 = 50 -- a figure the engine cannot reach while the window holds, which makes
+// that test pass whatever the cancellation does. 40 keeps the bound (10) far below what the window
+// allows.
 func TestTCPResetStopsGeneration(t *testing.T) {
 	path := os.Getenv("MODEL")
 	if path == "" {
-		t.Skip("set MODEL to a checkpoint; a fixture generates too fast for a reset to land mid-stream")
+		path = gguftest.Path(t)
 	}
 	gf, err := gguf.Open(path)
 	if err != nil {
@@ -67,7 +79,7 @@ func TestTCPResetStopsGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	const budget = 200
+	const budget = 40
 	body := fmt.Sprintf(`{"model":%q,"prompt":"The quick brown fox","max_tokens":%d,"stream":true}`,
 		cfg.Name, budget)
 	req := fmt.Sprintf("POST /v1/completions HTTP/1.1\r\nHost: %s\r\n"+

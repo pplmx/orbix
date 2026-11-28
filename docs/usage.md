@@ -163,21 +163,37 @@ the obvious attempt fails, and the reasons are measurements rather than guesses:
    measured on `" Hi"`, `"Hi"`, `"  Hi"`, `"a中"`, `"a中b"` and `"é"` -- because the decoder holds
    back the bytes of a character it has not finished and releases them on the token that completes
    it.
-2. But it emits nothing at all for a character that never completes, and a `max_tokens` bound can
-   cut one. Measured: encoding `"中"` and keeping the first two of its three byte tokens gives
-   `Decode` `"�"` and `StreamDecoder` `""`, so the entries would describe an empty reply that the
-   body says is one replacement character.
+2. A `max_tokens` bound can cut a character mid-way, and `Token` then emits nothing for the
+   surviving bytes. `Flush` is what covers it: called at the end of the run it renders the tail as
+   the same `"�"` that `Decode` does. Measured on the first two of `"中"`'s three byte tokens:
+   `Token` alone gives `""` and `Token` + `Flush` gives `"�"`, matching `Decode`. So this one is a
+   thing to remember rather than a blocker -- the entries have to be built with the flush, and
+   `Seq()` + `Flush()` plus the leading-space trim then reconstructs the content on all fourteen
+   inputs tried, including `" Hi"`, `"   Hi"`, `"a中"`, `"中文"`, `"é"`, `"🎉"` and `""`.
 3. `text_offset` cannot simply switch to raw byte lengths either: the parallel array is read as
    "where this token's text starts", and a reader lining the offsets up against the tokens beside
    them expects them to advance by those tokens' lengths. Both units are self-consistent and they
    disagree, so the field's unit has to be chosen before the code moves.
 
-An attempt that changed the text but trimmed both `raw` and `text` by one count broke
-`TestTheBytesOfTheEntriesConcatenateToTheContent` -- `bytes` concatenating to the content is a
-property that holds today and has a test, so it is the constraint, not something to trade away.
-Whoever picks this up should decide the unit first, then move the blocking and streamed paths
-together: the two are compared against each other for the same request, so changing one alone turns
-that comparison red.
+Three attempts during the investigation, all reverted, mark the edges of the problem:
+
+- Trimming `raw` and `text` by one shared count broke
+  `TestTheBytesOfTheEntriesConcatenateToTheContent`. The two runs differ: against a content of
+  `"中"` the decoder's text totals 3 bytes and the tokens' own bytes total 4, because a space is
+  its own token twice in the raw run. Each run needs its own count, and after giving them one the
+  bytes test passes again on all fourteen inputs.
+- Changing the blocking path alone turns `TestStreamingLogprobsMatchBlocking` red, as it should:
+  the two transports are compared against each other for the same request.
+- Changing both then fails on one shape only, `stop: ["A"]` against the reply `"\xefA"`. The
+  decoder emits `"�A"` as one token's text, the stop gate releases only `"�"` from it and marks the
+  match, and the entry for that token describes `"�A"`. The blocking path reports the whole
+  `"�A"` there too -- `keptTokens` measures the budget in raw bytes and keeps the straddling
+  token -- so at that point both transports agree with each other and disagree with the body.
+  Deciding what a straddling token's entry should say is the same question as before, one level
+  down.
+
+Whoever picks this up should decide the unit for both fields first, then move the blocking and
+streamed paths together, and expect the stop-straddle case to be the last one standing.
 
 What a reader can rely on today: `bytes` concatenates to the content exactly, the offsets are
 monotonic and match the lengths of the tokens beside them, and on an ASCII reply all of these

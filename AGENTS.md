@@ -49,13 +49,13 @@ just docker  # 本地构建容器镜像并打印里面的版本号；发布镜�
              # 用途是确认 Dockerfile 还能建、且镜像里的 version 与当前 checkout 一致。
 just skips   # 数一次运行里实际跳过了多少个测试，CI 每轮打印的就是这个数。
              # 它先打一行 `gates set: N of 14`，再打 `skipped: M`：一个数字单独看没有意义，
-             # 只有配上当时设了几个检查点才知道它说的是什么。实测两档（2026-11-28）：
-             # 0 个 → 32；4 个（gemma2 Q3_K_L 充当 MODEL/GEMMA2_MODEL/MODEL_KQUANT、
-             # gemma3 270M 充当 GEMMA3_MODEL）→ 20。
-             # **32 是「没有任何真实权重」的数，不是仓库的常数**：它随 gated 测试增删而变。
-             # 本会话加了两条（gemma3 的窗口后困惑度、gemma2 的窗口影响）涨到 34，随后两条
-             # 改用 fixture 兜底（`TestTCPResetStopsGeneration`、`TestTensorDecodesTheSameTwice`）
-             # 掉回 32。
+             # 只有配上当时设了几个检查点才知道它说的是什么。实测（2026-11-28）：
+             # 0 个 → 30；4 个（gemma2 Q3_K_L 充当 MODEL/GEMMA2_MODEL/MODEL_KQUANT、
+             # gemma3 270M 充当 GEMMA3_MODEL）→ 20（那一档测于这两条还带门禁的时候，现在更低）。
+             # **30 是「没有任何真实权重」的数，不是仓库的常数**：它随 gated 测试增删而变。
+             # 本会话先涨到 34（加了两条 gemma 门禁测试），随后四条改用 fixture 兜底
+             # （`TestTCPResetStopsGeneration`、`TestTensorDecodesTheSameTwice`、
+             # `TestRoundTripEveryRune`、`TestRoundTripEveryRuneByteLevel`）掉到 30。
              # 5 个和 6 个那两档这一轮没能复算——手头只有 gemma2 与 gemma3 两个文件，用它们
              # 冒充 MODEL/QWEN2_MODEL 等会让 suite 失败，而 `just skips` 在失败时不报数字
              # （这是它该有的行为）。要更新那两档得先凑齐六个真文件。2026-11-26 的读数是

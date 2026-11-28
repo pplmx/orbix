@@ -436,7 +436,7 @@ Measured 2026-11:
 
 | Gates set                                                                                                         | Skipped |
 | ----------------------------------------------------------------------------------------------------------------- | ------- |
-| none                                                                                                              | 32      |
+| none                                                                                                              | 30      |
 | the six that were on hand (`MODEL`, `QWEN2_MODEL`, `QWEN3_MODEL`, `GEMMA2_MODEL`, `GEMMA3_MODEL`, `MODEL_KQUANT`) | 10      |
 | all fourteen                                                                                                      | 0       |
 
@@ -483,7 +483,7 @@ because nothing at a call site reads them.
 
 The four quantization ones are easy to miss when auditing this list: they are not `os.Getenv("...")`
 at the call site but rows in a table that `TestRealWeightMatrixStats` walks, so a search for
-`Getenv("` finds ten gates and the four rows are invisible. Measured both ways -- 32 skipped with no
+`Getenv("` finds ten gates and the four rows are invisible. Measured both ways -- 30 skipped with no
 variables, 0 with all fourteen.
 
 That search is worth trusting only after measuring, because the two answers look equally plausible.

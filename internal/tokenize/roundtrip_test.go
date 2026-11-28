@@ -52,22 +52,51 @@ func realTokenizerAt(t *testing.T, path string) *Tokenizer {
 // 0xC3 and 0xC4 entries: MODEL=stories15M (SentencePiece) passed all 1,112,064 code points,
 // while MODEL=qwen2 reported "U+00C0 \"À\" round-trips to \"Ā\"" and the rest of the block.
 //
-// The documented gated run sets MODEL to the stories model, which means the table was only
-// ever checked there -- on the one vocabulary that cannot fail. This runs the same sweep
-// against QWEN2_MODEL, so both vocabulary families are covered by the standard command.
+// The documented gated run set MODEL to the stories model, which meant the table was only
+// ever checked there -- on the one vocabulary that cannot fail.
 //
-// Gated on QWEN2_MODEL and skipped when the file at MODEL is the byte-level one, so a
-// machine holding a single byte-level checkpoint does not run the sweep twice.
+// The fixture runs first and needs no checkpoint. gguftest can build a GPT-2 vocabulary: it
+// escapes the pieces to the byte-level spelling and appends a piece for every byte, which is the
+// shape a byte-level checkpoint has. That makes the whole table reachable from `just test`.
+// Verified by injection rather than assumed: widening bpeKeep's 0xA1..0xAC range to 0xAD -- the
+// kind of off-by-one the original bug was -- fails 50,323 code points here.
+//
+// QWEN2_MODEL stays as a second subtest, because a trained vocabulary is not the same input as a
+// constructed one and this sweep is the only thing that walks every byte of the table. It is
+// skipped when the file at MODEL is the same one, so a machine holding a single byte-level
+// checkpoint does not run the 1.1M-code-point sweep twice.
 func TestRoundTripEveryRuneByteLevel(t *testing.T) {
+	t.Run("fixture", func(t *testing.T) {
+		path := gguftest.Model{TokenizerModel: "gpt2"}.Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open(%s): %v", path, err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if !tok.byteLevel {
+			t.Fatal("the fixture is not a byte-level vocabulary, so this subtest would check " +
+				"nothing; gguftest's gpt2 mode is what makes it one")
+		}
+		roundTripEveryRune(t, tok)
+	})
+
 	path := os.Getenv("QWEN2_MODEL")
-	tok := realTokenizerAt(t, path)
-	if !tok.byteLevel {
-		t.Skipf("%s is not a byte-level vocabulary", path)
+	if path == "" {
+		return
 	}
-	if path == os.Getenv("MODEL") {
-		t.Skip("MODEL and QWEN2_MODEL are the same file; TestRoundTripEveryRune covers it")
-	}
-	roundTripEveryRune(t, tok)
+	t.Run("QWEN2_MODEL", func(t *testing.T) {
+		tok := realTokenizerAt(t, path)
+		if !tok.byteLevel {
+			t.Skipf("%s is not a byte-level vocabulary", path)
+		}
+		if path == os.Getenv("MODEL") {
+			t.Skip("MODEL and QWEN2_MODEL are the same file; TestRoundTripEveryRune covers it")
+		}
+		roundTripEveryRune(t, tok)
+	})
 }
 
 // roundTripEveryRune is the sweep both vocabulary families run.
@@ -113,8 +142,32 @@ func roundTripEveryRune(t *testing.T, tok *Tokenizer) {
 // character that has it, and it exercises every byte of the vocabulary's escaping table
 // without needing a corpus. A mismatch names the code point, which is what turns "some text
 // comes back wrong" into a fixable report.
+//
+// The fixture runs first, so the sweep happens on a machine with no checkpoint. MODEL stays as a
+// second subtest: a constructed vocabulary and a trained one are different inputs, and this sweep
+// is cheap enough to run on both.
 func TestRoundTripEveryRune(t *testing.T) {
-	roundTripEveryRune(t, realTokenizer(t))
+	t.Run("fixture", func(t *testing.T) {
+		path := gguftest.Default().Write(t, t.TempDir())
+		f, err := gguf.Open(path)
+		if err != nil {
+			t.Fatalf("Open(%s): %v", path, err)
+		}
+		tok, err := New(f)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if tok.byteLevel {
+			t.Fatal("the default fixture is byte-level; this subtest is the SentencePiece half " +
+				"and would otherwise check the same table as the byte-level one")
+		}
+		roundTripEveryRune(t, tok)
+	})
+
+	if os.Getenv("MODEL") == "" {
+		return
+	}
+	t.Run("MODEL", func(t *testing.T) { roundTripEveryRune(t, realTokenizer(t)) })
 }
 
 // TestRoundTripText checks whole strings, which is where a mapping that is right per

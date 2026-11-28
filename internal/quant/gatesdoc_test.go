@@ -486,3 +486,73 @@ func atoi(t *testing.T, s string) int {
 	}
 	return n
 }
+
+// TestArchitectureReviewStatesTheFuzzTargetCount checks the third figure in the gate table's last
+// row.
+//
+// "10 个 target 无崩溃" is a count of `func Fuzz` declarations, which is a stable fact about the
+// tree rather than a measurement: adding a target changes it, and nothing else does. It went stale
+// the round a target was added -- the document still said 9 while the tree had 10 -- which is the
+// same failure mode the gate and skip counts beside it already have guards for.
+func TestArchitectureReviewStatesTheFuzzTargetCount(t *testing.T) {
+	review, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "docs", "architecture-review.md")))
+	if err != nil {
+		t.Fatalf("read architecture-review.md: %v", err)
+	}
+	targets, packages := countFuzzTargets(t)
+	if targets == 0 {
+		t.Fatal("found no fuzz targets; the walk probably failed rather than the tree having none")
+	}
+
+	// The row's wording, so a rewrite is reported as "update this test" rather than as a wrong
+	// number.
+	claim := regexp.MustCompile(`通过，(\d+) 个 target 无崩溃`)
+	m := claim.FindStringSubmatch(string(review))
+	if m == nil {
+		t.Fatalf("architecture-review.md no longer states the fuzz result as " +
+			`"通过，N 个 target 无崩溃"; restore that phrasing or update this pattern`)
+	}
+	if got := m[1]; got != strconv.Itoa(targets) {
+		t.Errorf("architecture-review.md says %s fuzz targets; the tree declares %d in %d packages",
+			got, targets, packages)
+	}
+}
+
+// countFuzzTargets reports how many fuzz targets the tree declares and how many packages hold
+// them.
+//
+// It reads the source rather than running `just fuzz`, for the same reason the skip-count guard
+// reads the test files: the recipe runs every target for FUZZTIME, which is minutes, and the
+// number the document states is about the tree rather than about a run.
+func countFuzzTargets(t *testing.T) (targets, packages int) {
+	t.Helper()
+	fuzzDecl := regexp.MustCompile(`(?m)^func Fuzz[A-Z]\w*\(f \*testing\.F\)`)
+	root := filepath.Join("..", "..")
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == ".cache" || d.Name() == "node_modules" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, rerr := os.ReadFile(filepath.Clean(path))
+		if rerr != nil {
+			return rerr
+		}
+		if n := len(fuzzDecl.FindAllString(string(src), -1)); n > 0 {
+			targets += n
+			packages++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	return targets, packages
+}

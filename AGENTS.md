@@ -85,6 +85,15 @@ just mutate file pkg # 把一个文件里的 `return true`/`return false` 逐个
              # 错误信封后接一个完整 model 对象。存活不等于缺陷：拒绝路径的返回值常在写出响应
              # 之后才被读（变异等价），注释里写明不可达的分支是已记录的取舍。每个位点各跑一遍
              # 全套，二十个位点的文件就是二十遍，目标选小一点。
+             # 扫过的文件与存活数（2026-11-28，同一台机器）：`server/logprobs.go` 4/4 捕获、
+             # `server/server.go` 20 个位点 7 个存活、`engine/engine.go` 12 个里 5 个存活、
+             # `llama/prefix.go` 6 个里 1 个、`gguf/scalar.go` 4/4、`chat/parse.go` 4/4、
+             # `tokenize/pre.go` 14/14。全是 100% 的那四个不是偶然：`scalar.go` 是泛型 switch
+             # 的每种越界、`parse.go` 的 `isIdentifier` 每个字符类、`pre.go` 的 34 个预分词族，
+             # 每条都有一条用例盯着。存活的那些逐个读过，都在拒绝路径或不可达分支上。
+             # **捕获率不是质量分**：`isIdentifier` 4/4 捕获，而我读它时两次以为 `default:
+             # return true` 是 bug（它其实是「前面都合法，到此可以收尾了」），实测返回才对。
+             # 变异只回答「改动会被发现吗」，不回答「当前值对不对」。
 just check-guard doc pattern with guard # 把文档里的一处说法改错，报出守护它的测试红不红。
              # 与 `just mutate` 是一对：那条问测试能不能分辨代码改动，这条问守卫能不能分辨
              # 文档写错。两者都需要，因为守卫可以还在、还绿、却已经不看原来那件事了——本会话

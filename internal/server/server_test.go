@@ -836,6 +836,41 @@ func TestModelRetrieveAndUnknownEndpoints(t *testing.T) {
 		}
 	})
 
+	// The response is one JSON document and nothing after it.
+	//
+	// decodeBody reads with a single Decode, which stops at the end of the first value -- so a
+	// handler that writes a second object after the error is invisible to every test here. It was:
+	// making checkModel return true instead of false left the suite green while the body became
+	// the 404 envelope followed by a whole model object. Measured raw: {"error":{...}}\n{"created":0,
+	// "id":"tiny","object":"model","owned_by":"orbix"}. A client that reads the body as one
+	// document fails, and one that streams two gets a model it was just told does not exist.
+	//
+	// Asserting on the raw bytes is the only way to see it, so this reads them rather than decoding.
+	t.Run("unknown model writes exactly one document", func(t *testing.T) {
+		resp := get(t, srv.Handler(), "/v1/models/does-not-exist")
+		raw, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("reading the body: %v", err)
+		}
+		var first errorBody
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		if err := dec.Decode(&first); err != nil {
+			t.Fatalf("decode the error envelope: %v", err)
+		}
+		if first.Error.Code != "model_not_found" {
+			t.Errorf("first document is not the model_not_found envelope: %+v", first)
+		}
+		if dec.More() {
+			t.Errorf("the body carries a second JSON value after the error: %q", raw)
+		}
+		// Trailing whitespace is fine; trailing content is not.
+		rest := bytes.TrimSpace(raw[dec.InputOffset():])
+		if len(rest) != 0 {
+			t.Errorf("%d bytes follow the error document: %q", len(rest), rest)
+		}
+	})
+
 	// An endpoint this server does not implement answers in the envelope, with a code that
 	// says so rather than a generic not-found.
 	t.Run("unimplemented endpoint", func(t *testing.T) {

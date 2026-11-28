@@ -29,6 +29,24 @@ func TestDocsCiteRealFiles(t *testing.T) {
 		t.Fatalf("glob docs: %v", err)
 	}
 	docs = append(docs, extra...)
+	// The packages' own doc.go files cite paths too -- engine/doc.go points at
+	// internal/server/imports_test.go as the thing holding an import edge shut -- and they were
+	// not in this list. Measured before adding them: rewriting that path to a file that does not
+	// exist left this test green, so the one citation a reader is most likely to follow was the
+	// one nothing checked.
+	//
+	// Only paths with a directory prefix are matched, so the bare filenames these files also
+	// mention (rope.go, tools.go) do not become noise here.
+	for _, pattern := range []string{
+		filepath.Join(root, "internal", "*", "doc.go"),
+		filepath.Join(root, "cmd", "*", "doc.go"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		docs = append(docs, matches...)
+	}
 
 	cited := map[string]bool{}
 	for _, doc := range docs {
